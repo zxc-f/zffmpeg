@@ -8,7 +8,3 @@
 //!
 //! Zig analyzes files lazily, so tests run only in files this module imports.
 //! When a file with tests is added, reference it from a `test` block here.
-
-test "temporary failure-propagation check" {
-    return error.TemporaryFailurePropagationCheck;
-}
