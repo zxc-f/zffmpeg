@@ -1,6 +1,5 @@
-# Linux-only checks for the standalone Zig examples. Native Windows CI is
-# deferred; see TODO.md (T11). Extend this job with `zig build` and
-# `zig build test` when T01 adds the root build.
+# Linux-only checks for the Zig package. Native Windows CI is deferred; see
+# TODO.md (T11).
 name: CI
 
 on:
@@ -36,17 +35,29 @@ jobs:
 
       - name: Check formatting
         run: |
-          zig fmt --check zig/ || {
-            zig fmt zig/
+          zig fmt --check build.zig build.zig.zon zig/ || {
+            zig fmt build.zig build.zig.zon zig/
             git diff
             exit 1
           }
 
-      - name: Test examples (Debug)
-        run: for f in zig/examples/*.zig; do echo "::group::$f"; zig test "$f"; echo "::endgroup::"; done
+      - name: Require every example to be registered in build.zig
+        run: |
+          for f in zig/examples/*.zig; do
+            grep -qF "\"$f\"" build.zig || { echo "::error file=build.zig::$f is not registered in build.zig"; exit 1; }
+          done
 
-      - name: Test examples (ReleaseSafe)
-        run: for f in zig/examples/*.zig; do echo "::group::$f"; zig test "$f" -O ReleaseSafe; echo "::endgroup::"; done
+      - name: Build (Debug)
+        run: zig build --summary all
 
-      - name: Test examples (ReleaseFast)
-        run: for f in zig/examples/*.zig; do echo "::group::$f"; zig test "$f" -O ReleaseFast; echo "::endgroup::"; done
+      - name: Build (ReleaseSafe)
+        run: zig build -Doptimize=ReleaseSafe --summary all
+
+      - name: Test (Debug)
+        run: zig build test --summary all
+
+      - name: Test (ReleaseSafe)
+        run: zig build test -Doptimize=ReleaseSafe --summary all
+
+      - name: Test (ReleaseFast)
+        run: zig build test -Doptimize=ReleaseFast --summary all

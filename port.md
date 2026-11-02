@@ -2,12 +2,15 @@
 
 ## Status and scope
 
-Initialized on 2026-11-02. Current deliverables are the design, checklist, two
+Initialized on 2026-11-02. Current deliverables are the design, checklist, the
+minimal Zig package and build ([build.zig](build.zig), the `av` module rooted at
+[zig/root.zig](zig/root.zig), documented in [zig/README.md](zig/README.md)), two
 tested standalone examples ([I/O patterns](zig/examples/io_patterns.zig) and a
 [PCM s16 kernel](zig/examples/pcm_s16.zig)) and a Linux CI workflow. This
 standalone repository tracks the port's own files. FFmpeg in `.references/ffmpeg`
-remains the behavioral reference. There is no native library build, codec,
-container or command-line tool yet; the examples do not implement WAV support.
+remains the behavioral reference. There is no codec, container or command-line
+tool yet; the `av` module exports nothing and the examples do not implement WAV
+support.
 
 The goal is a native Zig multimedia library and tools, built incrementally from
 FFmpeg's functionality. Use idiomatic Zig APIs and explicit resource ownership.
@@ -167,17 +170,17 @@ they do not each require a build module or installed library. The first path nee
 core, I/O, PCM and WAV; a general graph engine, universal codec context, plugin
 system and full feature dependency resolver can wait for concrete requirements.
 
-The following is the **proposed first layout**. Only the standalone examples,
-`LICENSE` and the Linux CI workflow (`.github/workflows/ci.yml`) are already
-present; the library/build files remain planned:
+The following is the **proposed first layout**. The entries marked `existing`,
+plus `LICENSE` and the Linux CI workflow (`.github/workflows/ci.yml`), are
+present; the rest are planned:
 
 ```text
-build.zig                    # one library module, artifacts and tests
-build.zig.zon                # package identity, dependencies, source/license paths
-.zig-version                 # tooling hint: 0.17.0; build enforces version
+build.zig                    # existing: one library module, artifacts and tests
+build.zig.zon                # existing: package identity, dependencies, source/license paths
+.zig-version                 # existing: tooling hint 0.17.0; build enforces version
 zig/
-  README.md                  # setup, supported compiler and validation commands
-  root.zig                   # av: small public facade with direct feature access
+  README.md                  # existing: setup, supported compiler and validation commands
+  root.zig                   # existing: av: small public facade with direct feature access
   examples/
     io_patterns.zig          # existing: standalone, tested I/O usage
     pcm_s16.zig              # existing: standalone PCM kernel; promoted in T04
@@ -744,7 +747,7 @@ Required tiny local fixtures must fail when missing. Optional external corpora
 may be skipped only with a visible summary; the zigimg reference's missing-file
 skip policy must not hide gaps in this project's required contract tests.
 
-When phase 1 exists, the baseline commands should be:
+The baseline commands are:
 
 ```text
 zig version                         # must match the pinned version
@@ -755,11 +758,10 @@ zig build test -Doptimize=ReleaseSafe
 zig build test -Doptimize=ReleaseFast # required for implemented parser/size checks
 ```
 
-These root build commands remain planned. The current standalone examples are
-checked with the commands in [README.md](README.md#run-the-current-examples),
-which the Linux CI workflow runs. Start with one library test artifact for `av` and aggregate
-the example tests; if named modules are later split, aggregate their test runs
-too. Explicitly import implemented test files:
+[zig/README.md](zig/README.md) documents them and the Linux CI workflow runs
+them, together with `zig build -Doptimize=ReleaseSafe`. `zig build test` runs
+one test artifact for `av` plus one per registered example; if named modules are
+later split, aggregate their test runs too. Explicitly import implemented test files:
 Zig's lazy analysis does not automatically test
 every `.zig` file in the tree. Add integration/differential/fuzz/benchmark steps
 as their implementations become available.

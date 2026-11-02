@@ -67,7 +67,7 @@ The original [standalone example](../zig/examples/io_patterns.zig) demonstrates
 exact field reads, fixed memory writers, file `.interface` access, adapter
 lifetime, retained read errors, explicit flushing and buffer-size-independent
 behavior. It intentionally stops at individual fields and is not a WAV parser.
-Run it with the commands in [README.md](../README.md#run-the-current-examples).
+Run it with the commands in [README.md](../README.md#build-and-test).
 
 ## Patterns to adapt selectively
 
