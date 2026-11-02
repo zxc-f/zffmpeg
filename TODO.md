@@ -27,7 +27,7 @@ agree with the [first WAV contract](port.md#first-wav-contract).
 - [x] Inspect the FFmpeg source layout and record the reference revision.
   Evidence: [inspected baseline](port.md#inspected-baseline) and source map.
 - [x] Establish project guidance and a Zig design with phased acceptance criteria.
-  Evidence: [AGENTS.md](AGENTS.md) and [port.md](port.md).
+  Evidence: [CLAUDE.md](CLAUDE.md) (formerly AGENTS.md) and [port.md](port.md).
 - [x] Validate the illustrative PCM kernel with Zig 0.17.0.
   Evidence: both documentation-example tests and formatting passed; this is not
   an implemented codec. The kernel now lives in [pcm_s16.zig](zig/examples/pcm_s16.zig)
@@ -40,12 +40,19 @@ agree with the [first WAV contract](port.md#first-wav-contract).
   tests passed in each of Debug, ReleaseSafe and ReleaseFast on native Windows.
   Covers memory, fragmented input, file buffers, truncation, read failure and
   fixed output capacity. A seventh test for the file adapter's retained `.err`
-  was added later and runs in Linux CI only. This does not complete T01 or
-  implement WAV.
+  was added later; all 7 tests pass in Linux CI (see the CI entry below) but
+  have not been rerun on Windows. This does not complete T01 or implement WAV.
 - [x] Separate zffmpeg into its own repository with reproducible reference setup.
   Evidence: [README.md](README.md) records both pinned clone commands;
   [.gitignore](.gitignore) excludes references and Zig build output. Only project
   documentation and the original Zig example belong in the initial commit.
+- [x] Add Linux CI for the standalone examples.
+  Evidence: [ci.yml](.github/workflows/ci.yml);
+  [run 41544372319](https://github.com/zxc-f/zffmpeg/actions/runs/41544372319)
+  on `ubuntu-24.04` at commit `d701a20` confirmed `zig version` 0.17.0, passed
+  `zig fmt --check zig/`, and passed 7/7 `io_patterns.zig` and 2/2
+  `pcm_s16.zig` tests in each of Debug, ReleaseSafe and ReleaseFast. Native
+  Windows CI is deferred (T11).
 
 ## First milestone: build and a tested PCM kernel
 
