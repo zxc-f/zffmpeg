@@ -59,7 +59,7 @@ agree with the [first WAV contract](port.md#first-wav-contract).
 
 ## First milestone: build and a tested PCM kernel
 
-- [ ] **T01 — Add the minimal Zig package and build.** One package, one named
+- [x] **T01 — Add the minimal Zig package and build.** One package, one named
   library module `av` at `zig/root.zig`; internal files use ordinary imports.
   Preserve target/optimization options. Default install must compile an artifact,
   and `test` must execute its test artifact. Explicitly aggregate the existing
@@ -78,6 +78,20 @@ agree with the [first WAV contract](port.md#first-wav-contract).
   Document library setup in `zig/README.md`, update the root README's runnable
   commands and keep outputs ignored. Update the README, plan, checklist and
   agent guidance current-state statements in the same change.
+  Evidence: [build.zig](build.zig), [build.zig.zon](build.zig.zon),
+  [.zig-version](.zig-version), [zig/root.zig](zig/root.zig),
+  [zig/README.md](zig/README.md) and [ci.yml](.github/workflows/ci.yml), merged in
+  zxc-f/zffmpeg#4. The fingerprint `0x4b4a1226947194f5` is the value `zig build`
+  suggested for the manifest without one ([run 41548322449](https://github.com/zxc-f/zffmpeg/actions/runs/41548322449)). A temporary
+  failing test made `zig build test` report `av 0 pass, 1 fail` and exit with
+  status 1 ([run 41548611661](https://github.com/zxc-f/zffmpeg/actions/runs/41548611661)); it was then reverted. On the PR head,
+  [run 41548960006](https://github.com/zxc-f/zffmpeg/actions/runs/41548960006) passed the exact-version check,
+  `zig fmt --check build.zig build.zig.zon zig/`, the example-registration check,
+  `zig build` in Debug and ReleaseSafe, and `zig build test` with 9/9 tests
+  (`av` 0, `io_patterns` 7, `pcm_s16` 2) in Debug, ReleaseSafe and ReleaseFast
+  on `ubuntu-24.04`. No C dependency: `build.zig` has no C sources, libc, system
+  libraries or package dependencies, and CI builds from a checkout without
+  `.references/`. Native Windows was not run (T11).
 
 - [ ] **T02 — Materialize the WAV contract and fixtures.** Create the canonical
   `zig/testing/fixtures/README.md` with a named fixture for each rule in port.md:
