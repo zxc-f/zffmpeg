@@ -13,7 +13,8 @@ The baseline compiler is **Zig 0.17.0**.
 
 - [port.md](port.md): architecture, supported-subset contracts and verification plan.
 - [TODO.md](TODO.md): ordered tasks and completion evidence; T01 is next.
-- [AGENTS.md](AGENTS.md): repository guidance for development.
+- [CLAUDE.md](CLAUDE.md): repository guidance for development; [AGENTS.md](AGENTS.md)
+  contains only `@CLAUDE.md` so other agents load the same file.
 - [doc/zigimg-reference.md](doc/zigimg-reference.md): pinned zigimg source analysis.
 - [zig/examples/io_patterns.zig](zig/examples/io_patterns.zig): runnable I/O example.
 - [zig/examples/pcm_s16.zig](zig/examples/pcm_s16.zig): runnable PCM kernel example.

@@ -27,7 +27,7 @@ agree with the [first WAV contract](port.md#first-wav-contract).
 - [x] Inspect the FFmpeg source layout and record the reference revision.
   Evidence: [inspected baseline](port.md#inspected-baseline) and source map.
 - [x] Establish project guidance and a Zig design with phased acceptance criteria.
-  Evidence: [AGENTS.md](AGENTS.md) and [port.md](port.md).
+  Evidence: [CLAUDE.md](CLAUDE.md) (formerly AGENTS.md) and [port.md](port.md).
 - [x] Validate the illustrative PCM kernel with Zig 0.17.0.
   Evidence: both documentation-example tests and formatting passed; this is not
   an implemented codec. The kernel now lives in [pcm_s16.zig](zig/examples/pcm_s16.zig)

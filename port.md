@@ -814,7 +814,7 @@ Only mark a feature verified after its acceptance evidence exists.
 
 | Feature | Status | Evidence / next action |
 | --- | --- | --- |
-| Project guidance and architecture | Implemented | `AGENTS.md` and this file. |
+| Project guidance and architecture | Implemented | `CLAUDE.md` (imported by `AGENTS.md`) and this file. |
 | Standalone Zig I/O example | Verified | Original [source](zig/examples/io_patterns.zig); formatting and 6/6 tests per mode in Debug, ReleaseSafe and ReleaseFast on native Windows, Zig 0.17.0. A seventh test, for the file adapter's retained `.err`, was added later; all 7 tests passed per mode in [Linux CI run 41544372319](https://github.com/zxc-f/zffmpeg/actions/runs/41544372319), Zig 0.17.0, but have not been rerun on Windows. Individual fields only; no media parser, allocations or optimization claims. Provenance and reference evidence: [zigimg analysis](doc/zigimg-reference.md). |
 | Standalone PCM s16 kernel example | Verified | Original [source](zig/examples/pcm_s16.zig), moved from this document; formatting and 2/2 tests passed per mode in [Linux CI run 41544372319](https://github.com/zxc-f/zffmpeg/actions/runs/41544372319), Zig 0.17.0. Design example only; T04 promotes it into the library. |
 | Linux CI | Implemented | [Workflow](.github/workflows/ci.yml) requires `zig version` 0.17.0 and runs formatting plus every example in Debug, ReleaseSafe and ReleaseFast on `ubuntu-24.04`; first passing run: [Linux CI run 41544372319](https://github.com/zxc-f/zffmpeg/actions/runs/41544372319). Native Windows CI is deferred. |
