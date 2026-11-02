@@ -16,6 +16,7 @@ The baseline compiler is **Zig 0.17.0**.
 - [CLAUDE.md](CLAUDE.md): repository guidance for development; [AGENTS.md](AGENTS.md)
   contains only `@CLAUDE.md` so other agents load the same file.
 - [doc/zigimg-reference.md](doc/zigimg-reference.md): pinned zigimg source analysis.
+- [doc/zig-0.17-guide.md](doc/zig-0.17-guide.md): how to write Zig 0.17 in this project.
 - [zig/examples/io_patterns.zig](zig/examples/io_patterns.zig): runnable I/O example.
 - [zig/examples/pcm_s16.zig](zig/examples/pcm_s16.zig): runnable PCM kernel example.
 - [.github/workflows/ci.yml](.github/workflows/ci.yml): Linux CI for the examples.

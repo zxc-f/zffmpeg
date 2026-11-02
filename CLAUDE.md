@@ -71,6 +71,11 @@ Make, not Zig's build system.
   with what remains. Update the port.md ledger when a whole capability changes.
 - [doc/zigimg-reference.md](doc/zigimg-reference.md): pinned zigimg analysis,
   the source of the I/O adapter rules below.
+- [doc/zig-0.17-guide.md](doc/zig-0.17-guide.md): how to write Zig 0.17 here:
+  `@as` versus real casts, the 0.15/0.16 I/O breaks, containers, removed
+  builtins, formatting, tests, the build graph, and a checklist to run before
+  sending Zig. Follow it for new Zig; where it differs from this file, this
+  file wins.
 
 ## References
 
@@ -103,8 +108,9 @@ existing user changes.
   metadata; neither is an exact compiler check. T01 must enforce the tested
   version in the build as CI already does; upgrade deliberately.
 - Check installed standard-library sources and versioned official documentation
-  before adopting build, I/O, or reflection APIs from older examples. Resolve
-  disagreements by compiling a minimal check with the pinned toolchain.
+  before adopting build, I/O, or reflection APIs from older examples; the
+  [Zig 0.17 guide](doc/zig-0.17-guide.md) lists the stale patterns to avoid.
+  Resolve disagreements by compiling a minimal check with the pinned toolchain.
 - Start with one package and one named library module, `av`. Use ordinary
   file imports internally. Split named modules only for a demonstrated need,
   such as publishing a subset; keep imports acyclic and shared types minimal.
