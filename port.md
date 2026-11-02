@@ -2,11 +2,12 @@
 
 ## Status and scope
 
-Initialized on 2026-11-02. Current deliverables are the design, checklist and a
-tested [standalone I/O example](zig/examples/io_patterns.zig). This standalone
-repository tracks the port's own files. FFmpeg in `.references/ffmpeg` remains
-the behavioral reference. There is no native library build, codec,
-container or command-line tool yet; the example does not implement WAV support.
+Initialized on 2026-11-02. Current deliverables are the design, checklist, two
+tested standalone examples ([I/O patterns](zig/examples/io_patterns.zig) and a
+[PCM s16 kernel](zig/examples/pcm_s16.zig)) and a Linux CI workflow. This
+standalone repository tracks the port's own files. FFmpeg in `.references/ffmpeg`
+remains the behavioral reference. There is no native library build, codec,
+container or command-line tool yet; the examples do not implement WAV support.
 
 The goal is a native Zig multimedia library and tools, built incrementally from
 FFmpeg's functionality. Use idiomatic Zig APIs and explicit resource ownership.
@@ -72,7 +73,6 @@ affect them. Smaller source alone is not a sufficient success criterion.
   locally at `.references/ffmpeg`.
 - Commit subject: `avfilter/vf_scale_d3d12: add RGB formats and color space conversion`.
 - [RELEASE](https://github.com/FFmpeg/FFmpeg/blob/5d5a38a7e46be296eab75982c0986054f731e19e/RELEASE): `8.0.git`; use the commit above as the precise reference.
-- The original FFmpeg working tree was clean before the port's initial planning.
 - At the reference commit: 11,112 tracked files, including 3,511 C files, 1,283 headers, 236 `.S` files,
   and 189 `.asm` files. These are repository-wide counts, including tests/tools.
 - Local compiler: Zig **0.17.0** on PATH, confirmed with `zig version` / `zig env`.
@@ -167,8 +167,9 @@ they do not each require a build module or installed library. The first path nee
 core, I/O, PCM and WAV; a general graph engine, universal codec context, plugin
 system and full feature dependency resolver can wait for concrete requirements.
 
-The following is the **proposed first layout**. Only the standalone example is
-already present; the library/build files remain planned:
+The following is the **proposed first layout**. Only the standalone examples,
+`LICENSE` and the Linux CI workflow (`.github/workflows/ci.yml`) are already
+present; the library/build files remain planned:
 
 ```text
 build.zig                    # one library module, artifacts and tests
@@ -179,6 +180,7 @@ zig/
   root.zig                   # av: small public facade with direct feature access
   examples/
     io_patterns.zig          # existing: standalone, tested I/O usage
+    pcm_s16.zig              # existing: standalone PCM kernel; promoted in T04
   core/                      # internal files in the av module
     time.zig                 # only required time-base/rescale operations
     audio.zig                # small typed audio view and format description
@@ -299,7 +301,9 @@ The following choices were checked against the installed `std/Io/Reader.zig`,
   to the caller. State these lifetimes explicitly in public API comments.
 - Read fixed-width fields with `readSliceAll` into a small local byte array,
   then `std.mem.readInt`. This works with tiny source buffers and truncated
-  `Reader.fixed` input. `takeInt` / `takeArray` are alternatives only when their
+  `Reader.fixed` input. A failed exact read may already have consumed part of
+  the field, so treat truncation and I/O failure as terminal for that stream.
+  `takeInt` / `takeArray` are alternatives only when their
   contiguous-buffer capacity preconditions are satisfied; `takeInt` uses encoded
   bit width divided by eight, not generally `@sizeOf(T)`.
 - Decode fields explicitly; do not use `takeStruct`, `peekStruct`, their pointer
@@ -320,11 +324,14 @@ The following choices were checked against the installed `std/Io/Reader.zig`,
   rebuilding it can lose buffered read-ahead. Use `logicalPos()` or parser byte
   accounting when a consumed position is needed. At the file boundary, recover
   `.err` when generic I/O reports failure so cancellation/details survive.
-- Write through `*std.Io.Writer`; `writeInt` encodes into a local array and
-  writes it through the writer. Flush buffered file/stdout output and report
-  failures before success. Flush drains buffers; durable storage would require
-  a separate synchronization policy. Fixed memory writers need adequate output
-  capacity, not a universal integer-sized internal-buffer rule.
+- Write through `*std.Io.Writer`. Encode fixed-width fields into a small local
+  array with `std.mem.writeInt`, then call `writeAll`. `Writer.writeInt`
+  documents that the writer buffer must hold at least `@sizeOf(T)` bytes; the
+  0.17.0 implementation does not need that, but project code should not rely
+  on undocumented slack. Fixed memory writers report `WriteFailed`
+  when output capacity runs out, possibly after writing a prefix. Flush buffered
+  file/stdout output and report failures before success. Flush drains buffers;
+  durable storage would require a separate synchronization policy.
   Flush at operation completion or encoder `finish`, rather than after each
   field. Closing a file does not check errors in an unflushed writer buffer.
 - Use `std.testing.Reader` with `artificial_limit = .limited(1)` for short-read
@@ -424,45 +431,12 @@ Relevant features are documented in the
 
 In [pcm.c](https://github.com/FFmpeg/FFmpeg/blob/5d5a38a7e46be296eab75982c0986054f731e19e/libavcodec/pcm.c), `DECODE` builds reader and integer names by token
 pasting and mutates pointers supplied by its caller. A native Zig kernel can
-express the signed 16-bit subset with one ordinary loop. The following standalone
-example uses the installed Zig 0.17 API; it is a design example, not a complete
-codec implementation:
-
-```zig
-const std = @import("std");
-
-fn decodeS16(
-    comptime endian: std.lang.Endian,
-    bytes: []const u8,
-    output: []i16,
-) error{ TruncatedSample, OutputTooSmall }![]i16 {
-    if (bytes.len % 2 != 0) return error.TruncatedSample;
-    const count = bytes.len / 2;
-    if (output.len < count) return error.OutputTooSmall;
-
-    for (output[0..count], 0..) |*sample, i| {
-        sample.* = std.mem.readInt(i16, bytes[i * 2 ..][0..2], endian);
-    }
-    return output[0..count];
-}
-
-test "signed PCM byte orders share the same kernel" {
-    const expected = [_]i16{ 0, 32767, -32768, -1 };
-    const le = [_]u8{ 0, 0, 255, 127, 0, 128, 255, 255 };
-    const be = [_]u8{ 0, 0, 127, 255, 128, 0, 255, 255 };
-    var output: [4]i16 = undefined;
-    try std.testing.expectEqualSlices(i16, &expected, try decodeS16(.little, &le, &output));
-    try std.testing.expectEqualSlices(i16, &expected, try decodeS16(.big, &be, &output));
-}
-
-test "invalid buffers fail before writing output" {
-    var output = [_]i16{123};
-    try std.testing.expectError(error.TruncatedSample, decodeS16(.little, &.{0}, &output));
-    try std.testing.expectError(error.OutputTooSmall, decodeS16(.little, &.{ 0, 0, 0, 0 }, &output));
-    try std.testing.expectEqual(@as(i16, 123), output[0]);
-    try std.testing.expectEqual(@as(usize, 0), (try decodeS16(.little, &.{}, &output)).len);
-}
-```
+express the signed 16-bit subset with one ordinary loop. The standalone
+[pcm_s16.zig](zig/examples/pcm_s16.zig) example implements `decodeS16` with a
+`comptime` byte-order parameter and tests both byte orders, signed extrema,
+invalid buffer sizes, unchanged output on failure and empty input. It uses the
+installed Zig 0.17 API and is a design example, not a complete codec
+implementation.
 
 The caller owns `output`; the returned slice borrows it. Input and output must
 not overlap. Byte order is fixed per specialization; sample count and the loop
@@ -630,13 +604,13 @@ contract. Defaults below are project policy and may be revised with evidence.
 | --- | --- |
 | Container | Little-endian RIFF/WAVE only. Reject RF64, BW64, W64, RIFX and unknown-size sentinels as unsupported. |
 | `fmt ` | Accept 16 bytes, or 18 bytes with `cbSize == 0`; tag 1, 16-bit signed PCM, mono or stereo. Short fields are truncated; other complete variants are unsupported. |
-| Rate/alignment | Rate must be positive; default rate limit 192,000 Hz. Require `block_align == channels * 2` and `byte_rate == rate * block_align` with checked arithmetic. Zero channels/rate or inconsistent fields are invalid. |
+| Rate/alignment | Rate must be positive; default rate limit 192,000 Hz. Require `block_align == channels * 2` with checked arithmetic. Zero channels/rate or an inconsistent `block_align` are invalid. `byte_rate` is informational: decoding never uses it and FFmpeg does not validate it, so accept a mismatch and ignore the value. |
 | Ordering | Exactly one `fmt ` before exactly one `data`. Reject missing/duplicate required chunks within the declared RIFF extent. |
 | Data length | Explicit length, divisible by block alignment. Zero means an empty stream, never read-to-EOF. Reject `0xFFFFFFFF` as unsupported streaming size. |
-| Bounds | Account for chunk headers, bodies and odd-size padding inside `riff_size + 8`. Never read beyond that extent. Known input size permits early truncation checks; otherwise detect it during consumption. |
+| Bounds | Account for chunk headers, bodies and odd-size padding inside `riff_size + 8`. Never read beyond that extent. Known input size permits early truncation checks; otherwise detect it during consumption. T02 decides whether these common real-world cases are truncation or tolerated: a final odd-sized chunk whose padding byte is missing at EOF, a chunk (including `data`) whose declared size exceeds the RIFF extent, and a `riff_size` that disagrees with a known input length. |
 | Unknown chunks | Skip bounded contents and padding. Continue validation after `data` to the RIFF end so later duplicates/truncated chunks are detected. Ignore bytes outside the declared RIFF extent. |
 | Completion | Header discovery is not full-file validation. Success requires consuming/validating the declared extent. Errors found after emitting audio are reported; callers must not assume atomic output. |
-| Resource defaults | At most 4,096 chunks and 1 MiB of non-audio chunk/header/padding bytes; a 64 KiB streaming work buffer. Data streams within RIFF's checked 32-bit length limits, without whole-file allocation. Expose configurable policy limits. |
+| Resource defaults | At most 4,096 chunks and 1 MiB of retained non-audio bytes (headers and chunk contents the parser keeps in memory); a 64 KiB streaming work buffer. Skipped chunk bodies and padding are bounded by the chunk-count limit and the RIFF extent, not by the byte limit, so large `LIST`, `id3 ` or `iXML` chunks remain readable. Data streams within RIFF's checked 32-bit length limits, without whole-file allocation. Expose configurable policy limits. |
 | Output | Known frame count up front; write a 16-byte tag-1 `fmt ` and exact RIFF/data sizes. Validate the total RIFF size, not just `data`; reject overflows before the header. No seeking or placeholder sizes. `finish` verifies the exact frame count and flushes. |
 
 T07 includes sequential non-seekable input with known sizes and the ordering above.
@@ -647,7 +621,8 @@ declared frame count is an error; a failed stream may contain partial output.
 
 Use format errors such as `InvalidRiff`, `InvalidWave`, `InvalidFormat`,
 `Truncated`, `UnsupportedFormat`, `UnsupportedStreamingSize`, and
-`LimitExceeded`. Preserve `IoFailure`, `Cancelled`, and allocation failures at
+`LimitExceeded`. Preserve `IoFailure`, `Canceled` (Zig's `std.Io.Cancelable`
+spelling), and allocation failures at
 the appropriate boundary. Successful completion is a normal result, not an EOF
 error. T02 specifies error precedence for inputs violating several rules.
 
@@ -664,8 +639,10 @@ T09's `zffprobe` reports stable UTF-8 `key=value` lines, in this order:
 `format`, `codec`, `sample_fmt`, `channels`, `channel_layout`, `sample_rate`,
 `nb_samples`, `duration_num`, `duration_den`. Use `wav`, `pcm_s16le`, `s16` and
 `mono`/`stereo` as canonical strings. `nb_samples` counts sample frames (samples
-per channel); duration is exactly `nb_samples / sample_rate`, without decimal
-rounding. Empty data has numerator zero. Emit the report only after validation.
+per channel); duration is exact and unreduced in the stream's `1/sample_rate`
+time base: `duration_num = nb_samples` and `duration_den = sample_rate`, with no
+decimal rounding or fraction reduction. Empty data reports `duration_num=0` and
+the stream's sample rate as `duration_den`. Emit the report only after validation.
 
 Exit codes: 0 success/help, 1 usage, 2 invalid/truncated media, 3 unsupported
 media, 4 I/O failure, 5 resource/allocation limit, 6 cancellation. Diagnostics
@@ -707,9 +684,12 @@ normalized fields from reference `ffprobe` output, not its whole JSON verbatim.
 
 The reference FFmpeg [.forgejo workflow](https://github.com/FFmpeg/FFmpeg/blob/5d5a38a7e46be296eab75982c0986054f731e19e/.forgejo/workflows/test.yml) primarily uses
 Linux runners and also executes Windows binaries through Wine. Its broad FATE
-configuration enables GPL/nonfree components. Add a dedicated minimal Zig Linux
-job; native Windows validation uses a local script until a suitable runner is
-available. Neither Wine nor a cross-compile substitutes for that native run.
+configuration enables GPL/nonfree components. This project instead uses a
+dedicated minimal GitHub Actions [Linux workflow](.github/workflows/ci.yml),
+which currently checks the standalone examples and grows with T01 and T11.
+Native Windows CI is deferred; until a Windows job exists, Windows evidence
+comes only from recorded local runs. Neither Wine nor a cross-compile
+substitutes for a native run.
 
 Use format specifications and independent hand-checked vectors alongside the
 C reference. A mismatch needs investigation; agreeing with an upstream bug is
@@ -775,10 +755,9 @@ zig build test -Doptimize=ReleaseSafe
 zig build test -Doptimize=ReleaseFast # required for implemented parser/size checks
 ```
 
-These root build commands remain planned. The current standalone example can
-already be checked with `zig fmt --check zig/examples/io_patterns.zig` and
-`zig test zig/examples/io_patterns.zig`, also with `-O ReleaseSafe` and
-`-O ReleaseFast`. Start with one library test artifact for `av` and aggregate
+These root build commands remain planned. The current standalone examples are
+checked with the commands in [README.md](README.md#run-the-current-examples),
+which the Linux CI workflow runs. Start with one library test artifact for `av` and aggregate
 the example tests; if named modules are later split, aggregate their test runs
 too. Explicitly import implemented test files:
 Zig's lazy analysis does not automatically test
@@ -835,55 +814,44 @@ Only mark a feature verified after its acceptance evidence exists.
 
 | Feature | Status | Evidence / next action |
 | --- | --- | --- |
-| Project guidance and architecture | Complete | `AGENTS.md` and this file. |
-| Standalone Zig I/O example | Verified | Original [source](zig/examples/io_patterns.zig); formatting and 6/6 tests per mode in Debug, ReleaseSafe and ReleaseFast on native Windows, Zig 0.17.0. Individual fields only; no media parser, allocations or optimization claims. Provenance and reference evidence: [zigimg analysis](doc/zigimg-reference.md). |
+| Project guidance and architecture | Implemented | `AGENTS.md` and this file. |
+| Standalone Zig I/O example | Verified | Original [source](zig/examples/io_patterns.zig); formatting and 6/6 tests per mode in Debug, ReleaseSafe and ReleaseFast on native Windows, Zig 0.17.0. A seventh test, for the file adapter's retained `.err`, was added later and runs in Linux CI only. Individual fields only; no media parser, allocations or optimization claims. Provenance and reference evidence: [zigimg analysis](doc/zigimg-reference.md). |
+| Standalone PCM s16 kernel example | Verified | Original [source](zig/examples/pcm_s16.zig), moved from this document; both tests and formatting passed with Zig 0.17.0 and run in Linux CI. Design example only; T04 promotes it into the library. |
+| Linux CI | Implemented | [Workflow](.github/workflows/ci.yml) requires `zig version` 0.17.0 and runs formatting plus every example in Debug, ReleaseSafe and ReleaseFast on `ubuntu-24.04`. Native Windows CI is deferred. |
 | Zig toolchain/build/package | Planned | Local Zig 0.17.0 detected; create pinned module/test build. |
 | Core types and readers | Planned | Implement only time/audio views and byte access needed for WAV/PCM first. |
 | WAV + PCM s16le | Planned | First complete multimedia path, scoped above. |
 | zffprobe / zffmpeg | Planned | Add after the corresponding library path works. |
 
-The PCM example above was extracted and checked with Zig 0.17.0: formatting
-and both tests passed, covering both byte orders, signed extrema, invalid buffer
-sizes, unchanged output on failure and empty input. Local Markdown links and
-code fences were checked. Temporary validation artifacts from the original
-workspace were not migrated; new checks use this project's ignored `.zig-cache/`.
-This validates the example; native codec/container implementation is still planned.
+The examples validate design patterns; native codec/container implementation is
+still planned.
 
 The authoritative next action is in [TODO.md](TODO.md). Let the first working
 path determine which shared infrastructure is necessary.
 
-## Review integration notes
+## Recorded design decisions
 
-Findings from the earlier review inputs `r1.md`, `r2.md`, and `r3.md` were checked
-against the reference sources, installed Zig 0.17 library, and the official
-language/build documentation. Review suggestions are not themselves evidence.
-Those input files are not part of this standalone repository; the integrated
-decisions and validation evidence are retained here.
-
-Validation in the original workspace used an isolated build under
-`.zig-cache/review-validation`: default
-library compilation succeeded and all six checks passed in Debug and ReleaseFast.
-Checks cover the two PCM example tests, one-byte source fragments, short/empty
-fixed readers, insufficient fixed writer capacity, and checked arithmetic.
-Project documentation links/anchors and whitespace checks passed. These are
-temporary API checks, not completion of T01 or implementation of WAV support.
+These decisions came from earlier design reviews. They were checked against the
+reference sources, the installed Zig 0.17 standard library and the official
+language/build documentation; review suggestions are not themselves evidence.
 
 - Adopted: build-only T01 with a real default compile/test run, one initial
   module, explicit package paths/version check, fixture contract, dependency
   semantics, known-length writing, early fuzz entry, named build modes and
   concrete reference/platform evidence. The WAV limits and CLI schema above
-  are design choices, not facts imported from the reviews.
-- Qualified: 11,112 files is correct at the recorded baseline; paths on PATH
-  can resolve through aliases; reference FFmpeg CI has Wine coverage but no native
-  Windows runner. Keep the exact tested compiler policy rather than silently
-  accepting later patch releases based only on a minimum version declaration.
+  are project design choices.
+- Toolchain and package: keep the exact tested compiler policy rather than
+  silently accepting later releases based only on a minimum version declaration.
   Normal init templates have explicit package paths; minimal generated manifests
   can use `.paths = .{""}`. Set the allowlist deliberately in either case.
-- Corrected: installed `Writer.writeInt` uses a local byte array and `writeAll`,
-  without the asserted integer-sized buffer rule claimed in r3. Reader integer
-  capacity is based on encoded bit width; fixed-reader exhaustion can return
-  EOF. Flush is not durable synchronization. `cleanExit` is success-only.
+- Standard-library facts (0.17.0): `Writer.writeInt` documents a writer-buffer
+  capacity of at least `@sizeOf(T)` although its implementation encodes into a
+  local array and calls `writeAll`; project field writers do the latter
+  explicitly. `Reader.takeInt` requires buffer capacity for the encoded bit
+  width; fixed-reader exhaustion returns `EndOfStream`. Flush is not durable
+  synchronization. `cleanExit` is success-only and a no-op in Debug builds.
+- Reference CI: FFmpeg's workflow has Wine coverage but no native Windows
+  runner, so it supplies no native Windows evidence for this project.
 - Not adopted: a mandatory T07 split into a custom incremental state machine,
-  indiscriminate license tagging, or rewriting v1–v4 history. Known-size sequential
-  input uses the same blocking Reader parser; nonblocking resumability remains
-  a separate capability.
+  or indiscriminate license tagging. Known-size sequential input uses the same
+  blocking Reader parser; nonblocking resumability remains a separate capability.

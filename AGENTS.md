@@ -13,7 +13,8 @@ patterns, milestones, and acceptance criteria.
 Use [TODO.md](TODO.md) for the current implementation queue. Mark tasks complete
 only with recorded evidence; update port.md when feature-level status changes.
 
-Current state: design documents and a tested standalone I/O example; no native
+Current state: design documents, two tested standalone examples (I/O patterns
+and a PCM s16 kernel) and a Linux CI workflow that checks them; no native
 multimedia library build or codec/container implementation yet. See TODO.md for
 tasks and port.md for verified capabilities. Update the README, plan, checklist
 and agent guidance when T01 introduces the build. The ignored FFmpeg clone
@@ -26,7 +27,10 @@ remains the behavior reference.
 - `doc/zigimg-reference.md`: pinned zigimg analysis and adopted Zig patterns.
 - `.references/ffmpeg/`: ignored FFmpeg behavior/reference clone.
 - `.references/zigimg/`: ignored Zig implementation reference; no build dependency.
-- `zig/examples/io_patterns.zig`: tested I/O example; other native files are planned.
+- `zig/examples/io_patterns.zig`, `zig/examples/pcm_s16.zig`: tested standalone
+  examples; other native files are planned.
+- `.github/workflows/ci.yml`: Linux-only CI; native Windows CI is deferred (T11).
+- `LICENSE`: LGPL v2.1 text for the `LGPL-2.1-or-later` project sources.
 
 The following paths are relative to `.references/ffmpeg/`:
 
@@ -46,7 +50,7 @@ before source research. Keep them under the ignored `.references/` directory;
 do not commit their files, Git metadata or gitlinks. They are not submodules.
 New Zig implementation files belong under `zig/`, with a future root `build.zig`
 and `build.zig.zon`. Preserve reference attribution/licenses and existing user
-changes. Do not rely on the enclosing workspace's FFmpeg checkout or Git history.
+changes.
 
 ## Toolchain and architecture
 
@@ -71,6 +75,9 @@ changes. Do not rely on the enclosing workspace's FFmpeg checkout or Git history
 - Keep PCM kernels on slices. Parse WAV through `*std.Io.Reader`, starting with
   `Reader.fixed` tests. Use exact reads into local field buffers to handle tiny
   input fragments; do not retain reader-buffer views across subsequent reads.
+  A failed exact read may have consumed part of a field; treat it as terminal.
+  Encode output fields into local arrays and call `writeAll`; do not rely on
+  `Writer.writeInt` working with buffers smaller than its documented minimum.
 - Borrow `.interface` from a stable file adapter and reuse that adapter across
   reads. Preserve its scratch-buffer lifetime and detailed `.err` diagnostics;
   reconstructing it can lose read-ahead bytes. Keep seekability optional.
@@ -108,8 +115,10 @@ provide `zig build`, `zig build test`, and
 `zig fmt --check build.zig build.zig.zon zig/`. Check Debug and ReleaseSafe;
 run parser/size tests in ReleaseFast once implemented to verify explicit checks.
 Until then, do not report those project commands as passing. The standalone
-example can be checked now with `zig test zig/examples/io_patterns.zig` and
-`zig fmt --check zig/examples/io_patterns.zig`; also test ReleaseSafe/ReleaseFast.
+examples can be checked now with `zig fmt --check zig/` and
+`zig test zig/examples/<name>.zig` in Debug, ReleaseSafe and ReleaseFast; the
+Linux CI workflow runs the same checks. When T01 lands, add the build commands
+to that workflow.
 The C reference uses `configure` and Make, not Zig's build system.
 
 For implemented multimedia behavior, use hand-checked vectors and differential

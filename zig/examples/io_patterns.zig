@@ -10,6 +10,8 @@ pub const ReadError = error{ Truncated, IoFailure };
 
 /// Reads exactly one encoded field, without allocating or borrowing buffer views.
 /// EOF is truncation here because the caller has requested a required field.
+/// Either error may follow consumption of part of the field, so the reader's
+/// position is unspecified afterward; treat both errors as terminal for the stream.
 pub fn readU32Le(reader: *std.Io.Reader) ReadError!u32 {
     var bytes: [4]u8 = undefined;
     reader.readSliceAll(&bytes) catch |err| switch (err) {
@@ -20,8 +22,12 @@ pub fn readU32Le(reader: *std.Io.Reader) ReadError!u32 {
 }
 
 /// The caller owns the writer and decides when to flush. Failure may write a prefix.
+/// Encoding into a local array avoids `Writer.writeInt`'s documented requirement
+/// for a writer buffer of at least `@sizeOf(T)` bytes, so any buffer size works.
 pub fn writeU32Le(writer: *std.Io.Writer, value: u32) std.Io.Writer.Error!void {
-    try writer.writeInt(u32, value, .little);
+    var bytes: [4]u8 = undefined;
+    std.mem.writeInt(u32, &bytes, value, .little);
+    try writer.writeAll(&bytes);
 }
 
 /// Recover the file adapter's detailed error, including cancellation, when available.
@@ -98,5 +104,25 @@ test "file adapters work with empty small and larger caller buffers" {
         try std.testing.expectEqual(@as(u32, 0x12345678), try readFileU32Le(&reader));
         try std.testing.expectEqual(@as(u32, 0x90abcdef), try readFileU32Le(&reader));
         try std.testing.expectError(error.Truncated, readFileU32Le(&reader));
+    }
+}
+
+test "file read failure returns the adapter's retained error" {
+    const io = std.testing.io;
+    var directory = std.testing.tmpDir(.{});
+    defer directory.cleanup();
+
+    // Created files lack read access unless `.read = true`, so reading must fail.
+    const file = try directory.dir.createFile(io, "write-only.bin", .{});
+    defer file.close(io);
+    var buffer: [8]u8 = undefined;
+    var reader = file.readerStreaming(io, &buffer);
+    if (readFileU32Le(&reader)) |_| {
+        return error.TestExpectedError;
+    } else |err| {
+        // The generic interface reports only ReadFailed; the adapter keeps the cause.
+        const retained = reader.err orelse return error.TestExpectedError;
+        try std.testing.expectEqual(@as(anyerror, retained), @as(anyerror, err));
+        try std.testing.expect(err != error.IoFailure);
     }
 }
