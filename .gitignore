@@ -1,6 +1,6 @@
 # Source references are independent clones, never vendored or committed.
 /.references/
 
-# Local Zig build and test output.
-/.zig-cache/
-/zig-out/
+# Local Zig build and test output, wherever zig runs.
+.zig-cache/
+zig-out/

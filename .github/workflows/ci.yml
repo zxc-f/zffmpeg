@@ -1,0 +1,52 @@
+# Linux-only checks for the standalone Zig examples. Native Windows CI is
+# deferred; see TODO.md (T11). Extend this job with `zig build` and
+# `zig build test` when T01 adds the root build.
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux (Zig 0.17.0)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+
+      - name: Require the tested Zig version
+        run: |
+          actual="$(zig version)"
+          echo "zig version: $actual"
+          test "$actual" = "0.17.0"
+
+      - name: Check formatting
+        run: |
+          zig fmt --check zig/ || {
+            zig fmt zig/
+            git diff
+            exit 1
+          }
+
+      - name: Test examples (Debug)
+        run: for f in zig/examples/*.zig; do echo "::group::$f"; zig test "$f"; echo "::endgroup::"; done
+
+      - name: Test examples (ReleaseSafe)
+        run: for f in zig/examples/*.zig; do echo "::group::$f"; zig test "$f" -O ReleaseSafe; echo "::endgroup::"; done
+
+      - name: Test examples (ReleaseFast)
+        run: for f in zig/examples/*.zig; do echo "::group::$f"; zig test "$f" -O ReleaseFast; echo "::endgroup::"; done

@@ -17,18 +17,9 @@ of Zig library organization, I/O and ownership. Its image-oriented API does not
 define our multimedia timing, streaming or compatibility contract.
 
 Both reference repositories belong inside this project's ignored `.references/`
-directory; see [README.md](../README.md#clone-the-reference-repositories) for the
-complete setup. To obtain the zigimg snapshot in a fresh workspace, run from
-the project root:
-
-```text
-git clone --depth 1 --no-checkout https://github.com/zigimg/zigimg.git .references/zigimg
-git -C .references/zigimg fetch --depth 1 origin 083d0304840a3f5fd547c2e2005148a18886c401
-git -C .references/zigimg checkout --detach 083d0304840a3f5fd547c2e2005148a18886c401
-```
-
-Do not rerun clone over an existing reference directory. Check its revision
-before refreshing this analysis; the links below pin the inspected source.
+directory; [README.md](../README.md#clone-the-reference-repositories) has the
+pinned clone commands. Check the clone's revision before refreshing this
+analysis; the links below pin the inspected source.
 
 ## Findings and decisions
 
@@ -56,13 +47,15 @@ before refreshing this analysis; the links below pin the inspected source.
 3. **Read required fields exactly.** Use `readSliceAll` into small local arrays
    followed by endian decoding. This avoids imposing contiguous-buffer sizes
    on arbitrary readers. A tiny source buffer is not a reason to reject valid
-   input. Map EOF while reading a required field to truncation.
+   input. Map EOF while reading a required field to truncation. A failed exact
+   read may have consumed part of the field, so the failure is terminal.
 4. **Preserve transport diagnostics at the outer boundary.** Generic readers
    report `ReadFailed`; a file adapter retains more detail in `.err`, including
    cancellation. Translate to the domain's I/O failure while retaining/reporting
    the cause. Do not turn every failure into invalid media.
-5. **Make output completion explicit.** Generic field writers need not flush
-   after every field. The owning file/CLI operation or encoder `finish` flushes
+5. **Make output completion explicit.** Encode fields into a local array and
+   call `writeAll`, so writers work with any buffer size. Generic field writers
+   need not flush after every field. The owning file/CLI operation or encoder `finish` flushes
    and checks failure before success. Closing a handle is not a replacement
    for checking buffered output errors.
 6. **Separate parsing from resource acquisition.** The format parser accepts
@@ -74,13 +67,7 @@ The original [standalone example](../zig/examples/io_patterns.zig) demonstrates
 exact field reads, fixed memory writers, file `.interface` access, adapter
 lifetime, retained read errors, explicit flushing and buffer-size-independent
 behavior. It intentionally stops at individual fields and is not a WAV parser.
-
-```text
-zig fmt --check zig/examples/io_patterns.zig
-zig test zig/examples/io_patterns.zig
-zig test zig/examples/io_patterns.zig -O ReleaseSafe
-zig test zig/examples/io_patterns.zig -O ReleaseFast
-```
+Run it with the commands in [README.md](../README.md#run-the-current-examples).
 
 ## Patterns to adapt selectively
 
@@ -137,5 +124,7 @@ run. The standalone example passed formatting and **6/6 tests in each of Debug,
 ReleaseSafe and ReleaseFast** on native Windows with Zig 0.17.0. These exercise
 exact bytes, every short field length, one-byte source fragments, read failure,
 insufficient writer capacity and file readers with 0-, 1- and 64-byte buffers.
+A later seventh test checks that a file read failure returns the adapter's
+retained `.err`; it runs in the Linux CI workflow, not in the Windows run above.
 Neither reference tests nor examples complete the native library tasks in
 [TODO.md](../TODO.md).

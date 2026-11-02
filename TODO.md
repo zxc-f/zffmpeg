@@ -2,8 +2,8 @@
 
 This is the execution checklist for [port.md](port.md). The plan explains the
 architecture and compatibility rules; this file records the work to do next.
-The repository tracks project documentation and a tested standalone Zig I/O
-example. FFmpeg and zigimg are independent clones in ignored `.references/`;
+The repository tracks project documentation, two tested standalone Zig examples
+and a Linux CI workflow. FFmpeg and zigimg are independent clones in ignored `.references/`;
 see [README.md](README.md#clone-the-reference-repositories) for setup. There is
 no native library build or codec/container implementation yet.
 
@@ -30,15 +30,18 @@ agree with the [first WAV contract](port.md#first-wav-contract).
   Evidence: [AGENTS.md](AGENTS.md) and [port.md](port.md).
 - [x] Validate the illustrative PCM kernel with Zig 0.17.0.
   Evidence: both documentation-example tests and formatting passed; this is not
-  an implemented codec. See [the example](port.md#example-one-pcm-kernel-two-byte-orders).
+  an implemented codec. The kernel now lives in [pcm_s16.zig](zig/examples/pcm_s16.zig)
+  and runs in Linux CI. See [the example](port.md#example-one-pcm-kernel-two-byte-orders).
 - [x] Clone and inspect zigimg as a Zig implementation reference.
   Evidence: [pinned analysis](doc/zigimg-reference.md), commit `083d0304840a3f5fd547c2e2005148a18886c401`;
   its focused I/O suite passed 15/15 tests with Zig 0.17.0.
 - [x] Make the adopted I/O patterns runnable in an original example.
   Evidence: [io_patterns.zig](zig/examples/io_patterns.zig), formatting and 6/6
-  tests passed in each of Debug, ReleaseSafe and ReleaseFast. Covers memory,
-  fragmented input, file buffers, truncation, read failure and fixed output
-  capacity. This does not complete T01 or implement WAV.
+  tests passed in each of Debug, ReleaseSafe and ReleaseFast on native Windows.
+  Covers memory, fragmented input, file buffers, truncation, read failure and
+  fixed output capacity. A seventh test for the file adapter's retained `.err`
+  was added later and runs in Linux CI only. This does not complete T01 or
+  implement WAV.
 - [x] Separate zffmpeg into its own repository with reproducible reference setup.
   Evidence: [README.md](README.md) records both pinned clone commands;
   [.gitignore](.gitignore) excludes references and Zig build output. Only project
@@ -50,8 +53,10 @@ agree with the [first WAV contract](port.md#first-wav-contract).
   library module `av` at `zig/root.zig`; internal files use ordinary imports.
   Preserve target/optimization options. Default install must compile an artifact,
   and `test` must execute its test artifact. Explicitly aggregate the existing
-  I/O example tests through a test root or separate run artifact; no new media
-  helpers are required for this build task. Verify failure propagation with a
+  example tests (`zig/examples/*.zig`) through a test root or separate run
+  artifact; no new media helpers are required for this build task. Extend the
+  Linux CI workflow to run `zig build` and `zig build test` in Debug and
+  ReleaseSafe with the build's exact-version check. Verify failure propagation with a
   temporary failing test, then remove it. Use `.zig-version`
   as a hint, `.minimum_zig_version = "0.17.0"` as metadata, and an explicit
   tested-version check. Generate a package fingerprint with the toolchain and
@@ -70,7 +75,12 @@ agree with the [first WAV contract](port.md#first-wav-contract).
   empty data versus unknown size, padding, truncation, limits and trailing data.
   Record expected samples, metadata, errors/precedence, hashes or deterministic
   generation commands, and fixture provenance. Include high-rate plain tag-1
-  output as an intentional header difference from FFmpeg. Keep required tiny
+  output as an intentional header difference from FFmpeg. Also decide and
+  fixture the open boundary cases listed under the contract's Bounds row: a
+  final odd-sized chunk whose padding byte is missing at EOF, a chunk (including
+  `data`) whose declared size exceeds the RIFF extent, and a `riff_size` that
+  disagrees with a known input length. Keep a fixture for an inconsistent
+  `byte_rate`, which is accepted and ignored. Keep required tiny
   fixtures local and fail if any are missing. Done when small independent
   vectors make every accepted/rejected case reproducible.
 
@@ -92,8 +102,9 @@ agree with the [first WAV contract](port.md#first-wav-contract).
   retain a scalar implementation and document ownership/overlap rules. Done
   when independent vectors cover signed extrema, empty input, incomplete
   samples, insufficient output and the documented failure-mutation behavior.
-  Move the Markdown kernel/tests into `zig/codec/pcm.zig` and replace the duplicate
-  code fence with a source link; record applicable per-file license/provenance.
+  Promote the kernel/tests from [pcm_s16.zig](zig/examples/pcm_s16.zig) into
+  `zig/codec/pcm.zig` and update the port.md source link; record applicable
+  per-file license/provenance.
 
 - [ ] **T05 — Add only the audio/time types needed by this path.** Depends on T01
   and T02. Represent sample rate, channel count/order, interleaving and borrowed
@@ -153,13 +164,16 @@ agree with the [first WAV contract](port.md#first-wav-contract).
   differences are recorded and every supported operation has reproducible evidence.
 
 - [ ] **T11 — Establish the platform and build-mode baseline.** Once T07–T09
-  exist, run native Windows and Linux checks in Debug, ReleaseSafe and
-  `-Doptimize=ReleaseFast` (the safety-off check). Add a dedicated Linux Zig job
-  in Forgejo without FATE sample sync. Use a reproducible local Windows script
-  until a native Windows runner exists; upstream FFmpeg Wine jobs do not supply that
-  evidence. Keep cross-compilation separate from default test execution. Done
-  when both native runs and reference results are recorded; missing environments
-  remain outstanding. Verify the exact toolchain used in each run.
+  exist, run native Linux and Windows checks in Debug, ReleaseSafe and
+  `-Doptimize=ReleaseFast` (the safety-off check). The GitHub Actions
+  [Linux workflow](.github/workflows/ci.yml) already checks the examples; extend
+  it to the build, parser and CLI checks without FATE sample sync. Native Windows
+  CI is deferred for now: add a GitHub Actions Windows job (or, failing that, a
+  reproducible local Windows script) when Windows evidence is needed; upstream
+  FFmpeg Wine jobs do not supply that evidence. Keep cross-compilation separate
+  from default test execution. Done when both native runs and reference results
+  are recorded; missing environments remain outstanding. Verify the exact
+  toolchain used in each run.
 
 The first milestone is useful when kernels work; the second is complete when
 T06–T11 meet their criteria. Update port.md with the supported subset, provenance,
