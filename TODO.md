@@ -2,12 +2,15 @@
 
 This is the execution checklist for [port.md](port.md). The plan explains the
 architecture and compatibility rules; this file records the work to do next.
-The repository tracks project documentation, two tested standalone Zig examples
-and a Linux CI workflow. FFmpeg and zigimg are independent clones in ignored `.references/`;
-see [README.md](README.md#clone-the-reference-repositories) for setup. There is
-no native library build or codec/container implementation yet.
+The repository tracks project documentation, the minimal Zig package and build
+(the `av` module, documented in [zig/README.md](zig/README.md)), two tested
+standalone Zig examples and a Linux CI workflow. FFmpeg and zigimg are
+independent clones in ignored `.references/`; see
+[README.md](README.md#clone-the-reference-repositories) for setup. There is no
+codec/container implementation yet.
 
-**Next task: T01 — establish the minimal Zig build.**
+**Next tasks: T02 — materialize the WAV contract and fixtures, and T03 — the C
+reference setup (independent of T02). T04 and T05 need T01 and T02.**
 
 Work through the first WAV/PCM path before expanding the framework. Tasks have
 stable IDs for references. Check an item only when its completion criteria are

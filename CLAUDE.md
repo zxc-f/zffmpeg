@@ -10,46 +10,55 @@ This standalone repository is becoming a native Zig implementation of FFmpeg's
 multimedia functionality. Implement algorithms and APIs in Zig; compiling FFmpeg's C with
 `zig cc`, translating headers, or wrapping libav* does not constitute the port.
 
-Current state: design documents, two tested standalone examples (I/O patterns
-and a PCM s16 kernel) and a Linux CI workflow that checks them; no native
-multimedia library build or codec/container implementation yet. The next task is
-T01, the minimal Zig build. When the state changes, update the current-state
+Current state: the minimal Zig package and build (the `av` module rooted at
+`zig/root.zig`, which exports nothing yet), two tested standalone examples (I/O
+patterns and a PCM s16 kernel) and a Linux CI workflow; no codec/container
+implementation yet. The next tasks are T02 (the WAV fixture contract) and T03
+(the reference build); T04 needs T02. When the state changes, update the current-state
 statements in README.md, port.md ("Status and scope"), the TODO.md introduction
 and this file together.
 
 ## Commands
 
-Toolchain: Zig **0.17.0** exactly; CI fails on any other `zig version`. The
-examples need no C compiler and no reference clone. Run from the repository
-root, because `std.testing.tmpDir` creates `.zig-cache/tmp/` in the current
-directory.
+Toolchain: Zig **0.17.0** exactly. `build.zig` stops with a compile error on any
+other compiler, and CI checks `zig version` too. No C compiler or reference
+clone is needed. Run from the repository root, because `std.testing.tmpDir`
+creates `.zig-cache/tmp/` in the current directory.
 
 ```bash
-zig version                                   # must print 0.17.0
-zig fmt --check zig/                          # formatting
-zig test zig/examples/io_patterns.zig         # one file, Debug
-zig test zig/examples/io_patterns.zig -O ReleaseSafe
-zig test zig/examples/io_patterns.zig -O ReleaseFast
-zig test zig/examples/io_patterns.zig --test-filter "truncation"   # only tests whose names contain the text
+zig build                                    # compile the av library (Debug)
+zig build test                               # av module tests + every example's tests
+zig build test -Doptimize=ReleaseSafe
+zig build test -Doptimize=ReleaseFast        # safety off; required for parser/size code
+zig build test -Dtest-filter="truncation"    # only tests whose names contain the text
+zig build test --summary all                 # per-artifact test counts
+zig fmt --check build.zig build.zig.zon zig/
+zig test zig/examples/io_patterns.zig        # one standalone example, without the build
 ```
 
 [.github/workflows/ci.yml](.github/workflows/ci.yml) (Linux only; native Windows
-CI is deferred to T11) checks the exact version, runs `zig fmt --check zig/`
-(printing the diff on failure) and tests every `zig/examples/*.zig` in Debug,
-ReleaseSafe and ReleaseFast, so new example files are picked up automatically.
-If no local Zig 0.17.0 is available, the pull request's CI run is the
-verification; never report local results that were not run.
-
-There is no root `build.zig` yet. T01 adds `zig build`, `zig build test` (Debug
-and ReleaseSafe), `zig build test -Doptimize=ReleaseFast` for parser/size checks
-and `zig fmt --check build.zig build.zig.zon zig/`, documents setup in
-`zig/README.md`, and adds those steps to the CI workflow. Until then, do not
-report those project commands as passing. The C reference uses `configure` and
+CI is deferred to T11) runs the version check, formatting, a check that every
+`zig/examples/*.zig` is registered in `build.zig`, `zig build` in Debug and
+ReleaseSafe, and `zig build test` in Debug, ReleaseSafe and ReleaseFast. If no
+local Zig 0.17.0 is available, the pull request's CI run is the verification;
+never report local results that were not run. CI also runs on a branch without
+a pull request through `workflow_dispatch`. The C reference uses `configure` and
 Make, not Zig's build system.
+
+When adding code:
+
+- Register a new example in the `examples` list in `build.zig`.
+- Reference each new `av` file that has tests from a `test` block in
+  `zig/root.zig`; Zig analyzes lazily, so unreferenced files' tests never run.
+- Export only supported features from `zig/root.zig`.
+
+[zig/README.md](zig/README.md) documents the build graph, version policy,
+package manifest and per-file provenance.
 
 ## Where decisions live
 
 - [README.md](README.md): setup, pinned reference clone commands, runnable commands.
+- [zig/README.md](zig/README.md): build graph, version policy, manifest, provenance.
 - [port.md](port.md): architecture, contracts and the feature ledger. Read it
   before architectural work. Key sections:
   - "First WAV contract": the accepted subset, limits, error names (`Truncated`,
@@ -98,15 +107,16 @@ The following paths are relative to `.references/ffmpeg/`:
 - `tests/fate/`, `tests/ref/`, `tests/checkasm/`: integration definitions,
   expected outputs, and optimized-kernel checks; some need external samples.
 
-New Zig implementation files belong under `zig/`, with a future root
-`build.zig` and `build.zig.zon`. Preserve reference attribution/licenses and
-existing user changes.
+New Zig implementation files belong under `zig/`; the package is defined by
+the root `build.zig` and `build.zig.zon`. Preserve reference attribution/licenses
+and existing user changes.
 
 ## Toolchain and architecture
 
 - `.zig-version` is a tooling convention and `minimum_zig_version` is package
-  metadata; neither is an exact compiler check. T01 must enforce the tested
-  version in the build as CI already does; upgrade deliberately.
+  metadata; neither is an exact compiler check. `build.zig` enforces the tested
+  version (`tested_zig_version`); upgrade deliberately, changing all three and
+  CI together.
 - Check installed standard-library sources and versioned official documentation
   before adopting build, I/O, or reflection APIs from older examples; the
   [Zig 0.17 guide](doc/zig-0.17-guide.md) lists the stale patterns to avoid.
@@ -115,7 +125,9 @@ existing user changes.
   file imports internally. Split named modules only for a demonstrated need,
   such as publishing a subset; keep imports acyclic and shared types minimal.
 - The default build must compile an artifact; the test step must execute tests.
-  Use an explicit package `.paths` allowlist excluding the reference C tree.
+  Keep the explicit package `.paths` allowlist, which excludes the reference C
+  tree; never use `""`. The build has no C sources, libc or package
+  dependencies; add one only with a recorded decision in port.md.
 - Keep the public Zig API small, typed, and independent of C struct layouts.
   Add any C ABI compatibility later as a separate adapter.
 - Pass allocators and I/O dependencies explicitly. Document whether slices and
