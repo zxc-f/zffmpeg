@@ -45,6 +45,13 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/pcm_vectors
 ./pcm-vectors | diff -u zig/testing/vectors/pcm.txt -
 ```
 
+The T23a sample conversion vectors come from the reference's `libswresample`:
+
+```bash
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/sampleconv_vectors.c .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o sampleconv-vectors
+./sampleconv-vectors | diff -u zig/testing/vectors/sampleconv.txt -
+```
+
 On Windows (MSYS2 UCRT64 clang) link with `-lm -lbcrypt` instead of
 `-pthread` and strip the carriage returns MinGW's text output adds
 (`tr -d '\015'`) before comparing.

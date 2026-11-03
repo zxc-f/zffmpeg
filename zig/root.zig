@@ -29,6 +29,8 @@
 //!   FFmpeg's raw demuxers and muxers (`format/raw.zig`).
 //! - `caf`: bounded Apple CAF reading for linear PCM, A-law and µ-law
 //!   (`format/caf.zig`).
+//! - `audioconvert`: sample format conversion between every format, packed
+//!   or planar, as libswresample converts (`resample/audioconvert.zig`).
 //! - `codecs`: codec descriptors and the decoder and encoder registries, as
 //!   FFmpeg names them (`codec/registry.zig`).
 //! - `formats`: the format registry, with each container's demuxer probe and
@@ -57,6 +59,7 @@ pub const au = @import("format/au.zig");
 pub const aiff = @import("format/aiff.zig");
 pub const raw = @import("format/raw.zig");
 pub const caf = @import("format/caf.zig");
+pub const audioconvert = @import("resample/audioconvert.zig");
 pub const codecs = @import("codec/registry.zig");
 pub const formats = @import("format/registry.zig");
 pub const detect = @import("format/detect.zig");
@@ -79,6 +82,7 @@ test {
     _ = @import("format/aiff.zig");
     _ = @import("format/raw.zig");
     _ = @import("format/caf.zig");
+    _ = @import("resample/audioconvert.zig");
     _ = @import("format/registry.zig");
     _ = @import("format/detect.zig");
     _ = @import("format/replay.zig");

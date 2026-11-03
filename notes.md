@@ -204,6 +204,14 @@ port.md's contract table updated, and (after T06) the parser.
 | Unknown `data` size | Behind `unknown_length`, as for WAV and AU: it gives up the length check. | `caf_data_size_unknown`. |
 | Sample rate | Truncated toward zero, as FFmpeg's int conversion of the double; below 1 is invalid. | `sampleRate` in `caf.zig`, `caf_rate_fraction`. |
 
+## Sample format conversion
+
+| Decision | Current choice and reason | To change it |
+| --- | --- | --- |
+| Kernels (T23a) | `resample/audioconvert.zig` reproduces libswresample's direct conversion (`full_convert`, no resampling, rematrixing or dither) for every pair of the twelve formats, bit-exact on the 232 vectors of the pinned libswresample, floats included: integer shifts, round-to-nearest-even int-to-float conversion times an exact power of two, and float-to-int `lrint` (half to even) with clipping. | `audioconvert.zig`, `sampleconv_vectors.c`. |
+| Undefined C cases | Where FFmpeg's `lrint`/`llrint` overflow (a product beyond the 64-bit range, like 1.0 to s64, which x86 turns into the most negative value) or see NaN, the result is platform-dependent; the port saturates and turns NaN into 0, and the vectors stay where C is defined. | `convertSample` and its tests. |
+| Scope decisions | The project owner chose FFmpeg's automatic conversion to the output's default codec when transcoding, plus `-c:a` to pick another, and every dither method, noise shaping included. | TODO.md T23a; port.md. |
+
 ## Raw PCM contract
 
 | Decision | Current choice and reason | To change it |
