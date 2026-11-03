@@ -682,14 +682,15 @@ well as the source revision. Save reference commands, executable/input hashes
 and expected results so comparisons are reproducible. Clang is a reference-build
 choice; the Zig implementation does not require translating Clang's output.
 
-T03 establishes a Linux x86-64 reference recipe (pinned container or WSL plus
-recorded Clang/tool versions) in `zig/testing/reference/README.md`, building the
-pinned `.references/ffmpeg` clone. Validate a minimal configuration enabling
-WAV/PCM, raw s16le output, file/pipe protocols and
-the CLI/filter dependencies needed by the comparison commands. Record the
-working configure command and config log; do not present an untested command
-copied from a review as a reproducible build. Compare exact decoded samples and
-normalized fields from reference `ffprobe` output, not its whole JSON verbatim.
+T03 established the Linux x86-64 reference recipe in
+[zig/testing/reference](zig/testing/reference/README.md): `build-ffmpeg.sh`
+builds the pinned `.references/ffmpeg` clone with Clang and a minimal LGPL
+configuration (WAV/PCM, raw s16le output, file/pipe protocols and the filters
+the `ffmpeg` program needs), and CI's `reference` job runs it in a pinned
+GitHub-hosted Ubuntu image, recording the tool versions, configure command,
+`config.log` and binary hashes. `compare.py` compares exact decoded samples and
+normalized `ffprobe` fields, not whole output verbatim. Keep that recipe as the
+only reference build; do not present an untested command as reproducible.
 
 The reference FFmpeg [.forgejo workflow](https://github.com/FFmpeg/FFmpeg/blob/5d5a38a7e46be296eab75982c0986054f731e19e/.forgejo/workflows/test.yml) primarily uses
 Linux runners and also executes Windows binaries through Wine. Its broad FATE
