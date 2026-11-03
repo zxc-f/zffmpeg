@@ -164,6 +164,19 @@ port.md's contract table updated, and (after T06) the parser.
 | Content detection | A stream that starts with `.snd` is AU; anything else, including input shorter than 4 bytes, goes to the WAV parser (`zig/format/detect.zig`). With two formats, one magic check is enough, and WAV's results and errors stay exactly as before: a non-AU file reports `InvalidRiff`. The magic alone selects AU, so `au_empty_data` is detected, unlike FFmpeg's `au_probe`, which needs every header field nonzero. | Scored probing over a longer prefix (TODO.md T16/T26a) replaces it when a third format lands; `detect.zig`, the probe cases in `build.zig` and `ZFFPROBE_AU_DETECTION` in `compare.py`. |
 | Detection prefix | Detection reads at most 4 bytes with `readSliceShort` and hands them to the chosen parser through `format/prefix.zig`'s `Prefix`, a 4-byte array, instead of peeking into the reader's buffer: it works with any reader buffer size, including none, and a pipe loses no bytes. Each parser's first header read takes the whole prefix. | `prefix.zig`, `Parser.initPrefixed` in `wav.zig` and `au.zig`; a longer prefix (T16) needs `max_len` raised and a first read at least that long. |
 
+## Conversion pipeline
+
+| Decision | Current choice and reason | To change it |
+| --- | --- | --- |
+| Location and shape | `zig/format/convert.zig`, next to `detect.zig`, the other code that dispatches between containers: a `Conversion` with a two-container input union and a `switch` on the output, no registry or codec context. A third format replaces both switches with T16's dispatch. | port.md "Conversion pipeline"; T16. |
+| Two phases | `init` makes every check that does not need the rest of the input and writes nothing; `run` writes. T13b can then reject a command before it creates the output file. | `convert.zig` and its tests; T13b's preflight. |
+| Check order | Input header, then the request (matrix), then the output header, as FFmpeg opens the input before setting up output streams: a malformed input reports its own error even when the request would also fail. | port.md "Conversion pipeline" and `convert.zig`'s tests. |
+| Copy reads raw bytes | Stream copy moves encoded data through `Parser.readData` and `Writer.writeData`, not a decode and re-encode that happens to give the same bytes, so the matrix's copy cells really copy; `readSamples` and `writeFrames` now build on them. | `wav.zig`, `au.zig`, `convert.zig`. |
+| Writer header checks | `Writer.check` runs `begin`'s header checks without writing; both share one `encodeHeader`. | `wav.zig`, `au.zig`. |
+| Internal writer errors | `run` treats the writer's header, frame and count errors as unreachable: `init` ran the same header checks and the parser delivers exactly the declared whole frames. Only `WriteFailed` reaches callers. | `outputFailure` in `convert.zig`; revisit if writer limits ever differ between `check` and `begin`. |
+| Partial output on input failure | An exact transfer read that the input cannot fill delivers nothing, so the samples written before a truncation depend on the 4 KiB transfer boundaries. The failure itself is always reported. | `convert.zig`; delivering the readable prefix would need short reads in `readData`. |
+| Rejected-input oracle | Tests expect a rejected input to fail conversion with `detect.probe`'s error, which the fixture contracts already pin, instead of repeating the fixture-to-error mapping. | `convert.zig` tests. |
+
 ## Probe output
 
 | Decision | Current choice and reason | To change it |

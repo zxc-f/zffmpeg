@@ -127,6 +127,7 @@ slowdowns of the default build.
 | `zig/format/wav.zig`, `zig/io/file.zig`, `zig/cli/probe.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. FFmpeg's `wavdec.c`, `wavenc.c`, `riffenc.c` and `ffprobe` were read for behavior only; no code is copied. |
 | `zig/format/au.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. FFmpeg's `au.c` and `pcm.c` were read for behavior only; no code is copied. |
 | `zig/format/detect.zig`, `zig/format/prefix.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. The detection rule is the project's own; FFmpeg's `au_probe` in `au.c` was read only to record where it differs. |
+| `zig/format/convert.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. The operation matrix is TODO.md T13's; no FFmpeg source maps to it directly. |
 | `zig/testing/reference/build-ffmpeg.sh`, `compare.py` | `LGPL-2.1-or-later` (SPDX header) | Original scripts; they build and run the separate, unmodified FFmpeg reference. |
 | `zig/codec/pcm.zig`, `zig/core/audio.zig`, `zig/core/time.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. Behavior follows FFmpeg's `libavcodec/pcm.c`, `libavutil/mathematics.c`, `channel_layout.h` and `samplefmt.c` at the pinned revision; no code is copied. |
 | `zig/testing/fixtures.zig`, `zig/testing/fixtures/generate.py`, `zig/testing/write_driver.zig` | `LGPL-2.1-or-later` (SPDX header) | Original project files. |

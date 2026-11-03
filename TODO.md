@@ -7,8 +7,8 @@ need. The repository tracks project documentation, the minimal Zig package and
 build (the `av` module, documented in [zig/README.md](zig/README.md)), the WAV
 and AU fixture contracts ([zig/testing/fixtures](zig/testing/fixtures/README.md))
 and two complete paths: PCM s16 kernels, audio/time types, bounded WAV and AU
-parsers and known-length writers, file and pipe adapters, content detection
-and the `zffprobe` tool. Linux CI builds and tests it in every mode and compares it with a pinned
+parsers and known-length writers, file and pipe adapters, content detection,
+a WAV/AU conversion pipeline and the `zffprobe` tool. Linux CI builds and tests it in every mode and compares it with a pinned
 FFmpeg build ([zig/testing/reference](zig/testing/reference/README.md)).
 Development is verified on Linux only; see the
 [platform policy](#platform-policy-linux-only-during-development). FFmpeg and
@@ -16,8 +16,9 @@ zigimg are independent clones in ignored `.references/`; see
 [README.md](README.md#clone-the-reference-repositories) for setup.
 
 T12 is verified: the AU contract and 29 fixtures (T12a), the AU parser and
-writer (T12b) and AU in `zffprobe` with content detection (T12c). **Next:
-T13a–T13b, the synchronous conversion pipeline and the `zffmpeg` command. See
+writer (T12b) and AU in `zffprobe` with content detection (T12c). T13a, the
+synchronous conversion pipeline (`av.convert`), is implemented and awaits its
+Linux CI run. **Next: T13b, the `zffmpeg` command. See
 [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
@@ -660,6 +661,56 @@ sample formats stay in T20.
     Done when long input runs in bounded memory, frame counts and timing are
     exact, both ends finish, and a failure found after samples were written is
     reported as a failure, never a success.
+
+    ```text
+    ID / parent: T13a / T13
+    State: validating
+    Supported behavior and explicit exclusions: av.convert runs the T13
+      matrix: transcode in all four WAV/AU cells, copy within one codec;
+      copy across codecs is UnsupportedOperation. Excluded: rate and layout
+      changes (T23/T24), metadata (T17b), file adapters and the command
+      (T13b), unknown-length input (T22a).
+    Needs (verified) / lands with / verified after: T12c (verified); alone.
+    Contract and source provenance: TODO.md T13's matrix, port.md "CLI
+      policy" and "Conversion pipeline", notes.md "Conversion pipeline".
+      Original code; no FFmpeg source maps to it directly.
+    Required fixtures / optional corpus: the 52 WAV and 29 AU fixtures (21
+      accepted in 4 cells, 60 rejected in 2 same-codec cells), a synthesized
+      2 GiB header and a 4 MiB generated stream. No optional corpus.
+    Ownership, state transitions and limits: Conversion borrows the reader
+      and writer; init reads up to the first sample and writes nothing, run
+      is called once. No allocation: a 4 KiB transfer buffer plus the
+      parsers' and writers' fixed scratch. Parser and writer limits come
+      from detect.Limits per container.
+    Comparison rule and intentional differences: the output's own parser
+      must decode the fixture's samples, format and frame count; canonical
+      inputs convert to identical bytes; copy drops WAV chunks other than
+      fmt/data and AU annotations. Rejected inputs fail like detect.probe.
+      FFmpeg reads converted output in T13b, through the command.
+    Implementation files and test entry points: zig/format/convert.zig;
+      readData/writeData/Writer.check in wav.zig and au.zig; tests in
+      convert.zig.
+    Evidence commit / Linux CI run / reference report: 988e826 / not run /
+      not applicable (FFmpeg reads zffmpeg output in T13b).
+    Required cases: passed 9 convert.zig tests, covering 21 x 4 accepted
+      cells and 60 x 2 rejected cells / failed 0 / missing 0 (local Windows).
+    Optional cases: none.
+    Fuzz seeds, budget and result: convert.zig's differential entry against
+      detect.probe, 4 seeds, run under zig build test; passed. No sustained run.
+    Remaining work or blocker / next action: a Linux CI run of 988e826 or
+      later for G5; then T13b.
+    ```
+
+    Evidence so far (local Windows, Zig 0.17.0, not G5): implementation
+    commit `988e826`. `zig build test` passed 31/31 steps in Debug,
+    ReleaseSafe and ReleaseFast (`av` 76 tests, `io_patterns` 7, 24
+    `zffprobe` runs); `zig fmt --check` passed; the compile-only cross
+    builds and a compile-only test build for x86_64-linux-musl passed.
+    Mutation checks: skipping the input's `finish` and dropping the matrix
+    check each fail the new tests. Bounded memory: the API takes no
+    allocator, and a 4 MiB stream converts to AU and copies to WAV through
+    64 KiB file buffers, exact in frame count and samples, the copy
+    byte-identical to its canonical input.
   - [ ] **T13b — The `zffmpeg` command.** Needs T13a. A thin `zig/cli/`
     command: arguments, files, standard input and output, the policy for an
     existing output and for input and output being the same file, cleanup of

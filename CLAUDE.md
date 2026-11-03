@@ -13,12 +13,13 @@ multimedia functionality. Implement algorithms and APIs in Zig; compiling FFmpeg
 Current state: the WAV and AU PCM paths are complete (T01–T12). The `av`
 module (rooted at `zig/root.zig`) exports `pcm`, `audio`, `time`, `wav` and
 `au` (bounded parsers and known-length writers), `detect` (WAV or AU content
-detection) and `file` (file and pipe adapters); `zffprobe` is the first tool
+detection), `convert` (the synchronous T13a conversion and stream-copy
+pipeline) and `file` (file and pipe adapters); `zffprobe` is the first tool
 and probes WAV and AU. Tests cover 52 WAV and 29 AU fixtures, process runs of
 `zffprobe`, and a CI comparison against a pinned FFmpeg build. Verification is
-Linux-only during development; Windows and ARM wait for T62–T63. T13a (the
-synchronous conversion pipeline) is next, and TODO.md lays out the roadmap
-through T64. When the state changes, update the current-state statements in
+Linux-only during development; Windows and ARM wait for T62–T63. T13a is
+implemented and awaits its Linux CI run; T13b (the `zffmpeg` command) is next,
+and TODO.md lays out the roadmap through T64. When the state changes, update the current-state statements in
 README.md, port.md ("Status and scope"), the TODO.md introduction and this file
 together.
 
