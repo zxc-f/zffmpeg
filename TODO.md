@@ -23,8 +23,9 @@ T20b, the PCM encodings, and T21, complete WAV (T21a, extensible headers and
 encodings; T21b, RF64/BW64, Sony Wave64 and unknown-length input; T21c, tags,
 with T17b's metadata dictionary), T22a, every AU PCM encoding and
 unknown-length AU, T16, the codec and format registries with FFmpeg's scored
-content probing, T22b, AIFF and AIFF-C, and T22c, raw PCM with FFmpeg's
-extension fallback, are verified. **Next: T22d (CAF demux). See
+content probing, and T22, the remaining audio containers (T22a AU encodings,
+T22b AIFF and AIFF-C, T22c raw PCM with FFmpeg's extension fallback, T22d
+CAF demux), are verified. **Next: T23a (sample format conversion). See
 [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
@@ -1454,7 +1455,7 @@ names, not as an empty framework.
     carried. Mutations of the INFO recovery, the renaming's de-duplication
     and the re-encode rule each failed the tests.
 
-- [ ] **T22 — AU encodings, AIFF, raw PCM and CAF.** Checked when T22a–T22d
+- [x] **T22 — AU encodings, AIFF, raw PCM and CAF.** Checked when T22a–T22d
   are. Reference: `libavformat/au.c`, `aiffdec.c`, `aiffenc.c`, `pcmdec.c`,
   `pcmenc.c`, `rawenc.c`, `cafdec.c`.
   - [x] **T22a — Remaining AU encodings.** Needs T12 and T20b. The other PCM
@@ -1655,8 +1656,63 @@ names, not as an empty framework.
     and 734/734 unsupported cells; 134/134 AU and AIFF outputs equal to
     FFmpeg's conversion; 223/223 pipe results.
 
-  - [ ] **T22d — CAF demux.** Needs T16 and T20b.
+  - [x] **T22d — CAF demux.** Needs T16 and T20b.
     Done when PCM in CAF matches the reference; ALAC in CAF waits for T31b.
+
+    ```text
+    ID / parent: T22d / T22
+    State: verified
+    Supported behavior and explicit exclusions: CAF read sequentially:
+      lpcm (s8, s16/s24/s32/s64 and f32/f64 in both byte orders), alaw and
+      ulaw; mono and stereo; known length, and a data size of -1 behind
+      caf.Limits.unknown_length; in zffprobe and as a zffmpeg input.
+      Excluded: writing (FFmpeg's CAF muxer is not ported), packet tables
+      (pakt), compressed formats (AAC, ALAC until T31b, ...), odd integer
+      sizes, tags and channel layouts from info and chan, versions other
+      than 1.
+    Needs (verified) / lands with / verified after: T16 and T20b (verified);
+      alone.
+    Contract and source provenance: port.md "CAF contract",
+      zig/testing/fixtures/caf/README.md, notes.md "CAF contract"; cafdec.c,
+      caf.c and isom.h read for behavior. Original code.
+    Required fixtures / optional corpus: 47 CAF fixtures (19 accepted, 28
+      rejected, 2 of them unknown-length ones). No optional corpus.
+    Ownership, state transitions and limits: no allocation, sequential;
+      192 kHz and 4096 chunks by default.
+    Comparison rule and intentional differences: FFmpeg reads every accepted
+      CAF fixture, forced and detected, to the same samples and fields, and
+      the unknown-length one the option accepts the same; zffmpeg converts
+      every CAF input FFmpeg then reads. Recorded: FFmpeg's duration estimate
+      over the bytes after the data start, no duration for empty data, and
+      its verdicts on the 28 rejected fixtures (15 accepted).
+    Implementation files and test entry points: zig/format/caf.zig,
+      registry.zig, detect.zig, convert.zig, both CLIs, status.zig,
+      generate.py, compare.py, build-ffmpeg.sh; tests in caf.zig, detect.zig,
+      convert.zig; probe and convert cases in build.zig.
+    Evidence commit / Linux CI run / reference report: bbec9d6 / local
+      Windows runs instead (below) / local compare.py run (below).
+    Required cases: passed 19/19 accepted and 28/28 rejected CAF fixtures,
+      1/1 unknown-length acceptance / failed 0 / missing 0.
+    Optional cases: none.
+    Fuzz seeds, budget and result: caf.zig's entry, both unknown_length
+      settings; run under zig build test. No sustained run.
+    Remaining work or blocker / next action: none; see the introduction.
+    ```
+
+    Evidence (G5, local Windows runs with Zig 0.17.0): commit `bbec9d6`.
+    `zig build test` passed 151/151 steps in Debug, ReleaseSafe and
+    ReleaseFast (`av` 192 tests, the CAF fixtures from memory, one-byte reads
+    and probing with the option off and on); fmt, `generate.py --check`, the
+    four cross builds and Linux and big-endian type checks passed. The
+    reference, rebuilt with the CAF demuxer, ran `compare.py` with no
+    failures: 19/19 accepted and 28/28 rejected CAF fixtures; 13/13
+    unknown-length results; 270/270 detection results; the registry equal
+    to FFmpeg's 19 formats and demuxers and 18 muxers; 786/786 `zffmpeg`
+    outputs (the CAF inputs included) and 908/908 unsupported cells;
+    270/270 pipe results; the other sections as for T22c. A first run found
+    two fixture issues, both fixed: an empty `chan` chunk FFmpeg rightly
+    rejects, and FFmpeg's bit-rate duration estimate, now recorded.
+
 
 - [ ] **T23 — Sample format conversion, channel layouts and rematrixing.**
   Checked when T23a–T23c are. Reference: `libswresample/audioconvert.c`,

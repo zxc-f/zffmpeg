@@ -263,6 +263,24 @@ build include the WAV muxer. Its first run, locally on Windows at commit
   s16) rejected before any output: **54/54**.
 - Fixtures whose pipe result equals the file result: **105/105**.
 
+T22d added CAF demuxing, and the CAF demuxer (not the muxer) to the reference
+build. The run, locally on Windows at commit `bbec9d6` with MSYS2 UCRT64 clang
+23.1.4, reported no failures:
+
+- Accepted CAF fixtures FFmpeg and zffprobe read as expected: **19/19**, with
+  two recorded differences: FFmpeg sets no duration for an empty `data` chunk
+  and estimates one from the bit rate over the bytes after the data start
+  (`caf_chunks_around_data`: 10 frames for 4). Rejected ones with zffprobe's
+  status: **28/28**; FFmpeg accepts 15/28 (recorded).
+- Unknown-length results: **13/13**, the CAF one decoded the same.
+- Registries equal to FFmpeg's listings: 16 codecs, 19 formats and demuxers,
+  18 muxers.
+- FFmpeg's probe winner equals the recorded one: **270/270** fixtures (49
+  detected by no demuxer).
+- zffmpeg outputs FFmpeg reads as expected, equal through pipes: **786/786**,
+  the CAF inputs included; unsupported cells: **908/908**.
+- The other sections as for T22c; pipes **270/270**.
+
 T22c added raw PCM, and the raw PCM demuxers and muxers to the reference
 build, with detection by FFmpeg's extension fallback. The run, locally on
 Windows at commit `3b94b6d` with MSYS2 UCRT64 clang 23.1.4, reported no
