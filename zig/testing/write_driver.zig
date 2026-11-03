@@ -5,10 +5,12 @@
 //! writers, so the reference reads the actual Zig output rather than only
 //! fixtures the writer is tested to reproduce.
 //!
-//!     write-driver <wav|w64|au|aiff> <codec> <sample_rate> <channels> <input.raw> <output>
+//!     write-driver <format> <codec> <sample_rate> <channels> <input.raw> <output>
 //!                  [rf64] [bext] [tag=<key>=<value>]...
 //!
-//! `codec` is an FFmpeg PCM codec name such as `pcm_s24le`. The input holds
+//! `format` is a muxer's FFmpeg name (`wav`, `w64`, `au`, `aiff` or a raw PCM
+//! format such as `s16le`, T22c), `codec` an FFmpeg PCM codec name such as
+//! `pcm_s24le`. The input holds
 //! interleaved samples in that codec's storage format (`s32` for 24-bit),
 //! little-endian, at most `max_input_bytes` of them. `w64` writes Sony
 //! Wave64. The options after the output, in any order: `rf64` makes the WAV
@@ -23,10 +25,8 @@
 const std = @import("std");
 const av = @import("av");
 
-const usage = "usage: write-driver <wav|w64|au|aiff> <codec> <sample_rate> <channels> <input.raw> <output>" ++
+const usage = "usage: write-driver <format> <codec> <sample_rate> <channels> <input.raw> <output>" ++
     " [rf64] [bext] [tag=<key>=<value>]...\n";
-
-const Container = enum { wav, w64, au, aiff };
 
 /// Inputs are fixture-sized; the bound keeps a wrong argument from reading a
 /// large file into memory.
@@ -51,7 +51,7 @@ fn run(init: std.process.Init) Status {
         return .failure;
     };
     if (args.len < 7) return usageError(io);
-    const container = std.meta.stringToEnum(Container, args[1]) orelse return usageError(io);
+    const container = av.formats.findMuxer(args[1]) orelse return usageError(io);
     const codec = codecFromName(args[2]) orelse return usageError(io);
     const gpa = init.gpa;
     var tags: av.metadata.Dictionary = .empty;
@@ -94,7 +94,7 @@ fn codecFromName(name: []const u8) ?av.pcm.Codec {
 fn write(
     io: std.Io,
     gpa: std.mem.Allocator,
-    container: Container,
+    container: av.formats.Container,
     codec: av.pcm.Codec,
     wav_options: av.wav.WriteOptions,
     rate_text: []const u8,
@@ -128,8 +128,8 @@ fn write(
     defer file.close(io);
     var buffer: [av.file.default_buffer_len]u8 = undefined;
     var file_writer = file.writerStreaming(io, &buffer);
-    switch (container) {
-        .wav, .w64 => {
+    switch (container.family()) {
+        .wav => {
             var options = wav_options;
             options.variant = if (container == .w64) .w64 else .wav;
             var writer = try av.wav.Writer.begin(&file_writer.interface, codec, format, frames, options);
@@ -143,6 +143,11 @@ fn write(
         },
         .aiff => {
             var writer = try av.aiff.Writer.begin(&file_writer.interface, codec, format, frames, .{});
+            try writer.writeData(encoded);
+            try writer.finish();
+        },
+        .raw => {
+            var writer = try av.raw.Writer.begin(&file_writer.interface, codec, format, frames, .{});
             try writer.writeData(encoded);
             try writer.finish();
         },

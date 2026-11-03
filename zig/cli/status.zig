@@ -37,6 +37,7 @@ pub fn of(err: Error) ExitStatus {
         error.ProcessFdQuotaExceeded,
         error.SystemFdQuotaExceeded,
         => .limit,
+        error.UnusedOption => .usage,
         error.Canceled => .canceled,
         else => .io,
     };
@@ -58,4 +59,44 @@ pub fn writeStdout(io: std.Io, tool: []const u8, bytes: []const u8) ExitStatus {
         return of(err);
     };
     return .ok;
+}
+
+/// Raw PCM parameters from the command line, or the exit status their
+/// diagnostic was printed with.
+pub const RawParams = union(enum) {
+    /// Null when none was given: FFmpeg's defaults then apply to raw input.
+    ok: ?av.raw.Params,
+    failed: ExitStatus,
+};
+
+/// Parses `-sample_rate` (or zffmpeg's `-ar`), `-ch_layout` and zffmpeg's
+/// `-ac`, as given; null for each one absent. A rate that is not a decimal
+/// number is a usage error; a layout other than mono or stereo, as a name or
+/// a channel count, is unsupported (T23b).
+pub fn rawParams(io: std.Io, tool: []const u8, rate_text: ?[]const u8, layout_text: ?[]const u8, channels_text: ?[]const u8) RawParams {
+    if (rate_text == null and layout_text == null and channels_text == null) return .{ .ok = null };
+    var params: av.raw.Params = .{};
+    if (rate_text) |text| {
+        params.sample_rate = std.fmt.parseInt(u32, text, 10) catch {
+            printError(io, "{s}: {s}: invalid sample rate\n", .{ tool, text });
+            return .{ .failed = .usage };
+        };
+    }
+    if (layout_text) |text| {
+        params.layout = std.meta.stringToEnum(av.audio.ChannelLayout, text) orelse {
+            printError(io, "{s}: {s}: unsupported channel layout\n", .{ tool, text });
+            return .{ .failed = .unsupported };
+        };
+    }
+    if (channels_text) |text| {
+        const count = std.fmt.parseInt(u16, text, 10) catch {
+            printError(io, "{s}: {s}: invalid channel count\n", .{ tool, text });
+            return .{ .failed = .usage };
+        };
+        params.layout = av.audio.ChannelLayout.fromChannelCount(count) catch {
+            printError(io, "{s}: {s}: unsupported channel count\n", .{ tool, text });
+            return .{ .failed = .unsupported };
+        };
+    }
+    return .{ .ok = params };
 }

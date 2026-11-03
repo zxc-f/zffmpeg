@@ -22,7 +22,9 @@
 //! `Conversion.init` reads the input up to its first sample and makes every
 //! check that does not need the rest of it: the input header, the request
 //! against the matrix, then the output header's limits and sizes (in that
-//! order; the first failure wins). It writes nothing, so a rejected operation
+//! order; the first failure wins). An input of unknown length, such as raw
+//! PCM from a pipe, fails the output header check of every container whose
+//! header holds the length; raw PCM output needs none. It writes nothing, so a rejected operation
 //! leaves no output. `run` writes the output header, moves every frame,
 //! validates the rest of the input (so an error after the data still fails the
 //! operation) and finishes the output, which flushes. A failure found after
@@ -49,6 +51,7 @@ const metadata = @import("../core/metadata.zig");
 const wav = @import("wav.zig");
 const au = @import("au.zig");
 const aiff = @import("aiff.zig");
+const raw = @import("raw.zig");
 const detect = @import("detect.zig");
 
 pub const Container = detect.Container;
@@ -67,9 +70,9 @@ pub const Mode = enum {
 pub const Request = struct {
     output: Container,
     mode: Mode,
-    /// Parse the input as this container instead of probing it (FFmpeg's
-    /// input `-f`, T16).
-    input_format: ?Container = null,
+    /// What the caller knows about the input: a forced format (FFmpeg's input
+    /// `-f`, T16), its file name and length, raw PCM parameters (T22c).
+    input: detect.Source = .{},
     /// Carry the input's tags (T21c): `init` puts the tags FFmpeg's command
     /// would carry (`carriedTags`) from those before the input's `data` into
     /// the empty `tags.dictionary`, under FFmpeg's names, and a WAV output
@@ -84,10 +87,11 @@ pub const Request = struct {
 /// Failures before any output exists: the input header, the request and the
 /// output header. `LimitExceeded` can come from the input's or the output's
 /// limits.
-pub const InitError = detect.Error || wav.HeaderError || au.HeaderError || aiff.HeaderError || error{
+pub const InitError = detect.Error || wav.HeaderError || au.HeaderError || aiff.HeaderError || raw.HeaderError || error{
     /// The request is outside the operation matrix: stream copy into a
-    /// container that cannot carry the codec, or transcoding samples not
-    /// stored as s16 (sample-format conversion waits for TODO.md T23a).
+    /// container that cannot carry the codec, or transcoding samples, or
+    /// into a codec, not stored as s16 (sample-format conversion waits for
+    /// TODO.md T23a).
     UnsupportedOperation,
 };
 
@@ -107,8 +111,9 @@ pub const Summary = struct {
     /// The input's and the output's format; neither rate nor layout changes.
     format: audio.Format,
     /// Sample frames in the input and the output. The duration is this many
-    /// units of `format.timeBase()`, exactly, in both.
-    frame_count: u64,
+    /// units of `format.timeBase()`, exactly, in both. Null until `run` for an
+    /// input of unknown length (raw PCM output only), which `run` counts.
+    frame_count: ?u64,
 };
 
 /// Bytes moved per transfer step. It holds at least one frame of every
@@ -134,22 +139,24 @@ pub const Conversion = struct {
     /// Frames read so far: the next packet's timestamp.
     next_pts: i64 = 0,
 
-    /// One parser per format; the WAV parser also reads Wave64.
+    /// One parser per format family; the WAV parser also reads Wave64.
     const Parser = union(enum) {
         wav: wav.Parser,
         au: au.Parser,
         aiff: aiff.Parser,
+        raw: raw.Parser,
     };
 
     /// Reads the header of the opened `source` (probed, or forced with
-    /// `Request.input_format` when it was opened) and checks the request and
-    /// the output header. Reads at most up to the first sample and writes
+    /// `Request.input` when it was opened) and checks the request and the
+    /// output header. Reads at most up to the first sample and writes
     /// nothing.
     pub fn init(source: *detect.Input, request: Request, limits: Limits) InitError!Conversion {
-        var input: Parser = switch (source.container) {
-            .wav, .w64 => .{ .wav = source.wavParser(limits.wav) },
+        var input: Parser = switch (source.container.family()) {
+            .wav => .{ .wav = source.wavParser(limits.wav) },
             .au => .{ .au = .init(source.reader(), limits.au) },
             .aiff => .{ .aiff = .init(source.reader(), limits.aiff) },
+            .raw => .{ .raw = source.rawParser(limits.raw) },
         };
         // The tags as the file stores them, renamed once the header is read.
         var stored: metadata.Dictionary = .empty;
@@ -158,13 +165,14 @@ pub const Conversion = struct {
             std.debug.assert(t.dictionary.count() == 0);
             switch (input) {
                 .wav => |*parser| parser.collectTags(.{ .gpa = t.gpa, .dictionary = &stored }),
-                .au, .aiff => {},
+                .au, .aiff, .raw => {},
             }
         }
         const summary: Summary = switch (input) {
             inline else => |*parser| blk: {
                 const info = try parser.readHeader();
-                // Only WAV can have unknown-length data, and only on request.
+                // Unknown for WAV and AU only on request, and for raw PCM
+                // without a known length.
                 const frame_count: ?u64 = info.frame_count;
                 break :blk .{
                     .input = source.container,
@@ -177,8 +185,7 @@ pub const Conversion = struct {
                         .transcode => request.output.s16Codec() orelse info.codec,
                     },
                     .format = info.format,
-                    // Both writers put the length in the header up front.
-                    .frame_count = frame_count orelse return error.UnsupportedStreamingSize,
+                    .frame_count = frame_count,
                 };
             },
         };
@@ -187,7 +194,7 @@ pub const Conversion = struct {
             // Later tags could not reach the output header; `stored` dies here.
             switch (input) {
                 .wav => |*parser| parser.tags = null,
-                .au, .aiff => {},
+                .au, .aiff, .raw => {},
             }
             var generic = try wav.genericTags(t.gpa, &stored);
             defer generic.deinit(t.gpa);
@@ -198,15 +205,23 @@ pub const Conversion = struct {
         }
         const supported = switch (request.mode) {
             .copy => request.output.carries(summary.input_codec),
-            .transcode => summary.input_codec.storage() == .s16 and request.output.s16Codec() != null,
+            // The stages decode to and encode from s16 storage only.
+            .transcode => summary.input_codec.storage() == .s16 and
+                if (request.output.s16Codec()) |codec| codec.storage() == .s16 else false,
         };
         if (!supported) return error.UnsupportedOperation;
-        switch (request.output) {
-            .wav, .w64 => |container| try wav.Writer.check(summary.output_codec, summary.format, summary.frame_count, wavOptions(limits, container, tags)),
-            .au => try au.Writer.check(summary.output_codec, summary.format, summary.frame_count, limits.au),
-            .aiff => try aiff.Writer.check(summary.output_codec, summary.format, summary.frame_count, aiffOptions(limits)),
+        switch (request.output.family()) {
+            .wav => try wav.Writer.check(summary.output_codec, summary.format, try knownCount(summary), wavOptions(limits, request.output, tags)),
+            .au => try au.Writer.check(summary.output_codec, summary.format, try knownCount(summary), limits.au),
+            .aiff => try aiff.Writer.check(summary.output_codec, summary.format, try knownCount(summary), aiffOptions(limits)),
+            .raw => try raw.Writer.check(summary.output_codec, summary.format, rawOptions(limits)),
         }
         return .{ .input = input, .limits = limits, .summary = summary, .tags = tags };
+    }
+
+    /// The frame count a writer's header needs up front.
+    fn knownCount(summary: Summary) error{UnsupportedStreamingSize}!u64 {
+        return summary.frame_count orelse error.UnsupportedStreamingSize;
     }
 
     /// Writes the output header, moves every frame, validates the rest of the
@@ -214,20 +229,27 @@ pub const Conversion = struct {
     /// may hold a partial stream.
     pub fn run(c: *Conversion, out: *std.Io.Writer) RunError!void {
         const s = c.summary;
-        switch (s.output) {
-            .wav, .w64 => |container| {
-                var writer = wav.Writer.begin(out, s.output_codec, s.format, s.frame_count, wavOptions(c.limits, container, c.tags)) catch |err| return outputFailure(err);
+        // `init` checked that every writer but raw PCM's has a known count.
+        switch (s.output.family()) {
+            .wav => {
+                var writer = wav.Writer.begin(out, s.output_codec, s.format, s.frame_count.?, wavOptions(c.limits, s.output, c.tags)) catch |err| return outputFailure(err);
                 try c.transfer(wav.Writer, &writer);
             },
             .au => {
-                var writer = au.Writer.begin(out, s.output_codec, s.format, s.frame_count, c.limits.au) catch |err| return outputFailure(err);
+                var writer = au.Writer.begin(out, s.output_codec, s.format, s.frame_count.?, c.limits.au) catch |err| return outputFailure(err);
                 try c.transfer(au.Writer, &writer);
             },
             .aiff => {
-                var writer = aiff.Writer.begin(out, s.output_codec, s.format, s.frame_count, aiffOptions(c.limits)) catch |err| return outputFailure(err);
+                var writer = aiff.Writer.begin(out, s.output_codec, s.format, s.frame_count.?, aiffOptions(c.limits)) catch |err| return outputFailure(err);
                 try c.transfer(aiff.Writer, &writer);
             },
+            .raw => {
+                var writer = raw.Writer.begin(out, s.output_codec, s.format, s.frame_count, rawOptions(c.limits)) catch |err| return outputFailure(err);
+                try c.transfer(raw.Writer, &writer);
+            },
         }
+        // Every frame was read: an unknown count is now known.
+        if (c.summary.frame_count == null) c.summary.frame_count = @intCast(c.next_pts);
     }
 
     fn transfer(c: *Conversion, comptime W: type, writer: *W) RunError!void {
@@ -419,7 +441,7 @@ fn wavOptions(limits: Limits, output: Container, tags: ?*const metadata.Dictiona
         .variant = switch (output) {
             .wav => .wav,
             .w64 => .w64,
-            .au, .aiff => unreachable, // the AU and AIFF writers have their own options
+            else => unreachable, // the other writers have their own options
         },
         .tags = tags,
     };
@@ -428,6 +450,11 @@ fn wavOptions(limits: Limits, output: Container, tags: ?*const metadata.Dictiona
 /// The AIFF writer's options: the rate limit of the AIFF limits.
 fn aiffOptions(limits: Limits) aiff.WriteOptions {
     return .{ .max_sample_rate = limits.aiff.max_sample_rate };
+}
+
+/// The raw PCM writer's options: the rate limit of the raw limits.
+fn rawOptions(limits: Limits) raw.WriteOptions {
+    return .{ .max_sample_rate = limits.raw.max_sample_rate };
 }
 
 /// The writer's own failure. `init` already ran the header checks `begin`
@@ -451,7 +478,8 @@ fn outputFailure(err: wav.WriteError) std.Io.Writer.Error {
 /// Converts one stream: `Conversion.init`, then `run`.
 pub fn convert(reader: *std.Io.Reader, out: *std.Io.Writer, request: Request, limits: Limits) Error!Summary {
     var source: detect.Input = undefined;
-    try source.open(reader, request.input_format);
+    try source.open(reader, request.input);
+
     var conversion: Conversion = try .init(&source, request, limits);
     try conversion.run(out);
     return conversion.summary;
@@ -468,6 +496,16 @@ const all_cells = [_]Request{
     .{ .output = .au, .mode = .copy },
     .{ .output = .aiff, .mode = .transcode },
     .{ .output = .aiff, .mode = .copy },
+    // Raw PCM (T22c): the s16-stored ones transcode, and every one copies its
+    // own codec only. Transcoding into A-law or mu-law is lossy, so those
+    // cells are compared with FFmpeg's own conversion in compare.py instead.
+    .{ .output = .s16le, .mode = .transcode },
+    .{ .output = .s16le, .mode = .copy },
+    .{ .output = .s16be, .mode = .transcode },
+    .{ .output = .alaw, .mode = .copy },
+    .{ .output = .f32le, .mode = .transcode },
+    .{ .output = .f32le, .mode = .copy },
+    .{ .output = .s24be, .mode = .copy },
 };
 
 const Decoded = struct {
@@ -477,11 +515,11 @@ const Decoded = struct {
 };
 
 /// Decodes a converted stream with the output container's own parser, not
-/// through this file.
-fn decodeOutput(container: Container, bytes: []const u8, storage: []i16) !Decoded {
+/// through this file. Raw PCM takes `format`'s parameters and the length.
+fn decodeOutput(container: Container, bytes: []const u8, storage: []i16, format: audio.Format) !Decoded {
     var reader: std.Io.Reader = .fixed(bytes);
-    switch (container) {
-        .wav, .w64 => {
+    switch (container.family()) {
+        .wav => {
             var parser: wav.Parser = .init(&reader, .{});
             return decodeWith(wav.Parser, &parser, storage);
         },
@@ -493,7 +531,16 @@ fn decodeOutput(container: Container, bytes: []const u8, storage: []i16) !Decode
             var parser: aiff.Parser = .init(&reader, .{});
             return decodeWith(aiff.Parser, &parser, storage);
         },
+        .raw => {
+            // A raw family container has a codec.
+            var parser: raw.Parser = .init(&reader, container.rawCodec().?, paramsOf(format), bytes.len, .{});
+            return decodeWith(raw.Parser, &parser, storage);
+        },
     }
+}
+
+fn paramsOf(format: audio.Format) raw.Params {
+    return .{ .sample_rate = format.sample_rate, .layout = format.layout };
 }
 
 fn decodeWith(comptime P: type, parser: *P, storage: []i16) !Decoded {
@@ -520,6 +567,7 @@ fn headerLenOf(container: Container, codec: pcm.Codec, format: audio.Format) usi
         .w64 => wav.headerLen(codec, format, .w64),
         .au => au.canonical_header_len,
         .aiff => aiff.headerLen(codec),
+        else => 0, // raw PCM
     };
 }
 
@@ -528,8 +576,8 @@ fn padOf(container: Container, data_len: usize) usize {
     return switch (container) {
         .wav => wav.Variant.wav.padAfter(data_len),
         .w64 => wav.Variant.w64.padAfter(data_len),
-        .au => 0,
         .aiff => data_len % 2,
+        else => 0, // AU and raw PCM
     };
 }
 
@@ -539,36 +587,40 @@ fn wavContainer(bytes: []const u8) Container {
 }
 
 /// A stream's decoded samples, little-endian in their storage format, read by
-/// the container's own parser.
-fn rawOf(container: Container, bytes: []const u8, out: []u8) ![]const u8 {
+/// the container's own parser; raw PCM with `format`'s parameters.
+fn rawOf(container: Container, bytes: []const u8, out: []u8, format: audio.Format) ![]const u8 {
     var reader: std.Io.Reader = .fixed(bytes);
     var writer: std.Io.Writer = .fixed(out);
-    switch (container) {
-        .wav, .w64 => _ = try wav.decodeToRaw(&reader, &writer, .{}),
+    switch (container.family()) {
+        .wav => _ = try wav.decodeToRaw(&reader, &writer, .{}),
         .au => _ = try au.decodeToRaw(&reader, &writer, .{}),
         .aiff => _ = try aiff.decodeToRaw(&reader, &writer, .{}),
+        .raw => _ = try raw.decodeToRaw(&reader, &writer, container.rawCodec().?, paramsOf(format), bytes.len, .{}), // a raw container has a codec
     }
     return writer.buffered();
 }
 
 /// Runs every matrix cell on one accepted fixture. Copy works only into a
 /// container that carries the input's codec, and transcoding only from
-/// samples stored as s16 (other storage needs T23a). An input probing does not detect (`detected` false)
-/// is forced, as `-f` would.
-fn expectEveryCell(input: Container, detected: bool, bytes: []const u8, comptime stream: fixtures.Stream, writer_output: bool) !void {
+/// samples stored as s16 into a codec stored as s16 (other storage needs
+/// T23a). An input probing does not detect (`detected` false) is forced, as
+/// `-f` would, with `source`'s raw parameters and length.
+fn expectEveryCell(input: Container, detected: bool, source: detect.Source, bytes: []const u8, comptime stream: fixtures.Stream, writer_output: bool) !void {
     var expected_buffer: [1024]u8 = undefined;
     const expected = stream.samples.littleEndian(&expected_buffer);
     const input_codec = comptime std.meta.stringToEnum(pcm.Codec, @tagName(stream.codec)["pcm_".len..]).?;
     for (all_cells) |cell| {
         var request = cell;
-        if (!detected) request.input_format = input;
+        request.input = source;
+        if (!detected) request.input.format = input;
         var reader: std.Io.Reader = .fixed(bytes);
         var buffer: [1024]u8 = undefined;
         var out: std.Io.Writer = .fixed(&buffer);
         const result = convert(&reader, &out, request, .{});
         const supported = switch (request.mode) {
             .copy => request.output.carries(input_codec),
-            .transcode => stream.samples == .s16,
+            // Every output in all_cells has a muxer, so a default codec.
+            .transcode => stream.samples == .s16 and request.output.s16Codec().?.storage() == .s16,
         };
         if (!supported) {
             try std.testing.expectError(error.UnsupportedOperation, result);
@@ -591,7 +643,8 @@ fn expectEveryCell(input: Container, detected: bool, bytes: []const u8, comptime
         const header_len = headerLenOf(request.output, summary.output_codec, summary.format);
         try std.testing.expectEqual(header_len + data_len + padOf(request.output, data_len), written.len);
         var raw_buffer: [1024]u8 = undefined;
-        try std.testing.expectEqualSlices(u8, expected, try rawOf(request.output, written, &raw_buffer));
+        try std.testing.expectEqualSlices(u8, expected, try rawOf(request.output, written, &raw_buffer, summary.format));
+
         // A canonical input converts to itself, byte for byte.
         if (writer_output and request.output == input and summary.output_codec == summary.input_codec) {
             try std.testing.expectEqualSlices(u8, bytes, written);
@@ -607,17 +660,31 @@ test "every accepted fixture gives its samples in every supported cell, and copy
             const bytes = fixtures.bytes(fixture.name);
             // Without a tag dictionary in the request, tags are not carried.
             const canonical = fixture.writer_output and fixture.writer_header != .rf64 and fixture.untagged();
-            try expectEveryCell(wavContainer(bytes), fixture.detected != null, bytes, fixture.expected.accept, canonical);
+            try expectEveryCell(wavContainer(bytes), fixture.detected != null, .{}, bytes, fixture.expected.accept, canonical);
         }
     }
     inline for (fixtures.au.all) |fixture| {
         if (fixture.expected == .accept) {
-            try expectEveryCell(.au, fixture.detected != null, fixtures.au.bytes(fixture.name), fixture.expected.accept, fixture.writer_output);
+            try expectEveryCell(.au, fixture.detected != null, .{}, fixtures.au.bytes(fixture.name), fixture.expected.accept, fixture.writer_output);
         }
     }
     inline for (fixtures.aiff.all) |fixture| {
         if (fixture.expected == .accept) {
-            expectEveryCell(.aiff, fixture.detected != null, fixtures.aiff.bytes(fixture.name), fixture.expected.accept, fixture.writer_output) catch |err| {
+            expectEveryCell(.aiff, fixture.detected != null, .{}, fixtures.aiff.bytes(fixture.name), fixture.expected.accept, fixture.writer_output) catch |err| {
+                std.debug.print("fixture {s}\n", .{fixture.name});
+                return err;
+            };
+        }
+    }
+    // Raw PCM is forced, with its parameters and its length, as zffmpeg reads a file.
+    inline for (fixtures.raw.all) |fixture| {
+        if (fixture.expected == .accept) {
+            const stream = fixture.expected.accept;
+            const bytes = fixtures.raw.bytes(fixture.name);
+            const layout = comptime audio.ChannelLayout.fromChannelCount(stream.channels) catch unreachable; // mono or stereo
+            const source: detect.Source = .{ .raw = .{ .sample_rate = stream.sample_rate, .layout = layout }, .length = bytes.len };
+            const container = @field(Container, @tagName(fixture.format));
+            expectEveryCell(container, false, source, bytes, stream, fixture.writer_output) catch |err| {
                 std.debug.print("fixture {s}\n", .{fixture.name});
                 return err;
             };
@@ -663,7 +730,7 @@ test "the input is read as contiguous, timestamped packets of whole frames" {
 
     var reader: std.Io.Reader = .fixed(bytes);
     var source: detect.Input = undefined;
-    try source.open(&reader, null);
+    try source.open(&reader, .{});
     var conversion: Conversion = try .init(&source, .{ .output = .au, .mode = .transcode }, .{});
     var storage: [transfer_len]u8 = undefined;
     var expected_pts: i64 = 0;
@@ -695,11 +762,11 @@ test "copy keeps the encoded data and timing but not the container's metadata" {
         const copied = try convert(&copy_reader, &copy_out, .{ .output = case.container, .mode = .copy }, .{});
 
         var storage: [256]i16 = undefined;
-        const input = try decodeOutput(case.container, case.bytes, &storage);
+        const input = try decodeOutput(case.container, case.bytes, &storage, undefined);
 
         // Same samples, rate and frame count ...
         var copy_storage: [256]i16 = undefined;
-        const output = try decodeOutput(case.container, copy_out.buffered(), &copy_storage);
+        const output = try decodeOutput(case.container, copy_out.buffered(), &copy_storage, undefined);
         try std.testing.expectEqual(input.format, output.format);
         try std.testing.expectEqual(input.frame_count, output.frame_count);
         try std.testing.expectEqual(input.frame_count, copied.frame_count);
@@ -842,9 +909,10 @@ test "the carried tags follow FFmpeg's command: first key wins, stale keys go" {
     try std.testing.expectEqual(3, transcoded.count());
 }
 
-test "unknown-length input is refused before any output, because the writers need the length" {
+test "unknown-length input is refused before any output by the writers that need the length" {
     // Accepted by the parser with the option on, but there is nothing to write
-    // in the output header's size fields.
+    // in the output header's size fields. The request is checked first, so a
+    // copy the output cannot carry is UnsupportedOperation.
     var limits: Limits = .{};
     limits.wav.unknown_length = true;
     for ([_]Mode{ .transcode, .copy }) |mode| {
@@ -852,9 +920,30 @@ test "unknown-length input is refused before any output, because the writers nee
             var reader: std.Io.Reader = .fixed(fixtures.bytes("unknown_length_pipe"));
             var buffer: [1024]u8 = undefined;
             var out: std.Io.Writer = .fixed(&buffer);
-            try std.testing.expectError(error.UnsupportedStreamingSize, convert(&reader, &out, .{ .output = output, .mode = mode }, limits));
+            const want = if (mode == .copy and !output.carries(.s16le)) error.UnsupportedOperation else error.UnsupportedStreamingSize;
+            try std.testing.expectError(want, convert(&reader, &out, .{ .output = output, .mode = mode }, limits));
             try std.testing.expectEqual(0, out.buffered().len);
         }
+    }
+    // Raw PCM needs no length: the frames are counted as they pass.
+    {
+        var reader: std.Io.Reader = .fixed(fixtures.bytes("unknown_length_pipe"));
+        var buffer: [1024]u8 = undefined;
+        var out: std.Io.Writer = .fixed(&buffer);
+        const summary = try convert(&reader, &out, .{ .output = .s16le, .mode = .copy }, limits);
+        try std.testing.expectEqual(out.buffered().len / 2, summary.frame_count);
+    }
+    // Raw input without a length (a pipe) converts only to raw output.
+    {
+        const bytes = [_]u8{ 1, 0, 2, 0, 3, 0 };
+        var reader: std.Io.Reader = .fixed(&bytes);
+        var buffer: [64]u8 = undefined;
+        var out: std.Io.Writer = .fixed(&buffer);
+        try std.testing.expectError(error.UnsupportedStreamingSize, convert(&reader, &out, .{ .output = .wav, .mode = .transcode, .input = .{ .format = .s16le } }, .{}));
+        var with_length: std.Io.Reader = .fixed(&bytes);
+        const summary = try convert(&with_length, &out, .{ .output = .wav, .mode = .copy, .input = .{ .format = .s16le, .length = bytes.len } }, .{});
+        try std.testing.expectEqual(3, summary.frame_count);
+        try std.testing.expectEqual(44100, summary.format.sample_rate);
     }
     // A known data size in an unknown RIFF extent converts.
     var reader: std.Io.Reader = .fixed(fixtures.bytes("unknown_riff_chunk_after_data"));
@@ -896,7 +985,7 @@ test "an output the writer cannot represent is rejected before any output" {
     // The same stream fits in WAV: init succeeds, and only the missing data fails.
     var huge_again: std.Io.Reader = .fixed(&header);
     var source: detect.Input = undefined;
-    try source.open(&huge_again, null);
+    try source.open(&huge_again, .{});
     _ = try Conversion.init(&source, .{ .output = .wav, .mode = .copy }, .{});
 
     // The output's own rate limit is checked too.

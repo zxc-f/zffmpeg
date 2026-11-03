@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Original file for this project.
-//! zffprobe: validates one WAV, Wave64, AU or AIFF stream and reports it as
-//! `key=value` lines.
+//! zffprobe: validates one WAV, Wave64, AU, AIFF or raw PCM stream and reports
+//! it as `key=value` lines.
 //!
-//!     zffprobe [-f wav|w64|au|aiff] <file | ->
+//!     zffprobe [-f <format>] [-sample_rate <rate>] [-ch_layout mono|stereo] <file | ->
 //!
-//! The container is detected from content, not the file name, as FFmpeg's
-//! probing would (`av.detect`, T16); `-f` forces it, as `ffprobe -f` does.
+//! The container is detected from content as FFmpeg's probing would
+//! (`av.detect`, T16), with the file name's extension as FFmpeg's fallback
+//! for raw PCM (T22c); `-f` forces it, as `ffprobe -f` does. Raw PCM has no
+//! header: `-sample_rate` and `-ch_layout` give its stream, FFmpeg's raw
+//! demuxer options, 44100 Hz mono by default; for any other format they are a
+//! usage error.
 //! `-` reads standard input, which may be a pipe. The report goes to stdout
 //! only after the whole stream validates; diagnostics go to stderr. The output
 //! schema and exit codes are documented in port.md ("Initial probe output"):
@@ -21,14 +25,16 @@ const status = @import("status.zig");
 const ExitStatus = status.ExitStatus;
 const printError = status.printError;
 
-const usage = "usage: zffprobe [-f wav|w64|au|aiff] <file | ->\n";
+const usage = "usage: zffprobe [-f <format>] [-sample_rate <rate>] [-ch_layout mono|stereo] <file | ->\n";
 const help = usage ++
     \\
-    \\Validates a WAV, Wave64, AU or AIFF stream (standard input with -) and prints its
-    \\stream parameters as key=value lines. The format is detected from content,
-    \\or forced with -f. Exit codes: 0 success, 1 usage,
-    \\2 invalid or truncated media, 3 unsupported media, 4 I/O failure,
-    \\5 resource limit, 6 cancellation.
+    \\Validates a WAV, Wave64, AU, AIFF or raw PCM stream (standard input with -)
+    \\and prints its stream parameters as key=value lines. The format is detected
+    \\from content, or for raw PCM from the name (.sb, .ub, .al, .ul, .sw), or
+    \\forced with -f (wav, w64, au, aiff, or a raw format such as s16le or alaw).
+    \\-sample_rate and -ch_layout describe raw PCM, 44100 Hz mono by default.
+    \\Exit codes: 0 success, 1 usage, 2 invalid or truncated media,
+    \\3 unsupported media, 4 I/O failure, 5 resource limit, 6 cancellation.
     \\
 ;
 
@@ -46,30 +52,57 @@ fn run(init: std.process.Init) ExitStatus {
     if (args.len == 2 and (std.mem.eql(u8, args[1], "-h") or std.mem.eql(u8, args[1], "--help"))) {
         return status.writeStdout(io, "zffprobe", help);
     }
-    const forced = args.len == 4 and std.mem.eql(u8, args[1], "-f");
-    if (args.len != 2 and !forced) {
+    // Options in pairs, each once, then the input.
+    var format_name: ?[]const u8 = null;
+    var rate_text: ?[]const u8 = null;
+    var layout_text: ?[]const u8 = null;
+    var i: usize = 1;
+    while (i + 1 < args.len) : (i += 2) {
+        const slot = if (std.mem.eql(u8, args[i], "-f"))
+            &format_name
+        else if (std.mem.eql(u8, args[i], "-sample_rate"))
+            &rate_text
+        else if (std.mem.eql(u8, args[i], "-ch_layout"))
+            &layout_text
+        else
+            break;
+        if (slot.* != null) break;
+        slot.* = args[i + 1];
+    }
+    if (i + 1 != args.len) {
         printError(io, usage, .{});
         return .usage;
     }
-    const format: ?av.detect.Container = if (forced)
-        av.formats.findDemuxer(args[2]) orelse {
-            printError(io, "zffprobe: {s}: unsupported input format\n", .{args[2]});
+    const format: ?av.detect.Container = if (format_name) |name|
+        av.formats.findDemuxer(name) orelse {
+            printError(io, "zffprobe: {s}: unsupported input format\n", .{name});
             return .unsupported;
         }
     else
         null;
+    const raw_params = switch (status.rawParams(io, "zffprobe", rate_text, layout_text, null)) {
+        .ok => |params| params,
+        .failed => |exit| return exit,
+    };
     const path = args[args.len - 1];
     const gpa = init.gpa;
     var tags: av.metadata.Dictionary = .empty;
     defer tags.deinit(gpa);
-    const options: av.detect.Options = .{ .format = format, .tags = .{ .gpa = gpa, .dictionary = &tags } };
+    const options: av.detect.Options = .{
+        .source = .{ .format = format, .raw = raw_params },
+        .tags = .{ .gpa = gpa, .dictionary = &tags },
+    };
     var buffer: [av.file.default_buffer_len]u8 = undefined;
     const result = if (std.mem.eql(u8, path, "-"))
         av.file.probeFile(io, std.Io.File.stdin(), &buffer, .{}, options)
     else
         av.file.probePath(io, std.Io.Dir.cwd(), path, &buffer, .{}, options);
     const info = result catch |err| {
-        printError(io, "zffprobe: {s}: {t}\n", .{ path, err });
+        if (err == error.UnusedOption) {
+            printError(io, "zffprobe: {s}: -sample_rate and -ch_layout apply only to raw PCM input\n", .{path});
+        } else {
+            printError(io, "zffprobe: {s}: {t}\n", .{ path, err });
+        }
         return status.of(err);
     };
 

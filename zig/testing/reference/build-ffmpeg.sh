@@ -24,11 +24,12 @@ build="$root/.references/ffmpeg-build"
 # compares (u8, s8, s16/s24/s32/s64 and f32/f64 in both byte orders, A-law and
 # mu-law), the WAV muxer (decoded samples are compared as WAV payloads; T21a),
 # the Wave64, AU and AIFF muxers (their files must read in zffprobe; T21b,
-# T22a, T22b),
-# and the aresample filter. The ffmpeg program
+# T22a, T22b), the raw PCM demuxers and muxers of every one of those codecs
+# FFmpeg has one for, all but s64 (T22c), and the aresample filter. The ffmpeg program
 # selects the few filters it always needs. No GPL, nonfree, external or
 # hardware components.
 pcm_codecs=pcm_u8,pcm_s8,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,pcm_s32be,pcm_s64le,pcm_s64be,pcm_f32le,pcm_f32be,pcm_f64le,pcm_f64be,pcm_alaw,pcm_mulaw
+pcm_formats=pcm_u8,pcm_s8,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,pcm_s32be,pcm_f32le,pcm_f32be,pcm_f64le,pcm_f64be,pcm_alaw,pcm_mulaw
 configure_args=(
     --cc=clang
     --disable-everything
@@ -39,10 +40,10 @@ configure_args=(
     --disable-ffplay
     --disable-avdevice
     --enable-protocol=file,pipe
-    --enable-demuxer=wav,w64,au,aiff
+    --enable-demuxer=wav,w64,au,aiff,"$pcm_formats"
     --enable-decoder="$pcm_codecs"
     --enable-encoder="$pcm_codecs"
-    --enable-muxer=wav,w64,au,aiff
+    --enable-muxer=wav,w64,au,aiff,"$pcm_formats"
     --enable-filter=aresample
 )
 

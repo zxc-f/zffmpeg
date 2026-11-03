@@ -7,6 +7,7 @@
 //!
 //!     codec <name> <flags> <long name>
 //!     format <name> <D|.><E|.> <long name>
+//!     demuxer <name> <extensions|->
 //!     muxer <name> <extensions|-> <MIME type|-> <default audio codec>
 //!
 //! `flags` are the six columns of `ffmpeg -codecs`: D (a decoder), E (an
@@ -49,16 +50,27 @@ fn write(out: *std.Io.Writer) std.Io.Writer.Error!void {
         });
     }
     for (&av.formats.formats) |*format| {
+        const demuxer = format.demuxer orelse continue;
+        try out.print("demuxer {s} ", .{format.name});
+        try writeList(out, demuxer.extensions);
+        try out.writeByte('\n');
+    }
+    for (&av.formats.formats) |*format| {
         const muxer = format.muxer orelse continue;
         try out.print("muxer {s} ", .{format.name});
-        if (muxer.extensions.len == 0) try out.writeAll("-");
-        for (muxer.extensions, 0..) |extension, i| {
-            if (i > 0) try out.writeByte(',');
-            try out.writeAll(extension);
-        }
+        try writeList(out, muxer.extensions);
         try out.print(" {s} {s}\n", .{ muxer.mime_type orelse "-", muxer.audio_codec.name() });
     }
     try out.flush();
+}
+
+/// Comma-separated, or `-` when empty.
+fn writeList(out: *std.Io.Writer, items: []const []const u8) std.Io.Writer.Error!void {
+    if (items.len == 0) return out.writeAll("-");
+    for (items, 0..) |item, i| {
+        if (i > 0) try out.writeByte(',');
+        try out.writeAll(item);
+    }
 }
 
 fn flag(set: bool, letter: u8) u8 {

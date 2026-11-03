@@ -51,6 +51,14 @@ pub const Replay = struct {
             replay.pos += n;
             return n;
         }
+        // `Reader.discard` drops the source's buffered bytes and then reports
+        // the end of the stream, losing their count, so those go first.
+        const buffered = replay.source.buffered().len;
+        if (buffered > 0) {
+            const n = limit.minInt(buffered);
+            replay.source.toss(n);
+            return n;
+        }
         return replay.source.discard(limit);
     }
 };
@@ -82,4 +90,13 @@ test "a failing source fails the replay once the head is served" {
     var replay: Replay = .init("a", &source);
     var two: [2]u8 = undefined;
     try std.testing.expectError(error.ReadFailed, replay.interface.readSliceAll(&two));
+}
+
+test "skipping to the end counts every byte, buffered in the source or not" {
+    var source: std.Io.Reader = .fixed("cdefgh");
+    var replay: Replay = .init("ab", &source);
+    try std.testing.expectEqual(8, try replay.interface.discardShort(1 << 16));
+    var empty_head: std.Io.Reader = .fixed("cdefgh");
+    var after: Replay = .init("", &empty_head);
+    try std.testing.expectEqual(6, try after.interface.discardShort(1 << 16));
 }

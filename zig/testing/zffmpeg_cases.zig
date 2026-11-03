@@ -3,7 +3,8 @@
 //! zffmpeg process cases that need files prepared on disk (TODO.md T13b): the
 //! overwrite policy, same-file refusal, what preflight leaves alone, removal of
 //! a partial output, read and write failures through redirected standard
-//! streams, and a long stream. Cases that only check stdout, stderr and the
+//! streams, raw PCM through a real pipe and by file name (T22c), and a long
+//! stream. Cases that only check stdout, stderr and the
 //! status are `convert_cases` in build.zig.
 //!
 //!     zffmpeg-cases <zffmpeg> <fixture directory> <empty work directory>
@@ -64,6 +65,34 @@ const Harness = struct {
             child.stdout.?.close(io);
             child.stdout = null;
         }
+        const term = try child.wait(io);
+        return .{ .term = term, .stderr = try h.dir.readFile(io, "stderr.txt", &h.stderr_buffer) };
+    }
+
+    /// Runs zffmpeg with `input` written to a pipe as its standard input, so
+    /// the input has no size; standard output goes to `stdout.bin`.
+    fn runPiped(h: *Harness, args: []const []const u8, input: []const u8) !Outcome {
+        const io = h.io;
+        var argv_buffer: [16][]const u8 = undefined;
+        argv_buffer[0] = h.exe;
+        @memcpy(argv_buffer[1..][0..args.len], args);
+        const stderr_file = try h.dir.createFile(io, "stderr.txt", .{});
+        defer stderr_file.close(io);
+        const scratch = try h.dir.createFile(io, "stdout.bin", .{});
+        defer scratch.close(io);
+        var child = try std.process.spawn(io, .{
+            .argv = argv_buffer[0 .. args.len + 1],
+            .cwd = .{ .dir = h.dir },
+            .stdin = .pipe,
+            .stdout = .{ .file = scratch },
+            .stderr = .{ .file = stderr_file },
+        });
+        // Spawned with `.pipe`, so the write end exists (`child.stdin.?`). The input fits in
+        // the pipe's buffer; a child that exits early may refuse it.
+        const stdin = child.stdin.?;
+        stdin.writeStreamingAll(io, input) catch {};
+        stdin.close(io);
+        child.stdin = null;
         const term = try child.wait(io);
         return .{ .term = term, .stderr = try h.dir.readFile(io, "stderr.txt", &h.stderr_buffer) };
     }
@@ -224,6 +253,23 @@ pub fn main(init: std.process.Init) !u8 {
             // tools install no signal handlers.
             h.expect(case, outcome, 4, "zffmpeg: -: ");
         }
+    }
+
+    // Raw PCM (T22c): a pipe gives no length for a header's sizes, a file
+    // does, and a raw extension names the input format.
+    {
+        var raw_buffer: [64]u8 = undefined;
+        const raw_alaw = try fixture_dir.readFile(io, "raw" ++ std.fs.path.sep_str ++ "raw_alaw_mono_8k.raw", &raw_buffer);
+        const case = "raw PCM through a pipe has no length for a header";
+        h.expect(case, try h.runPiped(&.{ "-f", "alaw", "-i", "-", "-f", "wav", "-" }, raw_alaw), 3, "zffmpeg: -: UnsupportedStreamingSize");
+        const piped = "raw PCM through a pipe to raw PCM";
+        h.expect(piped, try h.runPiped(&.{ "-f", "alaw", "-i", "-", "-c", "copy", "-f", "alaw", "-" }, raw_alaw), 0, "");
+        try h.expectContent(piped, "stdout.bin", raw_alaw);
+        try h.write("take.al", raw_alaw);
+        const named = "a raw extension names the input format";
+        h.expect(named, try h.run(&.{ "-i", "take.al", "-c", "copy", "-f", "alaw", "-" }, .ignore, null), 0, "");
+        try h.expectContent(named, "stdout.bin", raw_alaw);
+        h.expect(named, try h.run(&.{ "-i", "take.al", "-c", "copy", "take.wav" }, .ignore, null), 0, "");
     }
 
     // A long stream converts through files with exact frame counts.

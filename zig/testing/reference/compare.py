@@ -26,8 +26,13 @@ the operation matrix, and FFmpeg must read each actual output with the expected
 samples and stream; copy across codecs must fail without creating output. AU
 and AIFF outputs of canonical inputs must equal FFmpeg's own conversion.
 
+Raw PCM fixtures (T22c): FFmpeg and zffprobe read each one forced with its
+format and parameters; FFmpeg must detect a copy named with the format's
+extension as that format, as zffprobe does; FFmpeg's raw muxers copy the
+writer-output fixtures unchanged.
+
 Registries (T16): the codec descriptors, decoders and encoders, and the
-formats with their muxers' extensions, MIME types and default codecs, as the
+formats with their demuxers' and muxers' extensions, MIME types and default codecs, as the
 registry dump prints them, must equal the reference build's own `ffmpeg
 -codecs`, `ffmpeg -formats` and `ffmpeg -h muxer=...`, and cover exactly the
 codecs and formats it enables.
@@ -84,6 +89,8 @@ KNOWN_FIELD_DIFFERENCES = {
 KNOWN_FIXTURE_DIFFERENCES = {
     # FFmpeg reads a data size of 0 as unknown length and reports no duration.
     ("empty_data", "duration_ts", "N/A"): "FFmpeg reads data size 0 as unknown length",
+    # FFmpeg estimates a raw duration from the file size, and has none for 0 bytes.
+    ("raw_empty", "duration_ts", "N/A"): "FFmpeg gives an empty raw file no duration",
 }
 
 # Fixtures the `unknown_length` option accepts but FFmpeg cannot open: its
@@ -130,6 +137,10 @@ FIELD_DIFFERENCES = {
 }
 # The codec transcoding writes into each container.
 S16_CODEC = {"wav": "pcm_s16le", "w64": "pcm_s16le", "au": "pcm_s16be", "aiff": "pcm_s16be"}
+# A raw format's muxer writes its own codec (T22c); FFmpeg reports the layout
+# it was given, so raw output has no field difference.
+S16_CODEC.update(generate.RAW_FORMATS)
+FIELD_DIFFERENCES.update({fmt: {} for fmt in generate.RAW_FORMATS})
 
 
 def run(*command):
@@ -150,7 +161,26 @@ def text(data):
 
 
 def forced(input_format):
+    """The input options for a forced format: a format name, or a whole list
+    of options (raw PCM's format and parameters)."""
+    if isinstance(input_format, list):
+        return input_format
     return ["-f", input_format] if input_format else []
+
+
+# The raw formats whose demuxer and muxer declare an extension; `sw` goes to
+# the native byte order's 16-bit format (FFmpeg's AV_NE).
+RAW_EXTENSIONS = {"u8": "ub", "s8": "sb", "alaw": "al", "mulaw": "ul",
+                  ("s16le" if sys.byteorder == "little" else "s16be"): "sw"}
+
+
+def raw_input_args(fmt, params):
+    """FFmpeg's (and the tools') input options for raw PCM: the format, then
+    the parameters unless the defaults apply."""
+    options = ["-f", fmt]
+    if params is not None:
+        options += ["-sample_rate", str(params[0]), "-ch_layout", LAYOUT[params[1]]]
+    return options
 
 
 def ffprobe(binary, path, input_format=None):
@@ -555,6 +585,7 @@ def compare_detection(args, lines, failures):
     detection tests require (T16)."""
     fixtures = [("wav", f) for f in generate.build_fixtures()]
     fixtures += [(directory, f) for directory, _, build, _, _ in FORCED_CONTRACTS for f in build()]
+    fixtures += [("raw", f) for f in generate.build_raw_fixtures()]
     agree = undetected = 0
     for directory, fixture in fixtures:
         path = FIXTURES / directory / f"{fixture.name}.{directory}"
@@ -619,6 +650,105 @@ def compare_forced(args, lines, failures, container, title, build, field_differe
     ]
 
 
+def compare_raw(args, lines, failures):
+    """The raw PCM fixtures (T22c), read forced with their format and
+    parameters; a copy named with the format's extension, detected; FFmpeg's
+    raw muxer copying each writer-output fixture unchanged."""
+    lines += [
+        "",
+        "## Raw PCM fixtures",
+        "",
+        "FFmpeg and zffprobe read each file forced with its format and parameters "
+        "(`-f`, `-sample_rate`, `-ch_layout`); copies named with the format's extension are detected.",
+        "",
+        "| Fixture | Expected | FFmpeg | zffprobe | Named copy | Result |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    fixtures = generate.build_raw_fixtures()
+    accepted_ok = rejected_ok = named_ok = named_total = muxed_ok = muxed_total = ffmpeg_accepts_rejected = 0
+    with tempfile.TemporaryDirectory() as tmp:
+        work = pathlib.Path(tmp)
+        for fixture in fixtures:
+            path = FIXTURES / "raw" / f"{fixture.name}.raw"
+            if not path.exists() or path.read_bytes() != fixture.data:
+                failures.append(f"{fixture.name}: fixture file is missing or differs from generate.py")
+                continue
+            input_args = raw_input_args(fixture.format, fixture.params)
+            problems, named = [], "no extension"
+            if fixture.accept is not None:
+                stream = fixture.accept
+                channels, rate, samples = stream
+                frames = len(samples) // channels
+                expected = expected_stream(fixture.format, stream.codec, channels, rate, frames, stream.storage)
+                stream_problems, notes = check_stream(args, fixture.name, path, expected, stream, input_args)
+                problems += stream_problems
+                code, fields, err = zffprobe(args.zffprobe, path, input_args)
+                want = zffprobe_report(fixture.format, stream.codec, channels, rate, frames, stream.storage)
+                if code != 0 or fields != want:
+                    problems.append(f"zffprobe exited {code} with {fields or first_line(err)}")
+                ours = "exit 0, report matches"
+                theirs = "same samples and stream" if not stream_problems else "differs"
+                if notes:
+                    theirs += "; " + "; ".join(notes)
+                expected_text = f"{LAYOUT[channels]}, {rate} Hz, {frames_text(frames)}"
+                extension = RAW_EXTENSIONS.get(fixture.format)
+                if extension is not None:
+                    named_total += 1
+                    copy = work / f"{fixture.name}.{extension}"
+                    copy.write_bytes(fixture.data)
+                    detected = detected_format(args.ffprobe, copy)
+                    # Detected, FFmpeg's defaults apply: compare the two reports.
+                    probe_code, their_fields, _ = ffprobe(args.ffprobe, copy)
+                    code, our_fields, err = zffprobe(args.zffprobe, copy)
+                    named_problems = []
+                    if detected != fixture.format:
+                        named_problems.append(f"FFmpeg detects .{extension} as {detected}")
+                    if code != 0 or our_fields.get("format") != fixture.format:
+                        named_problems.append(f"zffprobe on .{extension} exited {code} ({first_line(err)})")
+                    elif probe_code == 0 and (our_fields.get("sample_rate") != their_fields.get("sample_rate")
+                                              or (our_fields.get("nb_samples") != their_fields.get("duration_ts")
+                                                  and (fixture.name, "duration_ts", their_fields.get("duration_ts"))
+                                                  not in KNOWN_FIXTURE_DIFFERENCES)):
+                        named_problems.append(f"named copy: zffprobe {our_fields}, ffprobe {their_fields}")
+                    named_ok += not named_problems
+                    problems += named_problems
+                    named = f"`.{extension}`: " + ("detected as " + fixture.format if not named_problems else "differs")
+                if fixture.writer_output:
+                    muxed_total += 1
+                    out = work / f"{fixture.name}-ffmpeg.raw"
+                    process = run(args.ffmpeg, "-v", "error", "-nostdin", *input_args, "-i", path,
+                                  "-bitexact", "-c:a", "copy", "-f", fixture.format, out)
+                    if process.returncode == 0 and out.read_bytes() == fixture.data:
+                        muxed_ok += 1
+                    else:
+                        problems.append(f"FFmpeg's {fixture.format} muxer exited {process.returncode} or changed the bytes")
+                accepted_ok += not problems
+            else:
+                problems += check_rejection(args.zffprobe, path, fixture.reject, input_args)
+                ours = f"exit {EXIT_STATUS[fixture.reject]}"
+                expected_text = f"`{fixture.reject}`"
+                probe_code, fields, probe_err = ffprobe(args.ffprobe, path, input_args)
+                decode_code, raw, decode_err = ffmpeg_decode(args.ffmpeg, path, input_args)
+                if probe_code == 0 and decode_code == 0:
+                    theirs = f"accepts: {fields.get('sample_rate', '?')} Hz, {len(raw) // 2} samples"
+                    ffmpeg_accepts_rejected += 1
+                else:
+                    theirs = f"rejects: {clean(first_line(probe_err or decode_err), path) or 'exit ' + str(probe_code or decode_code)}"
+                rejected_ok += not problems
+            result = "pass" if not problems else "**FAIL**: " + "; ".join(problems)
+            lines.append(f"| `{fixture.name}` | `-f {fixture.format}`, {expected_text} | {theirs} | {ours} | {named} | {result} |")
+            failures.extend(f"{fixture.name}: {problem}" for problem in problems)
+    accepted = sum(1 for f in fixtures if f.accept is not None)
+    lines += [
+        "",
+        f"Accepted raw fixtures FFmpeg and zffprobe read as expected: {accepted_ok}/{accepted}.",
+        f"Rejected raw fixtures with zffprobe's expected status and error: {rejected_ok}/{len(fixtures) - accepted}; "
+        f"FFmpeg accepts {ffmpeg_accepts_rejected} (intentional differences).",
+        f"Named copies detected as their format by FFmpeg and zffprobe: {named_ok}/{named_total}.",
+        f"Writer-output fixtures FFmpeg's raw muxers copy unchanged: {muxed_ok}/{muxed_total}.",
+    ]
+
+
 def compare_writer(args, lines, failures):
     """The write driver's actual output, read by FFmpeg (T19a)."""
     lines += [
@@ -630,6 +760,7 @@ def compare_writer(args, lines, failures):
     ]
     streams = [(wav_container(f), f) for f in generate.build_fixtures() if f.writer_output]
     streams += [(directory, f) for directory, _, build, _, _ in FORCED_CONTRACTS for f in build() if f.writer_output]
+    streams += [(f.format, f) for f in generate.build_raw_fixtures() if f.writer_output]
     passed = 0
     with tempfile.TemporaryDirectory() as tmp:
         work = pathlib.Path(tmp)
@@ -654,7 +785,10 @@ def compare_writer(args, lines, failures):
                 if written != fixture.data:
                     problems.append("output differs from the writer-output fixture")
                 expected = expected_stream(container, stream.codec, channels, rate, frames, stream.storage)
-                if container == "aiff":
+                if container in generate.RAW_FORMATS:
+                    stream_problems, notes = check_stream(args, fixture.name, out, expected, stream,
+                                                          raw_input_args(container, fixture.params))
+                elif container == "aiff":
                     # Detected, not forced: every AIFF writer output carries a FORM size FFmpeg's probe accepts.
                     stream_problems, notes = check_stream(args, fixture.name, out, expected, stream,
                                                           field_differences=KNOWN_AIFF_FIELD_DIFFERENCES)
@@ -712,9 +846,12 @@ def compare_zffmpeg(args, lines, failures):
     inputs = [(wav_container(f), FIXTURES / "wav" / f"{f.name}.wav", f) for f in generate.build_fixtures() if f.accept]
     inputs += [(directory, FIXTURES / directory / f"{f.name}.{directory}", f)
                for directory, _, build, _, _ in FORCED_CONTRACTS for f in build() if f.accept]
-    # The codecs each output carries; copy needs the input's (T21a, T22a, T22b).
+    inputs += [(f.format, FIXTURES / "raw" / f"{f.name}.raw", f) for f in generate.build_raw_fixtures() if f.accept]
+    # The codecs each output carries; copy needs the input's (T21a, T22a, T22b);
+    # a raw format carries its own codec only (T22c).
     carried = {"wav": generate.WAV_CODECS, "w64": generate.WAV_CODECS, "au": generate.AU_CODECS,
                "aiff": generate.AIFF_CODECS}
+    carried.update({fmt: {codec} for fmt, codec in generate.RAW_FORMATS.items()})
     read_ok = read_total = rejected_ok = rejected_total = same_ok = same_total = 0
     with tempfile.TemporaryDirectory() as tmp:
         work = pathlib.Path(tmp)
@@ -722,14 +859,20 @@ def compare_zffmpeg(args, lines, failures):
             stream = fixture.accept
             channels, rate, samples = stream
             frames = len(samples) // channels
-            for output, copy in [(o, c) for c in (False, True) for o in ("wav", "w64", "au", "aiff")]:
-                cell = f"{'copy' if copy else 'transcode'} to {output.upper()}"
+            for output, copy in [(o, c) for c in (False, True) for o in ZFFMPEG_OUTPUTS]:
+                cell = f"{'copy' if copy else 'transcode'} to {output.upper() if output not in generate.RAW_FORMATS else output}"
                 options = (["-c", "copy"] if copy else []) + ["-f", output]
                 out = work / f"{fixture.name}-{'copy' if copy else 'transcode'}.{output}"
-                # An input FFmpeg's probing does not detect is forced (T16).
-                input_args = forced_input(fixture, container)
+                # An input FFmpeg's probing does not detect is forced (T16);
+                # raw PCM with its format and parameters (T22c).
+                if container in generate.RAW_FORMATS:
+                    input_args = raw_input_args(container, fixture.params)
+                else:
+                    input_args = forced_input(fixture, container)
                 code, _, err = zffprobe_raw(args.zffmpeg, *input_args, "-i", path, *options, out)
-                supported = stream.codec in carried[output] if copy else stream.storage == "s16"
+                output_codec = stream.codec if copy else S16_CODEC[output]
+                supported = (stream.codec in carried[output] if copy
+                             else stream.storage == "s16" and generate.CODEC_STORAGE[output_codec] == "s16")
                 if not supported:
                     rejected_total += 1
                     if code == 3 and b"UnsupportedOperation" in err and not out.exists():
@@ -751,14 +894,29 @@ def compare_zffmpeg(args, lines, failures):
                                                           data=path.read_bytes())
                     if pipe_code != 0 or pipe_out != written:
                         problems.append(f"through pipes zffmpeg exited {pipe_code} with different output")
-                    codec = stream.codec if copy else S16_CODEC[output]
+                    codec = output_codec
                     expected = expected_stream(output, codec, channels, rate, frames, stream.storage)
-                    differences = dict(FIELD_DIFFERENCES[output])
+                    differences = dict(FIELD_DIFFERENCES.get(output, KNOWN_FIELD_DIFFERENCES))
+                    # FFmpeg reads raw output with the stream's parameters.
+                    output_args = (raw_input_args(output, (rate, channels)) if output in generate.RAW_FORMATS
+                                   else output if output in ("au", "aiff") else None)
+                    lossy = codec != stream.codec and codec in ("pcm_alaw", "pcm_mulaw")
                     if output == "wav" and frames == 0:
                         differences[("duration_ts", "N/A")] = "FFmpeg reads data size 0 as unknown length"
                     if output == "w64":
                         differences = w64_differences(written, codec, channels, frames, differences)
-                    if output == "w64" and frames == 0:
+                    if output in generate.RAW_FORMATS and frames == 0:
+                        differences[("duration_ts", "N/A")] = "FFmpeg gives an empty raw file no duration"
+                    if lossy:
+                        # A-law and mu-law lose precision: the samples cannot be the
+                        # input's, so the bytes must be FFmpeg's own encoding.
+                        if fixture.name in KNOWN_AU_DECODE_DIFFERENCES:
+                            notes.append("lossy, and FFmpeg reads the input differently: not compared")
+                        else:
+                            problems += check_ffmpeg_conversion(args, path, input_args, out, output, copy, work)
+                            if not problems:
+                                notes.append("lossy: equal to FFmpeg's own encoding")
+                    elif output == "w64" and frames == 0:
                         probe_code, _, _ = ffprobe(args.ffprobe, out)
                         z_code, z_fields, _ = zffprobe(args.zffprobe, out)
                         if probe_code == 0:
@@ -769,11 +927,11 @@ def compare_zffmpeg(args, lines, failures):
                     else:
                         # Forced for AU, because FFmpeg's probe does not detect an empty AU file.
                         stream_problems, notes = check_stream(args, f"zffmpeg {fixture.name}", out, expected, stream,
-                                                              "au" if output == "au" else None,
+                                                              output_args if output != "aiff" else None,
                                                               field_differences=differences)
                         problems += stream_problems
                         problems += check_carried_tags(args, fixture, path, out, output, copy, work, notes)
-                    if output in ("au", "aiff") and fixture.writer_output and not fixture.tags:
+                    if output in ("au", "aiff") and fixture.writer_output and not fixture.tags and not lossy:
                         same_total += 1
                         same_problems = check_ffmpeg_conversion(args, path, input_args, out, output, copy, work)
                         same_ok += not same_problems
@@ -798,6 +956,11 @@ def compare_zffmpeg(args, lines, failures):
         f"AU and AIFF outputs of untagged writer-output inputs equal to FFmpeg's own conversion: "
         f"{same_ok}/{same_total}.",
     ]
+
+
+# zffmpeg's outputs in the matrix: every container with a header, and raw PCM
+# s16le (lossless transcoding), A-law (lossy transcoding) and f64be (copy only).
+ZFFMPEG_OUTPUTS = ("wav", "w64", "au", "aiff", "s16le", "alaw", "f64be")
 
 
 def check_ffmpeg_conversion(args, path, input_args, out, output, copy, work):
@@ -920,12 +1083,16 @@ def compare_ffmpeg_muxer(args, lines, failures, container, title, build):
 def compare_pipes(args, lines, failures):
     """zffprobe through a pipe must match zffprobe on the file (T12c)."""
     cases = [(FIXTURES / "wav" / f"{f.name}.wav") for f in generate.build_fixtures()]
-    cases += [(FIXTURES / directory / f"{f.name}.{directory}")
+    cases = [(path, []) for path in cases]
+    cases += [(FIXTURES / directory / f"{f.name}.{directory}", [])
               for directory, _, build, _, _ in FORCED_CONTRACTS for f in build()]
+    # Raw PCM forced: the length comes from the file, or is counted from the pipe.
+    cases += [(FIXTURES / "raw" / f"{f.name}.raw", raw_input_args(f.format, f.params))
+              for f in generate.build_raw_fixtures()]
     same = 0
-    for path in cases:
-        file_code, file_out, file_err = zffprobe_raw(args.zffprobe, path)
-        pipe_code, pipe_out, pipe_err = zffprobe_raw(args.zffprobe, "-", data=path.read_bytes())
+    for path, input_args in cases:
+        file_code, file_out, file_err = zffprobe_raw(args.zffprobe, *input_args, path)
+        pipe_code, pipe_out, pipe_err = zffprobe_raw(args.zffprobe, *input_args, "-", data=path.read_bytes())
         expected_err = file_err.replace(f"zffprobe: {path}: ".encode(), b"zffprobe: -: ")
         if (pipe_code, pipe_out, pipe_err) == (file_code, file_out, expected_err):
             same += 1
@@ -1020,6 +1187,7 @@ def compare_registries(args, lines, failures):
     ours = text(run(args.registry).stdout).splitlines()
     codecs = {}
     formats = {}
+    demuxers = {}
     muxers = {}
     for line in ours:
         kind, _, rest = line.partition(" ")
@@ -1029,6 +1197,9 @@ def compare_registries(args, lines, failures):
         elif kind == "format":
             name, flags, long_name = rest.split(" ", 2)
             formats[name] = (flags, long_name)
+        elif kind == "demuxer":
+            name, extensions = rest.split(" ")
+            demuxers[name] = extensions
         elif kind == "muxer":
             name, extensions, mime, codec = rest.split(" ")
             muxers[name] = {"Common extensions": extensions, "Mime type": mime, "Default audio codec": codec}
@@ -1060,11 +1231,10 @@ def compare_registries(args, lines, failures):
         if their_formats.get(name) != value:
             problems.append(f"format {name}: ours {value}, FFmpeg's {their_formats.get(name)}")
         if value[0][0] == "D":
-            # Detection uses no file names, which is FFmpeg's choice too only
-            # while no registered demuxer declares an extension.
-            demuxer = ffmpeg_help_fields(args.ffmpeg, "demuxer", name)
-            if "Common extensions" in demuxer:
-                problems.append(f"FFmpeg's {name} demuxer declares extensions {demuxer['Common extensions']}")
+            # Detection's file-name hints (T22c) use the demuxers' extensions.
+            theirs = ffmpeg_help_fields(args.ffmpeg, "demuxer", name).get("Common extensions", "-")
+            if demuxers.get(name) != theirs:
+                problems.append(f"demuxer {name}: ours extensions {demuxers.get(name)}, FFmpeg's {theirs}")
     for name, ours_fields in muxers.items():
         theirs = ffmpeg_help_fields(args.ffmpeg, "muxer", name)
         theirs = {key: theirs.get(key, "-") for key in ours_fields}
@@ -1078,7 +1248,8 @@ def compare_registries(args, lines, failures):
         "",
         f"Codec descriptors, decoders and encoders equal to `ffmpeg -codecs`: "
         f"{len(codecs) if not problems else 'see failures'} codecs; formats equal to `ffmpeg -formats`: "
-        f"{len(formats)}; muxers' extensions, MIME types and default codecs equal to `ffmpeg -h muxer=...`: "
+        f"{len(formats)}; demuxers' extensions equal to `ffmpeg -h demuxer=...`: {len(demuxers)}; "
+        f"muxers' extensions, MIME types and default codecs equal to `ffmpeg -h muxer=...`: "
         f"{len(muxers)}. Result: {'pass' if not problems else '**FAIL**'}.",
     ]
 
@@ -1142,6 +1313,8 @@ def main():
 
     for container, title, build, field_differences, decode_differences in FORCED_CONTRACTS:
         compare_forced(args, lines, failures, container, title, build, field_differences, decode_differences)
+    compare_raw(args, lines, failures)
+
     compare_writer(args, lines, failures)
     compare_zffmpeg(args, lines, failures)
     compare_ffmpeg_w64(args, lines, failures)

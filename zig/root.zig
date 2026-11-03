@@ -25,6 +25,8 @@
 //!   PCM (`format/au.zig`).
 //! - `aiff`: bounded AIFF and AIFF-C parsing and known-length writing for
 //!   their PCM encodings (`format/aiff.zig`).
+//! - `raw`: raw PCM reading with given stream parameters and writing, as
+//!   FFmpeg's raw demuxers and muxers (`format/raw.zig`).
 //! - `codecs`: codec descriptors and the decoder and encoder registries, as
 //!   FFmpeg names them (`codec/registry.zig`).
 //! - `formats`: the format registry, with each container's demuxer probe and
@@ -51,6 +53,7 @@ pub const metadata = @import("core/metadata.zig");
 pub const wav = @import("format/wav.zig");
 pub const au = @import("format/au.zig");
 pub const aiff = @import("format/aiff.zig");
+pub const raw = @import("format/raw.zig");
 pub const codecs = @import("codec/registry.zig");
 pub const formats = @import("format/registry.zig");
 pub const detect = @import("format/detect.zig");
@@ -71,6 +74,7 @@ test {
     _ = @import("format/wav.zig");
     _ = @import("format/au.zig");
     _ = @import("format/aiff.zig");
+    _ = @import("format/raw.zig");
     _ = @import("format/registry.zig");
     _ = @import("format/detect.zig");
     _ = @import("format/replay.zig");

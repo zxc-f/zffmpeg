@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Original file for this project.
-//! The WAV fixture contract (TODO.md T02), the AU fixture contract (T12a) and
-//! the AIFF fixture contract (T22b) as typed test data.
+//! The WAV fixture contract (TODO.md T02), the AU fixture contract (T12a),
+//! the AIFF fixture contract (T22b) and the raw PCM contract (T22c) as typed
+//! test data.
 //!
 //! `all` is imported at compile time from fixtures/manifest.zon, `au.all` from
-//! fixtures/au/manifest.zon and `aiff.all` from fixtures/aiff/manifest.zon;
+//! fixtures/au/manifest.zon, `aiff.all` from fixtures/aiff/manifest.zon and
+//! `raw.all` from fixtures/raw/manifest.zon;
 //! fixtures/generate.py writes them. `bytes`, `au.bytes` and `aiff.bytes`
 //! embed a fixture file, so a missing file fails the build. The rules,
 //! decisions and error precedence are documented in fixtures/README.md,
@@ -244,6 +246,59 @@ pub const aiff = struct {
     }
 };
 
+/// The raw PCM contract (port.md "Raw PCM contract"): header-less samples
+/// read with the parameters each fixture records. It shares `Stream` with the
+/// WAV contract.
+pub const raw = struct {
+    const Raw = @This();
+
+    /// Errors of the raw PCM contract, named exactly as the raw parser's errors.
+    pub const Failure = enum {
+        InvalidFormat,
+        Truncated,
+        LimitExceeded,
+    };
+
+    pub const Expected = union(enum) {
+        accept: Stream,
+        reject: Raw.Failure,
+    };
+
+    /// FFmpeg's raw PCM formats, named as their codecs without `pcm_`.
+    pub const Format = enum { u8, s8, s16le, s16be, s24le, s24be, s32le, s32be, f32le, f32be, f64le, f64be, alaw, mulaw };
+
+    /// The stream parameters a fixture is read with (`-sample_rate`,
+    /// `-ch_layout` as a channel count).
+    pub const Params = struct {
+        sample_rate: u32,
+        channels: u16,
+    };
+
+    pub const Fixture = struct {
+        /// The file is fixtures/raw/<name>.raw.
+        name: []const u8,
+        /// Lowercase hexadecimal SHA-256 of the file.
+        sha256: []const u8,
+        expected: Raw.Expected,
+        /// Content detection: always null, since no probe recognizes raw PCM
+        /// and `.raw` is no raw format's extension.
+        detected: ?Container,
+        format: Format,
+        /// Null: FFmpeg's defaults, 44100 Hz mono.
+        params: ?Params,
+        /// The raw writer, given the accepted stream, must produce exactly
+        /// these bytes.
+        writer_output: bool = false,
+    };
+
+    pub const all: []const Raw.Fixture = @import("fixtures/raw/manifest.zon");
+
+    /// The bytes of fixtures/raw/<name>.raw, embedded at compile time.
+    pub fn bytes(comptime name: []const u8) []const u8 {
+        return @embedFile("fixtures/raw/" ++ name ++ ".raw");
+    }
+};
+
 /// This file's own declarations: the WAV contract's `all` and `bytes`.
 const wav_contract = @This();
 
@@ -315,6 +370,7 @@ test "manifest names are unique and expectations are consistent" {
         expectConsistent(wav_contract);
         expectConsistent(au);
         expectConsistent(aiff);
+        expectConsistent(raw);
     }
 }
 
@@ -322,6 +378,7 @@ test "every fixture file is present and matches its recorded SHA-256" {
     try expectHashes(wav_contract);
     try expectHashes(au);
     try expectHashes(aiff);
+    try expectHashes(raw);
 }
 
 test "fixture names do not collide across contracts" {
@@ -330,6 +387,9 @@ test "fixture names do not collide across contracts" {
         expectDistinct(au, wav_contract);
         expectDistinct(aiff, wav_contract);
         expectDistinct(aiff, au);
+        expectDistinct(raw, wav_contract);
+        expectDistinct(raw, au);
+        expectDistinct(raw, aiff);
     }
 }
 

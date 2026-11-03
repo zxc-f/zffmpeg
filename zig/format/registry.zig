@@ -19,10 +19,12 @@
 //! the reference build's `ffmpeg -formats` and `ffmpeg -h muxer=...`.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const pcm = @import("../codec/pcm.zig");
 const wav = @import("wav.zig");
 const au = @import("au.zig");
 const aiff = @import("aiff.zig");
+const raw = @import("raw.zig");
 
 pub const Container = enum {
     wav,
@@ -31,6 +33,44 @@ pub const Container = enum {
     au,
     /// AIFF and AIFF-C.
     aiff,
+    // Raw PCM (T22c), one format per codec FFmpeg has a raw format for, named
+    // as the codec: every PCM codec but s64.
+    u8,
+    s8,
+    s16le,
+    s16be,
+    s24le,
+    s24be,
+    s32le,
+    s32be,
+    f32le,
+    f32be,
+    f64le,
+    f64be,
+    alaw,
+    mulaw,
+
+    /// The parser and writer family that reads and writes a container.
+    pub const Family = enum { wav, au, aiff, raw };
+
+    pub fn family(container: Container) Family {
+        return switch (container) {
+            .wav, .w64 => .wav,
+            .au => .au,
+            .aiff => .aiff,
+            // Checked below: exactly the raw formats, each named as its codec.
+            else => .raw,
+        };
+    }
+
+    /// The codec of a raw PCM format, which shares its name; null otherwise.
+    pub fn rawCodec(container: Container) ?pcm.Codec {
+        return switch (container) {
+            .wav, .w64, .au, .aiff => null,
+            // Compiles only if every other tag names a codec.
+            inline else => |tag| @field(pcm.Codec, @tagName(tag)),
+        };
+    }
 
     pub fn format(container: Container) *const Format {
         return &formats[@backingInt(container)];
@@ -66,11 +106,14 @@ pub const Container = enum {
 pub const Demuxer = struct {
     /// FFmpeg's `read_probe`: a score from 0 to 100 for the first bytes of a
     /// stream, which are fewer than the probe buffer only when the stream is.
-    /// Null for a format without a content signature, which probing never
-    /// chooses.
+    /// Null for a format without a content signature, which content alone
+    /// never chooses.
     probe: ?*const fn (head: []const u8) u8,
     /// The most bytes `probe` reads.
     probe_bytes: usize,
+    /// FFmpeg's `extensions`, lowercase without the dot: a file-name hint for
+    /// detection (`detect.zig`).
+    extensions: []const []const u8 = &.{},
 };
 
 pub const Muxer = struct {
@@ -126,7 +169,45 @@ pub const formats = [_]Format{
             .carries = aiff.carries,
         },
     },
+    rawFormat(.u8, "PCM unsigned 8-bit", &.{"ub"}),
+    rawFormat(.s8, "PCM signed 8-bit", &.{"sb"}),
+    // FFmpeg gives `sw` to the native byte order's 16-bit format (`AV_NE`).
+    rawFormat(.s16le, "PCM signed 16-bit little-endian", if (native_endian == .little) &.{"sw"} else &.{}),
+    rawFormat(.s16be, "PCM signed 16-bit big-endian", if (native_endian == .big) &.{"sw"} else &.{}),
+    rawFormat(.s24le, "PCM signed 24-bit little-endian", &.{}),
+    rawFormat(.s24be, "PCM signed 24-bit big-endian", &.{}),
+    rawFormat(.s32le, "PCM signed 32-bit little-endian", &.{}),
+    rawFormat(.s32be, "PCM signed 32-bit big-endian", &.{}),
+    rawFormat(.f32le, "PCM 32-bit floating-point little-endian", &.{}),
+    rawFormat(.f32be, "PCM 32-bit floating-point big-endian", &.{}),
+    rawFormat(.f64le, "PCM 64-bit floating-point little-endian", &.{}),
+    rawFormat(.f64be, "PCM 64-bit floating-point big-endian", &.{}),
+    rawFormat(.alaw, "PCM A-law", &.{"al"}),
+    rawFormat(.mulaw, "PCM mu-law", &.{"ul"}),
 };
+
+const native_endian = builtin.cpu.arch.endian();
+
+/// A raw PCM format (pcmdec.c, pcmenc.c): no probe, the same extensions for
+/// the demuxer and the muxer, which carries only its own codec.
+fn rawFormat(comptime container: Container, long_name: []const u8, extensions: []const []const u8) Format {
+    const codec = container.rawCodec() orelse unreachable; // a raw container, by its callers
+    return .{
+        .container = container,
+        .name = @tagName(container),
+        .long_name = long_name,
+        .demuxer = .{ .probe = null, .probe_bytes = 0, .extensions = extensions },
+        .muxer = .{ .extensions = extensions, .mime_type = null, .audio_codec = codec, .carries = onlyCodec(codec) },
+    };
+}
+
+fn onlyCodec(comptime codec: pcm.Codec) *const fn (pcm.Codec) bool {
+    return struct {
+        fn carries(other: pcm.Codec) bool {
+            return other == codec;
+        }
+    }.carries;
+}
 
 /// The container FFmpeg names `name`, if it has a demuxer (an input `-f`).
 pub fn findDemuxer(name: []const u8) ?Container {
@@ -168,13 +249,25 @@ comptime {
         if (@backingInt(format.container) != i) @compileError("formats must follow Container's order: " ++ format.name);
         if (!std.mem.eql(u8, format.name, tag)) @compileError("a format name differs from its container's tag: " ++ format.name);
         if (format.demuxer == null and format.muxer == null) @compileError("a format needs a demuxer or a muxer: " ++ format.name);
+        if ((format.container.family() == .raw) != (format.container.rawCodec() != null)) {
+            @compileError("raw formats are exactly the containers named as a codec: " ++ format.name);
+        }
+        if (format.container.rawCodec()) |codec| {
+            if (!raw.carries(codec)) @compileError("FFmpeg has no raw format for this codec: " ++ format.name);
+        }
+        if (format.demuxer) |demuxer| {
+            // FFmpeg reads more and probes again while the best score is at
+            // most 25; a probe-less demuxer's extension scores 50, but a
+            // probing one's only 1, which would need that loop (detect.zig).
+            if (demuxer.probe != null and demuxer.extensions.len > 0) {
+                @compileError("a demuxer with a probe and extensions needs the probe retry: " ++ format.name);
+            }
+            checkExtensions(demuxer.extensions, format.name);
+        }
         const muxer = format.muxer orelse continue;
         if (!muxer.carries(muxer.audio_codec)) @compileError("a muxer does not carry its default codec: " ++ format.name);
+        checkExtensions(muxer.extensions, format.name);
         for (muxer.extensions) |extension| {
-            if (extension.len == 0) @compileError("an empty extension: " ++ format.name);
-            for (extension) |c| {
-                if (c == '.' or std.ascii.isUpper(c)) @compileError("extensions are lowercase, without the dot: " ++ extension);
-            }
             for (formats[i + 1 ..]) |other| {
                 const other_muxer = other.muxer orelse continue;
                 for (other_muxer.extensions) |other_extension| {
@@ -183,6 +276,26 @@ comptime {
             }
         }
     }
+}
+
+fn checkExtensions(comptime extensions: []const []const u8, comptime name: []const u8) void {
+    for (extensions) |extension| {
+        if (extension.len == 0) @compileError("an empty extension: " ++ name);
+        for (extension) |c| {
+            if (c == '.' or std.ascii.isUpper(c)) @compileError("extensions are lowercase, without the dot: " ++ extension);
+        }
+    }
+}
+
+/// Whether `file_name`'s extension is one of `extensions`, as FFmpeg's
+/// `av_match_ext`: the text after the last dot, without regard to case.
+pub fn matchesExtension(file_name: []const u8, extensions: []const []const u8) bool {
+    const extension = std.fs.path.extension(file_name);
+    if (extension.len < 2) return false;
+    for (extensions) |candidate| {
+        if (std.ascii.eqlIgnoreCase(candidate, extension[1..])) return true;
+    }
+    return false;
 }
 
 test "formats are found by name, with a demuxer or a muxer" {
@@ -201,6 +314,29 @@ test "muxers are found by extension without regard to case" {
     try std.testing.expectEqual(null, muxerForExtension("wav"));
     try std.testing.expectEqual(null, muxerForExtension("."));
     try std.testing.expectEqual(null, muxerForExtension(".mp3"));
+}
+
+test "raw formats are named as their codecs, have no probe, and carry only their codec" {
+    try std.testing.expectEqual(pcm.Codec.alaw, Container.alaw.rawCodec());
+    try std.testing.expectEqual(null, Container.aiff.rawCodec());
+    try std.testing.expectEqual(Container.Family.raw, Container.u8.family());
+    try std.testing.expectEqual(Container.Family.wav, Container.w64.family());
+    try std.testing.expectEqual(Container.mulaw, findDemuxer("mulaw"));
+    try std.testing.expectEqual(null, findDemuxer("s64le")); // FFmpeg has none
+    try std.testing.expect(Container.s24be.carries(.s24be) and !Container.s24be.carries(.s24le));
+    try std.testing.expectEqual(pcm.Codec.f32le, Container.f32le.s16Codec());
+    try std.testing.expectEqual(null, Container.alaw.format().demuxer.?.probe); // `alaw` has a demuxer
+    try std.testing.expectEqual(Container.alaw, muxerForExtension(".AL"));
+    const native: Container = if (native_endian == .little) .s16le else .s16be;
+    try std.testing.expectEqual(native, muxerForExtension(".sw"));
+}
+
+test "extensions match as FFmpeg's av_match_ext does" {
+    try std.testing.expect(matchesExtension("take.al", &.{"al"}));
+    try std.testing.expect(matchesExtension("dir.x" ++ std.fs.path.sep_str ++ "TAKE.AL", &.{ "ul", "al" }));
+    try std.testing.expect(!matchesExtension("take.al.wav", &.{"al"}));
+    try std.testing.expect(!matchesExtension("al", &.{"al"}));
+    try std.testing.expect(!matchesExtension("take.", &.{"al"}));
 }
 
 test "the default codecs are FFmpeg's and each muxer carries them" {

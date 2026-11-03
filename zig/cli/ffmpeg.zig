@@ -2,14 +2,18 @@
 // Original file for this project.
 // fftools/ffmpeg_opt.c at the pinned reference revision was read for the -y/-n
 // and same-file behavior; see port.md "zffmpeg command" for the differences.
-//! zffmpeg: converts or stream-copies one WAV, Wave64, AU or AIFF stream
-//! (TODO.md T13b, T21b, T22b).
+//! zffmpeg: converts or stream-copies one WAV, Wave64, AU, AIFF or raw PCM
+//! stream (TODO.md T13b, T21b, T22b, T22c).
 //!
-//!     zffmpeg [-y | -n] [-f wav|w64|au|aiff] -i <input | -> [-c copy] [-f wav|w64|au|aiff] <output | ->
+//!     zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate> | -ar <rate>]
+//!             [-ch_layout mono|stereo | -ac 1|2] -i <input | -> [-c copy] [-f <format>] <output | ->
 //!
 //! The input container is detected from content as FFmpeg's probing would
-//! (T16), or forced with a `-f` before `-i`, as in FFmpeg, where an option
-//! before `-i` applies to the input. The output container is the `-f` after
+//! (T16), with the file name's extension as FFmpeg's fallback for raw PCM
+//! (T22c), or forced with a `-f` before `-i`, as in FFmpeg, where an option
+//! before `-i` applies to the input. `-sample_rate` (`-ar`) and `-ch_layout`
+//! (`-ac`) there describe a raw PCM input, 44100 Hz mono by default; for any
+//! other input they are a usage error. The output container is the `-f` after
 //! `-i`, or else the output name's extension (`.wav`, `.w64`, `.au`, or as
 //! FFmpeg's AIFF muxer `.aif`, `.aiff`, `.afc` and `.aifc`); `-`
 //! (standard output) needs `-f`. `-c copy` copies the encoded samples, which
@@ -33,13 +37,18 @@ const status = @import("status.zig");
 const ExitStatus = status.ExitStatus;
 const printError = status.printError;
 
-const usage = "usage: zffmpeg [-y | -n] [-f wav|w64|au|aiff] -i <input | -> [-c copy] [-f wav|w64|au|aiff] <output | ->\n";
+const usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout mono|stereo] -i <input | -> [-c copy] [-f <format>] <output | ->\n";
 const help = usage ++
     \\
-    \\Converts one WAV, Wave64, AU or AIFF stream (standard input or output with
-    \\-). The input container is detected from content, or forced with -f before
-    \\-i. The output container is the -f after -i, or the output name's .wav,
-    \\.w64, .au, .aif, .aiff, .afc or .aifc extension.
+    \\Converts one WAV, Wave64, AU, AIFF or raw PCM stream (standard input or
+    \\output with -). The input container is detected from content, or for raw
+    \\PCM from the name (.sb, .ub, .al, .ul, .sw), or forced with -f before -i.
+    \\Before -i, -sample_rate (or -ar) and -ch_layout (or -ac 1|2) describe raw
+    \\PCM input, 44100 Hz mono by default. The output container is the -f after
+    \\-i, or the output name's extension (.wav, .w64, .au, .aif, .aiff, .afc,
+    \\.aifc, .sb, .ub, .al, .ul, .sw). Formats: wav, w64, au, aiff and the raw
+    \\formats u8, s8, s16le, s16be, s24le, s24be, s32le, s32be, f32le, f32be,
+    \\f64le, f64be, alaw and mulaw.
     \\-c copy keeps the encoded samples and needs the same codec on both sides.
     \\-y replaces an existing output; without it (or with -n) an existing output
     \\is an error.
@@ -54,6 +63,10 @@ const Command = struct {
     output: []const u8,
     /// The `-f` value before `-i`, if any: the forced input container.
     input_format: ?[]const u8,
+    /// The raw PCM parameters before `-i`, as given.
+    input_rate: ?[]const u8,
+    input_layout: ?[]const u8,
+    input_channels: ?[]const u8,
     /// The `-f` value after `-i`, if any; resolved by `outputContainer`.
     format: ?[]const u8,
     mode: av.convert.Mode,
@@ -105,17 +118,21 @@ fn run(init: std.process.Init) ExitStatus {
             return .unsupported;
         },
         error.UnknownExtension => {
-            printError(io, "zffmpeg: {s}: cannot choose an output format from the name; use -f wav, w64, au or aiff\n", .{command.output});
+            printError(io, "zffmpeg: {s}: cannot choose an output format from the name; use -f\n", .{command.output});
             return .unsupported;
         },
     };
     const input_container: ?av.convert.Container = if (command.input_format) |name|
-        std.meta.stringToEnum(av.convert.Container, name) orelse {
+        av.formats.findDemuxer(name) orelse {
             printError(io, "zffmpeg: {s}: unsupported input format\n", .{name});
             return .unsupported;
         }
     else
         null;
+    const raw_params = switch (status.rawParams(io, "zffmpeg", command.input_rate, command.input_layout, command.input_channels)) {
+        .ok => |params| params,
+        .failed => |exit| return exit,
+    };
     // The input's tags are carried, as FFmpeg's default -map_metadata does
     // (T21c, the project owner's choice).
     var tags: av.metadata.Dictionary = .empty;
@@ -123,7 +140,7 @@ fn run(init: std.process.Init) ExitStatus {
     return convert(io, command, .{
         .output = container,
         .mode = command.mode,
-        .input_format = input_container,
+        .input = .{ .format = input_container, .raw = raw_params },
         .tags = .{ .gpa = init.gpa, .dictionary = &tags },
     });
 }
@@ -135,6 +152,9 @@ fn parse(args: []const [:0]const u8) Parsed {
     var input: ?[]const u8 = null;
     var output: ?[]const u8 = null;
     var input_format: ?[]const u8 = null;
+    var input_rate: ?[]const u8 = null;
+    var input_layout: ?[]const u8 = null;
+    var input_channels: ?[]const u8 = null;
     var format: ?[]const u8 = null;
     var copy = false;
     var yes = false;
@@ -152,11 +172,24 @@ fn parse(args: []const [:0]const u8) Parsed {
             i += 1;
             if (i == args.len) return .{ .usage = .{ .reason = "missing value for", .arg = arg } };
             input = args[i];
+        } else if (input == null and isRawOption(arg)) {
+            // FFmpeg's raw demuxer options, and the -ar/-ac it maps to them
+            // before -i (T22c).
+            i += 1;
+            if (i == args.len) return .{ .usage = .{ .reason = "missing value for", .arg = arg } };
+            const is_rate = std.mem.eql(u8, arg, "-sample_rate") or std.mem.eql(u8, arg, "-ar");
+            if (is_rate) {
+                if (input_rate != null) return .{ .usage = .{ .reason = "given twice", .arg = arg } };
+                input_rate = args[i];
+            } else {
+                if (input_layout != null or input_channels != null) return .{ .usage = .{ .reason = "given twice", .arg = arg } };
+                if (std.mem.eql(u8, arg, "-ac")) input_channels = args[i] else input_layout = args[i];
+            }
         } else if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "-c") or std.mem.eql(u8, arg, "-c:a")) {
-            // Before -i, FFmpeg applies these to the input; only -f is an
-            // input option here (T16).
+            // Before -i, FFmpeg applies these to the input; -f is an input
+            // option here (T16), -c is not.
             const is_format = arg[1] == 'f';
-            if (input == null and !is_format) return .{ .usage = .{ .reason = "input options other than -f are not supported; put this after -i <input>", .arg = arg } };
+            if (input == null and !is_format) return .{ .usage = .{ .reason = "input options other than -f and the raw PCM ones are not supported; put this after -i <input>", .arg = arg } };
             i += 1;
             if (i == args.len) return .{ .usage = .{ .reason = "missing value for", .arg = arg } };
             const value: []const u8 = args[i];
@@ -181,6 +214,9 @@ fn parse(args: []const [:0]const u8) Parsed {
         .input = input orelse return .{ .usage = .{ .reason = "missing -i <input>" } },
         .output = output orelse return .{ .usage = .{ .reason = "missing output" } },
         .input_format = input_format,
+        .input_rate = input_rate,
+        .input_layout = input_layout,
+        .input_channels = input_channels,
         .format = format,
         .mode = if (copy) .copy else .transcode,
         .overwrite = yes,
@@ -194,6 +230,13 @@ fn outputContainer(command: Command) error{ FormatRequired, UnknownFormat, Unkno
     if (isStdio(command.output)) return error.FormatRequired;
     // The muxers' extensions, without regard to case, as FFmpeg matches them.
     return av.formats.muxerForExtension(std.fs.path.extension(command.output)) orelse error.UnknownExtension;
+}
+
+fn isRawOption(arg: []const u8) bool {
+    for ([_][]const u8{ "-sample_rate", "-ar", "-ch_layout", "-ac" }) |name| {
+        if (std.mem.eql(u8, arg, name)) return true;
+    }
+    return false;
 }
 
 fn isStdio(path: []const u8) bool {
@@ -213,9 +256,18 @@ fn convert(io: std.Io, command: Command, request: av.convert.Request) ExitStatus
     // `source` borrows `reader.interface` and `conversion` borrows `source`;
     // all three stay in this frame.
     var source: av.detect.Input = undefined;
-    source.open(&reader.interface, request.input_format) catch |err| {
+    var input = request.input;
+    // FFmpeg's extension hints need the name; raw PCM's frame count, a size.
+    if (!isStdio(command.input)) input.file_name = command.input;
+    input.length = av.file.regularLength(io, input_file);
+    source.open(&reader.interface, input) catch |err| {
+        if (err == error.UnusedOption) {
+            printError(io, "zffmpeg: {s}: -sample_rate and -ch_layout apply only to raw PCM input\n", .{command.input});
+            return status.of(err);
+        }
         return fail(io, command.input, withReadCause(err, &reader));
     };
+
     var conversion = av.convert.Conversion.init(&source, request, .{}) catch |err| {
         return fail(io, command.input, withReadCause(err, &reader));
     };

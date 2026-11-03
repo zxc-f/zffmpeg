@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LGPL-2.1-or-later
 # Original file for this project.
-"""Generate the fixtures for the WAV (TODO.md T02), AU (T12a) and AIFF (T22b) contracts.
+"""Generate the fixtures for the WAV (TODO.md T02), AU (T12a), AIFF (T22b) and raw PCM (T22c) contracts.
 
 Every fixture is defined below and built byte by byte with the Python standard
 library, independently of the Zig implementation. From those lists this script
@@ -16,6 +16,9 @@ writes:
 * aiff/<name>.aiff     the AIFF and AIFF-C fixture files (T22b)
 * aiff/manifest.zon    AIFF expected results
 * aiff/README.md       the AIFF table between the GENERATED markers
+* raw/<name>.raw       the raw PCM fixture files (T22c)
+* raw/manifest.zon     raw PCM expected results, with each file's parameters
+* raw/README.md        the raw PCM table between the GENERATED markers
 
 Usage, from the repository root:
 
@@ -40,6 +43,9 @@ AU_README = AU_DIR / "README.md"
 AIFF_DIR = HERE / "aiff"
 AIFF_MANIFEST = AIFF_DIR / "manifest.zon"
 AIFF_README = AIFF_DIR / "README.md"
+RAW_DIR = HERE / "raw"
+RAW_MANIFEST = RAW_DIR / "manifest.zon"
+RAW_README = RAW_DIR / "README.md"
 TABLE_BEGIN = "<!-- BEGIN GENERATED FIXTURE TABLE: edit generate.py, then run it -->\n"
 TABLE_END = "<!-- END GENERATED FIXTURE TABLE -->\n"
 
@@ -1285,6 +1291,95 @@ def build_aiff_fixtures():
     return fx
 
 
+# --- raw PCM fixtures (T22c) -------------------------------------------------
+
+RAW_ERRORS = ("InvalidFormat", "Truncated", "LimitExceeded")
+# FFmpeg's raw formats for the contract's codecs (pcmdec.c; none for s64):
+# format name -> codec. The name is the codec's without `pcm_`.
+RAW_FORMATS = {name: f"pcm_{name}" for name in (
+    "u8", "s8", "s16le", "s16be", "s24le", "s24be", "s32le", "s32be",
+    "f32le", "f32be", "f64le", "f64be", "alaw", "mulaw")}
+# Storage of each codec, as FFmpeg's decoder gives it.
+CODEC_STORAGE = {**{codec: storage for codec, (_, _, storage) in WAV_CODECS.items()},
+                 **{codec: storage for codec, (_, _, storage) in AU_CODECS.items()}}
+# FFmpeg's raw demuxer defaults (pcm_options in pcmdec.c).
+RAW_DEFAULT_RATE = 44100
+RAW_DEFAULT_CHANNELS = 1
+
+
+@dataclasses.dataclass
+class RawFixture(Fixture):
+    """A raw PCM file and the parameters it is read with (`params` None takes
+    FFmpeg's defaults, 44100 Hz mono)."""
+    format: str = None
+    params: tuple = None  # (sample_rate, channels)
+
+
+def build_raw_fixtures():
+    fx = []
+
+    def stream(fmt, payload, params):
+        rate, channels = params or (RAW_DEFAULT_RATE, RAW_DEFAULT_CHANNELS)
+        codec = RAW_FORMATS[fmt]
+        return Stream(codec, channels, rate, CODEC_STORAGE[codec], decode_stored(codec, payload))
+
+    def ok(name, rule, fmt, payload, params, writer_output=True):
+        fx.append(RawFixture(name, "accepted", rule, payload, accept=stream(fmt, payload, params),
+                             writer_output=writer_output, format=fmt, params=params))
+
+    def bad(name, rule, fmt, payload, params, error):
+        assert error in RAW_ERRORS, error
+        fx.append(RawFixture(name, "rejected", rule, payload, reject=error, format=fmt, params=params))
+
+    def values(fmt, items):
+        return b"".join(struct.pack(fmt, v) for v in items)
+
+    s24 = [0, 1, -1, 0x7FFFFF, -0x800000, 123456, -654321, 256]
+    s32 = [0, 1, -1, 0x7FFFFFFF, -0x80000000, 123456789, -987654321, 65536]
+    f32 = [0, 0x80000000, 0x3F800000, 0xBF800000, 0x3F000000, 0x7F800000, 1, 0x7FC00001]
+    f64 = [0, 0x8000000000000000, 0x3FF0000000000000, 0xBFF0000000000000,
+           0x7FF0000000000000, 1, 0x7FF8000000000001, 0x3FE0000000000000]
+
+    # One per raw format, read with explicit parameters; each is also writer
+    # output, which for raw PCM is the payload itself.
+    ok("raw_u8_mono_8k", "Unsigned 8-bit mono at 8 kHz.", "u8",
+       bytes([0x00, 0x80, 0xFF, 0x7F, 0x01, 0x81, 0x40, 0xC0]), (8000, 1))
+    ok("raw_s8_mono_8k", "Signed 8-bit; stored as u8, offset by 128.", "s8",
+       bytes([0x00, 0x7F, 0x80, 0xFF, 0x01, 0x81, 0x40, 0xC0]), (8000, 1))
+    ok("raw_s16le_mono_8k", "16-bit little-endian mono.", "s16le", pcm(MONO), (8000, 1))
+    ok("raw_s16be_stereo_44k1", "16-bit big-endian stereo at 44.1 kHz.", "s16be", values(">h", STEREO), (44100, 2))
+    ok("raw_s24le_stereo_48k", "24-bit little-endian stereo at 48 kHz; stored as s32.", "s24le",
+       b"".join(struct.pack("<i", v)[:3] for v in s24), (48000, 2))
+    ok("raw_s24be_mono_8k", "24-bit big-endian mono.", "s24be", b"".join(struct.pack(">i", v)[1:] for v in s24),
+       (8000, 1))
+    ok("raw_s32le_mono_8k", "32-bit little-endian mono.", "s32le", values("<i", s32), (8000, 1))
+    ok("raw_s32be_stereo_8k", "32-bit big-endian stereo.", "s32be", values(">i", s32), (8000, 2))
+    ok("raw_f32le_mono_8k", "32-bit float little-endian; every bit kept.", "f32le", values("<I", f32), (8000, 1))
+    ok("raw_f32be_mono_8k", "32-bit float big-endian.", "f32be", values(">I", f32), (8000, 1))
+    ok("raw_f64le_stereo_96k", "64-bit float little-endian stereo at 96 kHz.", "f64le", values("<Q", f64), (96000, 2))
+    ok("raw_f64be_mono_8k", "64-bit float big-endian.", "f64be", values(">Q", f64), (8000, 1))
+    ok("raw_alaw_mono_8k", "A-law; decodes to s16.", "alaw", bytes([0xD5, 0x55, 0xAA, 0x2A, 0x00, 0x80, 0x7F, 0xFF]),
+       (8000, 1))
+    ok("raw_mulaw_mono_8k", "µ-law; its negative zero (0x7F) is left out, as for WAV and AU.", "mulaw",
+       bytes([0xFF, 0x70, 0x80, 0x00, 0x01, 0x81, 0xFE, 0x7E]), (8000, 1))
+    ok("raw_s16le_defaults", "No parameters: FFmpeg's defaults, 44100 Hz mono.", "s16le", pcm(MONO), None,
+       writer_output=False)
+    ok("raw_empty", "No bytes: an empty stream of 0 frames.", "s16le", b"", (8000, 1))
+
+    # Rejected.
+    bad("raw_partial_frame", "Stereo 16-bit, 6 bytes: the input ends inside its second frame. FFmpeg decodes "
+        "the whole frame.", "s16le", pcm(STEREO[:3]), (8000, 2), "Truncated")
+    bad("raw_partial_sample", "24-bit mono, 4 bytes: the input ends inside its second sample.", "s24le",
+        bytes(4), (8000, 1), "Truncated")
+    bad("raw_rate_zero", "Sample rate 0.", "s16le", pcm(MONO[:4]), (0, 1), "InvalidFormat")
+    bad("raw_rate_over_limit", f"Sample rate {MAX_RATE + 1} Hz, above the default limit.", "s16le",
+        pcm(MONO[:4]), (MAX_RATE + 1, 1), "LimitExceeded")
+
+    names = [f.name for f in fx]
+    assert len(names) == len(set(names)), "duplicate raw fixture names"
+    return fx
+
+
 # --- outputs ---------------------------------------------------------------
 
 
@@ -1314,7 +1409,8 @@ def ffmpeg_detect(data):
     An independent reading of the probes in wavdec.c (wav_probe, w64_probe),
     au.c (au_probe) and aiffdec.c (aiff_probe) and of format.c's choice: the highest nonzero score wins, a
     tie at the highest means none. The first probe buffer holds 2048 bytes, and
-    these probes never ask for more."""
+    these probes never ask for more. File-name extensions (T22c) play no part:
+    no fixture's extension is a raw format's."""
     head = data[:2048]
     scores = {"wav": 0, "w64": 0, "au": 0, "aiff": 0}
     if len(head) > 32 and head[8:12] == b"WAVE":
@@ -1348,6 +1444,10 @@ def render_manifest(fixtures, entry_note):
         lines.append(f"        .expected = {render_expected(f.accept, f.reject)},")
         detected = ffmpeg_detect(f.data)
         lines.append(f"        .detected = {'.' + detected if detected else 'null'},")
+        if isinstance(f, RawFixture):
+            lines.append(f"        .format = .{f.format},")
+            params = "null" if f.params is None else f".{{ .sample_rate = {f.params[0]}, .channels = {f.params[1]} }}"
+            lines.append(f"        .params = {params},")
         if f.writer_output:
             lines.append("        .writer_output = true,")
         if f.writer_header != "riff":
@@ -1381,6 +1481,9 @@ def describe_result(accept, reject):
 
 def describe(f):
     text = describe_result(f.accept, f.reject) + ("; writer output" if f.writer_output else "")
+    if isinstance(f, RawFixture):
+        params = "defaults" if f.params is None else f"{f.params[0]} Hz, {f.params[1]} channel{'s' if f.params[1] != 1 else ''}"
+        text = f"`-f {f.format}`, {params}; " + text
     if f.tags:
         text += f"; {len(f.tags)} tag{'s' if len(f.tags) != 1 else ''}"
     if f.unknown_accept is not None or f.unknown_reject is not None:
@@ -1420,7 +1523,7 @@ def render_readme(path, table):
     return (text[:begin] + table + text[end:]).encode()
 
 
-def outputs(fixtures, au_fixtures, aiff_fixtures):
+def outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures):
     files = {WAV_DIR / f"{f.name}.wav": f.data for f in fixtures}
     files[MANIFEST] = render_manifest(
         fixtures, "// Each entry names wav/<name>.wav; see README.md for the rules and decisions.")
@@ -1433,6 +1536,10 @@ def outputs(fixtures, au_fixtures, aiff_fixtures):
     files[AIFF_MANIFEST] = render_manifest(
         aiff_fixtures, "// Each entry names aiff/<name>.aiff; see aiff/README.md for the rules and decisions.")
     files[AIFF_README] = render_readme(AIFF_README, render_table(aiff_fixtures))
+    files.update({RAW_DIR / f"{f.name}.raw": f.data for f in raw_fixtures})
+    files[RAW_MANIFEST] = render_manifest(
+        raw_fixtures, "// Each entry names raw/<name>.raw; see raw/README.md for the rules and decisions.")
+    files[RAW_README] = render_readme(RAW_README, render_table(raw_fixtures))
     return files
 
 
@@ -1444,9 +1551,11 @@ def main():
     fixtures = build_fixtures()
     au_fixtures = build_au_fixtures()
     aiff_fixtures = build_aiff_fixtures()
-    expected = outputs(fixtures, au_fixtures, aiff_fixtures)
+    raw_fixtures = build_raw_fixtures()
+    expected = outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures)
     stale = [path for path, content in expected.items() if not path.exists() or path.read_bytes() != content]
-    extra = sorted((set(WAV_DIR.glob("*.wav")) | set(AU_DIR.glob("*.au")) | set(AIFF_DIR.glob("*.aiff"))) - set(expected))
+    extra = sorted((set(WAV_DIR.glob("*.wav")) | set(AU_DIR.glob("*.au")) | set(AIFF_DIR.glob("*.aiff"))
+             | set(RAW_DIR.glob("*.raw"))) - set(expected))
 
     if args.check:
         for path in stale:
@@ -1456,17 +1565,18 @@ def main():
         if stale or extra:
             print("run: python3 zig/testing/fixtures/generate.py", file=sys.stderr)
             return 1
-        print(f"{len(fixtures)} WAV, {len(au_fixtures)} AU and {len(aiff_fixtures)} AIFF fixtures, manifests and README tables are current")
+        print(f"{len(fixtures)} WAV, {len(au_fixtures)} AU, {len(aiff_fixtures)} AIFF and {len(raw_fixtures)} raw PCM fixtures, manifests and README tables are current")
         return 0
 
     WAV_DIR.mkdir(exist_ok=True)
     AU_DIR.mkdir(exist_ok=True)
     AIFF_DIR.mkdir(exist_ok=True)
+    RAW_DIR.mkdir(exist_ok=True)
     for path in extra:
         path.unlink()
     for path in stale:
         path.write_bytes(expected[path])
-    print(f"wrote {len(stale)} file(s), removed {len(extra)}; {len(fixtures)} WAV, {len(au_fixtures)} AU and {len(aiff_fixtures)} AIFF fixtures")
+    print(f"wrote {len(stale)} file(s), removed {len(extra)}; {len(fixtures)} WAV, {len(au_fixtures)} AU, {len(aiff_fixtures)} AIFF and {len(raw_fixtures)} raw PCM fixtures")
     return 0
 
 

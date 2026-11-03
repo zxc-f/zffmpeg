@@ -21,8 +21,14 @@
 //! this file checks at compile time that each probe needs no more than
 //! `probe_len` bytes. A probe that can score low must add the loop. A demuxer
 //! without a probe (a format without a content signature) is never chosen.
-//! Extensions and MIME types, only hints in FFmpeg, are not used: none of
-//! these demuxers declares one.
+//!
+//! A file name, when the caller has one, adds FFmpeg's extension hints
+//! (`av_match_ext`): a demuxer without a probe whose extension matches scores
+//! 50 (`AVPROBE_SCORE_EXTENSION`), so the raw PCM formats (T22c) are chosen
+//! by name only when no content probe recognizes the stream; a probing
+//! demuxer's match would score at least 1, and the registry rejects that
+//! combination until the retry loop exists. MIME types (HTTP only) and
+//! FFmpeg's skipping of a leading ID3v2 tag are not ported.
 
 const std = @import("std");
 const audio = @import("../core/audio.zig");
@@ -31,23 +37,43 @@ const metadata = @import("../core/metadata.zig");
 const wav = @import("wav.zig");
 const au = @import("au.zig");
 const aiff = @import("aiff.zig");
+const raw = @import("raw.zig");
 const registry = @import("registry.zig");
 const Replay = @import("replay.zig").Replay;
 
 pub const Container = registry.Container;
 
-/// The WAV, AU and AIFF contract errors, which share their common names, and
-/// `UnknownFormat` for a stream no demuxer recognizes.
-pub const Error = wav.Error || au.Error || aiff.Error || error{
+/// The WAV, AU, AIFF and raw PCM contract errors, which share their common
+/// names, `UnknownFormat` for a stream no demuxer recognizes, and
+/// `UnusedOption`.
+pub const Error = wav.Error || au.Error || aiff.Error || raw.Error || error{
     /// No demuxer's probe scored the stream, as FFmpeg's "Invalid data found
     /// when processing input"; force a format to parse it anyway.
     UnknownFormat,
+    /// Raw PCM parameters were given for an input whose format has its own.
+    UnusedOption,
 };
 
 pub const Limits = struct {
     wav: wav.Limits = .{},
     au: au.Limits = .{},
     aiff: aiff.Limits = .{},
+    raw: raw.Limits = .{},
+};
+
+/// What the caller knows about an input besides its bytes.
+pub const Source = struct {
+    /// Parse as this container instead of probing (`-f`).
+    format: ?Container = null,
+    /// The input's file name, for the demuxers' extension hints; null for
+    /// standard input, which FFmpeg names without an extension too.
+    file_name: ?[]const u8 = null,
+    /// The input's length in bytes, when known (a regular file's size): raw
+    /// PCM has no header to give its frame count before the samples.
+    length: ?u64 = null,
+    /// Raw PCM stream parameters (`-sample_rate`, `-ch_layout`); null takes
+    /// FFmpeg's defaults. Given for any other format, `UnusedOption`.
+    raw: ?raw.Params = null,
 };
 
 /// FFmpeg's first probe size (`PROBE_BUF_MIN`).
@@ -55,6 +81,8 @@ pub const probe_len = 2048;
 
 /// `AVPROBE_SCORE_MAX`.
 const max_score = 100;
+/// `AVPROBE_SCORE_EXTENSION`: a probe-less demuxer whose extension matches.
+const extension_score = 50;
 
 comptime {
     for (registry.formats) |format| {
@@ -63,22 +91,26 @@ comptime {
     }
 }
 
-/// FFmpeg's winner for `head`, the first bytes of a stream: the demuxer with
-/// the highest nonzero score, or none when no demuxer scores or the highest
-/// score is tied.
-pub fn probeHead(head: []const u8) ?Container {
-    return winner(&registry.formats, head[0..@min(head.len, probe_len)]);
+/// FFmpeg's winner for `head`, the first bytes of a stream named `file_name`
+/// (null when it has no name): the demuxer with the highest nonzero score, or
+/// none when no demuxer scores or the highest score is tied.
+pub fn probeHead(head: []const u8, file_name: ?[]const u8) ?Container {
+    return winner(&registry.formats, head[0..@min(head.len, probe_len)], file_name);
 }
 
-/// The winner among `formats`. FFmpeg's order only matters for ties, which
-/// mean no winner whatever the order.
-fn winner(formats: []const registry.Format, head: []const u8) ?Container {
+/// The winner among `formats`, scored as `av_probe_input_format3` scores
+/// them. FFmpeg's order only matters for ties, which mean no winner whatever
+/// the order.
+fn winner(formats: []const registry.Format, head: []const u8, file_name: ?[]const u8) ?Container {
     var best: u8 = 0;
     var chosen: ?Container = null;
     for (formats) |format| {
         const demuxer = format.demuxer orelse continue;
-        const score_head = demuxer.probe orelse continue;
-        const score = score_head(head);
+        const named = if (file_name) |name| registry.matchesExtension(name, demuxer.extensions) else false;
+        const score: u8 = if (demuxer.probe) |score_head| score: {
+            const content = score_head(head);
+            break :score if (named) @max(content, 1) else content;
+        } else if (named) extension_score else 0;
         std.debug.assert(score <= max_score);
         if (score > best) {
             best = score;
@@ -98,20 +130,29 @@ pub const Input = struct {
     container: Container,
     /// The container came from the caller, not from probing.
     forced: bool,
+    source: Source,
 
-    /// Probes `source`, or with `format` takes it without reading anything.
-    /// Fills `input` in place; it must not move afterward, because `reader`
-    /// points into it. Only a failing source, or a stream no demuxer
-    /// recognizes, is an error.
-    pub fn open(input: *Input, source: *std.Io.Reader, format: ?Container) error{ IoFailure, UnknownFormat }!void {
-        if (format) |container| {
-            input.* = .{ .head_buffer = undefined, .replay = .init(&.{}, source), .container = container, .forced = true };
-            return;
+    /// Probes `reader`, or with `source.format` takes that format without
+    /// reading anything. Fills `input` in place; it must not move afterward,
+    /// because `reader` points into it. Only a failing reader, a stream no
+    /// demuxer recognizes, or raw parameters for another format are errors.
+    pub fn open(input: *Input, reader_in: *std.Io.Reader, source: Source) error{ IoFailure, UnknownFormat, UnusedOption }!void {
+        if (source.format) |container| {
+            input.* = .{
+                .head_buffer = undefined,
+                .replay = .init(&.{}, reader_in),
+                .container = container,
+                .forced = true,
+                .source = source,
+            };
+        } else {
+            const len = reader_in.readSliceShort(&input.head_buffer) catch return error.IoFailure;
+            input.replay = .init(input.head_buffer[0..len], reader_in);
+            input.container = probeHead(input.head_buffer[0..len], source.file_name) orelse return error.UnknownFormat;
+            input.forced = false;
+            input.source = source;
         }
-        const len = source.readSliceShort(&input.head_buffer) catch return error.IoFailure;
-        input.replay = .init(input.head_buffer[0..len], source);
-        input.container = probeHead(input.head_buffer[0..len]) orelse return error.UnknownFormat;
-        input.forced = false;
+        if (source.raw != null and input.container.family() != .raw) return error.UnusedOption;
     }
 
     pub fn reader(input: *Input) *std.Io.Reader {
@@ -124,9 +165,16 @@ pub const Input = struct {
         const variant: wav.Variant = switch (input.container) {
             .wav => .wav,
             .w64 => .w64,
-            .au, .aiff => unreachable, // the caller dispatches on the container
+            else => unreachable, // the caller dispatches on the family
         };
         return .initVariant(input.reader(), limits, variant);
+    }
+
+    /// A raw PCM parser for a raw input, with the source's parameters and
+    /// length.
+    pub fn rawParser(input: *Input, limits: raw.Limits) raw.Parser {
+        const codec = input.container.rawCodec() orelse unreachable; // the caller dispatches on the family
+        return .init(input.reader(), codec, input.source.raw orelse .{}, input.source.length, limits);
     }
 };
 
@@ -137,13 +185,13 @@ pub const Probed = struct {
     /// `sample_format` is `codec.storage()`.
     format: audio.Format,
     /// Sample frames in the stream; null for data of unknown length
-    /// (`unknown_length`).
+    /// (`unknown_length`). Raw PCM is counted while validating.
     frame_count: ?u64,
 };
 
 pub const Options = struct {
-    /// Parse as this container instead of probing (`ffprobe -f`).
-    format: ?Container = null,
+    /// The format, file name, length and raw parameters the caller knows.
+    source: Source = .{},
     /// Also add the stream's tags to the empty `tags.dictionary`, under
     /// FFmpeg's names (`wav.genericTags`). Only RIFF and RF64 streams carry
     /// tags so far. On failure the dictionary may hold some of them.
@@ -156,12 +204,12 @@ pub fn probe(reader: *std.Io.Reader, limits: Limits) Error!Probed {
     return probeWith(reader, limits, .{});
 }
 
-/// `probe`, with a forced format or tags.
+/// `probe`, with what the caller knows about the source, or tags.
 pub fn probeWith(reader: *std.Io.Reader, limits: Limits, options: Options) Error!Probed {
     var input: Input = undefined;
-    try input.open(reader, options.format);
-    switch (input.container) {
-        .wav, .w64 => {
+    try input.open(reader, options.source);
+    switch (input.container.family()) {
+        .wav => {
             var parser = input.wavParser(limits.wav);
             var stored: metadata.Dictionary = .empty;
             defer if (options.tags) |t| stored.deinit(t.gpa);
@@ -190,6 +238,12 @@ pub fn probeWith(reader: *std.Io.Reader, limits: Limits, options: Options) Error
             const info = try parser.readHeader();
             try parser.finish();
             return .{ .container = .aiff, .codec = info.codec, .format = info.format, .frame_count = info.frame_count };
+        },
+        .raw => {
+            var parser = input.rawParser(limits.raw);
+            const info = try parser.readHeader();
+            try parser.finish();
+            return .{ .container = input.container, .codec = info.codec, .format = info.format, .frame_count = parser.frames_read };
         },
     }
 }
@@ -226,7 +280,7 @@ fn expectDetection(comptime detected: ?fixtures.Container, bytes: []const u8, di
     const container = comptime containerOf(detected.?);
     try expectSameResult(direct, got, container);
     var forced: std.Io.Reader = .fixed(bytes);
-    try expectSameResult(direct, probeWith(&forced, .{}, .{ .format = container }), container);
+    try expectSameResult(direct, probeWith(&forced, .{}, .{ .source = .{ .format = container } }), container);
 }
 
 test "detection gives every WAV fixture FFmpeg's winner and then the parser's result" {
@@ -262,31 +316,63 @@ test "detection gives every AIFF fixture FFmpeg's winner and then the parser's r
     }
 }
 
+test "raw fixtures are found by no content probe, by their extension, and read when forced" {
+    @setEvalBranchQuota(10_000);
+    inline for (fixtures.raw.all) |fixture| {
+        const bytes = fixtures.raw.bytes(fixture.name);
+        const container = @field(Container, @tagName(fixture.format));
+        try std.testing.expectEqual(null, probeHead(bytes, null));
+        try std.testing.expectEqual(null, probeHead(bytes, fixture.name ++ ".raw"));
+        // Named with the format's extension, if it has one, the format is chosen.
+        const extensions = container.format().demuxer.?.extensions; // every raw format has a demuxer
+        if (extensions.len > 0) {
+            var name_buffer: [64]u8 = undefined;
+            const name = try std.fmt.bufPrint(&name_buffer, "take.{s}", .{extensions[0]});
+            try std.testing.expectEqual(container, probeHead(bytes, name));
+        }
+        const params: ?raw.Params = if (fixture.params) |p| .{
+            .sample_rate = p.sample_rate,
+            .layout = comptime audio.ChannelLayout.fromChannelCount(p.channels) catch unreachable, // mono or stereo
+        } else null;
+        var forced: std.Io.Reader = .fixed(bytes);
+        const got = probeWith(&forced, .{}, .{ .source = .{ .format = container, .raw = params } });
+        switch (fixture.expected) {
+            .accept => |stream| {
+                const probed = try got;
+                try std.testing.expectEqual(container, probed.container);
+                try std.testing.expectEqual(stream.sample_rate, probed.format.sample_rate);
+                try std.testing.expectEqual(stream.frameCount(), probed.frame_count);
+            },
+            .reject => try std.testing.expect(std.meta.isError(got)),
+        }
+    }
+}
+
 test "the probes need FFmpeg's minimum lengths and nonzero AU fields" {
     // A 33-byte RIFF/WAVE start is detected, 32 bytes are not.
     const wav_head = fixtures.bytes("mono_8k");
-    try std.testing.expectEqual(Container.wav, probeHead(wav_head[0..33]));
-    try std.testing.expectEqual(null, probeHead(wav_head[0..32]));
+    try std.testing.expectEqual(Container.wav, probeHead(wav_head[0..33], null));
+    try std.testing.expectEqual(null, probeHead(wav_head[0..32], null));
     // RF64 needs `ds64` at 12.
     var rf64 = fixtures.bytes("rf64")[0..40].*;
-    try std.testing.expectEqual(Container.wav, probeHead(&rf64));
+    try std.testing.expectEqual(Container.wav, probeHead(&rf64, null));
     rf64[12] = 'x';
-    try std.testing.expectEqual(null, probeHead(&rf64));
+    try std.testing.expectEqual(null, probeHead(&rf64, null));
     // Wave64: 41 bytes, not 40.
     const w64_head = fixtures.bytes("w64_mono_8k");
-    try std.testing.expectEqual(Container.w64, probeHead(w64_head[0..41]));
-    try std.testing.expectEqual(null, probeHead(w64_head[0..40]));
+    try std.testing.expectEqual(Container.w64, probeHead(w64_head[0..41], null));
+    try std.testing.expectEqual(null, probeHead(w64_head[0..40], null));
     // AU: 24 bytes; a zero data size is not detected.
-    try std.testing.expectEqual(Container.au, probeHead(fixtures.au.bytes("au_mono_8k")[0..24]));
-    try std.testing.expectEqual(null, probeHead(fixtures.au.bytes("au_mono_8k")[0..23]));
-    try std.testing.expectEqual(null, probeHead(fixtures.au.bytes("au_empty_data")));
+    try std.testing.expectEqual(Container.au, probeHead(fixtures.au.bytes("au_mono_8k")[0..24], null));
+    try std.testing.expectEqual(null, probeHead(fixtures.au.bytes("au_mono_8k")[0..23], null));
+    try std.testing.expectEqual(null, probeHead(fixtures.au.bytes("au_empty_data"), null));
     // AIFF: 12 bytes, a FORM size of at least 4, and AIFF or AIFC.
     var aiff_head = fixtures.aiff.bytes("aifc_sowt")[0..12].*;
-    try std.testing.expectEqual(Container.aiff, probeHead(&aiff_head));
-    try std.testing.expectEqual(null, probeHead(aiff_head[0..11]));
+    try std.testing.expectEqual(Container.aiff, probeHead(&aiff_head, null));
+    try std.testing.expectEqual(null, probeHead(aiff_head[0..11], null));
     std.mem.writeInt(u32, aiff_head[4..8], 3, .big);
-    try std.testing.expectEqual(null, probeHead(&aiff_head));
-    try std.testing.expectEqual(null, probeHead(""));
+    try std.testing.expectEqual(null, probeHead(&aiff_head, null));
+    try std.testing.expectEqual(null, probeHead("", null));
 }
 
 fn alwaysProbe(head: []const u8) u8 {
@@ -294,40 +380,62 @@ fn alwaysProbe(head: []const u8) u8 {
     return max_score;
 }
 
-test "a demuxer without a probe is never chosen, and a tie chooses none" {
-    const head = fixtures.bytes("mono_8k");
-    // A probe-less demuxer (raw PCM, T22c, will be one) next to WAV.
-    const raw: registry.Format = .{
-        .container = .au,
-        .name = "raw",
-        .long_name = "raw",
-        .demuxer = .{ .probe = null, .probe_bytes = 0 },
-        .muxer = null,
-    };
-    try std.testing.expectEqual(null, winner(&.{raw}, head));
-    try std.testing.expectEqual(Container.wav, winner(&.{ raw, Container.wav.format().* }, head));
+test "a probe-less demuxer is chosen only by name, below every content probe" {
+    const wav_bytes = fixtures.bytes("mono_8k");
+    const undetected = fixtures.au.bytes("au_empty_data");
+    // Without a name, or with another extension, raw PCM is never chosen.
+    try std.testing.expectEqual(null, probeHead(undetected, null));
+    try std.testing.expectEqual(null, probeHead(undetected, "take.raw"));
+    // Named `.al`, content no probe recognizes is A-law (score 50) ...
+    try std.testing.expectEqual(Container.alaw, probeHead(undetected, "take.al"));
+    try std.testing.expectEqual(Container.alaw, probeHead("", "TAKE.AL"));
+    try std.testing.expectEqual(Container.mulaw, probeHead(undetected, "take.ul"));
+    // ... but a content probe's 99 or 100 wins.
+    try std.testing.expectEqual(Container.wav, probeHead(wav_bytes, "take.al"));
+    try std.testing.expectEqual(Container.au, probeHead(fixtures.au.bytes("au_mono_8k"), "take.ub"));
     // Two demuxers scoring 100 for the same bytes tie: no winner.
     const always: registry.Demuxer = .{ .probe = alwaysProbe, .probe_bytes = 0 };
     var both = [2]registry.Format{ Container.wav.format().*, Container.aiff.format().* };
     both[0].demuxer = always;
     both[1].demuxer = always;
-    try std.testing.expectEqual(null, winner(&both, head));
+    try std.testing.expectEqual(null, winner(&both, wav_bytes, null));
+    // Two probe-less demuxers claiming one extension tie too.
+    const twins = [2]registry.Format{ Container.alaw.format().*, Container.alaw.format().* };
+    try std.testing.expectEqual(null, winner(&twins, undetected, "take.al"));
+}
+
+test "a raw input takes FFmpeg's defaults, the given parameters, and its length" {
+    const bytes = [_]u8{ 0xD5, 0x55, 0xAA, 0x2A };
+    var defaults: std.Io.Reader = .fixed(&bytes);
+    const probed = try probeWith(&defaults, .{}, .{ .source = .{ .file_name = "take.al" } });
+    try std.testing.expectEqual(Container.alaw, probed.container);
+    try std.testing.expectEqual(44100, probed.format.sample_rate);
+    try std.testing.expectEqual(.mono, probed.format.layout);
+    try std.testing.expectEqual(4, probed.frame_count);
+    var stereo: std.Io.Reader = .fixed(&bytes);
+    const params: raw.Params = .{ .sample_rate = 8000, .layout = .stereo };
+    const forced = try probeWith(&stereo, .{}, .{ .source = .{ .format = .s16le, .raw = params, .length = bytes.len } });
+    try std.testing.expectEqual(1, forced.frame_count);
+    try std.testing.expectEqual(8000, forced.format.sample_rate);
+    // Raw parameters for a format with a header are refused.
+    var wav_input: std.Io.Reader = .fixed(fixtures.bytes("mono_8k"));
+    try std.testing.expectError(error.UnusedOption, probeWith(&wav_input, .{}, .{ .source = .{ .raw = params } }));
 }
 
 test "a forced format parses what probing would not detect, and only that format" {
     var empty_au: std.Io.Reader = .fixed(fixtures.au.bytes("au_empty_data"));
     try std.testing.expectError(error.UnknownFormat, probe(&empty_au, .{}));
     var forced_au: std.Io.Reader = .fixed(fixtures.au.bytes("au_empty_data"));
-    try std.testing.expectEqual(0, (try probeWith(&forced_au, .{}, .{ .format = .au })).frame_count);
+    try std.testing.expectEqual(0, (try probeWith(&forced_au, .{}, .{ .source = .{ .format = .au } })).frame_count);
     // Forced WAV rejects Wave64, and the other way round, as FFmpeg's demuxers do.
     var w64_as_wav: std.Io.Reader = .fixed(fixtures.bytes("w64_mono_8k"));
-    try std.testing.expectError(error.InvalidRiff, probeWith(&w64_as_wav, .{}, .{ .format = .wav }));
+    try std.testing.expectError(error.InvalidRiff, probeWith(&w64_as_wav, .{}, .{ .source = .{ .format = .wav } }));
     var wav_as_w64: std.Io.Reader = .fixed(fixtures.bytes("mono_8k"));
-    try std.testing.expectError(error.InvalidRiff, probeWith(&wav_as_w64, .{}, .{ .format = .w64 }));
+    try std.testing.expectError(error.InvalidRiff, probeWith(&wav_as_w64, .{}, .{ .source = .{ .format = .w64 } }));
     var wav_as_au: std.Io.Reader = .fixed(fixtures.bytes("mono_8k"));
-    try std.testing.expectError(error.InvalidAu, probeWith(&wav_as_au, .{}, .{ .format = .au }));
+    try std.testing.expectError(error.InvalidAu, probeWith(&wav_as_au, .{}, .{ .source = .{ .format = .au } }));
     var au_as_aiff: std.Io.Reader = .fixed(fixtures.au.bytes("au_mono_8k"));
-    try std.testing.expectError(error.InvalidAiff, probeWith(&au_as_aiff, .{}, .{ .format = .aiff }));
+    try std.testing.expectError(error.InvalidAiff, probeWith(&au_as_aiff, .{}, .{ .source = .{ .format = .aiff } }));
     var small_form: std.Io.Reader = .fixed(fixtures.aiff.bytes("aiff_form_size_small"));
     try std.testing.expectError(error.UnknownFormat, probe(&small_form, .{}));
 }
@@ -361,10 +469,11 @@ fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
     // Replaying the probed bytes loses none: detection agrees with the
     // chosen parser reading the same input directly.
     var direct: std.Io.Reader = .fixed(bytes);
-    if (probeHead(bytes)) |container| switch (container) {
+    if (probeHead(bytes, null)) |container| switch (container.family()) {
         .au => try expectSameResult(au.probe(&direct, .{}), got, .au),
         .aiff => try expectSameResult(aiff.probe(&direct, .{}), got, .aiff),
-        .wav, .w64 => try expectSameResult(wav.probe(&direct, .{}), got, container),
+        .wav => try expectSameResult(wav.probe(&direct, .{}), got, container),
+        .raw => unreachable, // no content probe chooses raw PCM
     } else try std.testing.expectError(error.UnknownFormat, got);
 }
 

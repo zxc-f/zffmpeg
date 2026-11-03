@@ -34,15 +34,20 @@ pub const ReadError = detect.Error || std.Io.File.Reader.Error;
 pub const DecodeError = wav.DecodeError || std.Io.File.Reader.Error;
 pub const WriteError = wav.WriteError || std.Io.File.Writer.Error;
 
-/// Detects the container (WAV, Wave64 or AU) of the stream in a borrowed file,
-/// or takes `options.format`, and validates the stream without decoding
+/// Detects the container of the stream in a borrowed file, or takes
+/// `options.source.format`, and validates the stream without decoding
 /// samples; `options.tags` also collects its tags (`detect.probeWith`).
+/// Without a `source.length`, a regular file's size is used (`regularLength`).
 pub fn probeFile(io: std.Io, file: std.Io.File, buffer: []u8, limits: detect.Limits, options: detect.Options) ReadError!detect.Probed {
+    var with_length = options;
+    if (with_length.source.length == null) with_length.source.length = regularLength(io, file);
     var reader = file.readerStreaming(io, buffer);
-    return detect.probeWith(&reader.interface, limits, options) catch |err| return withReadCause(err, &reader);
+    return detect.probeWith(&reader.interface, limits, with_length) catch |err| return withReadCause(err, &reader);
 }
 
 /// Opens `sub_path` in `dir`, detects and validates its stream and closes it.
+/// Without a `source.file_name`, `sub_path` is the name for the demuxers'
+/// extension hints.
 pub fn probePath(
     io: std.Io,
     dir: std.Io.Dir,
@@ -53,7 +58,16 @@ pub fn probePath(
 ) (ReadError || std.Io.File.OpenError)!detect.Probed {
     const file = try dir.openFile(io, sub_path, .{});
     defer file.close(io);
-    return probeFile(io, file, buffer, limits, options);
+    var named = options;
+    if (named.source.file_name == null) named.source.file_name = sub_path;
+    return probeFile(io, file, buffer, limits, named);
+}
+
+/// The size of a regular file, which raw PCM takes as its length; null for
+/// pipes, terminals and anything whose size `stat` cannot give.
+pub fn regularLength(io: std.Io, file: std.Io.File) ?u64 {
+    const stat = file.stat(io) catch return null;
+    return if (stat.kind == .file) stat.size else null;
 }
 
 /// Decodes the WAV stream in a borrowed file and writes its samples to `out`
@@ -285,7 +299,8 @@ test "path helpers report missing files and release handles on failure" {
     // Not a WAV by content (`JUNK`), so no demuxer claims it; forced, the
     // WAV parser rejects it.
     try std.testing.expectError(error.UnknownFormat, probePath(io, tmp.dir, "not_riff.wav", &buffer, .{}, .{}));
-    try std.testing.expectError(error.InvalidRiff, probePath(io, tmp.dir, "not_riff.wav", &buffer, .{}, .{ .format = .wav }));
+    try std.testing.expectError(error.InvalidRiff, probePath(io, tmp.dir, "not_riff.wav", &buffer, .{}, .{ .source = .{ .format = .wav } }));
+
     // The handle was closed, so the file can be removed.
     try tmp.dir.deleteFile(io, "not_riff.wav");
 }

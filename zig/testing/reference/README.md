@@ -10,7 +10,7 @@ binaries are never committed.
 | Path | Role |
 | --- | --- |
 | [build-ffmpeg.sh](build-ffmpeg.sh) | Clones or checks out `.references/ffmpeg` at the pinned commit, builds it out of tree in `.references/ffmpeg-build` and installs it to the given prefix. It records the configure arguments, commit, compiler and `config.log` in `<prefix>/share/zffmpeg-reference/`. |
-| [compare.py](compare.py) | Runs FFmpeg's `ffprobe` and `ffmpeg` and our `zffprobe` on every [WAV fixture](../fixtures/README.md), [AU fixture](../fixtures/au/README.md) and [AIFF fixture](../fixtures/aiff/README.md), has FFmpeg read the files the Zig [write driver](../write_driver.zig) and `zffmpeg` produce, checks `zffprobe` through a pipe, compares the [registry dump](../registry_dump.zig) with FFmpeg's own codec and format listings, prints a Markdown report and exits with status 1 on any failure. Python 3, standard library only. |
+| [compare.py](compare.py) | Runs FFmpeg's `ffprobe` and `ffmpeg` and our `zffprobe` on every [WAV fixture](../fixtures/README.md), [AU fixture](../fixtures/au/README.md), [AIFF fixture](../fixtures/aiff/README.md) and [raw PCM fixture](../fixtures/raw/README.md), has FFmpeg read the files the Zig [write driver](../write_driver.zig) and `zffmpeg` produce, checks `zffprobe` through a pipe, compares the [registry dump](../registry_dump.zig) with FFmpeg's own codec and format listings, prints a Markdown report and exits with status 1 on any failure. Python 3, standard library only. |
 
 ## Reproduce
 
@@ -65,13 +65,15 @@ with the install prefix and:
 ```text
 --cc=clang --disable-everything --disable-autodetect --disable-doc
 --disable-network --disable-x86asm --disable-ffplay --disable-avdevice
---enable-protocol=file,pipe --enable-demuxer=wav,w64,au,aiff
+--enable-protocol=file,pipe --enable-demuxer=wav,w64,au,aiff,$pcm_formats
 --enable-decoder=$pcm_codecs --enable-encoder=$pcm_codecs
---enable-muxer=wav,w64,au,aiff --enable-filter=aresample
+--enable-muxer=wav,w64,au,aiff,$pcm_formats --enable-filter=aresample
 
 pcm_codecs=pcm_u8,pcm_s8,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,
   pcm_s32be,pcm_s64le,pcm_s64be,pcm_f32le,pcm_f32be,pcm_f64le,pcm_f64be,
   pcm_alaw,pcm_mulaw
+pcm_formats=pcm_u8,pcm_s8,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,
+  pcm_s32be,pcm_f32le,pcm_f32be,pcm_f64le,pcm_f64be,pcm_alaw,pcm_mulaw
 ```
 
 Everything is disabled and then only what the comparison needs is enabled: the
@@ -82,7 +84,8 @@ WAV muxer, through which `compare.py` takes FFmpeg's decoded samples in each
 stream's storage format (T21a; it replaced the raw s16le muxer), the Wave64
 muxer, whose files `zffprobe` and `zffmpeg` must read (T21b), the AU muxer,
 whose copies of the AU writer-output fixtures must be byte-identical (T22a), the
-AIFF muxer, likewise for AIFF (T22b), and the
+AIFF muxer, likewise for AIFF (T22b), the raw PCM demuxers and muxers of every
+codec FFmpeg has one for, all but s64 (T22c), and the
 `aresample` filter for the
 `ffmpeg` program's audio filter graph. The program itself selects the few other
 filters it always needs. There are no GPL, nonfree, external-library or
@@ -167,6 +170,13 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   detection; FFmpeg's verdict on rejected ones is recorded; `zffprobe` must
   give the report or the contract's status and error, forced with `-f aiff`
   where FFmpeg's probe detects nothing.
+- **Raw PCM fixtures (T22c).** FFmpeg and `zffprobe` read each one forced
+  with its format and parameters (`-f`, `-sample_rate`, `-ch_layout`); accepted
+  ones must give the expected fields and samples, rejected ones the contract's
+  status, FFmpeg's verdict recorded. A copy of each accepted fixture named
+  with its format's extension (`.ub`, `.sb`, `.al`, `.ul`, `.sw`) must be
+  detected as that format by FFmpeg and `zffprobe`, with the same report.
+  FFmpeg's raw muxer must copy each writer-output fixture unchanged.
 - **Registries (T16).** The `registry-dump` test tool prints the codec
   descriptors, decoders and encoders, formats and muxers. They must equal the
   reference build's `ffmpeg -codecs` (flags and long names), `ffmpeg -formats`
@@ -184,7 +194,10 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   real file, which FFmpeg must probe and decode to the fixture's samples and
   stream; the same command through standard input and output must give the
   same bytes. Copy into a container without the codec must exit 3 with
-  `UnsupportedOperation` and create no file. Since T22b, the AU and AIFF
+  `UnsupportedOperation` and create no file. Raw PCM inputs are forced with
+  their parameters, and the raw `s16le`, `alaw` and `f64be` outputs are read
+  back with the stream's; transcoding into A-law is lossy, so that output must
+  equal FFmpeg's own conversion byte for byte instead (T22c). Since T22b, the AU and AIFF
   outputs of every untagged writer-output input must also equal FFmpeg's own
   `ffmpeg -bitexact` conversion byte for byte.
 - **FFmpeg's AU muxer (T22a).** FFmpeg copies each AU writer-output fixture
@@ -195,7 +208,7 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   fixture with an 8-byte-aligned payload into Wave64; `zffprobe` must report
   it and `zffmpeg -c copy -f wav` must give back exactly the fixture. FFmpeg's
   muxer counts the alignment padding in its sizes, unlike ours.
-- **Pipes.** `zffprobe -` reading each of the 203 WAV, AU and AIFF fixtures from a
+- **Pipes.** `zffprobe -` reading each of the 223 WAV, AU, AIFF and raw PCM fixtures (raw ones forced) from a
   pipe must give the same status, report and error as reading the file, with
   the path shown as `-`.
 - **Not implemented.** Checks whose Zig code has not landed are listed apart

@@ -29,7 +29,7 @@ const examples = [_]Example{
 };
 
 /// The fixture directories: zig/testing/fixtures/wav/ and zig/testing/fixtures/au/.
-const FixtureSet = enum { wav, au, aiff };
+const FixtureSet = enum { wav, au, aiff, raw };
 
 /// A zffprobe process run with its expected exit code and output.
 const ProbeCase = struct {
@@ -50,7 +50,7 @@ const ProbeCase = struct {
     stderr_contains: ?[]const u8 = null,
 };
 
-const usage_line = "usage: zffprobe [-f wav|w64|au|aiff] <file | ->\n";
+const usage_line = "usage: zffprobe [-f <format>] [-sample_rate <rate>] [-ch_layout mono|stereo] <file | ->\n";
 
 const mono_8k_report =
     \\format=wav
@@ -153,6 +153,32 @@ const aifc_fl32_report =
     \\nb_samples=8
     \\duration_num=8
     \\duration_den=8000
+    \\
+;
+
+const raw_s16le_report =
+    \\format=s16le
+    \\codec=pcm_s16le
+    \\sample_fmt=s16
+    \\channels=1
+    \\channel_layout=mono
+    \\sample_rate=8000
+    \\nb_samples=8
+    \\duration_num=8
+    \\duration_den=8000
+    \\
+;
+
+const raw_alaw_defaults_report =
+    \\format=alaw
+    \\codec=pcm_alaw
+    \\sample_fmt=s16
+    \\channels=1
+    \\channel_layout=mono
+    \\sample_rate=44100
+    \\nb_samples=8
+    \\duration_num=8
+    \\duration_den=44100
     \\
 ;
 
@@ -320,6 +346,17 @@ const probe_cases = [_]ProbeCase{
     .{ .name = "compressed AIFF-C", .set = .aiff, .fixture = "aifc_unknown_type", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
     .{ .name = "AIFF rate limit", .set = .aiff, .fixture = "aiff_rate_over_limit", .exit_code = 5, .stderr_contains = ": LimitExceeded\n" },
     .{ .name = "truncated AIFF pipe", .set = .aiff, .args = &.{"-"}, .stdin_fixture = "aiff_truncated_data", .exit_code = 2, .stderr = "zffprobe: -: Truncated\n" },
+    // T22c: raw PCM, forced with its parameters or FFmpeg's defaults.
+    .{ .name = "raw PCM with parameters", .set = .raw, .args = &.{ "-sample_rate", "8000", "-f", "s16le", "-ch_layout", "mono" }, .fixture = "raw_s16le_mono_8k", .exit_code = 0, .stdout = raw_s16le_report, .stderr = "" },
+    .{ .name = "raw A-law defaults from a pipe", .set = .raw, .args = &.{ "-f", "alaw", "-" }, .stdin_fixture = "raw_alaw_mono_8k", .exit_code = 0, .stdout = raw_alaw_defaults_report, .stderr = "" },
+    .{ .name = "raw PCM is not detected from content", .set = .raw, .fixture = "raw_s16le_mono_8k", .exit_code = 3, .stderr_contains = ": UnknownFormat\n" },
+    .{ .name = "a partial raw frame", .set = .raw, .args = &.{ "-f", "s16le", "-ch_layout", "stereo" }, .fixture = "raw_partial_frame", .exit_code = 2, .stderr_contains = ": Truncated\n" },
+    .{ .name = "a raw sample rate of 0", .set = .raw, .args = &.{ "-f", "s16le", "-sample_rate", "0" }, .fixture = "raw_rate_zero", .exit_code = 2, .stderr_contains = ": InvalidFormat\n" },
+    .{ .name = "raw parameters for WAV", .args = &.{ "-sample_rate", "8000" }, .fixture = "mono_8k", .exit_code = 1, .stderr_contains = ": -sample_rate and -ch_layout apply only to raw PCM input\n" },
+    .{ .name = "an invalid sample rate", .args = &.{ "-f", "s16le", "-sample_rate", "fast" }, .fixture = "mono_8k", .exit_code = 1, .stderr = "zffprobe: fast: invalid sample rate\n" },
+    .{ .name = "an unsupported channel layout", .args = &.{ "-f", "s16le", "-ch_layout", "5.1" }, .fixture = "mono_8k", .exit_code = 3, .stderr = "zffprobe: 5.1: unsupported channel layout\n" },
+    .{ .name = "an option given twice", .args = &.{ "-f", "s16le", "-f", "s16le" }, .fixture = "mono_8k", .exit_code = 1, .stderr = usage_line },
+    .{ .name = "an unknown raw format", .args = &.{ "-f", "s64le" }, .fixture = "mono_8k", .exit_code = 3, .stderr = "zffprobe: s64le: unsupported input format\n" },
 };
 
 /// A zffmpeg process run: `args`, then the input fixture's path (or standard
@@ -349,7 +386,7 @@ const ConvertCase = struct {
     stderr_contains: ?[]const u8 = null,
 };
 
-const zffmpeg_usage = "usage: zffmpeg [-y | -n] [-f wav|w64|au|aiff] -i <input | -> [-c copy] [-f wav|w64|au|aiff] <output | ->\n";
+const zffmpeg_usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout mono|stereo] -i <input | -> [-c copy] [-f <format>] <output | ->\n";
 
 // The paired WAV and AU fixtures hold the same samples, so each is the exact
 // expected output of converting the other.
@@ -374,6 +411,9 @@ const aiff_mono_8k = @embedFile("zig/testing/fixtures/aiff/aiff_mono_8k.aiff");
 const aiff_stereo_44k1 = @embedFile("zig/testing/fixtures/aiff/aiff_stereo_44k1.aiff");
 // mono_8k's s16le samples, stream-copied into AIFF-C `sowt`.
 const aifc_sowt = @embedFile("zig/testing/fixtures/aiff/aifc_sowt.aiff");
+// T22c: the raw payloads of the paired fixtures.
+const raw_s16be_stereo_44k1 = @embedFile("zig/testing/fixtures/raw/raw_s16be_stereo_44k1.raw");
+const raw_alaw_mono_8k = @embedFile("zig/testing/fixtures/raw/raw_alaw_mono_8k.raw");
 
 /// T13b: every cell of the operation matrix (files and pipes, transcode and
 /// copy), the output format from -f or the extension, late and early media
@@ -427,7 +467,7 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "help", .args = &.{"--help"}, .exit_code = 0, .stdout_contains = zffmpeg_usage, .stderr = "" },
     .{ .name = "-y with -n", .args = &.{ "-y", "-n", "-i", "a.wav", "b.wav" }, .exit_code = 1, .stderr = "zffmpeg: -y and -n contradict each other\n" ++ zffmpeg_usage },
     .{ .name = "two inputs", .args = &.{ "-i", "a.wav", "-i", "b.wav", "c.wav" }, .exit_code = 1, .stderr_contains = "only one input is supported\n" },
-    .{ .name = "an input option", .args = &.{ "-c", "copy", "-i", "a.wav", "b.wav" }, .exit_code = 1, .stderr_contains = "input options other than -f are not supported; put this after -i <input>: -c\n" },
+    .{ .name = "an input option", .args = &.{ "-c", "copy", "-i", "a.wav", "b.wav" }, .exit_code = 1, .stderr_contains = "input options other than -f and the raw PCM ones are not supported; put this after -i <input>: -c\n" },
     .{ .name = "an option after the output", .args = &.{ "-i", "a.wav", "b.wav", "-y" }, .exit_code = 1, .stderr_contains = "options after the output are not supported: -y\n" },
     .{ .name = "no output", .args = &.{ "-i", "a.wav" }, .exit_code = 1, .stderr_contains = "missing output\n" },
     .{ .name = "an unknown option", .args = &.{ "-i", "a.wav", "-ar", "8000", "b.wav" }, .exit_code = 1, .stderr_contains = "unknown option: -ar\n" },
@@ -446,6 +486,17 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "AIFF from an uppercase .AIFC extension", .set = .au, .args = &.{"-i"}, .input = "au_mono_8k", .tail = &.{ "-c", "copy" }, .output_file = "OUT.AIFC", .output_bytes = aiff_mono_8k, .exit_code = 0, .stderr = "" },
     .{ .name = "plain AIFF copy to WAV is rejected", .set = .aiff, .args = &.{"-i"}, .input = "aiff_mono_8k", .tail = &.{ "-c", "copy", "-f", "wav", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
     .{ .name = "a non-AIFF input forced as AIFF", .args = &.{ "-f", "aiff", "-i" }, .input = "mono_8k", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stderr_contains = ": InvalidAiff\n" },
+    // T22c: raw PCM in and out. A file's size gives the frame count the
+    // headers need.
+    .{ .name = "raw PCM to WAV", .set = .raw, .args = &.{ "-f", "s16le", "-ar", "8000", "-ac", "1", "-i" }, .input = "raw_s16le_mono_8k", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_mono_8k, .stderr = "" },
+    .{ .name = "raw PCM to AIFF with FFmpeg's option names", .set = .raw, .args = &.{ "-f", "s16be", "-sample_rate", "44100", "-ch_layout", "stereo", "-i" }, .input = "raw_s16be_stereo_44k1", .tail = &.{ "-c", "copy", "-f", "aiff", "-" }, .exit_code = 0, .stdout = aiff_stereo_44k1, .stderr = "" },
+    .{ .name = "AIFF copy to raw PCM", .set = .aiff, .args = &.{"-i"}, .input = "aiff_stereo_44k1", .tail = &.{ "-c", "copy", "-f", "s16be", "-" }, .exit_code = 0, .stdout = raw_s16be_stereo_44k1, .stderr = "" },
+    .{ .name = "A-law copy to raw PCM from the .al extension", .args = &.{"-i"}, .input = "alaw_mono_8k", .tail = &.{ "-c", "copy" }, .output_file = "out.al", .output_bytes = raw_alaw_mono_8k, .exit_code = 0, .stderr = "" },
+    .{ .name = "raw PCM from a pipe to raw PCM", .set = .raw, .args = &.{ "-f", "alaw", "-i", "-" }, .stdin_input = "raw_alaw_mono_8k", .tail = &.{ "-c", "copy", "-f", "alaw", "-" }, .exit_code = 0, .stdout = raw_alaw_mono_8k, .stderr = "" },
+    .{ .name = "raw parameters for a WAV input", .args = &.{ "-ar", "8000", "-i" }, .input = "mono_8k", .tail = &.{ "-f", "wav", "-" }, .exit_code = 1, .stderr_contains = ": -sample_rate and -ch_layout apply only to raw PCM input\n" },
+    .{ .name = "-ac with -ch_layout", .args = &.{ "-ac", "1", "-ch_layout", "mono", "-i", "a.raw", "b.wav" }, .exit_code = 1, .stderr_contains = "given twice: -ch_layout\n" },
+    .{ .name = "an unsupported channel count", .set = .raw, .args = &.{ "-f", "s16le", "-ac", "6", "-i" }, .input = "raw_s16le_mono_8k", .tail = &.{ "-f", "wav", "-" }, .exit_code = 3, .stderr = "zffmpeg: 6: unsupported channel count\n" },
+    .{ .name = "raw f32 transcode is rejected", .set = .raw, .args = &.{ "-f", "f32le", "-i" }, .input = "raw_f32le_mono_8k", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
 };
 
 pub fn build(b: *std.Build) void {
