@@ -54,6 +54,7 @@ EXIT_STATUS = {
     "Truncated": 2,
     "UnsupportedFormat": 3,
     "UnsupportedStreamingSize": 3,
+    "UnknownFormat": 3,
     "LimitExceeded": 5,
 }
 LAYOUT = {1: "mono", 2: "stereo"}
@@ -62,12 +63,6 @@ LAYOUT = {1: "mono", 2: "stereo"}
 # rules"). Each is reported as not implemented, never as a pass or a skip; the
 # subtask that owns it deletes its entry here, which makes the check mandatory.
 NOT_IMPLEMENTED = {}
-
-# zffprobe detects AU by its `.snd` magic and sends anything else to the WAV
-# parser, so an AU fixture without that magic reports the WAV parser's error.
-ZFFPROBE_AU_DETECTION = {
-    "au_bad_magic": "InvalidRiff",
-}
 
 # Understood differences in FFmpeg's metadata for accepted fixtures, matched on
 # the exact value; see zig/testing/reference/README.md. Anything else fails.
@@ -99,10 +94,6 @@ KNOWN_TAG_CARRY_DIFFERENCES = {
 # The same field difference for AU, whose header has no layout field either.
 KNOWN_AU_FIELD_DIFFERENCES = {
     ("channel_layout", "unknown"): "an AU header has no channel layout",
-}
-# Accepted AU fixtures that FFmpeg's content probe does not detect.
-KNOWN_AU_DETECTION_DIFFERENCES = {
-    "au_empty_data": "FFmpeg's AU probe needs a nonzero data size",
 }
 # Accepted AU fixtures whose FFmpeg decode continues past the expected samples:
 # its output must start with them.
@@ -168,14 +159,24 @@ def ffmpeg_decode(binary, path, input_format=None, storage="s16"):
 
 
 def detected_format(binary, path):
-    """The format FFmpeg's content probe picks, or None if it detects nothing."""
-    code, fields, _ = ffprobe(binary, path)
-    return fields.get("format_name") if code == 0 else None
+    """The format FFmpeg's content probe picks, or None if it picks none (T16).
+
+    Read from ffprobe's debug log, which names the winner even when its
+    demuxer then fails, so detection and parsing are judged apart."""
+    process = run(binary, "-v", "debug", path)
+    match = re.search(rb"Format (\S+) probed with size=\d+ and score=\d+", process.stderr)
+    return match.group(1).decode() if match else None
 
 
-def zffprobe(binary, path):
+def forced_input(fixture, container):
+    """zffprobe's and zffmpeg's `-f` for a fixture FFmpeg's probing does not
+    detect (T16), so its parser still reads it; nothing for the others."""
+    return [] if generate.ffmpeg_detect(fixture.data) else ["-f", container]
+
+
+def zffprobe(binary, path, input_args=()):
     """Exit status, the stream fields (without the tag lines) and stderr."""
-    process = run(binary, path)
+    process = run(binary, *input_args, path)
     stream_lines = b"\n".join(line for line in process.stdout.split(b"\n") if not line.startswith(b"tag:"))
     return process.returncode, key_values(text(stream_lines)), text(process.stderr)
 
@@ -198,9 +199,9 @@ ZFFPROBE_ESCAPES = {0x5C: 0x5C, ord("n"): 0x0A, ord("r"): 0x0D}
 FFPROBE_C_ESCAPES = {0x5C: 0x5C, ord("n"): 0x0A, ord("r"): 0x0D, ord("b"): 0x08, ord("f"): 0x0C, ord("|"): ord("|")}
 
 
-def zffprobe_tags(binary, path):
+def zffprobe_tags(binary, path, input_args=()):
     """zffprobe's `tag:<key>=<value>` lines (T21c) as (key, value) byte pairs, in order."""
-    process = run(binary, path)
+    process = run(binary, *input_args, path)
     tags = []
     for line in process.stdout.split(b"\n"):
         if line.startswith(b"tag:"):
@@ -325,7 +326,12 @@ def compare_accepted(fixture, args, path):
     elif raw != generate.storage_bytes(stream):
         problems.append(f"ffmpeg decoded {len(raw)} bytes of {stream.storage} that differ from the {len(samples)} expected samples")
 
-    code, fields, err = zffprobe(args.zffprobe, path)
+    input_args = forced_input(fixture, container)
+    if input_args:
+        undetected_code, _, undetected_err = zffprobe(args.zffprobe, path)
+        if undetected_code != 3 or not undetected_err.endswith(": UnknownFormat"):
+            problems.append(f"undetected, zffprobe exited {undetected_code} ({undetected_err}), expected UnknownFormat")
+    code, fields, err = zffprobe(args.zffprobe, path, input_args)
     z_expected = {
         "format": container,
         "codec": stream.codec,
@@ -345,7 +351,7 @@ def compare_accepted(fixture, args, path):
     their_tags = ffprobe_tags(args.ffprobe, path)
     if their_tags != want_tags:
         problems.append(f"ffprobe tags {tags_text(their_tags)}, expected {tags_text(want_tags)}")
-    our_tags = zffprobe_tags(args.zffprobe, path)
+    our_tags = zffprobe_tags(args.zffprobe, path, input_args)
     if our_tags != want_tags:
         problems.append(f"zffprobe tags {tags_text(our_tags)}, expected {tags_text(want_tags)}")
 
@@ -358,14 +364,26 @@ def compare_accepted(fixture, args, path):
     return problems, f"{LAYOUT[channels]}, {rate} Hz, {frames} frames{encoding}", "exit 0, report matches", verdict
 
 
-def compare_rejected(fixture, args, path):
-    problems = []
-    want = EXIT_STATUS[fixture.reject]
-    code, _, err = zffprobe(args.zffprobe, path)
-    if code != want or not err.endswith(f": {fixture.reject}"):
-        problems.append(f"zffprobe exited {code} ({err}), expected {want} with {fixture.reject}")
+def check_rejection(binary, path, error, input_args=()):
+    """zffprobe must exit with `error`'s status and name it; returns the problems."""
+    want = EXIT_STATUS[error]
+    code, _, err = zffprobe(binary, path, input_args)
+    if code != want or not err.endswith(f": {error}"):
+        return [f"zffprobe {' '.join(input_args)} exited {code} ({err}), expected {want} with {error}"]
+    return []
 
-    return problems, f"`{fixture.reject}` (exit {want})", f"exit {code}", ffmpeg_verdict(args, path)
+
+def compare_rejected(fixture, args, path):
+    """The contract's error from the parser, forced when FFmpeg's probing does
+    not detect the file, and `UnknownFormat` from detection then (T16)."""
+    input_args = forced_input(fixture, wav_container(fixture))
+    problems = check_rejection(args.zffprobe, path, fixture.reject, input_args)
+    ours = f"exit {EXIT_STATUS[fixture.reject]}"
+    if input_args:
+        problems += check_rejection(args.zffprobe, path, "UnknownFormat")
+        ours = f"undetected: exit 3; {' '.join(input_args)}: {ours}"
+    want = EXIT_STATUS[fixture.reject]
+    return problems, f"`{fixture.reject}` (exit {want})", ours, ffmpeg_verdict(args, path)
 
 
 def ffmpeg_verdict(args, path):
@@ -444,22 +462,22 @@ def zffprobe_report(container, codec, channels, rate, frames, storage="s16"):
 
 
 def check_zffprobe_au(fixture, args, path):
-    """zffprobe on one AU fixture (T12c); returns (problems, summary)."""
-    code, fields, err = zffprobe(args.zffprobe, path)
+    """zffprobe on one AU fixture (T12c, T16): the parser's result, forced with
+    `-f au` when FFmpeg's probing does not detect the file, which then gives
+    `UnknownFormat`. Returns (problems, summary)."""
+    input_args = forced_input(fixture, "au")
+    problems = check_rejection(args.zffprobe, path, "UnknownFormat") if input_args else []
+    prefix = "undetected: exit 3; -f au: " if input_args else ""
     if fixture.accept is not None:
+        code, fields, err = zffprobe(args.zffprobe, path, input_args)
         channels, rate, samples = fixture.accept
         want = zffprobe_report("au", fixture.accept.codec, channels, rate, len(samples) // channels,
                                fixture.accept.storage)
         if code != 0 or fields != want:
-            return [f"zffprobe exited {code} with {fields or first_line(err)}"], f"exit {code}"
-        return [], "exit 0, report matches"
-    error = ZFFPROBE_AU_DETECTION.get(fixture.name, fixture.reject)
-    status = EXIT_STATUS[error]
-    if code != status or not err.endswith(f": {error}"):
-        return [f"zffprobe exited {code} ({err}), expected {status} with {error}"], f"exit {code}"
-    if error != fixture.reject:
-        return [], f"exit {code}, `{error}` (not AU by content)"
-    return [], f"exit {code}"
+            problems.append(f"zffprobe exited {code} with {fields or first_line(err)}")
+        return problems, f"{prefix}exit 0, report matches"
+    problems += check_rejection(args.zffprobe, path, fixture.reject, input_args)
+    return problems, f"{prefix}exit {EXIT_STATUS[fixture.reject]}"
 
 
 def compare_au_accepted(fixture, args, path):
@@ -470,17 +488,8 @@ def compare_au_accepted(fixture, args, path):
                                    KNOWN_AU_DECODE_DIFFERENCES.get(fixture.name),
                                    KNOWN_AU_FIELD_DIFFERENCES)
 
-    detected = detected_format(args.ffprobe, path)
-    detection_note = KNOWN_AU_DETECTION_DIFFERENCES.get(fixture.name)
-    if detected == "au":
-        detection = "au"
-        if detection_note:
-            problems.append(f"FFmpeg now detects {fixture.name}; remove its known difference")
-    elif detection_note:
-        detection = f"not detected ({detection_note})"
-    else:
-        detection = f"{detected or 'not detected'}"
-        problems.append(f"FFmpeg's content probe gave {detected!r}, expected 'au'")
+    detection, detection_problems = check_detection(args, fixture, path)
+    problems += detection_problems
 
     verdict = "same samples and stream" if not problems else "differs"
     if notes:
@@ -497,8 +506,39 @@ def compare_au_rejected(fixture, args, path):
     else:
         reason = clean(first_line(probe_err or decode_err), path) or f"exit {probe_code or decode_code}"
         verdict = f"rejects: {reason}"
-    detection = detected_format(args.ffprobe, path) or "not detected"
-    return [], f"`{fixture.reject}`", verdict, detection
+    detection, problems = check_detection(args, fixture, path)
+    return problems, f"`{fixture.reject}`", verdict, detection
+
+
+def check_detection(args, fixture, path):
+    """FFmpeg's probe winner must be the one the manifest records (T16), which
+    the Zig tests hold detection to. Returns (summary, problems)."""
+    theirs = detected_format(args.ffprobe, path)
+    want = generate.ffmpeg_detect(fixture.data)
+    summary = theirs or "not detected"
+    if theirs != want:
+        return summary, [f"FFmpeg's probe picks {theirs or 'nothing'}, the manifest {want or 'nothing'}"]
+    return summary, []
+
+
+def compare_detection(args, lines, failures):
+    """Every WAV and AU fixture: FFmpeg's probe winner equals the manifest's,
+    as the Zig detection tests require (T16)."""
+    fixtures = [("wav", f) for f in generate.build_fixtures()] + [("au", f) for f in generate.build_au_fixtures()]
+    agree = undetected = 0
+    for directory, fixture in fixtures:
+        path = FIXTURES / directory / f"{fixture.name}.{directory}"
+        summary, problems = check_detection(args, fixture, path)
+        agree += not problems
+        undetected += summary == "not detected"
+        failures.extend(f"{fixture.name} (detection): {problem}" for problem in problems)
+    lines += [
+        "",
+        "## Content detection (T16)",
+        "",
+        f"Fixtures whose FFmpeg probe winner equals the manifest's: {agree}/{len(fixtures)} "
+        f"({undetected} detected by no demuxer).",
+    ]
 
 
 def compare_au(args, lines, failures):
@@ -653,7 +693,9 @@ def compare_zffmpeg(args, lines, failures):
                 cell = f"{'copy' if copy else 'transcode'} to {output.upper()}"
                 options = (["-c", "copy"] if copy else []) + ["-f", output]
                 out = work / f"{fixture.name}-{'copy' if copy else 'transcode'}.{output}"
-                code, _, err = zffprobe_raw(args.zffmpeg, "-i", path, *options, out)
+                # An input FFmpeg's probing does not detect is forced (T16).
+                input_args = forced_input(fixture, container)
+                code, _, err = zffprobe_raw(args.zffmpeg, *input_args, "-i", path, *options, out)
                 supported = stream.codec in carried[output] if copy else stream.storage == "s16"
                 if not supported:
                     rejected_total += 1
@@ -672,7 +714,8 @@ def compare_zffmpeg(args, lines, failures):
                 else:
                     written = out.read_bytes()
                     summary = f"{len(written)} bytes"
-                    pipe_code, pipe_out, _ = zffprobe_raw(args.zffmpeg, "-i", "-", *options, "-", data=path.read_bytes())
+                    pipe_code, pipe_out, _ = zffprobe_raw(args.zffmpeg, *input_args, "-i", "-", *options, "-",
+                                                          data=path.read_bytes())
                     if pipe_code != 0 or pipe_out != written:
                         problems.append(f"through pipes zffmpeg exited {pipe_code} with different output")
                     codec = stream.codec if copy else ("pcm_s16be" if output == "au" else "pcm_s16le")
@@ -954,6 +997,7 @@ def main():
         f"Rejected fixtures that FFmpeg accepts (intentional differences): {ffmpeg_accepts_rejected}/{rejected}.",
     ]
     compare_unknown_length(args, lines, failures)
+    compare_detection(args, lines, failures)
     compare_au(args, lines, failures)
     compare_writer(args, lines, failures)
     compare_zffmpeg(args, lines, failures)

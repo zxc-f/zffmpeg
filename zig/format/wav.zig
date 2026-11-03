@@ -32,7 +32,6 @@ const audio = @import("../core/audio.zig");
 const samples_storage = @import("../core/samples.zig");
 const metadata = @import("../core/metadata.zig");
 const pcm = @import("../codec/pcm.zig");
-const Prefix = @import("prefix.zig").Prefix;
 
 /// Contract errors (see the fixture README), plus `IoFailure` for a failing
 /// reader and `OutOfMemory`, which only collecting tags can return. File
@@ -217,8 +216,8 @@ const ChunkHeader = struct {
 pub const Parser = struct {
     reader: *std.Io.Reader,
     limits: Limits,
-    /// Bytes content detection already read; they come before the reader's.
-    prefix: Prefix = .{},
+    /// Set by `initVariant`: the only layout accepted.
+    only: ?Variant = null,
     /// Bytes of the declared RIFF (or RF64) extent not yet consumed; null
     /// when the RIFF size is unknown and the extent is the rest of the stream.
     extent_left: ?u64 = 0,
@@ -249,10 +248,11 @@ pub const Parser = struct {
         return .{ .reader = reader, .limits = limits };
     }
 
-    /// Like `init`, for a stream whose first bytes content detection already
-    /// read (format/detect.zig). The parser reads them first.
-    pub fn initPrefixed(reader: *std.Io.Reader, limits: Limits, prefix: Prefix) Parser {
-        return .{ .reader = reader, .limits = limits, .prefix = prefix };
+    /// Like `init`, accepting only `variant`, as FFmpeg's `wav` and `w64`
+    /// demuxers each read only their own layout: a Wave64 stream read as WAV,
+    /// or a RIFF one read as Wave64, is `InvalidRiff`.
+    pub fn initVariant(reader: *std.Io.Reader, limits: Limits, variant: Variant) Parser {
+        return .{ .reader = reader, .limits = limits, .only = variant };
     }
 
     /// Makes `readHeader` and `finish` add the stream's tags to
@@ -271,10 +271,12 @@ pub const Parser = struct {
     pub fn readHeader(p: *Parser) Error!Info {
         std.debug.assert(p.state == .header);
         const tag = try p.readArray(4);
-        if (std.mem.eql(u8, &tag, "riff")) {
-            try p.readW64Header();
-        } else {
-            try p.readRiffHeader(tag);
+        const variant: Variant = if (std.mem.eql(u8, &tag, "riff")) .w64 else .wav;
+        // `initVariant` accepts only its own layout's start.
+        if (p.only) |only| if (only != variant) return error.InvalidRiff;
+        switch (variant) {
+            .w64 => try p.readW64Header(),
+            .wav => try p.readRiffHeader(tag),
         }
 
         while (true) {
@@ -401,8 +403,6 @@ pub const Parser = struct {
     }
 
     fn nextChunk(p: *Parser) Error!?ChunkHeader {
-        // The prefix is consumed by now: the container tag took it.
-        std.debug.assert(p.prefix.pending().len == 0);
         var buffer: [w64_chunk_header_len]u8 = undefined;
         const bytes = buffer[0..p.variant.chunkHeaderLen()];
         if (p.extent_left) |*left| {
@@ -649,11 +649,10 @@ pub const Parser = struct {
         if (p.extent_left) |*left| left.* -= size;
     }
 
-    /// Every header and chunk field goes through here, so the first read takes
-    /// any detection prefix; later reads find it empty.
+    /// A header field, read exactly into a local array.
     fn readArray(p: *Parser, comptime n: usize) Error![n]u8 {
         var bytes: [n]u8 = undefined;
-        p.prefix.readAll(p.reader, &bytes) catch |err| return mapRead(err);
+        p.reader.readSliceAll(&bytes) catch |err| return mapRead(err);
         return bytes;
     }
 };

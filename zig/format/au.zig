@@ -23,7 +23,6 @@ const std = @import("std");
 const audio = @import("../core/audio.zig");
 const samples_storage = @import("../core/samples.zig");
 const pcm = @import("../codec/pcm.zig");
-const Prefix = @import("prefix.zig").Prefix;
 
 /// Contract errors (see the AU fixture README), plus `IoFailure` for a failing
 /// reader.
@@ -120,8 +119,6 @@ const scratch_len = 4096;
 pub const Parser = struct {
     reader: *std.Io.Reader,
     limits: Limits,
-    /// Bytes content detection already read; they come before the reader's.
-    prefix: Prefix = .{},
     codec: pcm.Codec = .s16be,
     /// Bytes of one encoded frame; set by `readHeader`.
     frame_bytes: u32 = 0,
@@ -136,19 +133,12 @@ pub const Parser = struct {
         return .{ .reader = reader, .limits = limits };
     }
 
-    /// Like `init`, for a stream whose first bytes content detection already
-    /// read (format/detect.zig). The parser reads them first.
-    pub fn initPrefixed(reader: *std.Io.Reader, limits: Limits, prefix: Prefix) Parser {
-        return .{ .reader = reader, .limits = limits, .prefix = prefix };
-    }
-
     /// Reads and validates the header, then skips the annotation. Header fields
     /// are checked in file order; the first failing check wins.
     pub fn readHeader(p: *Parser) Error!Info {
         std.debug.assert(p.state == .header);
-        // The header is longer than any detection prefix, so this read takes it all.
         var header: [header_len]u8 = undefined;
-        p.prefix.readAll(p.reader, &header) catch |err| return mapRead(err);
+        p.reader.readSliceAll(&header) catch |err| return mapRead(err);
         if (!std.mem.eql(u8, header[0..4], ".snd")) return error.InvalidAu;
         const data_offset = std.mem.readInt(u32, header[4..8], .big);
         const data_size = std.mem.readInt(u32, header[8..12], .big);

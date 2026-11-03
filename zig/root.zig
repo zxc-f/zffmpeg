@@ -23,8 +23,9 @@
 //!   known-length writing for the WAV PCM encodings (`format/wav.zig`).
 //! - `au`: bounded Sun AU parsing and known-length writing for s16 big-endian
 //!   PCM (`format/au.zig`).
-//! - `detect`: WAV, Wave64 or AU content detection that hands the bytes it
-//!   read to the chosen parser (`format/detect.zig`).
+//! - `detect`: content detection with FFmpeg's winner, or a forced format,
+//!   replaying the bytes it read to the chosen parser (`format/detect.zig`,
+//!   `format/replay.zig`).
 //! - `convert`: synchronous WAV/Wave64/AU conversion and stream copy, with
 //!   every check made before output starts (`format/convert.zig`).
 //! - `file`: file and stream adapters for the WAV and AU paths, with
@@ -60,7 +61,7 @@ test {
     _ = @import("format/wav.zig");
     _ = @import("format/au.zig");
     _ = @import("format/detect.zig");
-    _ = @import("format/prefix.zig");
+    _ = @import("format/replay.zig");
     _ = @import("format/convert.zig");
     _ = @import("io/file.zig");
     // Test-only files: the WAV and AU fixture contracts and their integrity

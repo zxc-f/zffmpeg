@@ -5,15 +5,17 @@
 //! zffmpeg: converts or stream-copies one WAV, Wave64 or AU stream (TODO.md
 //! T13b, T21b).
 //!
-//!     zffmpeg [-y | -n] -i <input | -> [-c copy] [-f wav|w64|au] <output | ->
+//!     zffmpeg [-y | -n] [-f wav|w64|au] -i <input | -> [-c copy] [-f wav|w64|au] <output | ->
 //!
-//! The input container is detected from content. The output container is `-f`,
-//! or else the output name's `.wav`, `.w64` or `.au` extension; `-` (standard
-//! output) needs `-f`. `-c copy` copies the encoded samples, which works only
-//! when both containers carry the same codec; without it the samples are
-//! decoded and encoded again. Tags before the input's `data` are carried into
-//! a WAV output, as FFmpeg's default `-map_metadata` does (T21c). Output options follow `-i`, as in FFmpeg, where an option
-//! before `-i` applies to the input.
+//! The input container is detected from content as FFmpeg's probing would
+//! (T16), or forced with a `-f` before `-i`, as in FFmpeg, where an option
+//! before `-i` applies to the input. The output container is the `-f` after
+//! `-i`, or else the output name's `.wav`, `.w64` or `.au` extension; `-`
+//! (standard output) needs `-f`. `-c copy` copies the encoded samples, which
+//! works only when both containers carry the same codec; without it the
+//! samples are decoded and encoded again. Tags before the input's `data` are
+//! carried into a WAV output, as FFmpeg's default `-map_metadata` does
+//! (T21c).
 //!
 //! Every check that does not need the rest of the input happens before the
 //! output file is opened: the arguments, the input header, the operation
@@ -30,11 +32,13 @@ const status = @import("status.zig");
 const ExitStatus = status.ExitStatus;
 const printError = status.printError;
 
-const usage = "usage: zffmpeg [-y | -n] -i <input | -> [-c copy] [-f wav|w64|au] <output | ->\n";
+const usage = "usage: zffmpeg [-y | -n] [-f wav|w64|au] -i <input | -> [-c copy] [-f wav|w64|au] <output | ->\n";
 const help = usage ++
     \\
     \\Converts one WAV, Wave64 or AU stream (standard input or output with -). The
-    \\output container is -f, or the output name's .wav, .w64 or .au extension.
+    \\input container is detected from content, or forced with -f before -i. The
+    \\output container is the -f after -i, or the output name's .wav, .w64 or .au
+    \\extension.
     \\-c copy keeps the encoded samples and needs the same codec on both sides.
     \\-y replaces an existing output; without it (or with -n) an existing output
     \\is an error.
@@ -47,7 +51,9 @@ const help = usage ++
 const Command = struct {
     input: []const u8,
     output: []const u8,
-    /// The `-f` value, if any; resolved by `outputContainer`.
+    /// The `-f` value before `-i`, if any: the forced input container.
+    input_format: ?[]const u8,
+    /// The `-f` value after `-i`, if any; resolved by `outputContainer`.
     format: ?[]const u8,
     mode: av.convert.Mode,
     overwrite: bool,
@@ -102,6 +108,13 @@ fn run(init: std.process.Init) ExitStatus {
             return .unsupported;
         },
     };
+    const input_container: ?av.convert.Container = if (command.input_format) |name|
+        std.meta.stringToEnum(av.convert.Container, name) orelse {
+            printError(io, "zffmpeg: {s}: unsupported input format\n", .{name});
+            return .unsupported;
+        }
+    else
+        null;
     // The input's tags are carried, as FFmpeg's default -map_metadata does
     // (T21c, the project owner's choice).
     var tags: av.metadata.Dictionary = .empty;
@@ -109,6 +122,7 @@ fn run(init: std.process.Init) ExitStatus {
     return convert(io, command, .{
         .output = container,
         .mode = command.mode,
+        .input_format = input_container,
         .tags = .{ .gpa = init.gpa, .dictionary = &tags },
     });
 }
@@ -119,6 +133,7 @@ fn parse(args: []const [:0]const u8) Parsed {
     }
     var input: ?[]const u8 = null;
     var output: ?[]const u8 = null;
+    var input_format: ?[]const u8 = null;
     var format: ?[]const u8 = null;
     var copy = false;
     var yes = false;
@@ -137,14 +152,17 @@ fn parse(args: []const [:0]const u8) Parsed {
             if (i == args.len) return .{ .usage = .{ .reason = "missing value for", .arg = arg } };
             input = args[i];
         } else if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "-c") or std.mem.eql(u8, arg, "-c:a")) {
-            // Before -i, FFmpeg applies these to the input; that is not supported.
-            if (input == null) return .{ .usage = .{ .reason = "input options are not supported; put this after -i <input>", .arg = arg } };
+            // Before -i, FFmpeg applies these to the input; only -f is an
+            // input option here (T16).
+            const is_format = arg[1] == 'f';
+            if (input == null and !is_format) return .{ .usage = .{ .reason = "input options other than -f are not supported; put this after -i <input>", .arg = arg } };
             i += 1;
             if (i == args.len) return .{ .usage = .{ .reason = "missing value for", .arg = arg } };
             const value: []const u8 = args[i];
-            if (arg[1] == 'f') {
-                if (format != null) return .{ .usage = .{ .reason = "given twice", .arg = arg } };
-                format = value;
+            if (is_format) {
+                const slot = if (input == null) &input_format else &format;
+                if (slot.* != null) return .{ .usage = .{ .reason = "given twice", .arg = arg } };
+                slot.* = value;
             } else {
                 if (copy) return .{ .usage = .{ .reason = "given twice", .arg = arg } };
                 if (!std.mem.eql(u8, value, "copy")) return .{ .usage = .{ .reason = "only -c copy is supported; got", .arg = value } };
@@ -161,6 +179,7 @@ fn parse(args: []const [:0]const u8) Parsed {
     return .{ .command = .{
         .input = input orelse return .{ .usage = .{ .reason = "missing -i <input>" } },
         .output = output orelse return .{ .usage = .{ .reason = "missing output" } },
+        .input_format = input_format,
         .format = format,
         .mode = if (copy) .copy else .transcode,
         .overwrite = yes,
@@ -194,8 +213,13 @@ fn convert(io: std.Io, command: Command, request: av.convert.Request) ExitStatus
 
     var input_buffer: [av.file.default_buffer_len]u8 = undefined;
     var reader = input_file.readerStreaming(io, &input_buffer);
-    // `conversion` borrows `reader.interface`; both stay in this frame.
-    var conversion = av.convert.Conversion.init(&reader.interface, request, .{}) catch |err| {
+    // `source` borrows `reader.interface` and `conversion` borrows `source`;
+    // all three stay in this frame.
+    var source: av.detect.Input = undefined;
+    source.open(&reader.interface, request.input_format) catch |err| {
+        return fail(io, command.input, withReadCause(err, &reader));
+    };
+    var conversion = av.convert.Conversion.init(&source, request, .{}) catch |err| {
         return fail(io, command.input, withReadCause(err, &reader));
     };
 

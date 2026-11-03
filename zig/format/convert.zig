@@ -61,6 +61,9 @@ pub const Mode = enum {
 pub const Request = struct {
     output: Container,
     mode: Mode,
+    /// Parse the input as this container instead of probing it (FFmpeg's
+    /// input `-f`, T16).
+    input_format: ?Container = null,
     /// Carry the input's tags (T21c): `init` puts the tags FFmpeg's command
     /// would carry (`carriedTags`) from those before the input's `data` into
     /// the empty `tags.dictionary`, under FFmpeg's names, and a WAV output
@@ -112,11 +115,12 @@ comptime {
     std.debug.assert(transfer_len >= largest_frame);
 }
 
-/// One conversion from a borrowed reader to a borrowed writer. Create it with
-/// `init`, then call `run` once. It holds the reader pointer but nothing
-/// points into it, so it may be moved between the two calls.
+/// One conversion from an opened input to a borrowed writer. Create it with
+/// `init`, then call `run` once. It holds a pointer to the `detect.Input`,
+/// which must stay in place, but nothing points into the conversion, so it
+/// may be moved between the two calls.
 pub const Conversion = struct {
-    input: Input,
+    input: Parser,
     limits: Limits,
     summary: Summary,
     /// The input's tags, for the output header.
@@ -125,19 +129,19 @@ pub const Conversion = struct {
     next_pts: i64 = 0,
 
     /// One parser per format; the WAV parser also reads Wave64.
-    const Input = union(enum) {
+    const Parser = union(enum) {
         wav: wav.Parser,
         au: au.Parser,
     };
 
-    /// Detects the input container, reads its header and checks the request
-    /// and the output header. Reads at most up to the first sample and writes
+    /// Reads the header of the opened `source` (probed, or forced with
+    /// `Request.input_format` when it was opened) and checks the request and
+    /// the output header. Reads at most up to the first sample and writes
     /// nothing.
-    pub fn init(reader: *std.Io.Reader, request: Request, limits: Limits) InitError!Conversion {
-        const detected = try detect.detect(reader);
-        var input: Input = switch (detected.container) {
-            .wav, .w64 => .{ .wav = .initPrefixed(reader, limits.wav, detected.prefix) },
-            .au => .{ .au = .initPrefixed(reader, limits.au, detected.prefix) },
+    pub fn init(source: *detect.Input, request: Request, limits: Limits) InitError!Conversion {
+        var input: Parser = switch (source.container) {
+            .wav, .w64 => .{ .wav = source.wavParser(limits.wav) },
+            .au => .{ .au = .init(source.reader(), limits.au) },
         };
         // The tags as the file stores them, renamed once the header is read.
         var stored: metadata.Dictionary = .empty;
@@ -155,7 +159,7 @@ pub const Conversion = struct {
                 // Only WAV can have unknown-length data, and only on request.
                 const frame_count: ?u64 = info.frame_count;
                 break :blk .{
-                    .input = detected.container,
+                    .input = source.container,
                     .output = request.output,
                     .mode = request.mode,
                     .input_codec = info.codec,
@@ -427,7 +431,9 @@ fn outputFailure(err: wav.WriteError) std.Io.Writer.Error {
 
 /// Converts one stream: `Conversion.init`, then `run`.
 pub fn convert(reader: *std.Io.Reader, out: *std.Io.Writer, request: Request, limits: Limits) Error!Summary {
-    var conversion: Conversion = try .init(reader, request, limits);
+    var source: detect.Input = undefined;
+    try source.open(reader, request.input_format);
+    var conversion: Conversion = try .init(&source, request, limits);
     try conversion.run(out);
     return conversion.summary;
 }
@@ -520,12 +526,15 @@ fn rawOf(container: Container, bytes: []const u8, out: []u8) ![]const u8 {
 /// Runs every matrix cell on one accepted fixture. WAV and Wave64 carry the
 /// same codecs and AU none of theirs, so copy works only within the WAV
 /// family or AU, and transcoding only from samples stored as s16 (other
-/// storage needs T23a).
-fn expectEveryCell(input: Container, bytes: []const u8, comptime stream: fixtures.Stream, writer_output: bool) !void {
+/// storage needs T23a). An input probing does not detect (`detected` false)
+/// is forced, as `-f` would.
+fn expectEveryCell(input: Container, detected: bool, bytes: []const u8, comptime stream: fixtures.Stream, writer_output: bool) !void {
     var expected_buffer: [1024]u8 = undefined;
     const expected = stream.samples.littleEndian(&expected_buffer);
     const input_codec = comptime std.meta.stringToEnum(pcm.Codec, @tagName(stream.codec)["pcm_".len..]).?;
-    for (all_cells) |request| {
+    for (all_cells) |cell| {
+        var request = cell;
+        if (!detected) request.input_format = input;
         var reader: std.Io.Reader = .fixed(bytes);
         var buffer: [1024]u8 = undefined;
         var out: std.Io.Writer = .fixed(&buffer);
@@ -571,12 +580,12 @@ test "every accepted fixture gives its samples in every supported cell, and copy
             const bytes = fixtures.bytes(fixture.name);
             // Without a tag dictionary in the request, tags are not carried.
             const canonical = fixture.writer_output and fixture.writer_header != .rf64 and fixture.untagged();
-            try expectEveryCell(wavContainer(bytes), bytes, fixture.expected.accept, canonical);
+            try expectEveryCell(wavContainer(bytes), fixture.detected != null, bytes, fixture.expected.accept, canonical);
         }
     }
     inline for (fixtures.au.all) |fixture| {
         if (fixture.expected == .accept) {
-            try expectEveryCell(.au, fixtures.au.bytes(fixture.name), fixture.expected.accept, fixture.writer_output);
+            try expectEveryCell(.au, fixture.detected != null, fixtures.au.bytes(fixture.name), fixture.expected.accept, fixture.writer_output);
         }
     }
 }
@@ -594,7 +603,9 @@ test "the input is read as contiguous, timestamped packets of whole frames" {
     try writer.finish();
 
     var reader: std.Io.Reader = .fixed(bytes);
-    var conversion: Conversion = try .init(&reader, .{ .output = .au, .mode = .transcode }, .{});
+    var source: detect.Input = undefined;
+    try source.open(&reader, null);
+    var conversion: Conversion = try .init(&source, .{ .output = .au, .mode = .transcode }, .{});
     var storage: [transfer_len]u8 = undefined;
     var expected_pts: i64 = 0;
     while (try conversion.readPacket(&storage)) |packet| {
@@ -815,7 +826,9 @@ test "an output the writer cannot represent is rejected before any output" {
     try std.testing.expectError(error.SizeOverflow, convert(&huge, &out, .{ .output = .au, .mode = .transcode }, .{}));
     // The same stream fits in WAV: init succeeds, and only the missing data fails.
     var huge_again: std.Io.Reader = .fixed(&header);
-    _ = try Conversion.init(&huge_again, .{ .output = .wav, .mode = .copy }, .{});
+    var source: detect.Input = undefined;
+    try source.open(&huge_again, null);
+    _ = try Conversion.init(&source, .{ .output = .wav, .mode = .copy }, .{});
 
     // The output's own rate limit is checked too.
     var mono: std.Io.Reader = .fixed(fixtures.bytes("mono_8k"));

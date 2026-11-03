@@ -50,7 +50,7 @@ const ProbeCase = struct {
     stderr_contains: ?[]const u8 = null,
 };
 
-const usage_line = "usage: zffprobe <file.wav | file.w64 | file.au | ->\n";
+const usage_line = "usage: zffprobe [-f wav|w64|au] <file.wav | file.w64 | file.au | ->\n";
 
 const mono_8k_report =
     \\format=wav
@@ -244,8 +244,11 @@ const probe_cases = [_]ProbeCase{
     .{ .name = "valid mono file", .fixture = "mono_8k", .exit_code = 0, .stdout = mono_8k_report, .stderr = "" },
     .{ .name = "valid stereo from a pipe", .args = &.{"-"}, .stdin_fixture = "stereo_44k1", .exit_code = 0, .stdout = stereo_44k1_report, .stderr = "" },
     .{ .name = "empty data", .fixture = "empty_data", .exit_code = 0, .stdout = empty_data_report, .stderr = "" },
-    .{ .name = "empty input", .fixture = "empty_input", .exit_code = 2, .stderr_contains = ": Truncated\n" },
-    .{ .name = "malformed header", .fixture = "not_riff", .exit_code = 2, .stderr_contains = ": InvalidRiff\n" },
+    // T16: no demuxer claims an empty input or a non-RIFF start, as in FFmpeg.
+    .{ .name = "empty input", .fixture = "empty_input", .exit_code = 3, .stderr_contains = ": UnknownFormat\n" },
+    .{ .name = "forced, an empty input is truncated", .args = &.{ "-f", "wav" }, .fixture = "empty_input", .exit_code = 2, .stderr_contains = ": Truncated\n" },
+    .{ .name = "unknown content", .fixture = "not_riff", .exit_code = 3, .stderr_contains = ": UnknownFormat\n" },
+    .{ .name = "malformed header", .args = &.{ "-f", "wav" }, .fixture = "not_riff", .exit_code = 2, .stderr_contains = ": InvalidRiff\n" },
     .{ .name = "error after the data", .fixture = "duplicate_data", .exit_code = 2, .stderr_contains = ": InvalidWave\n" },
     .{ .name = "truncated pipe", .args = &.{"-"}, .stdin_fixture = "truncated_data", .exit_code = 2, .stderr = "zffprobe: -: Truncated\n" },
     .{ .name = "unsupported container", .fixture = "rifx_big_endian", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
@@ -258,9 +261,13 @@ const probe_cases = [_]ProbeCase{
     .{ .name = "help", .args = &.{"--help"}, .exit_code = 0, .stdout_contains = usage_line, .stderr = "" },
     .{ .name = "valid AU file", .set = .au, .fixture = "au_mono_8k", .exit_code = 0, .stdout = au_mono_8k_report, .stderr = "" },
     .{ .name = "valid AU from a pipe", .set = .au, .args = &.{"-"}, .stdin_fixture = "au_stereo_44k1", .exit_code = 0, .stdout = au_stereo_44k1_report, .stderr = "" },
-    .{ .name = "empty AU data", .set = .au, .fixture = "au_empty_data", .exit_code = 0, .stdout = au_empty_data_report, .stderr = "" },
+    // FFmpeg's AU probe needs a nonzero data size, so an empty AU file is read only when forced.
+    .{ .name = "empty AU data is not detected", .set = .au, .fixture = "au_empty_data", .exit_code = 3, .stderr_contains = ": UnknownFormat\n" },
+    .{ .name = "empty AU data, forced", .set = .au, .args = &.{ "-f", "au" }, .fixture = "au_empty_data", .exit_code = 0, .stdout = au_empty_data_report, .stderr = "" },
     .{ .name = "malformed AU header", .set = .au, .fixture = "au_offset_too_small", .exit_code = 2, .stderr_contains = ": InvalidAu\n" },
-    .{ .name = "non-AU magic goes to WAV", .set = .au, .fixture = "au_bad_magic", .exit_code = 2, .stderr_contains = ": InvalidRiff\n" },
+    .{ .name = "a wrong AU magic is not detected", .set = .au, .fixture = "au_bad_magic", .exit_code = 3, .stderr_contains = ": UnknownFormat\n" },
+    .{ .name = "a wrong AU magic, forced", .set = .au, .args = &.{ "-f", "au" }, .fixture = "au_bad_magic", .exit_code = 2, .stderr_contains = ": InvalidAu\n" },
+    .{ .name = "an unknown -f", .args = &.{ "-f", "mp3" }, .fixture = "mono_8k", .exit_code = 3, .stderr = "zffprobe: mp3: unsupported input format\n" },
     .{ .name = "unsupported AU encoding", .set = .au, .fixture = "au_encoding_g726", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
     .{ .name = "unknown AU size", .set = .au, .fixture = "au_unknown_size", .exit_code = 3, .stderr_contains = ": UnsupportedStreamingSize\n" },
     .{ .name = "AU rate limit", .set = .au, .fixture = "au_rate_over_limit", .exit_code = 5, .stderr_contains = ": LimitExceeded\n" },
@@ -307,7 +314,7 @@ const ConvertCase = struct {
     stderr_contains: ?[]const u8 = null,
 };
 
-const zffmpeg_usage = "usage: zffmpeg [-y | -n] -i <input | -> [-c copy] [-f wav|w64|au] <output | ->\n";
+const zffmpeg_usage = "usage: zffmpeg [-y | -n] [-f wav|w64|au] -i <input | -> [-c copy] [-f wav|w64|au] <output | ->\n";
 
 // The paired WAV and AU fixtures hold the same samples, so each is the exact
 // expected output of converting the other.
@@ -344,7 +351,8 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "AU copy to AU", .set = .au, .args = &.{"-i"}, .input = "au_stereo_44k1", .tail = &.{ "-c", "copy", "-f", "au", "-" }, .exit_code = 0, .stdout = au_stereo_44k1, .stderr = "" },
     .{ .name = "AU to WAV", .set = .au, .args = &.{"-i"}, .input = "au_stereo_44k1", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_stereo_44k1, .stderr = "" },
     .{ .name = "AU at 192 kHz to WAV from a pipe", .set = .au, .args = &.{ "-i", "-" }, .stdin_input = "au_mono_192k_rate_limit", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_mono_192k, .stderr = "" },
-    .{ .name = "empty AU to WAV", .set = .au, .args = &.{"-i"}, .input = "au_empty_data", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_empty_data, .stderr = "" },
+    // FFmpeg's AU probe needs a nonzero data size: an empty AU input must be forced.
+    .{ .name = "empty AU to WAV", .set = .au, .args = &.{ "-f", "au", "-i" }, .input = "au_empty_data", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_empty_data, .stderr = "" },
     .{ .name = "WAV copy to AU is rejected", .args = &.{"-i"}, .input = "mono_8k", .tail = &.{ "-c", "copy", "-f", "au", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
     .{ .name = "AU copy to WAV is rejected", .set = .au, .args = &.{"-i"}, .input = "au_mono_8k", .tail = &.{ "-c:a", "copy", "-f", "wav", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
     .{ .name = "output format from the extension", .args = &.{"-i"}, .input = "mono_8k", .output_file = "out.au", .output_bytes = au_mono_8k, .exit_code = 0, .stderr = "" },
@@ -367,7 +375,9 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "24-bit copy to AU is rejected", .args = &.{"-i"}, .input = "s24_stereo_48k_extensible", .tail = &.{ "-c", "copy", "-f", "au", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
     .{ .name = "an error after the data", .args = &.{"-i"}, .input = "duplicate_data", .tail = &.{ "-f", "au", "-" }, .exit_code = 2, .stderr_contains = ": InvalidWave\n" },
     .{ .name = "a truncated pipe", .set = .au, .args = &.{ "-i", "-" }, .stdin_input = "au_truncated_data", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stderr = "zffmpeg: -: Truncated\n" },
-    .{ .name = "a malformed header", .args = &.{"-i"}, .input = "not_riff", .tail = &.{ "-f", "au", "-" }, .exit_code = 2, .stderr_contains = ": InvalidRiff\n" },
+    .{ .name = "unknown content", .args = &.{"-i"}, .input = "not_riff", .tail = &.{ "-f", "au", "-" }, .exit_code = 3, .stderr_contains = ": UnknownFormat\n" },
+    .{ .name = "a malformed header, forced", .args = &.{ "-f", "wav", "-i" }, .input = "not_riff", .tail = &.{ "-f", "au", "-" }, .exit_code = 2, .stderr_contains = ": InvalidRiff\n" },
+    .{ .name = "an unknown input -f", .args = &.{ "-f", "mp3", "-i" }, .input = "mono_8k", .tail = &.{ "-f", "au", "-" }, .exit_code = 3, .stderr = "zffmpeg: mp3: unsupported input format\n" },
     .{ .name = "an unsupported input", .args = &.{"-i"}, .input = "rifx_big_endian", .tail = &.{ "-f", "au", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
     .{ .name = "an input limit", .args = &.{"-i"}, .input = "chunks_over_limit", .tail = &.{ "-f", "au", "-" }, .exit_code = 5, .stderr_contains = ": LimitExceeded\n" },
     .{ .name = "a missing input", .args = &.{ "-i", "no-such-file.wav", "-f", "wav", "-" }, .exit_code = 4, .stderr = "zffmpeg: no-such-file.wav: FileNotFound\n" },
@@ -377,7 +387,7 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "help", .args = &.{"--help"}, .exit_code = 0, .stdout_contains = zffmpeg_usage, .stderr = "" },
     .{ .name = "-y with -n", .args = &.{ "-y", "-n", "-i", "a.wav", "b.wav" }, .exit_code = 1, .stderr = "zffmpeg: -y and -n contradict each other\n" ++ zffmpeg_usage },
     .{ .name = "two inputs", .args = &.{ "-i", "a.wav", "-i", "b.wav", "c.wav" }, .exit_code = 1, .stderr_contains = "only one input is supported\n" },
-    .{ .name = "an input option", .args = &.{ "-f", "wav", "-i", "a.wav", "b.wav" }, .exit_code = 1, .stderr_contains = "input options are not supported; put this after -i <input>: -f\n" },
+    .{ .name = "an input option", .args = &.{ "-c", "copy", "-i", "a.wav", "b.wav" }, .exit_code = 1, .stderr_contains = "input options other than -f are not supported; put this after -i <input>: -c\n" },
     .{ .name = "an option after the output", .args = &.{ "-i", "a.wav", "b.wav", "-y" }, .exit_code = 1, .stderr_contains = "options after the output are not supported: -y\n" },
     .{ .name = "no output", .args = &.{ "-i", "a.wav" }, .exit_code = 1, .stderr_contains = "missing output\n" },
     .{ .name = "an unknown option", .args = &.{ "-i", "a.wav", "-ar", "8000", "b.wav" }, .exit_code = 1, .stderr_contains = "unknown option: -ar\n" },

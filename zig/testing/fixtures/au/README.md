@@ -87,21 +87,24 @@ order.
 
 ## Content detection
 
-`zffprobe` and `av.detect` (T12c) choose the container from content, not the
-file name. They read at most the first 4 bytes: `.snd` selects this contract's
-parser, and anything else, including input shorter than 4 bytes, goes to the
-WAV parser, whose results are those of the [WAV contract](../README.md). The
-bytes read are handed to the chosen parser, so a pipe loses nothing. Two
-fixtures therefore report differently through detection than to the AU parser
-alone:
+Since T16, `zffprobe`, `zffmpeg` and `av.detect` choose the container as
+FFmpeg's probing does ([port.md](../../../../port.md#initial-probe-output)): AU
+when `.snd` starts at least 24 bytes and the five header fields after it are
+all nonzero (FFmpeg's `au_probe`). A stream no demuxer recognizes is
+`UnknownFormat`; `-f au` forces this contract's parser, as `ffprobe -f au`
+does. Each fixture's `detected` field in `manifest.zon` records FFmpeg's
+winner, which `compare.py` checks against FFmpeg itself. The parser results
+in the table are those with the format forced; the fixtures marked "not
+detected" give `UnknownFormat` without it:
 
-| Fixture | AU parser | Through detection |
+| Fixture | AU parser (`-f au`) | Probing |
 | --- | --- | --- |
-| `au_bad_magic` | `InvalidAu` | `InvalidRiff`: not AU by content, so the WAV parser reports it. |
-| `au_empty_data` | accepted | accepted: the magic alone selects AU, while FFmpeg's content probe does not detect it. |
+| `au_bad_magic` | `InvalidAu` | not detected: no `.snd`. Before T16 the WAV parser reported `InvalidRiff`. |
+| `au_empty_data` | accepted | not detected: the data size is 0. Before T16 the magic alone selected AU. |
+| `au_empty_input`, `au_truncated_header` | `Truncated` | not detected: shorter than 24 bytes. |
+| `au_rate_zero`, `au_channels_zero` and others with a zero field | as listed | not detected. |
 
-Every other fixture gives the same result both ways.
-
+Every other fixture is detected as AU and gives the same result both ways.
 ## Decisions
 
 FFmpeg's behavior is from `libavformat/au.c` and `pcm.c` at the pinned
@@ -139,7 +142,7 @@ differences above.
 | `au_mono_8k` | accepted | 48 | accept: mono, 8000 Hz, 8 frames; writer output | Canonical writer output: 24-byte header, 8 zero annotation bytes, encoding 3, 8 kHz mono. | `b3ee2a6ef998ac87910e2d7210cea80afd062854036c8de03d8758c1b29e9613` |
 | `au_stereo_44k1` | accepted | 48 | accept: stereo, 44100 Hz, 4 frames; writer output | Canonical stereo at 44.1 kHz; samples interleave left/right. | `4d9aac23caa7b2c90f7fd34b10c3f526364082ca56ac2b051bcfe68be37863a9` |
 | `au_mono_192k_rate_limit` | accepted | 40 | accept: mono, 192000 Hz, 4 frames; writer output | Sample rate exactly at the 192,000 Hz limit. | `ad4207ff73ca69e7022590635223c426659be36ad944989ca12d31cff1985de9` |
-| `au_empty_data` | accepted | 32 | accept: mono, 8000 Hz, 0 frames; writer output | Data size 0 is an empty stream. FFmpeg's content probe needs a nonzero data size, so it does not detect this file; forced with `-f au` it reads it. | `a5ccce11ea71cf99c1208dbf91803d697089d578ebe81bf2f75322d4eee3d4b6` |
+| `au_empty_data` | accepted | 32 | accept: mono, 8000 Hz, 0 frames; writer output; not detected (probing picks no format) | Data size 0 is an empty stream. FFmpeg's content probe needs a nonzero data size, so it does not detect this file; forced with `-f au` it reads it. | `a5ccce11ea71cf99c1208dbf91803d697089d578ebe81bf2f75322d4eee3d4b6` |
 | `au_header_24` | accepted | 32 | accept: mono, 8000 Hz, 4 frames | Data offset 24: the minimal header, with no annotation. | `eee93e7eab7ca84a60bd3229d360bb18b96a31703975158ad5b0f8acf2610320` |
 | `au_annotation_text` | accepted | 48 | accept: mono, 8000 Hz, 4 frames | A 16-byte text annotation (offset 40) is skipped and ignored; FFmpeg reads it as metadata. | `507cad839041cb6e89c0634397e5f21a72327333698e5320cee3847726b8b5e5` |
 | `au_annotation_odd_length` | accepted | 37 | accept: mono, 8000 Hz, 4 frames | A 5-byte annotation (offset 29): the data offset needs no alignment. | `4668188d2dd6f9b9f85887127b1b1b5b9fc61ce0c4ed75fbf446ac1259a0f1af` |
@@ -152,9 +155,9 @@ differences above.
 | `au_f32_mono` | encodings | 64 | accept: mono, 8000 Hz, 8 frames, `pcm_f32be`; writer output | Encoding 6, 32-bit float; every bit kept, NaN payload included. | `c79883f0a8c93e0a38f122ba73b82c6d5acea64113f016af91b8a4d3e50c2264` |
 | `au_f64_stereo_96k` | encodings | 96 | accept: stereo, 96000 Hz, 4 frames, `pcm_f64be`; writer output | Encoding 7, 64-bit float, at 96 kHz. | `c41010d664f522d968190a589f20af0c6e83d71c809f7fb5b95b786dbb8540ce` |
 | `au_alaw_mono_8k` | encodings | 40 | accept: mono, 8000 Hz, 8 frames, `pcm_alaw`; writer output | Encoding 27, A-law; decodes to s16. | `2b41318fcffacc0e3e0a53a0667e9a59ded8d429098ca188f77dccd5f26cc74e` |
-| `au_empty_input` | header | 0 | reject: `Truncated` | Zero-byte input. | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
-| `au_truncated_header` | header | 20 | reject: `Truncated` | Input ends inside the 24-byte header. | `cd16e50772d175ca42b4dd5bd4302c42f9ff2e8fda801c855758afc315ece3dd` |
-| `au_bad_magic` | header | 48 | reject: `InvalidAu` | Magic `.sne` instead of `.snd`. | `b9613aad46845b44797f3a9d025ac8acd91a0df48932989784dd549b2a6285c5` |
+| `au_empty_input` | header | 0 | reject: `Truncated`; not detected (probing picks no format) | Zero-byte input. | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
+| `au_truncated_header` | header | 20 | reject: `Truncated`; not detected (probing picks no format) | Input ends inside the 24-byte header. | `cd16e50772d175ca42b4dd5bd4302c42f9ff2e8fda801c855758afc315ece3dd` |
+| `au_bad_magic` | header | 48 | reject: `InvalidAu`; not detected (probing picks no format) | Magic `.sne` instead of `.snd`. | `b9613aad46845b44797f3a9d025ac8acd91a0df48932989784dd549b2a6285c5` |
 | `au_offset_too_small` | header | 32 | reject: `InvalidAu` | Data offset 16 is below the 24-byte header. FFmpeg ignores it and reads data from byte 24. | `bdec00c6a12cbad3a8d77f8a7724462fe9612ec5baad08badd6bd7dbc5be415e` |
 | `au_annotation_over_limit` | limits | 32 | reject: `LimitExceeded` | Data offset 1048601 declares one byte more than the 1,048,576-byte annotation limit; rejected from the header, before any annotation is read. | `b04c7cba1da7b7414a3c3be2b927d0cf74a465297b6692568e616ac14bbcc46b` |
 | `au_truncated_annotation` | header | 32 | reject: `Truncated` | Data offset 40, but input ends after 8 annotation bytes. | `d72ebc3f0582392e7fdbadbfeaf3013b0f707883a6a78619534603c58f26f7b9` |
@@ -168,10 +171,10 @@ differences above.
 | `au_truncated_mid_sample` | size | 37 | reject: `Truncated` | Data size 8, but input ends inside the third sample. | `bc91cb8379d7a65bb05ee136e9378d85e76c0de31b0d74d7d1ce96b905de84ae` |
 | `au_encoding_g726` | format | 36 | reject: `UnsupportedFormat` | Encoding 23 (4-bit G.726) waits for T31c. | `5150af0881e4c158eee09d3159a24253b5973fa802088160c398d8a8364ee1a6` |
 | `au_encoding_unknown` | format | 36 | reject: `UnsupportedFormat` | Encoding 99 is not an AU encoding. | `c22a72e95b2dbda4e144be6a35e85072332302ea04cdc7878df8c0aabd4e4531` |
-| `au_rate_zero` | format | 40 | reject: `InvalidFormat` | Sample rate 0. | `7bccf402af28a56ddde19e3ddc1c16d9c16042eb2b80edc4f2cad20bbc45d5a0` |
+| `au_rate_zero` | format | 40 | reject: `InvalidFormat`; not detected (probing picks no format) | Sample rate 0. | `7bccf402af28a56ddde19e3ddc1c16d9c16042eb2b80edc4f2cad20bbc45d5a0` |
 | `au_rate_over_limit` | limits | 40 | reject: `LimitExceeded` | Sample rate 192001, one above the limit. | `a95f07d4fd74824917682ec3928a27bee43f5100e020cde8cf01718dc0624ce5` |
-| `au_channels_zero` | format | 40 | reject: `InvalidFormat` | Zero channels. | `19c5020adb16fa771c4766f27bede267b7b3f01f2f418d191717821284c7e4a1` |
+| `au_channels_zero` | format | 40 | reject: `InvalidFormat`; not detected (probing picks no format) | Zero channels. | `19c5020adb16fa771c4766f27bede267b7b3f01f2f418d191717821284c7e4a1` |
 | `au_channels3` | format | 44 | reject: `UnsupportedFormat` | Three channels: only mono and stereo are supported. | `fcce15a7e6b105a461c62ebda8bc70bddddaecf68b6a1a5cd56b87b36dc1d9d7` |
 | `au_limit_before_unsupported` | precedence | 36 | reject: `LimitExceeded` | Data size over the limit and encoding 99: the data size field comes first. | `572bd49c00e6a74b04615d07f4f48b42cc7faa5644791c91f8407b1d4cf9b364` |
-| `au_unsupported_before_invalid` | precedence | 36 | reject: `UnsupportedFormat` | Encoding 24 (G.722) and sample rate 0: the encoding field comes first. (Before T22a it used encoding 6, now supported.) | `4d9bf4b697802293982178987c44517b4b87cc67789892ab0672f8d54ccf96b2` |
+| `au_unsupported_before_invalid` | precedence | 36 | reject: `UnsupportedFormat`; not detected (probing picks no format) | Encoding 24 (G.722) and sample rate 0: the encoding field comes first. (Before T22a it used encoding 6, now supported.) | `4d9bf4b697802293982178987c44517b4b87cc67789892ab0672f8d54ccf96b2` |
 <!-- END GENERATED FIXTURE TABLE -->

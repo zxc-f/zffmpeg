@@ -3,9 +3,10 @@
 //! zffprobe: validates one WAV, Wave64 or AU stream and reports it as
 //! `key=value` lines.
 //!
-//!     zffprobe <file.wav | file.w64 | file.au | ->
+//!     zffprobe [-f wav|w64|au] <file.wav | file.w64 | file.au | ->
 //!
-//! The container is detected from content, not the file name (`av.detect`).
+//! The container is detected from content, not the file name, as FFmpeg's
+//! probing would (`av.detect`, T16); `-f` forces it, as `ffprobe -f` does.
 //! `-` reads standard input, which may be a pipe. The report goes to stdout
 //! only after the whole stream validates; diagnostics go to stderr. The output
 //! schema and exit codes are documented in port.md ("Initial probe output"):
@@ -20,11 +21,12 @@ const status = @import("status.zig");
 const ExitStatus = status.ExitStatus;
 const printError = status.printError;
 
-const usage = "usage: zffprobe <file.wav | file.w64 | file.au | ->\n";
+const usage = "usage: zffprobe [-f wav|w64|au] <file.wav | file.w64 | file.au | ->\n";
 const help = usage ++
     \\
     \\Validates a WAV, Wave64 or AU stream (standard input with -) and prints its
-    \\stream parameters as key=value lines. Exit codes: 0 success, 1 usage,
+    \\stream parameters as key=value lines. The format is detected from content,
+    \\or forced with -f. Exit codes: 0 success, 1 usage,
     \\2 invalid or truncated media, 3 unsupported media, 4 I/O failure,
     \\5 resource limit, 6 cancellation.
     \\
@@ -44,20 +46,28 @@ fn run(init: std.process.Init) ExitStatus {
     if (args.len == 2 and (std.mem.eql(u8, args[1], "-h") or std.mem.eql(u8, args[1], "--help"))) {
         return status.writeStdout(io, "zffprobe", help);
     }
-    if (args.len != 2) {
+    const forced = args.len == 4 and std.mem.eql(u8, args[1], "-f");
+    if (args.len != 2 and !forced) {
         printError(io, usage, .{});
         return .usage;
     }
-    const path = args[1];
+    const format: ?av.detect.Container = if (forced)
+        std.meta.stringToEnum(av.detect.Container, args[2]) orelse {
+            printError(io, "zffprobe: {s}: unsupported input format\n", .{args[2]});
+            return .unsupported;
+        }
+    else
+        null;
+    const path = args[args.len - 1];
     const gpa = init.gpa;
     var tags: av.metadata.Dictionary = .empty;
     defer tags.deinit(gpa);
-    const tag_sink: av.wav.Tags = .{ .gpa = gpa, .dictionary = &tags };
+    const options: av.detect.Options = .{ .format = format, .tags = .{ .gpa = gpa, .dictionary = &tags } };
     var buffer: [av.file.default_buffer_len]u8 = undefined;
     const result = if (std.mem.eql(u8, path, "-"))
-        av.file.probeFile(io, std.Io.File.stdin(), &buffer, .{}, tag_sink)
+        av.file.probeFile(io, std.Io.File.stdin(), &buffer, .{}, options)
     else
-        av.file.probePath(io, std.Io.Dir.cwd(), path, &buffer, .{}, tag_sink);
+        av.file.probePath(io, std.Io.Dir.cwd(), path, &buffer, .{}, options);
     const info = result catch |err| {
         printError(io, "zffprobe: {s}: {t}\n", .{ path, err });
         return status.of(err);

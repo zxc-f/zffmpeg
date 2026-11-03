@@ -96,6 +96,9 @@ pub const Fixture = struct {
     /// Lowercase hexadecimal SHA-256 of the file.
     sha256: []const u8,
     expected: Expected,
+    /// The format FFmpeg's content probing picks for the file, or null for
+    /// none (T16); detection must agree before any parser runs.
+    detected: ?Container,
     /// The writer (T08) must produce exactly these bytes from `expected.accept`.
     writer_output: bool = false,
     /// ... with this header (T21b): RIFF is the default; RF64 is written
@@ -131,6 +134,9 @@ pub const Fixture = struct {
 };
 
 pub const WriterHeader = enum { riff, rf64, w64 };
+
+/// The formats content probing can choose (T16), by FFmpeg's names.
+pub const Container = enum { wav, w64, au };
 
 /// One tag as bytes: values may hold any byte but NUL.
 pub const Tag = struct {
@@ -173,6 +179,8 @@ pub const au = struct {
         /// Lowercase hexadecimal SHA-256 of the file.
         sha256: []const u8,
         expected: Au.Expected,
+        /// The format FFmpeg's content probing picks, or null for none (T16).
+        detected: ?Container,
         /// The AU writer (T12b) must produce exactly these bytes from `expected.accept`.
         writer_output: bool = false,
         /// The result with the parser's `unknown_length` option (T22a), where

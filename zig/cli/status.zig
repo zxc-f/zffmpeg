@@ -29,7 +29,7 @@ pub const Error = av.convert.Error ||
 pub fn of(err: Error) ExitStatus {
     return switch (err) {
         error.InvalidRiff, error.InvalidWave, error.InvalidAu, error.InvalidFormat, error.Truncated => .invalid,
-        error.UnsupportedFormat, error.UnsupportedStreamingSize, error.UnsupportedOperation => .unsupported,
+        error.UnsupportedFormat, error.UnsupportedStreamingSize, error.UnsupportedOperation, error.UnknownFormat => .unsupported,
         error.LimitExceeded,
         error.SizeOverflow,
         error.OutOfMemory,
