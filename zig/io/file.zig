@@ -179,8 +179,7 @@ test "AU files agree with memory for every fixture and buffer size" {
                 try std.testing.expectEqual(info.frame_count, got.frame_count);
                 try std.testing.expectEqual(info.format, got.format);
             } else |want| {
-                const err = if (result) |_| return error.TestExpectedError else |e| e;
-                try std.testing.expectEqualStrings(@errorName(want), @errorName(err));
+                try std.testing.expectError(want, result);
             }
         }
     }

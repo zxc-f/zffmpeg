@@ -97,8 +97,7 @@ fn expectSameResult(expected: anytype, got: Error!Probed, container: Container) 
         try std.testing.expectEqual(info.format, probed.format);
         try std.testing.expectEqual(info.frame_count, probed.frame_count);
     } else |want| {
-        const err = if (got) |_| return error.TestExpectedError else |e| e;
-        try std.testing.expectEqualStrings(@errorName(want), @errorName(err));
+        try std.testing.expectError(want, got);
     }
 }
 
