@@ -13,7 +13,9 @@ fixtures with expected results ([zig/testing/fixtures](zig/testing/fixtures/READ
 and CI compares them with a pinned FFmpeg build
 ([zig/testing/reference](zig/testing/reference/README.md)). This standalone
 repository tracks the port's own files. FFmpeg in `.references/ffmpeg` remains
-the behavioral reference. Native Windows runs are outstanding (T11); T12 is next.
+the behavioral reference. Verification is Linux-only during development;
+Windows and ARM wait for the platform milestone (TODO.md T62–T63). T12a, the
+contract for AU with signed 16-bit big-endian PCM, is next.
 
 The goal is a native Zig multimedia library and tools, built incrementally from
 FFmpeg's functionality. Use idiomatic Zig APIs and explicit resource ownership.
@@ -593,6 +595,10 @@ Progress is measured by working, tested behavior, not by translated file counts.
 | 5 — next compressed slice | Select one end-to-end path based on needs, such as MP3 demux/decode; scope AAC, H.264 and MP4/Matroska separately. | Document the chosen profiles, parser/demux dependencies, seek/error/drain behavior and reference comparisons. |
 | 6 — optimization/platforms | SIMD, threading, hardware and devices; broader CLI/API adapters. | Scalar comparisons, benchmarks, CPU fallback checks, platform integration tests and explicit compatibility claims. |
 
+[TODO.md](TODO.md#roadmap-to-a-nearly-complete-port) breaks phases 3–6 into
+milestones 4–12 (T14–T64), with dependencies, upstream references and
+completion criteria, and lists what is not planned.
+
 Later slices start with native implementations and no external codec libraries.
 Choose the dependency policy explicitly before a format requiring compression
 support, such as PNG; a zlib binding must not silently count as a native port.
@@ -697,10 +703,10 @@ Linux runners and also executes Windows binaries through Wine. Its broad FATE
 configuration enables GPL/nonfree components. This project instead uses a
 dedicated minimal GitHub Actions [Linux workflow](.github/workflows/ci.yml),
 which builds and tests the package in every mode and runs the reference
-comparison.
-Native Windows CI is deferred; until a Windows job exists, Windows evidence
-comes only from recorded local runs. Neither Wine nor a cross-compile
-substitutes for a native run.
+comparison. Development is verified on Linux only by decision (TODO.md
+"Platform policy"): native Windows and ARM runs start in the platform milestone
+(T62–T63), and code stays portable meanwhile (CLAUDE.md "Portable Zig code").
+Neither Wine nor a cross-compile substitutes for a native run.
 
 Use format specifications and independent hand-checked vectors alongside the
 C reference. A mismatch needs investigation; agreeing with an upstream bug is
@@ -722,8 +728,10 @@ particularly stricter malformed-input handling and unsupported features.
 - Feed identical data in different chunk sizes, including one byte at a time;
   results must be independent of I/O chunk boundaries. Run non-seekable cases
   separately from seekable input and report which behaviors require seeking.
-- Add native Windows and Linux validation early; cross-compilation alone does
-  not validate OS behavior. Compile additional targets as modules mature.
+- Validate natively on Linux during development; Windows and ARM validation
+  comes in the platform milestone (TODO.md T62–T63), once the code is more
+  complete. Cross-compilation alone does not validate OS behavior, but CI
+  compiles Windows and AArch64 targets to catch Linux-only APIs early.
 
 Use Debug and ReleaseSafe during implementation; exercise optimized builds with
 malformed inputs before release. Explicit parser checks must work when runtime
@@ -820,14 +828,15 @@ For each implemented feature, add a ledger entry containing: source paths and
 upstream commit, Zig destination, license provenance, supported subset,
 dependencies, verification performed, known limitations and optimization status.
 Use these statuses: **planned**, **implemented**, **verified**, **optimized**.
-Only mark a feature verified after its acceptance evidence exists.
+Only mark a feature verified after its acceptance evidence exists: work that
+has passed TODO.md gates G2–G4 is implemented, and it becomes verified at G5.
 
 | Feature | Status | Evidence / next action |
 | --- | --- | --- |
 | Project guidance and architecture | Implemented | `CLAUDE.md` (imported by `AGENTS.md`) and this file. |
 | Standalone Zig I/O example | Verified | Original [source](zig/examples/io_patterns.zig); formatting and 6/6 tests per mode in Debug, ReleaseSafe and ReleaseFast on native Windows, Zig 0.17.0. A seventh test, for the file adapter's retained `.err`, was added later; all 7 tests passed per mode in [Linux CI run 41544372319](https://github.com/zxc-f/zffmpeg/actions/runs/41544372319), Zig 0.17.0, but have not been rerun on Windows. Individual fields only; no media parser, allocations or optimization claims. Provenance and reference evidence: [zigimg analysis](doc/zigimg-reference.md). |
 | PCM s16 kernels | Verified | [zig/codec/pcm.zig](zig/codec/pcm.zig), promoted from the former `zig/examples/pcm_s16.zig` example (T04). Original, `LGPL-2.1-or-later`; behavior follows `libavcodec/pcm.c`. Exhaustive `i16` round trip and fixture cross-check passed in [run 41553566007](https://github.com/zxc-f/zffmpeg/actions/runs/41553566007). Scalar only. |
-| Linux CI | Implemented | [Workflow](.github/workflows/ci.yml) on `ubuntu-24.04`. The `linux` job requires `zig version` 0.17.0, checks `zig fmt` on `build.zig`, `build.zig.zon` and `zig/`, that the fixtures are current and that every example is registered, runs `zig build` in Debug and ReleaseSafe and `zig build test` (unit tests and `zffprobe` process runs) in Debug, ReleaseSafe and ReleaseFast, and cross-compiles for x86_64-windows-gnu, aarch64-linux-musl and aarch64-macos without running. The `reference` job builds the pinned FFmpeg and runs the comparison (see the FFmpeg reference row). First example-only pass: [run 41544372319](https://github.com/zxc-f/zffmpeg/actions/runs/41544372319); first build/test pass: [run 41548960006](https://github.com/zxc-f/zffmpeg/actions/runs/41548960006); both jobs: [run 41557971301](https://github.com/zxc-f/zffmpeg/actions/runs/41557971301). Native Windows CI is deferred (T11). |
+| Linux CI | Implemented | [Workflow](.github/workflows/ci.yml) on `ubuntu-24.04`. The `linux` job requires `zig version` 0.17.0, checks `zig fmt` on `build.zig`, `build.zig.zon` and `zig/`, that the fixtures are current and that every example is registered, runs `zig build` in Debug and ReleaseSafe and `zig build test` (unit tests and `zffprobe` process runs) in Debug, ReleaseSafe and ReleaseFast, and cross-compiles for x86_64-windows-gnu, aarch64-linux-musl and aarch64-macos without running. The `reference` job builds the pinned FFmpeg and runs the comparison (see the FFmpeg reference row). First example-only pass: [run 41544372319](https://github.com/zxc-f/zffmpeg/actions/runs/41544372319); first build/test pass: [run 41548960006](https://github.com/zxc-f/zffmpeg/actions/runs/41548960006); both jobs: [run 41557971301](https://github.com/zxc-f/zffmpeg/actions/runs/41557971301). Windows and ARM runs wait for TODO.md T62–T63. |
 | Zig toolchain/build/package | Verified | [build.zig](build.zig) (exact Zig 0.17.0 check, `av` module, `libzffmpeg.a`, test step for `av` and each example), [build.zig.zon](build.zig.zon) (toolchain-generated fingerprint, `.paths` allowlist, no dependencies), [zig/README.md](zig/README.md). Original `LGPL-2.1-or-later` files. `zig build` passed in Debug and ReleaseSafe and `zig build test` passed 9/9 in Debug, ReleaseSafe and ReleaseFast in [run 41548960006](https://github.com/zxc-f/zffmpeg/actions/runs/41548960006); failure propagation shown in [run 41548611661](https://github.com/zxc-f/zffmpeg/actions/runs/41548611661). Linux only; no C build dependency. |
 | Audio and time types | Verified | [zig/core/audio.zig](zig/core/audio.zig) and [zig/core/time.zig](zig/core/time.zig) (T05). Original, `LGPL-2.1-or-later`; rescaling follows `av_rescale_q_rnd` except for overflow and INT64_MIN (see [notes.md](notes.md)). Verified in [run 41553566007](https://github.com/zxc-f/zffmpeg/actions/runs/41553566007) against oracle-derived vectors. T10 compared the WAV path's time base and duration with FFmpeg; `rescale` has no direct FFmpeg differential. |
 | WAV fixture contract | Verified | [zig/testing/fixtures](zig/testing/fixtures/README.md): 52 fixtures generated independently of the Zig code by `generate.py` (original, `LGPL-2.1-or-later`), with expected results, boundary decisions and error precedence; integrity-tested by [fixtures.zig](zig/testing/fixtures.zig) in [run 41550661260](https://github.com/zxc-f/zffmpeg/actions/runs/41550661260). The parser (T06) and FFmpeg (T10) agree with every expected result. |
@@ -865,6 +874,11 @@ language/build documentation; review suggestions are not themselves evidence.
   synchronization. `cleanExit` is success-only and a no-op in Debug builds.
 - Reference CI: FFmpeg's workflow has Wine coverage but no native Windows
   runner, so it supplies no native Windows evidence for this project.
+- Adopted on 2026-11-03: development is verified on Linux x86-64 only. Windows,
+  ARM and macOS verification moves to TODO.md T62–T63, when the code is more
+  complete; new code follows CLAUDE.md "Portable Zig code" so that those runs
+  find little to fix, and CI keeps compile-only Windows and AArch64 builds as a
+  guard.
 - Not adopted: a mandatory T07 split into a custom incremental state machine,
   or indiscriminate license tagging. Known-size sequential input uses the same
   blocking Reader parser; nonblocking resumability remains a separate capability.
