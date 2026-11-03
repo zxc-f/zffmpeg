@@ -21,10 +21,10 @@ synchronous conversion pipeline (`av.convert`, T13a) and the `zffmpeg`
 command (T13b). T14a, packets, frames and send/receive stages, T20a, decoded sample storage,
 T20b, the PCM encodings, and T21, complete WAV (T21a, extensible headers and
 encodings; T21b, RF64/BW64, Sony Wave64 and unknown-length input; T21c, tags,
-with T17b's metadata dictionary), and T22a, every AU PCM encoding and
-unknown-length AU, are verified. T16's scored probing with FFmpeg's winner and
-`-f` landed (part 1). **Next: T22b (AIFF and AIFF-C), with the rest of T16;
-T22c (raw PCM) is also ready. See [Near-term order](#near-term-order).**
+with T17b's metadata dictionary), T22a, every AU PCM encoding and
+unknown-length AU, T16, the codec and format registries with FFmpeg's scored
+content probing, and T22b, AIFF and AIFF-C, are verified. **Next: T22c (raw
+PCM), then T22d (CAF). See [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
 [How tasks are completed](#how-tasks-are-completed) describes. Tasks and
@@ -943,7 +943,7 @@ names, not as an empty framework.
   Done when vectors from an exact rational oracle, including `i64` extremes,
   missing values and negative timestamps, pass in every build mode.
 
-- [ ] **T16 — Codec and format descriptors, registries and probing.** Needs
+- [x] **T16 — Codec and format descriptors, registries and probing.** Needs
   T13b. Start with the first subtask that adds a third format (T22b, T22d or
   T26a), replacing T12c's two-format detection.
   Reference: `libavcodec/codec_desc.c`, `allcodecs.c`,
@@ -957,19 +957,66 @@ names, not as an empty framework.
   winner as FFmpeg on the fixtures, including short and ambiguous inputs, and
   formats without a content signature (raw PCM) are never chosen by probing.
 
-  Progress (not yet checked): part 1 at `42a6cf5` replaced T12c's 4-byte
-  routing with FFmpeg's scored probing, as the project owner chose
-  (`zig/format/detect.zig`, `replay.zig`): the demuxer registry, checked at
-  compile time for duplicates and probe sizes; the ported `wav_probe`,
-  `w64_probe` and `au_probe`; FFmpeg's winner and tie rule over the first
-  2048 bytes, replayed to the parser; `UnknownFormat` for undetected input;
-  `-f` to force the input format in both tools. On local Windows, the
-  detection tests pass in every mode, and `compare.py` finds FFmpeg's probe
-  winner equal to each fixture's recorded one on 159/159 fixtures (19
-  detected by no demuxer, the short ones among them). Remaining: the codec
-  and muxer descriptor registries, AIFF's probe with T22b, the
-  never-chosen check once raw PCM lands (T22c), and FFmpeg's larger-buffer
-  retry when a probe can score at most 25.
+  ```text
+  ID / parent: T16 / Milestone 4
+  State: verified
+  Supported behavior and explicit exclusions: codec descriptors (media type,
+    FFmpeg's name and long name, intra-only/lossy/lossless) for the 16 PCM
+    codecs; decoder and encoder registries with compile-time stage-signature
+    checks; the format registry (names, long names, demuxer probes, muxer
+    extensions, MIME types, default and carried codecs); FFmpeg's scored
+    content probing over the first 2048 bytes, replayed to the parser, with
+    its winner and tie rule; -f in both tools; probe-less demuxers never
+    chosen. Excluded until a consumer needs them: FFmpeg's larger-buffer
+    retry (no registered probe scores at most 25; the first, MP3, adds it),
+    extension and MIME hints (no registered demuxer declares one), a general
+    codec identifier beyond pcm.Codec (the first non-PCM codec), vtable
+    dispatch.
+  Needs (verified) / lands with / verified after: T13b (verified); lands with
+    T22b (AIFF, the third format).
+  Contract and source provenance: port.md "Initial probe output" and
+    "Dispatch and registration should grow with the implementation", notes.md
+    "Registries (T16)" and "Content detection"; codec_desc.c, allcodecs.c,
+    allformats.c, format.c and the demuxer probes read for behavior. Original
+    code.
+  Required fixtures / optional corpus: every fixture's `detected` field (203:
+    121 WAV, 38 AU, 44 AIFF), computed independently by generate.py. No
+    optional corpus.
+  Ownership, state transitions and limits: tables are compile-time constants;
+    probing reads at most 2048 bytes into the caller's Input, which the parser
+    then replays; nothing allocates.
+  Comparison rule and intentional differences: FFmpeg's probe winner (its
+    debug log) equals each fixture's recorded one; the registry dump equals
+    the reference build's ffmpeg -codecs, -formats and -h muxer=..., and
+    covers exactly the codecs and formats it enables. No differences.
+  Implementation files and test entry points: zig/codec/registry.zig,
+    zig/format/registry.zig, detect.zig, replay.zig, the probes in wav.zig,
+    au.zig and aiff.zig, stage.check, both CLIs, registry_dump.zig,
+    compare.py; tests in those files and the probe and convert cases.
+  Evidence commit / Linux CI run / reference report: 42a6cf5 (part 1),
+    c829e01 (part 2) / local Windows runs instead (below) / local compare.py
+    run (below).
+  Required cases: passed 203/203 detection results and the registry check /
+    failed 0 / missing 0.
+  Optional cases: none.
+  Fuzz seeds, budget and result: detect.zig's entry gained AIFF seeds; run
+    under zig build test. No sustained run.
+  Remaining work or blocker / next action: none; see the introduction.
+  ```
+
+  Evidence (G5, local Windows runs with Zig 0.17.0): part 1 at `42a6cf5`
+  replaced T12c's 4-byte routing with FFmpeg's scored probing, as the project
+  owner chose; part 2 at `c829e01` added the codec and format registries. At
+  `c829e01`, `zig build test` passed 122/122 steps in Debug, ReleaseSafe and
+  ReleaseFast (`av` 165 tests, 47 `zffprobe` and 58 `zffmpeg` process runs);
+  fmt, `generate.py --check`, the four cross builds and a Linux type check
+  passed. `compare.py` with no failures: FFmpeg's probe winner equals the
+  recorded one on 203/203 fixtures (24 detected by no demuxer), and the
+  registry dump equals FFmpeg's listings for 16 codecs, 4 formats and 4
+  muxers. Mutations each failed: a stage registered with the wrong signature
+  and an extension shared by two muxers stop compilation, and a dump with a
+  wrong long name or a missing extension fails `compare.py`. The
+  never-chosen rule is tested with a probe-less demuxer.
 
 - [ ] **T17 — Options, metadata and diagnostics.** Checked when T17a and T17b
   are.
@@ -1470,12 +1517,76 @@ names, not as an empty framework.
     µ-law copies between WAV and AU included, and 125/125 unsupported cells;
     159/159 pipe results. The C vectors regenerate unchanged. A mutation of
     the encoding table failed the tests.
-  - [ ] **T22b — AIFF and AIFF-C.** Needs T16 and T20b. Big-endian fields, the
+  - [x] **T22b — AIFF and AIFF-C.** Needs T16 and T20b. Big-endian fields, the
     80-bit extended sample rate converted exactly, and the PCM, A-law, µ-law
     and float compression types.
     Done when probing tells AIFF from the other formats, decoding matches, and
     mux output is byte-exact where FFmpeg's is deterministic, with any header
     differences documented.
+
+    ```text
+    ID / parent: T22b / T22
+    State: verified
+    Supported behavior and explicit exclusions: AIFF and AIFF-C read and
+      written: s8 and s16/s24/s32 big-endian by sample size (plain AIFF, NONE,
+      twos), raw (u8), sowt (s16le), fl32, fl64, alaw, ulaw, in24, in32,
+      case-insensitive; the 80-bit rate converted as FFmpeg does; mono and
+      stereo; known length; in zffprobe and zffmpeg (-f aiff, .aif/.aiff/
+      .afc/.aifc), with copy between containers sharing a codec. Excluded:
+      compressed AIFF-C (ima4, MAC3, GSM, G.72x, QDM2, ...), sample sizes
+      other than 8/16/24/32, SSND before COMM, more than 2 channels, AIFF tags
+      (NAME, AUTH, (c), ANNO, ID3), unknown length.
+    Needs (verified) / lands with / verified after: T20b (verified); T16,
+      which landed with it and is verified in the same record.
+    Contract and source provenance: port.md "AIFF contract",
+      zig/testing/fixtures/aiff/README.md (rules, decisions, precedence),
+      notes.md "AIFF contract"; aiffdec.c, aiffenc.c and aiff.c read for
+      behavior. Original code.
+    Required fixtures / optional corpus: 44 AIFF fixtures (21 accepted with
+      13 writer outputs, 23 rejected), one per contract rule and decision. No
+      optional corpus.
+    Ownership, state transitions and limits: no allocation, sequential, the
+      FORM size bounds every chunk; 192 kHz and 4096 chunks by default.
+    Comparison rule and intentional differences: FFmpeg decodes every accepted
+      AIFF fixture (forced and detected) and every AIFF file the write driver
+      and zffmpeg write to the same samples and fields; FFmpeg's AIFF muxer
+      copies each writer-output fixture to identical bytes; zffmpeg's AU and
+      AIFF outputs of untagged writer-output inputs equal FFmpeg's own
+      conversion. Rejected-fixture verdicts are recorded (11 of 23 accepted
+      by FFmpeg); channel_layout=unknown is the one field difference.
+    Implementation files and test entry points: zig/format/aiff.zig
+      (probeScore, Parser, probe, decodeToRaw, Writer), detect.zig,
+      registry.zig, convert.zig, both CLIs, status.zig, write_driver.zig,
+      generate.py, compare.py, build-ffmpeg.sh; tests in aiff.zig, detect.zig,
+      convert.zig, fixtures.zig; probe and convert cases in build.zig.
+    Evidence commit / Linux CI run / reference report: 791bd7f (and c829e01,
+      which moved the probe) / local Windows runs instead (below) / local
+      compare.py run (below).
+    Required cases: passed 21/21 accepted and 23/23 rejected AIFF fixtures,
+      13/13 FFmpeg AIFF copies, 13/13 Zig-written AIFF files / failed 0 /
+      missing 0.
+    Optional cases: none.
+    Fuzz seeds, budget and result: aiff.zig has its own entry (six seeds);
+      run under zig build test. No sustained run.
+    Remaining work or blocker / next action: none; see the introduction.
+    ```
+
+    Evidence (G5, local Windows runs with Zig 0.17.0): commit `791bd7f`, then
+    `c829e01`. `zig build test` passed 122/122 steps in Debug, ReleaseSafe
+    and ReleaseFast (`av` 165 tests; the AIFF fixtures from memory, one-byte
+    reads, probing, readSamples and the writer); fmt, `generate.py --check`,
+    the four cross builds and a Linux type check passed. The reference,
+    rebuilt with the AIFF demuxer and muxer, ran `compare.py` with no
+    failures: 21/21 accepted AIFF fixtures decode in FFmpeg with `-f aiff` to
+    the expected samples, and their detection agrees; 23/23 rejected ones give
+    the contract's status; 44/44 Zig-written files (13 AIFF) read as
+    expected; FFmpeg's `-bitexact` AIFF copy of all 13 writer-output fixtures
+    is byte-identical; 456/456 `zffmpeg` outputs and 232/232 unsupported
+    cells, with 105/105 AU and AIFF outputs equal to FFmpeg's own conversion
+    (s16le WAV into AIFF-C `sowt` among them); 203/203 pipe results. FFmpeg
+    cannot read its own pipe-written AIFF (`FORM` size 0) either, as
+    recorded.
+
   - [ ] **T22c — Raw PCM demux and mux.** Needs T20b. Explicit parameters only
     (`-f s16le` and the rest); probing never selects it.
     Done when payloads are byte-exact both ways and probing ignores raw input.

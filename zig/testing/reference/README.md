@@ -159,30 +159,43 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   fields and exactly the expected samples, and detection must
   find `au` except for the recorded difference. For rejected fixtures FFmpeg's
   verdict is recorded but not checked. `zffprobe` must give the expected
-  report, or the contract's status and error, except where content detection
-  sends a file without the `.snd` magic to the WAV parser (`au_bad_magic`
-  reports `InvalidRiff`).
-- **Zig-written files.** The write driver writes every WAV and AU
+  report, or the contract's status and error, forced with `-f au` where
+  FFmpeg's probe detects nothing, which then gives `UnknownFormat` (T16;
+  before it, `au_bad_magic` went to the WAV parser and reported `InvalidRiff`).
+- **AIFF fixtures (T22b).** As for AU, with `-f aiff`: accepted fixtures must
+  give the expected codec, storage, fields and samples forced and agree on
+  detection; FFmpeg's verdict on rejected ones is recorded; `zffprobe` must
+  give the report or the contract's status and error, forced with `-f aiff`
+  where FFmpeg's probe detects nothing.
+- **Registries (T16).** The `registry-dump` test tool prints the codec
+  descriptors, decoders and encoders, formats and muxers. They must equal the
+  reference build's `ffmpeg -codecs` (flags and long names), `ffmpeg -formats`
+  and `ffmpeg -h muxer=...` (extensions, MIME type, default audio codec), and
+  cover exactly the codecs and formats it enables; no registered demuxer may
+  declare an extension, since detection ignores file names.
+- **Zig-written files.** The write driver writes every WAV, AU and AIFF
   writer-output stream from raw samples, in its codec (T21a: every WAV
   encoding, plain and extensible; T21b: RF64 and Wave64 too). Each file must
   equal its fixture byte for byte, and FFmpeg must decode it to the expected
   samples and stream.
-- **zffmpeg (T13b).** Every accepted WAV, Wave64 and AU fixture is converted
-  in each supported cell of the operation matrix (transcode to WAV, Wave64 or
-  AU; copy into a container that carries its codec) into a real file, which
-  FFmpeg must probe and decode to the fixture's samples and stream; the same
-  command through standard input and output must give the same bytes. Copy
-  into a container without the codec must exit 3 with `UnsupportedOperation`
-  and create no file.
+- **zffmpeg (T13b).** Every accepted WAV, Wave64, AU and AIFF fixture is
+  converted in each supported cell of the operation matrix (transcode to WAV,
+  Wave64, AU or AIFF; copy into a container that carries its codec) into a
+  real file, which FFmpeg must probe and decode to the fixture's samples and
+  stream; the same command through standard input and output must give the
+  same bytes. Copy into a container without the codec must exit 3 with
+  `UnsupportedOperation` and create no file. Since T22b, the AU and AIFF
+  outputs of every untagged writer-output input must also equal FFmpeg's own
+  `ffmpeg -bitexact` conversion byte for byte.
 - **FFmpeg's AU muxer (T22a).** FFmpeg copies each AU writer-output fixture
   into AU (`-f au -i … -bitexact -c:a copy -f au`); the result must equal the
   fixture byte for byte, so FFmpeg's muxer and the Zig writer emit the same
-  header for every encoding.
+  header for every encoding. FFmpeg's AIFF muxer likewise for AIFF (T22b).
 - **FFmpeg-written Wave64 (T21b).** FFmpeg copies each writer-output WAV
   fixture with an 8-byte-aligned payload into Wave64; `zffprobe` must report
   it and `zffmpeg -c copy -f wav` must give back exactly the fixture. FFmpeg's
   muxer counts the alignment padding in its sizes, unlike ours.
-- **Pipes.** `zffprobe -` reading each of the 138 WAV and AU fixtures from a
+- **Pipes.** `zffprobe -` reading each of the 203 WAV, AU and AIFF fixtures from a
   pipe must give the same status, report and error as reading the file, with
   the path shown as `-`.
 - **Not implemented.** Checks whose Zig code has not landed are listed apart
@@ -236,6 +249,26 @@ build include the WAV muxer. Its first run, locally on Windows at commit
   unsupported cells (copy across containers, transcoding samples not stored as
   s16) rejected before any output: **54/54**.
 - Fixtures whose pipe result equals the file result: **105/105**.
+
+T22b added AIFF and AIFF-C, and the AIFF demuxer and muxer to the reference
+build; T16 added the registry check. The run, locally on Windows at commit
+`c829e01` with MSYS2 UCRT64 clang 23.1.4, reported no failures:
+
+- Accepted AIFF fixtures FFmpeg and zffprobe read as expected: **21/21**;
+  rejected ones with zffprobe's status: **23/23**; FFmpeg accepts 11/23
+  (recorded, below).
+- Registries equal to FFmpeg's listings: 16 codecs, 4 formats, 4 muxers.
+- FFmpeg's probe winner equals the recorded one: **203/203** fixtures (24
+  detected by no demuxer).
+- Zig-written files FFmpeg reads as expected: **44/44** (13 AIFF).
+- FFmpeg's AIFF muxer: its `-bitexact` copy of each of the **13/13** AIFF
+  writer-output fixtures is byte-identical; AU **11/11** as before.
+- zffmpeg outputs FFmpeg reads as expected, equal through pipes: **456/456**;
+  unsupported cells: **232/232**; AU and AIFF outputs of untagged
+  writer-output inputs equal to FFmpeg's own conversion: **105/105** (s16le
+  WAV copies into AIFF-C `sowt`, as FFmpeg's muxer tags it).
+- WAV **49/49** and **72/72**, AU **16/16** and **22/22**, unknown length
+  **12/12**, FFmpeg-written Wave64 **12/12**, pipes **203/203**.
 
 T22a added every AU PCM encoding and unknown-length AU, and the AU muxer to
 the reference build. Its run, locally on Windows at commit `2e68534` with
@@ -472,7 +505,27 @@ requested, but no decoder found for: …"). The detection column is the format
 `ffprobe` reports without `-f`; "not detected" means it found no format or
 could not open the file.
 
+### AIFF fixtures
+
+FFmpeg accepts 11 of the 23 rejected AIFF fixtures with `-f aiff`; the
+contract is deliberately stricter
+([decisions](../fixtures/aiff/README.md#decisions)): `aiff_missing_ssnd`
+(0 samples, the duration from `COMM`), `aiff_ssnd_before_comm` and
+`aiff_duplicate_comm` (4 samples), `aiff_channels3` (6 samples),
+`aiff_rate_over_limit` (192001 Hz), `aiff_bits12` (read as 16-bit),
+`aiff_frames_mismatch` (the 4 samples present), `aiff_data_not_block_aligned`
+(2 samples), `aiff_ssnd_offset_too_big` (0 samples), `aiff_chunk_exceeds_form`
+(4 samples) and `aiff_truncated_data` (2 samples). It rejects the rest;
+`aifc_unknown_type` probes as `adpcm_ima_qt`, which this build cannot decode.
+The 5 fixtures FFmpeg's probe does not detect (`aiff_empty_input`,
+`aiff_not_form`, `aiff_bad_form_type`, `aiff_form_size_small`,
+`aiff_truncated_header`) are `UnknownFormat` in zffprobe without `-f aiff`.
+AIFF has no layout field without `CHAN`, so ffprobe reports
+`channel_layout=unknown` for the accepted ones, the one known field
+difference.
+
 ## Updating the reference
+
 
 Change the commit or configuration only in `build-ffmpeg.sh`; the cache key
 follows the script, so CI rebuilds. Then update the tables here from the new

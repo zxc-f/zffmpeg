@@ -13,25 +13,28 @@ multimedia functionality. Implement algorithms and APIs in Zig; compiling FFmpeg
 Current state: the WAV and AU PCM paths are complete (T01–T12), WAV with every
 PCM encoding, plain or extensible (T21a), in RIFF, RF64/BW64 or Sony Wave64,
 with unknown-length input behind an option (T21b) and LIST/INFO and `bext`
-tags (T21c), and AU with every PCM encoding of FFmpeg's table and unknown
-length (T22a). The `av`
+tags (T21c), AU with every PCM encoding of FFmpeg's table and unknown
+length (T22a), and AIFF and AIFF-C with every PCM encoding of FFmpeg's table
+(T22b). The `av`
 module (rooted at `zig/root.zig`) exports `pcm` (the PCM encodings,
 kernels and s16 decoder/encoder stages), `audio`, `time`, `samples` (decoded sample storage
 for every sample format), `packet`, `frame`, `stage` (the send/receive
-contract), `metadata` (the tag dictionary), `wav` (also Wave64) and
-`au` (bounded parsers and known-length writers), `detect` (WAV, Wave64 or AU
-content detection), `convert` (the synchronous T13a conversion and stream-copy
-pipeline) and `file` (file and pipe adapters). Two tools sit on it:
-`zffprobe` probes WAV, Wave64 and AU, tags included, and `zffmpeg` (T13b)
-converts and stream-copies between them, carrying tags. Tests cover 121 WAV
-and 38 AU fixtures, process runs of both tools, and a CI comparison against a
+contract), `metadata` (the tag dictionary), `wav` (also Wave64), `au` and
+`aiff` (bounded parsers and known-length writers), `codecs` and `formats`
+(the codec and format registries), `detect` (content detection with
+FFmpeg's scored probes), `convert` (the synchronous T13a conversion and
+stream-copy pipeline) and `file` (file and pipe adapters). Two tools sit on it:
+`zffprobe` probes WAV, Wave64, AU and AIFF, tags included, and `zffmpeg` (T13b)
+converts and stream-copies between them, carrying tags. Tests cover 121 WAV,
+38 AU and 44 AIFF fixtures, process runs of both tools, and a CI comparison against a
 pinned FFmpeg build that also reads every `zffmpeg` output. Verification is
 Linux-only during development; Windows and ARM wait for T62–T63. T13, T14a
 (packets, frames and stages), T17b (the metadata dictionary), T20a (decoded
 sample storage), T20b (the PCM encodings) and T21 (complete WAV: T21a
 extensible headers and encodings, T21b RF64, Wave64 and unknown length, T21c
-tags) and T22a (AU encodings) are verified; T16 (format descriptors and
-probing) with T22b (AIFF) is next, and TODO.md
+tags), T22a (AU encodings), T16 (codec and format registries and probing)
+and T22b (AIFF) are verified; T22c (raw PCM) is next, and TODO.md
+
 lays out the roadmap through T64. When the state changes, update the current-state statements in
 README.md, port.md ("Status and scope"), the TODO.md introduction and this file
 together.

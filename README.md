@@ -3,17 +3,19 @@
 A native Zig multimedia library and tools, developed incrementally from FFmpeg's
 documented behavior and algorithms, one supported capability at a time.
 
-Current state: two complete paths work. The `av` library reads and writes
+Current state: three containers work. The `av` library reads and writes
 every WAV PCM encoding (u8, 16- to 64-bit integers, float, A-law, mu-law, plain
-or WAVE_FORMAT_EXTENSIBLE) in RIFF, RF64/BW64 or Sony Wave64, past 4 GiB, and
-every PCM encoding of Sun AU (bounded parsers, known-length writers, file and
-pipe adapters); it can also read unknown-length WAV and AU input behind an option,
-and reads and writes WAV's LIST/INFO and `bext` tags as FFmpeg does. The
-`zffprobe` tool detects WAV, Wave64 or AU from the content, validates the file
-and reports its stream and tags. Both are checked against 121 WAV and 38 AU
-fixtures and against a pinned FFmpeg build in CI (Linux). The `zffmpeg` tool
-converts and stream-copies between WAV, Wave64 and AU, carrying tags as
-FFmpeg does, through the
+or WAVE_FORMAT_EXTENSIBLE) in RIFF, RF64/BW64 or Sony Wave64, past 4 GiB,
+every PCM encoding of Sun AU, and AIFF and AIFF-C with every PCM encoding of
+FFmpeg's AIFF table (bounded parsers, known-length writers, file and pipe
+adapters); it can also read unknown-length WAV and AU input behind an option,
+and reads and writes WAV's LIST/INFO and `bext` tags as FFmpeg does. Codec
+and format registries name everything as FFmpeg does. The `zffprobe` tool
+detects WAV, Wave64, AU or AIFF from the content with FFmpeg's scored probes,
+validates the file and reports its stream and tags. Both are checked against
+121 WAV, 38 AU and 44 AIFF fixtures and against a pinned FFmpeg build in CI
+(Linux). The `zffmpeg` tool converts and stream-copies between WAV, Wave64, AU
+and AIFF, carrying tags as FFmpeg does, through the
 library's synchronous pipeline (T13), which runs on packets, frames and
 send/receive stages (T14a), and FFmpeg reads every output it writes for the
 fixtures. [TODO.md](TODO.md) holds the completion
@@ -47,14 +49,19 @@ the [unplanned features](TODO.md#not-planned).
   contract (121 fixtures, expected results, decisions, error precedence).
 - [zig/testing/fixtures/au/README.md](zig/testing/fixtures/au/README.md): the AU
   fixture contract (38 fixtures, parser and detection expectations kept separate).
+- [zig/testing/fixtures/aiff/README.md](zig/testing/fixtures/aiff/README.md): the
+  AIFF fixture contract (44 fixtures, AIFF and AIFF-C).
 - [zig/testing/reference/README.md](zig/testing/reference/README.md): the pinned
   FFmpeg reference build and the recorded comparison results.
 - [zig/format/wav.zig](zig/format/wav.zig), [zig/format/au.zig](zig/format/au.zig),
+  [zig/format/aiff.zig](zig/format/aiff.zig), [zig/format/registry.zig](zig/format/registry.zig),
+  [zig/codec/registry.zig](zig/codec/registry.zig),
   [zig/format/detect.zig](zig/format/detect.zig), [zig/format/convert.zig](zig/format/convert.zig),
   [zig/io/file.zig](zig/io/file.zig), [zig/cli/probe.zig](zig/cli/probe.zig),
-  [zig/cli/ffmpeg.zig](zig/cli/ffmpeg.zig): WAV and AU parsers and writers,
-  content detection, the conversion pipeline, file adapters, and the
-  `zffprobe` and `zffmpeg` tools.
+  [zig/cli/ffmpeg.zig](zig/cli/ffmpeg.zig): WAV, AU and AIFF parsers and
+  writers, the format and codec registries, content detection, the conversion
+  pipeline, file adapters, and the `zffprobe` and `zffmpeg` tools.
+
 - [zig/examples/io_patterns.zig](zig/examples/io_patterns.zig): runnable I/O example.
 - [zig/codec/pcm.zig](zig/codec/pcm.zig): signed 16-bit PCM decode/encode kernels.
 - [zig/core/audio.zig](zig/core/audio.zig), [zig/core/time.zig](zig/core/time.zig):
