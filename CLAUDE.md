@@ -15,8 +15,8 @@ Current state: the first WAV/PCM path is complete. The `av` module (rooted at
 known-length writer) and `file` (file and pipe adapters); `zffprobe` is the
 first tool. Tests cover 52 fixtures, process runs of `zffprobe`, and a CI
 comparison against a pinned FFmpeg build. Verification is Linux-only during
-development; Windows and ARM wait for T62–T63. T12 is next, and TODO.md lays out
-the roadmap through T64. When the state changes, update the current-state
+development; Windows and ARM wait for T62–T63. T12a (the AU contract) is next,
+and TODO.md lays out the roadmap through T64. When the state changes, update the current-state
 statements in README.md, port.md ("Status and scope"), the TODO.md introduction
 and this file together.
 
@@ -93,10 +93,12 @@ package manifest and per-file provenance.
     `testing/` created only when their first feature lands.
   - "Provenance and feature tracking": ledger statuses are planned,
     implemented, verified and optimized.
-- [TODO.md](TODO.md): ordered tasks T01–T64 with stable IDs, dependencies and
-  "Done when" criteria. Check an item only with an evidence note naming the
-  files and checks run (for CI, the run link); keep unfinished items unchecked
-  with what remains. Update the port.md ledger when a whole capability changes.
+- [TODO.md](TODO.md): tasks T01–T64 and their subtasks (T12a, ...) with stable
+  IDs, dependency words (**Needs**, **Lands with**, **Verified after**), gates
+  G0–G5, a progress card and "Done when" criteria. Check an item only at G5,
+  with an evidence note naming the files, the checks, the commit and the CI run
+  link; keep unfinished items unchecked with what remains. Update the port.md
+  ledger when a whole capability changes.
 - [notes.md](notes.md): every revisable project decision, its reason and what to
   change together. Add new revisable decisions there in the same change.
 - [doc/zigimg-reference.md](doc/zigimg-reference.md): pinned zigimg analysis,

@@ -141,3 +141,12 @@ port.md's contract table updated, and (after T06) the parser.
 | --- | --- | --- |
 | Agent guidance | `CLAUDE.md` is canonical; `AGENTS.md` only contains `@CLAUDE.md`. | Move the content back if a tool cannot follow the import. |
 | Style guide precedence | [doc/zig-0.17-guide.md](doc/zig-0.17-guide.md) governs new Zig, but `CLAUDE.md` wins where they differ. | Either file. |
+
+## Planning
+
+| Decision | Current choice and reason | To change it |
+| --- | --- | --- |
+| Task structure | Parent tasks keep stable IDs and split into subtasks with their own gates (G0–G5). Dependencies use **Needs**, **Lands with** and **Verified after**; shared infrastructure has a **Start with** note instead of a dependency, so no task waits on its own consumer. Adopted after a review found scheduling loops in the first roadmap. | TODO.md "How tasks are completed". |
+| Second container (T12) | Sun AU with signed 16-bit big-endian PCM (encoding 3): it adds container dispatch, big-endian fields and sequential I/O through the existing `pcm` kernels without changing the decoded audio model. Unknown-length AU and the other encodings wait for T22a. | TODO.md T12 and T22; choosing AIFF or a sample-format variant instead means rewriting T12a–T12c. |
+| Stream copy (T13) | Preserves encoded media and timing, not container headers or unsupported metadata chunks. Copy between WAV s16le and AU s16be is rejected before any output, because the samples need byte swapping. | TODO.md T13's operation matrix. |
+| Coverage denominator | Each subtask names its required fixtures; missing or altered required files fail, and optional corpora are reported separately with their skips. Conformance streams that cannot be generated or redistributed are fetched by pinned hash and stay required. | TODO.md "Coverage and comparison rules". |

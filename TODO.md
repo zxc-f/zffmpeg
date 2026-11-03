@@ -15,23 +15,18 @@ Development is verified on Linux only; see the
 zigimg are independent clones in ignored `.references/`; see
 [README.md](README.md#clone-the-reference-repositories) for setup.
 
-**Next tasks: T12 — a second supported variant or small container, then T13 —
-a minimal `zffmpeg`. Milestone 4 (T14–T19) follows, each piece landing with its
-first consumer.**
+**Next: T12a, the AU contract and fixtures, with T19a's comparison support;
+then T12b–T12c and T13a–T13b. See [Near-term order](#near-term-order).**
 
-Work through the milestones in order; a task may start once its dependencies
-are met. Tasks have stable IDs for references. Check an item only when its
-completion criteria are met, and append a short evidence note with the relevant
-files and checks run.
-Keep unfinished or blocked items unchecked and record what remains. Update the
-feature ledger in port.md when an entire capability becomes implemented or
-verified; do not duplicate this detailed checklist there.
-
-Dependencies below describe implementation prerequisites unless labeled a
-**completion gate**. Work can begin when its code prerequisites are ready;
-reference setup T03 gates differential acceptance, not writing native code.
-Keep task IDs stable. Implementation decisions and fixture expectations must
-agree with the task's written contract; for WAV, the
+Pick the next ready subtask from the dependency graph, as
+[How tasks are completed](#how-tasks-are-completed) describes. Tasks and
+subtasks have stable IDs for references. Check an item only when its gates are
+met, and append a short evidence note with the relevant files, the checks run
+and the commit. Keep unfinished or blocked items unchecked and record what
+remains. Update the feature ledger in port.md when an entire capability becomes
+implemented or verified; do not duplicate this detailed checklist there.
+Implementation decisions and fixture expectations must agree with the
+subtask's written contract; for WAV, the
 [first WAV contract](port.md#first-wav-contract).
 
 ## Platform policy: Linux only during development
@@ -56,28 +51,106 @@ Linux x86-64 only.
 - The FFmpeg reference build stays Linux-only, also after T62/T63; other
   platforms compare against results recorded on Linux.
 
-## Rules for every task from T12 on
+## How tasks are completed
 
-- Start with the contract: the supported subset, errors, limits and intentional
-  differences, written down (port.md or a fixture README) with named fixtures,
-  before the implementation. Generate fixtures with standard-library Python, or
-  record how a reference-made fixture was produced and under which license.
+### Task structure and dependency words
+
+Parent tasks keep their stable IDs. Most are split into subtasks (T12a, T12b,
+...) that are reviewed, verified and checked on their own. A parent is checked
+when all of its subtasks are, or after a recorded decision revises its scope.
+Subtasks name their relationships with three phrases:
+
+- **Needs**: must already be verified before the work starts.
+- **Lands with**: built in the same change, because neither can be tested
+  without the other.
+- **Verified after**: a completion gate. The work can be implemented first, but
+  stays unchecked until the named gate passes.
+
+Shared infrastructure has self-contained gates and a **Start with** note naming
+its first consumer. That note schedules the work; it is not a dependency. T01–T11
+use "Depends on", which means **Needs**. Pick the next subtask whose needs are
+verified; milestone order is a guide, not a gate. Keep one active
+implementation slice unless two slices have independent prerequisites.
+
+### Gates
+
+| Gate | Artifact or behavior | Exit condition |
+| --- | --- | --- |
+| G0 ready | The subtask's progress card: exact subset, prerequisites, upstream source map, limits, errors and ownership. | Every need is verified or lands in the same change. |
+| G1 oracle | Independent vectors, reference commands and results, fixture hashes, the declared comparison rule. | Expected outputs exist before implementation; required and optional coverage are listed separately. |
+| G2 scalar implementation | Small concrete Zig types, local state, checked parsing, explicit allocator and I/O. | Unit vectors pass; new test files are reachable from `zig/root.zig`; new examples are registered in `build.zig`. |
+| G3 failure behavior | Truncation, malformed input, limit boundaries, one-byte input, output and flush failures, cancellation, allocation-failure injection, a bounded fuzz smoke run. | Each relevant case has an assertion and passes in ReleaseFast. Buffering stages also pass drain, reset and backpressure tests. |
+| G4 integration | Library path, CLI process cases where applicable, FFmpeg reading Zig-generated output, metadata and timestamp checks. | The supported operation or profile matrix passes; unsupported combinations fail as specified. |
+| G5 verified | Linux CI, the reference report, the port.md ledger and limitations. | All required checks pass for the implementation commit, and the evidence links the commit, the run and the coverage counts. Only now check the subtask. |
+
+Work at G2–G4 is **implemented** in the port.md ledger. It becomes **verified**
+only at G5, and **optimized** only with a retained scalar oracle and a measured
+gain. Evidence belongs to a commit: a later refactor re-runs the gates rather
+than inheriting the claim.
+
+### Coverage and comparison rules
+
+- Required fixtures are named in the subtask's contract and fail when missing
+  or altered; that list is the coverage denominator. Generate them with
+  standard-library Python, or commit small reference-made or conformance files
+  with recorded commands, hashes and licenses. A file that is too large or not
+  redistributable is fetched by pinned hash and still fails when missing.
+- Optional corpora (FATE samples and the like) are reported separately with
+  their skips. A missing optional sample never removes a required gate.
 - Extend [build-ffmpeg.sh](zig/testing/reference/build-ffmpeg.sh) only with the
-  LGPL components the task compares against, and compare through the
-  differential harness (`compare.py` until T19 generalizes it). Integer and
-  lossless paths compare bit-exactly; floating-point and lossy paths state a
-  tolerance and the reason for it.
-- Keep large media out of the repository. Tiny local fixtures are required and
-  fail when missing; larger samples (for example FATE's) are an optional corpus
-  whose skips are reported, never silently passed.
-- Every parser or decoder that reads untrusted bytes gets a bounded
-  `std.testing.fuzz` entry when it lands; T60 sustains them.
-- Evidence names the files, the checks and the CI run link. Record new
-  revisable decisions in [notes.md](notes.md), provenance in each new file's
-  header and in [zig/README.md](zig/README.md), and capability status in the
-  [port.md ledger](port.md#provenance-and-feature-tracking).
-- Introduce shared machinery (packets, registries, graphs, transforms) with its
-  first real consumer, which each task below names.
+  LGPL components the subtask compares against. Record the FFmpeg revision,
+  configuration, binary and fixture hashes and commands with each report; a
+  cached build counts when its recorded identity matches.
+- Integer and lossless decoding compares canonical samples or planes exactly,
+  together with format and timing. Remuxing compares packet payloads, codec
+  configuration, stream parameters and normalized timestamps: container bytes
+  may differ, and packet-boundary normalization is stated where demuxers split
+  payloads differently. Lossy encoders are checked for decodability, duration,
+  bitrate and a declared quality metric. Floating-point output declares its
+  error metric, threshold and alignment before the run; never widen a tolerance
+  just to pass. Normalization keeps negative timestamps, missing values and
+  side data.
+- Every allocating or buffering feature passes allocation-failure injection,
+  limit-boundary tests and chunking tests before G5, so port.md's
+  [resource rules](port.md#core-api-and-resource-rules) are enforced at first
+  use. Every parser of untrusted bytes gets a bounded `std.testing.fuzz` entry
+  with seeds and a recorded smoke budget; T60 adds sustained campaigns. A
+  passing test suite is not evidence of a fuzz campaign.
+- Generated media is validated by FFmpeg reading the actual Zig output, not
+  only by self round trips or by fixtures the writer is tested to reproduce.
+- Keep three things apart: codec identity (the encoding), decoded storage
+  (sample format, layout, planes) and what a container can carry. Each
+  container subtask lists the encodings it demuxes and muxes, taken from the
+  upstream codec tag tables. Stream copy into a container that cannot carry an
+  encoding fails before any output is created.
+- Record revisable decisions in [notes.md](notes.md), provenance in each new
+  file's header and [zig/README.md](zig/README.md), and capability status in
+  the [port.md ledger](port.md#provenance-and-feature-tracking).
+
+### Progress card
+
+Copy this under the active subtask at G0 and keep it current. It is the one
+authoritative record of the slice; its states do not replace port.md's ledger
+words.
+
+```text
+ID / parent:
+State: planned | ready | implementing | validating | verified | blocked
+Supported behavior and explicit exclusions:
+Needs (verified) / lands with / verified after:
+Contract and source provenance:
+Required fixtures / optional corpus:
+Ownership, state transitions and limits:
+Comparison rule and intentional differences:
+Implementation files and test entry points:
+Evidence commit / Linux CI run / reference report:
+Required cases: passed __ / failed __ / missing __
+Optional cases: passed __ / failed __ / skipped __ (reasons)
+Fuzz seeds, budget and result:
+Remaining work or blocker / next action:
+```
+
+Do not report a percentage of FFmpeg implemented from checked task counts.
 
 ## Completed preparation
 
@@ -378,600 +451,953 @@ supported subset, provenance, verification evidence and remaining limitations.
 
 ## Third milestone: prove reuse before generalizing
 
-- [ ] **T12 — Add a second supported variant or small container.** After T10/T11,
-  choose the path that tests the least-proven boundary: a sample-format variant
-  for conversion/dispatch, or a small big-endian container for byte order and
-  parser reuse. Stabilize T07 first. Reuse PCM/time/I/O logic and extract only shared
-  contracts demonstrated by both implementations. If format dispatch becomes
-  useful, start with explicit descriptors and typed options; preserve a bounded
-  probe prefix for sequential input. Test format identity with disabled features
-  when build selection is introduced. Done when the new path has
-  independent vectors and reference comparisons without duplicating the kernel.
-  The option not chosen stays in T20 (sample formats) or T22 (containers).
-- [ ] **T13 — Add a minimal `zffmpeg` conversion/stream-copy pipeline.** Depends
-  on T12. Start with supported PCM stream-copy/remuxing and same-format
-  decode/encode; no
-  rate/channel conversion until the corresponding transforms exist. Publish an
-  operation matrix for the available formats. Introduce runtime
-  selection, buffering and drain/reset semantics only where needed. Done when
-  conversions and applicable stream-copy operations pass end-to-end checks with
-  explicit ownership, progress and cancellation behavior.
+T12 adds a second container through the existing PCM kernels; T13 turns the two
+paths into a first conversion tool. T12's container is Sun AU with signed
+16-bit big-endian PCM, recorded as a revisable decision in [notes.md](notes.md).
+It exercises container dispatch, big-endian fields and sequential I/O with the
+existing `pcm.decodeS16(.big)` and `encodeS16(.big)` kernels while keeping the
+decoded audio model unchanged; the pinned `libavformat/au.c` maps AU encoding 3
+to `PCM_S16BE`. Remaining AU encodings, AIFF and raw PCM stay in T22; more
+sample formats stay in T20.
+
+- [ ] **T12 — Known-length AU with signed 16-bit big-endian PCM.** Checked when
+  T12a–T12c are. Reference: `libavformat/au.c`, `pcmdec.c`, `rawenc.c`.
+  - [ ] **T12a — AU contract and fixtures.** Needs T10. Lands with T19a.
+    Write the contract (port.md, plus a fixture README) before parser code:
+    `.snd` magic; encoding 3 only; mono or stereo; the sample-rate limit; a
+    data offset of at least 24 bytes, a cap on skipped annotation bytes and
+    whether they are ignored; the largest supported payload size, decided
+    explicitly rather than assuming every `u32` works; bytes after the declared
+    payload and a partial final frame; zero-length data versus the unknown-size
+    sentinel `0xffffffff` (unknown length is deferred to T22a); one canonical
+    known-length header for output; error names and precedence. FFmpeg's
+    `au_probe` rejects a header with any zero field, including the data size,
+    so an empty AU is not detected by content: give it its own fixture and
+    record the difference. Generate mono and stereo, extrema, zero and one
+    frame, offset and annotation, unsupported encoding, truncated header and
+    payload, invalid rate and channel count, and size-limit fixtures with
+    standard-library Python; large logical sizes use synthetic readers, not
+    large files.
+    Done when the fixtures are generated and hash-checked, every case has an
+    expected result and error, and FFmpeg's verdict on each is recorded through
+    T19a.
+  - [ ] **T12b — AU parser and writer.** Needs T12a. An allocation-free
+    `zig/format/au.zig` over `*std.Io.Reader` and `*std.Io.Writer`, reusing the
+    PCM, audio and time code. Size overflow is detected before any output;
+    read and write finalization, and what stays valid after an I/O failure,
+    are specified.
+    Done when memory input, one-byte input, empty and tiny adapter buffers,
+    truncation, generic I/O and flush failures and the fuzz seeds pass, decoded
+    samples are exact, and writer bytes equal the expected fixtures.
+  - [ ] **T12c — AU in zffprobe with a bounded probe prefix.** Needs T12b.
+    Content detection of WAV and AU over a bounded prefix that is retained and
+    replayed, so non-seekable input loses no bytes. Extract only the adapter
+    pieces that AU proves common.
+    Done when file and standard-input process cases pass for both formats,
+    existing WAV reports are unchanged, and FFmpeg decodes actual AU writer
+    output from the T19a test driver to the expected samples.
+
+- [ ] **T13 — A minimal `zffmpeg` for conversion and stream copy.** Checked
+  when T13a and T13b are. The operation matrix:
+
+  | Input → output | Decode and encode | Stream copy |
+  | --- | --- | --- |
+  | WAV s16le → WAV s16le | Supported | Supported |
+  | AU s16be → AU s16be | Supported | Supported |
+  | WAV s16le → AU s16be | Supported through the PCM kernels | Unsupported: the samples need byte swapping |
+  | AU s16be → WAV s16le | Supported through the PCM kernels | Unsupported, for the same reason |
+  | Rate or channel-layout change | Deferred to T23/T24 | Unsupported |
+
+  Stream copy preserves encoded media and timing, not container headers or
+  unsupported metadata chunks; test that distinction.
+
+  - [ ] **T13a — Synchronous conversion and copy pipeline in `av`.** Needs
+    T12c. A concrete, synchronous library pipeline for the matrix, with no
+    general framework. It enforces a minimum output capacity, because
+    `wav.Parser.readSamples` returns an empty slice both at the end of data and
+    when the output cannot hold one frame. It calls the parser's `finish` after
+    the last sample, so errors after `data` still fail the operation, and
+    writer success includes the final flush. The output length is known before
+    the header is written (the WAV writer needs the frame count up front), and
+    rejected operations fail before any output exists.
+    Done when long input runs in bounded memory, frame counts and timing are
+    exact, both ends finish, and a failure found after samples were written is
+    reported as a failure, never a success.
+  - [ ] **T13b — The `zffmpeg` command.** Needs T13a. A thin `zig/cli/`
+    command: arguments, files, standard input and output, the policy for an
+    existing output and for input and output being the same file, cleanup of
+    partial output, and exit codes.
+    Done when process cases cover the whole matrix, read, write and flush
+    errors, late parse errors, cancellation and the overwrite policy, and
+    FFmpeg reads every actual `zffmpeg` output through T19a with matching
+    samples, parameters and timing.
+
+### Near-term order
+
+```mermaid
+flowchart TD
+    B[T01-T11 verified] --> A1[T12a AU contract and fixtures]
+    A1 --- H[T19a comparison support and test driver]
+    A1 --> A2[T12b AU parser and writer]
+    A2 --> A3[T12c AU in zffprobe]
+    H --> A3
+    A3 --> P1[T13a synchronous pipeline]
+    P1 --> P2[T13b zffmpeg command]
+    P2 --> O[T14a packet and frame ownership]
+    O --> F[T26a FLAC demux and first decoding subset, with T18a]
+    H --> F
+    P2 --> D[T16 dispatch extraction]
+    D --> M[T17a options and diagnostics]
+    O --> MB[T17b metadata dictionary]
+    O --> S[T20a sample storage]
+    S --> E[T20b PCM encodings]
+    E --> W[T21a WAV encodings]
+    MB --> WM[T21c WAV metadata]
+    W --> WM
+```
+
+Arrows point from a prerequisite to the work it enables; the plain line joins
+work that lands together. PCM paths keep using `time.TimeBase` and `rescale`;
+T15 brings only the extensions a consumer needs. T14a does not imply a frame
+pool, reference counting or every kind of side data. An early FLAC slice can
+follow the verified pipeline without waiting for the audio filters.
 
 ## Roadmap to a nearly complete port
 
 The milestones below take the port from one audio path to the codecs,
 containers, filters and tools most FFmpeg users rely on. They refine phases 3–6
-of [port.md](port.md#porting-order-and-acceptance-criteria). Each task is one
-or a few reviewable pull requests. "Reference" lists the upstream sources to
-read first, relative to `.references/ffmpeg/`, and the FATE definitions that
-map its coverage. Order follows dependencies; a task may start as soon as its
-dependencies are met. Scope wording is the intended subset. Refine it into a
-written contract when the task starts.
+of [port.md](port.md#porting-order-and-acceptance-criteria). Each subtask is
+one reviewable change. "Reference" lists the upstream sources to read first,
+relative to `.references/ffmpeg/`, and the FATE definitions that map their
+coverage. Scope wording is the intended subset; G0 turns it into a written
+contract with named required fixtures.
 
 ## Milestone 4: core media framework
 
-Shared types the next formats need. Each one lands with the first consumer it
+Shared types the next formats need. Each one starts with the first consumer it
 names, not as an empty framework.
 
-- [ ] **T14 — Packets, frames and shared buffers.** Depends on T13. It lands
-  with the first stage that buffers (T13's stream copy or T26).
-  Reference: `libavcodec/packet.c`, `libavutil/frame.c`, `libavutil/buffer.c`,
-  `libavcodec/avcodec.h` (send/receive contract).
-  A `Packet` (payload, pts, dts, duration, stream index, key/discard flags,
-  owned or borrowed data) and an audio `Frame` (format, layout, sample count,
-  planes, pts); video planes follow in T38. Reference-counted storage only
-  where stages share data, plus a frame pool for decoders. Decoder and encoder
-  adapters expose need-input, have-output, drained and reset states (port.md
-  "Streaming state, ownership and time").
-  Done when PCM decode and encode run through the adapters with drain and reset
-  tests, and every allocating path passes `std.testing.allocator` leak checks
-  and allocation-failure injection.
+- [ ] **T14 — Packets, frames and shared buffers.** Reference:
+  `libavcodec/packet.c`, `libavutil/frame.c`, `libavutil/buffer.c`,
+  `libavcodec/avcodec.h` (the send/receive contract).
+  - [ ] **T14a — Packet and frame ownership with a real consumer.** Needs T13b.
+    Move the T13 pipeline onto a `Packet` (payload, pts, dts, duration, stream
+    index, key and discard flags, owned or borrowed data) and an audio `Frame`
+    (format, layout, sample count, planes, pts), with decoder and encoder
+    adapters that expose need-input, have-output, drained and reset states.
+    Direct APIs stay usable. A small controlled buffered test stage exercises
+    multiple and delayed outputs and backpressure, which PCM alone cannot.
+    Done when each of these holds and has a test, and every allocating path
+    passes leak checks and allocation-failure injection at each site:
 
-- [ ] **T15 — Rational arithmetic and timestamps.** Depends on T05. It lands
-  with T13 or the first container with several time bases.
+    | Situation | Required behavior |
+    | --- | --- |
+    | Input rejected by backpressure | The caller keeps ownership; a retry does not consume twice. |
+    | Input accepted | Copy, retain or transfer is explicit; consumed input is never submitted again. |
+    | Output received | Its lifetime and release are explicit; it is retained only through the supported mechanism. |
+    | End of input | Draining starts once, delayed output is emitted, a defined drained state follows, and repeated drain or receive calls behave as specified. |
+    | Seek or reset | Buffered output and timing state are dropped and the stage restarts cleanly; reset is not drain. |
+    | No progress | Queues are bounded; each synchronous iteration consumes input, emits output or changes state, or returns a defined wait or error. |
+    | Cancellation, limit or I/O failure | Owned resources and retained references are released, the failure is reported, and whether the instance can be reset or must be destroyed is defined. |
+
+  - [ ] **T14b — Shared storage and pools.** Needs T14a. Start with the first
+    stage that shares data or emits many frames (T25c, T26a or T33a).
+    Reference-counted buffers and a frame pool, added only where sharing or a
+    measured cost requires them.
+    Done when sharing, release and pool reuse are tested under allocation
+    failure and cancellation, and copying an owning value never clones it
+    implicitly.
+
+- [ ] **T15 — Rational arithmetic and timestamps.** Needs T05. Start with the
+  first consumer that needs more than `TimeBase` and `rescale` (T52a, T27a,
+  T33a or T36a).
   Reference: `libavutil/rational.c`, `libavutil/mathematics.c`
   (`av_rescale_q_rnd`, `av_compare_ts`, `av_rescale_delta`, `av_add_stable`).
   A general signed `Rational` with reduction and float-to-rational conversion
   for CLI input; comparisons across time bases; wrap-around helpers for 33-bit
   MPEG timestamps; audio timestamp smoothing as `av_rescale_delta` does it.
   Done when vectors from an exact rational oracle, including `i64` extremes,
-  agree, and the values FFmpeg exposes (ffprobe timestamps) match on fixtures.
+  pass in every build mode.
 
-- [ ] **T16 — Codec and format descriptors, registries and probing.** Depends
-  on T12. It lands when two formats need dispatch (T13 or T22).
+- [ ] **T16 — Codec and format descriptors, registries and probing.** Needs
+  T13b. Start with the first subtask that adds a third format (T22b, T22d or
+  T26a), replacing T12c's two-format detection.
   Reference: `libavcodec/codec_desc.c`, `allcodecs.c`,
   `libavformat/allformats.c`, `format.c` (`av_probe_input_format3`),
-  `demux.c` (probe buffer).
+  `demux.c` (the probe buffer).
   Codec IDs, media types and descriptor tables; compile-time validated
   registries of demuxers, muxers, decoders and encoders (duplicate names,
-  signatures); content probing with scores over a bounded prefix that is
-  retained and replayed, so non-seekable input still works; extensions and
-  MIME types only as hints.
+  signatures); scored content probing over the bounded, replayed prefix;
+  extensions and MIME types only as hints.
   Done when every implemented format is detected from content with the same
-  winner as FFmpeg on the fixtures, including short and ambiguous inputs.
+  winner as FFmpeg on the fixtures, including short and ambiguous inputs, and
+  formats without a content signature (raw PCM) are never chosen by probing.
 
-- [ ] **T17 — Options, metadata and diagnostics.** Depends on T16. It lands
-  with the first component that has options (T21, T24 or T13).
-  Reference: `libavutil/opt.c`, `dict.c`, `log.c`, `parseutils.c`, `eval.c`.
-  Typed per-component options with range, default, unit and help metadata
-  derived at compile time; string parsing for the CLI (SI suffixes such as
-  `128k`, `hh:mm:ss.ms` durations, sizes, rates); a metadata dictionary for
-  container and stream tags; a diagnostic sink passed explicitly, with levels,
-  instead of a global `av_log`. Expression evaluation arrives with its first
-  filter (T25).
-  Done when parsing matches FFmpeg's accepted and rejected forms for the
-  supported options (vectors from `parseutils.c`), and tags round-trip through
-  a container (T21).
+- [ ] **T17 — Options, metadata and diagnostics.** Checked when T17a and T17b
+  are.
+  - [ ] **T17a — Typed options and diagnostics.** Needs T16. Start with the
+    first component that has options (T24).
+    Reference: `libavutil/opt.c`, `log.c`, `parseutils.c`.
+    Per-component options with range, default, unit and help metadata derived
+    at compile time; string parsing for the CLI (SI suffixes such as `128k`,
+    `hh:mm:ss.ms` durations, sizes and rates); a diagnostic sink passed
+    explicitly, with levels, instead of a global `av_log`. Expression
+    evaluation arrives with T25b.
+    Done when parsing matches FFmpeg's accepted and rejected forms for the
+    supported options (vectors from `parseutils.c`).
+  - [ ] **T17b — Metadata dictionary.** Needs T14a. Start with T21c.
+    Reference: `libavutil/dict.c`.
+    Container and stream tags with ordered, case-insensitive keys, an explicit
+    duplicate-key policy and owned storage.
+    Done when ownership, duplicate keys, ordering and allocation failure are
+    tested on their own. The container round trip is T21c's gate.
 
-- [ ] **T18 — Bit readers and writers, VLC tables and checksums.** Depends on
-  T01. It lands with its first consumer (T26).
-  Reference: `libavcodec/get_bits.h`, `put_bits.h`, `golomb.h`, `vlc.c`,
-  `libavutil/crc.c`, `md5.c`, `adler32.c`.
-  MSB-first and LSB-first readers over slices with checked over-read and
-  explicit padding rules; writers with flush; unary, Rice and exp-Golomb codes;
-  VLC/Huffman tables built at compile time; the CRC variants FFmpeg uses
-  (`std.hash.crc` where its parameters match), MD5 and Adler-32.
-  Done when exhaustive and round-trip vectors pass, end-of-buffer reads are
-  rejected in ReleaseFast, and checksums equal reference values.
+- [ ] **T18 — Bit readers, writers and checksums.** Checked when T18a–T18d
+  are. Each piece lands with its first consumer. Reference: `libavcodec/get_bits.h`, `put_bits.h`, `golomb.h`, `vlc.c`,
+  `libavutil/crc.c`.
+  - [ ] **T18a — FLAC bit reading and checksums.** Lands with T26a.
+    An MSB-first reader over slices with checked over-read and explicit padding
+    rules, unary and Rice codes, and the CRC-8 and CRC-16 FLAC uses
+    (`std.hash.crc` where its parameters match).
+    Done when exhaustive and round-trip vectors pass, over-reads are rejected
+    in ReleaseFast, and checksums equal reference values.
+  - [ ] **T18b — Bit writer.** Lands with T26c.
+    Done when round-trip vectors against T18a pass, including flush and
+    padding rules.
+  - [ ] **T18c — LSB-first reader and VLC tables.** Lands with T27d. An
+    LSB-first reader and VLC/Huffman tables built at compile time; later
+    consumers (T29b, T30b, T42a, T49b) need it.
+    Done when exhaustive table vectors pass and over-reads are rejected in
+    ReleaseFast.
+  - [ ] **T18d — Exp-Golomb codes.** Lands with T43a.
+    Done when exhaustive vectors over the supported range pass. Frame hashes
+    need none of T18: they use the standard library's Adler-32 and MD5 (T19b).
 
-- [ ] **T19 — Differential harness and frame hashes.** Depends on T14 and T18.
-  Reference: `libavformat/framecrcenc.c`, `framehash.c`, `hashenc.c`,
+- [ ] **T19 — Differential harness.** Checked when T19a–T19c are. Reference:
+  `libavformat/framecrcenc.c`, `framehash.c`, `hashenc.c`,
   `tests/fate-run.sh`, `tests/Makefile`.
-  Generalize `compare.py` into a per-feature harness. It compares FFmpeg's
-  `framecrc`, `framemd5` and `streamhash` output with the same hashes from Zig
-  (a small test tool, later `zffmpeg -f framecrc`), and normalized
-  `ffprobe -of json` metadata. It adds an optional FATE sample sync on Linux
-  with recorded provenance and visible skips.
-  Done when the WAV path and T12's path run through it in CI, a missing
-  required fixture fails, and an absent optional sample is reported as skipped.
+  - [ ] **T19a — AU comparison support and a writer test driver.** Lands with
+    T12a, and grows with T12b–T12c. Extend `compare.py` to AU next to WAV: the
+    contract's expected results, FFmpeg's verdicts and `zffprobe` output. Add a
+    small Zig test driver, built by `zig build`, that writes WAV and AU files
+    from the fixture expectations; `compare.py` feeds those actual outputs to
+    FFmpeg. This also replaces T08's indirect writer check.
+    Done when FFmpeg's verdict on every AU fixture is recorded, the driver's
+    WAV and AU output decodes in FFmpeg to the expected samples and timing, and
+    a missing or altered required fixture fails the run.
+  - [ ] **T19b — Frame and packet hashes.** Needs T19a. Lands with T26a.
+    FFmpeg's `framecrc` (Adler-32), `framemd5` and `streamhash` output compared
+    with the same hashes from Zig (the test driver, later
+    `zffmpeg -f framecrc`), plus normalized `ffprobe -of json` metadata.
+    Done when FLAC and the PCM paths compare through it in CI.
+  - [ ] **T19c — Optional corpus and coverage report.** Needs T19b. Start with
+    the first optional sample. An optional FATE sample sync on Linux with
+    recorded provenance, and a report of required cases (passed, failed,
+    missing) and optional cases (passed, failed, skipped, with reasons).
+    Done when CI publishes the report and a missing optional sample is
+    reported rather than failed.
 
 ## Milestone 5: audio formats and processing
 
-- [ ] **T20 — Complete PCM codec family.** Depends on T12 and T14.
-  Reference: `libavcodec/pcm.c`, `pcm_tablegen.h`, `libavutil/samplefmt.c`,
-  `tests/fate/pcm.mak`.
-  u8, s8, s16/s24/s32/s64 in both byte orders, f32/f64 in both byte orders,
-  planar variants and G.711 A-law/µ-law, specialized at compile time over a
-  small set of real formats.
-  Done when every variant decodes and encodes bit-exactly against the
-  reference, exhaustively for 8- and 16-bit formats and by vectors for wider
-  ones, with short and misaligned input covered.
+- [ ] **T20 — Sample storage and PCM encodings.** Checked when T20a and T20b
+  are. Reference: `libavutil/samplefmt.c`, `libavcodec/pcm.c`,
+  `pcm_tablegen.h`; `tests/fate/pcm.mak`.
+  - [ ] **T20a — Decoded sample storage.** Needs T14a. Sample formats as
+    storage (u8, s16, s32, s64, f32 and f64; packed and planar), separate from
+    codec identity and from what containers carry.
+    Done when buffer sizes, alignment and plane math equal
+    `av_samples_get_buffer_size` and related functions on vectors for every
+    format.
+  - [ ] **T20b — PCM encodings.** Needs T20a. Codec identities and kernels for
+    u8, s8, s16/s24/s32/s64 in both byte orders, f32/f64 in both byte orders,
+    A-law and µ-law, specialized at compile time over the real formats. Planar
+    PCM codecs only when a container needs them.
+    Done when each encoding decodes into and encodes from T20a storage
+    bit-exactly against the reference, exhaustively for 8- and 16-bit
+    encodings and by vectors for wider ones, with short and misaligned input
+    covered.
 
-- [ ] **T21 — Complete WAV.** Depends on T17 and T20.
-  Reference: `libavformat/wavdec.c`, `wavenc.c`, `riffdec.c`, `riffenc.c`,
-  `w64.c`.
-  WAVE_FORMAT_EXTENSIBLE (channel masks, subformat GUIDs), every T20 format,
-  RF64/BW64 (`ds64`) reading and writing past 4 GiB, Sony Wave64, unknown-length
-  input read to end of stream, LIST/INFO and `bext` metadata, seeking on
-  seekable input; the writer switches to extensible and RF64 where `riffenc.c`
-  does. Revise the [first WAV contract](port.md#first-wav-contract) and its
-  fixtures through `generate.py`. Fixtures that become supported move from
-  rejected to accepted; keep the intentional differences that remain.
-  Done when the reference comparison covers every new variant and the formerly
-  rejected fixtures match FFmpeg's output.
+- [ ] **T21 — Complete WAV.** Checked when T21a–T21c are; WAV seeking is
+  T52a's first container. Reference:
+  `libavformat/wavdec.c`, `wavenc.c`, `riff.c` (`ff_codec_wav_tags`),
+  `riffdec.c`, `riffenc.c`, `w64.c`.
+  WAV carries only the encodings its tag table maps: tag 1 by bit depth to u8,
+  s16le, s24le, s32le or s64le; tag 3 to f32le or f64le; tag 6 A-law; tag 7
+  µ-law; and the same as extensible subformats. Big-endian and planar PCM are
+  not WAV encodings; RIFX stays rejected unless a decision adds it.
+  - [ ] **T21a — Extensible headers and the WAV encodings.** Needs T20b.
+    WAVE_FORMAT_EXTENSIBLE (channel masks, subformat GUIDs) and the encodings
+    above; the writer chooses extensible where `riffenc.c` does. Revise the
+    [first WAV contract](port.md#first-wav-contract) and its fixtures through
+    `generate.py`: fixtures that become supported move from rejected to
+    accepted, and remaining intentional differences stay.
+    Done when every encoding in the table demuxes and muxes against the
+    reference, and the formerly rejected fixtures match FFmpeg's output.
+  - [ ] **T21b — RF64/BW64, Wave64 and unknown-length input.** Needs T21a.
+    `ds64` reading and writing past 4 GiB, Sony Wave64, and unknown-length
+    input read to the end of the stream behind an option.
+    Done when synthetic readers exercise sizes past 4 GiB, and each layout
+    matches the reference.
+  - [ ] **T21c — WAV metadata.** Needs T17b and T21a. LIST/INFO and `bext`.
+    Done when tags round-trip through WAV and equal FFmpeg's `ffprobe` tags.
 
-- [ ] **T22 — Raw PCM, AIFF and AU containers.** Depends on T16 and T20.
-  Reference: `libavformat/pcmdec.c`, `pcmenc.c`, `rawenc.c`, `aiffdec.c`,
-  `aiffenc.c`, `au.c`, `cafdec.c`.
-  Raw demux and mux with explicit parameters (`-f s16le` and the rest);
-  AIFF and AIFF-C (big-endian fields, the 80-bit extended sample rate converted
-  exactly, PCM, A-law, µ-law and float compression types); Sun AU; CAF demux as
-  a later step.
-  Done when probing tells them apart, decoding matches the reference, and mux
-  output is byte-exact where FFmpeg's is deterministic, with any header
-  differences documented.
+- [ ] **T22 — AU encodings, AIFF, raw PCM and CAF.** Checked when T22a–T22d
+  are. Reference: `libavformat/au.c`, `aiffdec.c`, `aiffenc.c`, `pcmdec.c`,
+  `pcmenc.c`, `rawenc.c`, `cafdec.c`.
+  - [ ] **T22a — Remaining AU encodings.** Needs T12 and T20b. The other
+    encodings in `au.c`'s table (µ-law, s8, s24be, s32be, f32be, f64be, A-law;
+    the G.72x ADPCM codes wait for T31) and unknown-length AU.
+    Done when each encoding demuxes and muxes against the reference.
+  - [ ] **T22b — AIFF and AIFF-C.** Needs T16 and T20b. Big-endian fields, the
+    80-bit extended sample rate converted exactly, and the PCM, A-law, µ-law
+    and float compression types.
+    Done when probing tells AIFF from the other formats, decoding matches, and
+    mux output is byte-exact where FFmpeg's is deterministic, with any header
+    differences documented.
+  - [ ] **T22c — Raw PCM demux and mux.** Needs T20b. Explicit parameters only
+    (`-f s16le` and the rest); probing never selects it.
+    Done when payloads are byte-exact both ways and probing ignores raw input.
+  - [ ] **T22d — CAF demux.** Needs T16 and T20b.
+    Done when PCM in CAF matches the reference; ALAC in CAF waits for T31b.
 
-- [ ] **T23 — Sample format conversion and channel rematrixing.** Depends on
-  T14 and T20.
-  Reference: `libswresample/audioconvert.c`, `rematrix.c`, `swresample.c`,
-  `dither.c`, `libavutil/channel_layout.c`.
-  Conversions between all T20 formats, packed and planar, with FFmpeg's
-  rounding and clipping; layouts beyond mono and stereo (5.1, 7.1, named and
-  custom orders); the default upmix and downmix matrices with center and
-  surround mix levels and normalization; dither as an option.
-  Done when integer conversions are bit-exact against the reference, float
-  conversions stay within a documented ULP tolerance, and generated matrices
-  equal `swr_build_matrix` output for every supported layout pair.
+- [ ] **T23 — Sample format conversion, channel layouts and rematrixing.**
+  Checked when T23a–T23c are. Reference: `libswresample/audioconvert.c`,
+  `rematrix.c`, `swresample.c`, `dither.c`, `libavutil/channel_layout.c`.
+  - [ ] **T23a — Sample format conversion.** Needs T20a. Conversions between
+    all T20a formats, packed and planar, with FFmpeg's rounding and clipping,
+    and dither as an option.
+    Done when integer conversions are bit-exact against the reference and
+    float conversions stay within a declared ULP tolerance.
+  - [ ] **T23b — Channel layouts.** Needs T20a. Layouts beyond mono and
+    stereo: native masks, named and custom orders. Ambisonics is excluded.
+    Done when layout descriptions and parsing equal FFmpeg's
+    (`av_channel_layout_describe` and `from_string` vectors).
+  - [ ] **T23c — Rematrixing.** Needs T23a and T23b. The default upmix and
+    downmix matrices with center and surround mix levels and normalization.
+    Done when generated matrices equal `swr_build_matrix` output for every
+    supported layout pair and rematrixed output matches the reference.
 
-- [ ] **T24 — Resampling.** Depends on T23.
+- [ ] **T24 — Resampling.** Needs T17a and T23a.
   Reference: `libswresample/resample.c`, `resample_dsp.c` (soxr is external
   and excluded).
   The polyphase windowed-sinc resampler with swresample's defaults (filter
   size, phase count, Kaiser window, cutoff), linear interpolation, exact and
-  arbitrary ratios, streaming with delay, drain and timestamp compensation.
-  Done when output matches the reference within a measured, documented
-  tolerance (bit-exact for s16 if reachable), delay and drain sample counts
-  match, and any input chunking gives identical output.
+  arbitrary ratios, and streaming with delay, drain and timestamp
+  compensation, integrated into the T14a pipeline before T25 adds graph syntax.
+  Done when output matches the reference within a measured, declared tolerance
+  (bit-exact for s16 if reachable), delay and drain sample counts match, and
+  any input chunking gives identical output.
 
-- [ ] **T25 — Audio filter graph.** Depends on T14, T17, T23 and T24.
-  Reference: `libavfilter/avfilter.c`, `avfiltergraph.c`, `graphparser.c`,
-  `formats.c`, `buffersrc.c`, `buffersink.c`, `af_anull.c`, `af_aformat.c`,
-  `af_aresample.c`, `af_volume.c`, `trim.c`, `af_amix.c`, `af_pan.c`,
-  `libavutil/eval.c`; `tests/fate/filter-audio.mak`.
-  Filter descriptors and options, format negotiation that inserts conversions
-  where FFmpeg does, the filtergraph string syntax, push and pull scheduling
-  with timestamps and EOF; first filters: anull, aformat, aresample, volume
-  (with its expression subset), atrim, asetpts, amix, pan, channelmap and
-  channelsplit.
-  Done when each filter's output equals the reference's on fixtures (bit-exact
-  or within its documented tolerance), negotiation inserts the same
-  conversions, and EOF and drain propagate through the graph.
+- [ ] **T25 — Audio filter graph.** Checked when T25a–T25c are. Reference:
+  `libavfilter/avfilter.c`, `avfiltergraph.c`, `graphparser.c`, `formats.c`,
+  `buffersrc.c`, `buffersink.c`, `af_*.c`, `trim.c`, `libavutil/eval.c`;
+  `tests/fate/filter-audio.mak`.
+  - [ ] **T25a — Graph core and linear chains.** Needs T14a, T17a, T23a and
+    T24. Filter descriptors and options, format negotiation that inserts
+    conversions where FFmpeg does, buffer source and sink, timestamps and EOF;
+    the anull, aformat, aresample and volume (constant gain) filters.
+    Done when each filter's output equals the reference's on fixtures
+    (bit-exact or within its declared tolerance), negotiation inserts the same
+    conversions, and EOF and drain propagate.
+  - [ ] **T25b — Filtergraph syntax and expressions.** Needs T25a. The
+    filtergraph string syntax, the expression subset volume needs, atrim and
+    asetpts.
+    Done when parsed graphs and their output match the reference, and syntax
+    errors match documented messages.
+  - [ ] **T25c — Several inputs and outputs.** Needs T25b. Scheduling with
+    several inputs and outputs; amix, pan, channelmap, channelsplit and asplit.
+    Done when outputs match the reference and backpressure between branches is
+    tested.
 
 ## Milestone 6: audio codecs
 
-- [ ] **T26 — FLAC demux, decode and encode.** Depends on T16, T18 and T19.
-  Reference: `libavformat/flacdec.c`, `flacenc.c`, `libavcodec/flacdec.c`,
-  `flacenc.c`, `flac.c`, `flacdsp.c`, `flac_parser.c`; `tests/fate/flac.mak`.
-  Native FLAC: STREAMINFO, SEEKTABLE, VORBIS_COMMENT and PICTURE blocks; frames
-  with CRC-8/16; every subframe type; 4- to 32-bit depths; stereo decorrelation;
-  variable block sizes; MD5 verification; seeking by seek table and frame scan.
-  An encoder covers FFmpeg's compression levels (LPC with quantized
-  coefficients, Rice partitions).
-  Done when the FATE FLAC cases with available samples decode bit-exactly, and
-  FFmpeg decodes the encoder's output to the original samples, at a compressed
-  size recorded against FFmpeg's.
+- [ ] **T26 — FLAC.** Checked when T26a–T26c are. Reference:
+  `libavformat/flacdec.c`, `flacenc.c`, `libavcodec/flacdec.c`, `flacenc.c`,
+  `flac.c`, `flacdsp.c`, `flac_parser.c`; `tests/fate/flac.mak`.
+  Required fixtures are generated with Python (verbatim, constant and fixed
+  subframes) or made with the reference build's native FLAC encoder, with
+  their commands recorded.
+  - [ ] **T26a — FLAC demux and a first decoding subset.** Needs T13b, T14a,
+    T16 and T19a. Lands with T18a and T19b. Native FLAC container, STREAMINFO,
+    frame headers with CRC-8 and CRC-16, constant, verbatim, fixed and LPC
+    subframes at 16 bits, and stereo decorrelation.
+    Done when the required fixtures decode bit-exactly and packets match the
+    reference.
+  - [ ] **T26b — Complete FLAC decoding and seeking.** Needs T17b, T26a and
+    T52a. Bit depths 4–32, variable block sizes, SEEKTABLE, VORBIS_COMMENT and
+    PICTURE blocks, MD5 verification, and seeking by seek table and frame scan.
+    Done when a named required fixture for each depth, block-size mode and
+    metadata block decodes bit-exactly; FATE FLAC cases are reported as
+    optional coverage.
+  - [ ] **T26c — FLAC encoder.** Needs T26b. Lands with T18b.
+    FFmpeg's compression levels (LPC with quantized coefficients, Rice
+    partitions).
+    Done when FFmpeg decodes our output to the original samples at every level,
+    and the compressed size at each level is recorded against FFmpeg's.
 
-- [ ] **T27 — Ogg, the transform module and Vorbis.** Depends on T18 and T26.
-  Reference: `libavformat/oggdec.c`, `oggparsevorbis.c`, `oggparseflac.c`,
-  `oggparseopus.c`, `oggenc.c`, `libavcodec/vorbisdec.c`, `vorbis.c`,
-  `libavutil/tx.c`; `tests/fate/vorbis.mak`.
-  Ogg pages and packets with CRC, chained streams, granule positions to
-  timestamps, bisection seeking on seekable input, and muxing FLAC, Vorbis and
-  Opus. A native FFT/MDCT module (the `tx` sizes later codecs need) and a
-  Vorbis I decoder (codebooks, floors 0 and 1, residues 0–2, coupling).
-  Done when decoded output matches the reference within a documented tolerance,
-  granule-derived timestamps match exactly, and damaged pages are reported per
-  the contract.
+- [ ] **T27 — Ogg, transforms and Vorbis.** Checked when T27a–T27d are.
+  Reference: `libavformat/oggdec.c`, `oggparse*.c`, `oggenc.c`,
+  `libavcodec/vorbisdec.c`, `vorbis.c`, `libavutil/tx.c`;
+  `tests/fate/vorbis.mak`.
+  - [ ] **T27a — Ogg demux.** Needs T14a, T15, T16 and T52a. Pages with CRC,
+    packets, chained streams and granule positions to timestamps, parsing only
+    the FLAC, Opus and Vorbis headers; bisection seeking on seekable input.
+    Done when packets and timestamps equal the reference's
+    (`-c copy -f framecrc`), without decoding, and damaged pages are reported
+    as the contract says.
+  - [ ] **T27b — Ogg mux.** Needs T27a.
+    Done when FFmpeg demuxes our output to identical packets and timestamps.
+  - [ ] **T27c — FFT and MDCT.** Needs T01. Lands with T27d. A native transform
+    module for the sizes the audio codecs need.
+    Done when outputs match a float64 DFT oracle within a declared error, for
+    every supported size.
+  - [ ] **T27d — Vorbis decoder.** Needs T27a. Lands with T27c and T18c.
+    Codebooks, floors 0 and 1, residues 0–2 and coupling.
+    Done when float output matches the reference within a declared tolerance on
+    the required streams.
 
-- [ ] **T28 — Opus decoder.** Depends on T27.
-  Reference: `libavcodec/opus/` (range decoder, SILK, CELT, hybrid),
-  `libavformat/oggparseopus.c`; RFC 6716, RFC 7845, RFC 8251 test vectors;
-  `tests/fate/opus.mak`.
-  Range decoder, SILK (narrow to wide band), CELT, hybrid mode, packet framing,
-  multistream channel mapping, pre-skip and end trimming at 48 kHz.
-  Done when every RFC test vector meets the RFC's `opus_compare` criteria
-  (ported natively into the harness) and output matches the reference within
-  tolerance.
+- [ ] **T28 — Opus decoder.** Checked when T28a–T28c are. Reference:
+  `libavcodec/opus/`, `libavformat/oggparseopus.c`; RFC 6716, RFC 7845 and
+  RFC 8251 test vectors; `tests/fate/opus.mak`. The RFC's `opus_compare`
+  check is ported natively into the harness.
+  - [ ] **T28a — Range decoder and CELT.** Needs T27a and T27c.
+    Done when the CELT-only test vectors meet `opus_compare` and match the
+    reference within tolerance.
+  - [ ] **T28b — SILK.** Needs T28a.
+    Done when the SILK-only test vectors meet `opus_compare`.
+  - [ ] **T28c — Hybrid mode, multistream and trimming.** Needs T28b. Hybrid
+    frames, channel mapping families, pre-skip and end trimming at 48 kHz.
+    Done when every RFC test vector meets `opus_compare` and Ogg Opus timing
+    matches the reference.
 
-- [ ] **T29 — MPEG audio: MP1, MP2 and MP3.** Depends on T16 and T18.
+- [ ] **T29 — MPEG audio: MP1, MP2 and MP3.** Checked when T29a–T29d are.
   Reference: `libavformat/mp3dec.c`, `mp3enc.c`,
   `libavcodec/mpegaudiodec_template.c`, `mpegaudiodecheader.c`,
   `mpegaudio_parser.c`, `mpegaudiodsp*.c`, `mpegaudioenc*.c`;
-  `tests/fate/mp3.mak`.
-  Frame sync with resynchronization; ID3v1/ID3v2 tags into metadata;
-  Xing/Info/LAME/VBRI headers for duration and gapless delay and padding;
-  decoding Layers I–III (Huffman, requantization, stereo modes, IMDCT, alias
-  reduction, polyphase synthesis); seeking by TOC; an MP2 encoder. There is no
-  MP3 encoder, because FFmpeg relies on external LAME.
-  Done when decoding matches the reference's float decoder within the FATE
-  conformance tolerance and gapless trimming matches.
+  `tests/fate/mp3.mak`. There is no MP3 encoder: FFmpeg relies on external LAME.
+  - [ ] **T29a — Demux and parser.** Needs T16 and T17b. Frame sync with
+    resynchronization, ID3v1 and ID3v2 tags into metadata, and Xing, Info,
+    LAME and VBRI headers for duration and gapless delay and padding.
+    Done when packets, duration and gapless parameters equal the reference's,
+    without decoding.
+  - [ ] **T29b — Layer III decoder.** Needs T18c and T29a. Huffman decoding,
+    requantization, stereo modes, IMDCT, alias reduction and polyphase
+    synthesis.
+    Done when decoding matches the reference's float decoder within the FATE
+    conformance tolerance and gapless trimming matches.
+  - [ ] **T29c — Layers I and II.** Needs T29b.
+    Done when the required Layer I and II streams match within the same
+    tolerance.
+  - [ ] **T29d — MP2 encoder.** Needs T29c.
+    Done when FFmpeg decodes our output, and bitrate and a declared quality
+    metric are recorded against FFmpeg's own MP2 encoder at the same settings.
 
-- [ ] **T30 — AAC decoder and ADTS.** Depends on T16, T18 and T27 (`tx`).
-  Reference: `libavcodec/aac/`, `aacsbr*.c`, `aacps*.c`, `mpeg4audio.c`,
+- [ ] **T30 — AAC.** Checked when T30a–T30d are. Reference:
+  `libavcodec/aac/`, `aacsbr*.c`, `aacps*.c`, `mpeg4audio.c`,
   `libavformat/aacdec.c`, `adtsenc.c`; `tests/fate/aac.mak`.
-  ADTS demux and mux, AudioSpecificConfig parsing (shared with MP4 in T33),
-  AAC-LC (sections, scale factors, spectral Huffman, M/S, intensity, PNS, TNS,
-  windows, IMDCT), then HE-AAC v1 (SBR) and v2 (PS) as separate steps, with
-  encoder delay handled. LATM is a later step.
-  Done when LC, SBR and PS streams decode within tolerance of the reference.
+  - [ ] **T30a — ADTS and AudioSpecificConfig.** Needs T16. ADTS demux and
+    mux, and configuration parsing shared with MP4 (T33a).
+    Done when packets and parsed configurations equal the reference's, without
+    decoding.
+  - [ ] **T30b — AAC-LC decoder.** Needs T18c, T27c and T30a. Sections, scale
+    factors, spectral Huffman decoding, M/S, intensity, PNS, TNS, windows and
+    the IMDCT, with encoder delay handled.
+    Done when the required LC streams match the reference within tolerance.
+  - [ ] **T30c — SBR (HE-AAC v1).** Needs T30b.
+    Done when the required SBR streams match within tolerance.
+  - [ ] **T30d — PS (HE-AAC v2).** Needs T30c.
+    Done when the required PS streams match within tolerance. LATM comes later.
 
-- [ ] **T31 — ADPCM and ALAC.** Depends on T21 and T22; ALAC needs T33 or CAF
-  from T22.
-  Reference: `libavcodec/adpcm.c`, `adpcmenc.c`, `adpcm_data.c`, `alac.c`,
-  `alacenc.c`; `tests/fate/adpcm.mak`, `alac.mak`.
-  IMA (WAV and QuickTime) and Microsoft ADPCM decoding and encoding, and ALAC
-  decoding and encoding.
-  Done when every implemented variant is bit-exact against the reference.
+- [ ] **T31 — ADPCM and ALAC.** Checked when T31a and T31b are. Reference:
+  `libavcodec/adpcm.c`, `adpcmenc.c`, `adpcm_data.c`, `alac.c`, `alacenc.c`;
+  `tests/fate/adpcm.mak`, `alac.mak`.
+  - [ ] **T31a — IMA and Microsoft ADPCM.** Needs T21a. Decoding and encoding
+    in WAV.
+    Done when both are bit-exact against the reference.
+  - [ ] **T31b — ALAC.** Needs T33a or T22d. Decoding and encoding.
+    Done when both are bit-exact against the reference.
 
-- [ ] **T32 — AC-3/E-AC-3 decoding and native lossy encoders.** Depends on
-  T25, T29 and T30.
+- [ ] **T32 — AC-3 and native lossy encoders.** Checked when T32a–T32d are.
   Reference: `libavcodec/ac3dec.c`, `eac3dec.c`, `ac3dsp.c`, `ac3enc*.c`,
   `aacenc*.c`, `libavformat/ac3dec.c`; `tests/fate/ac3.mak`.
-  AC-3 and E-AC-3 decoding (common in video files); the AC-3 and AAC-LC
-  encoders FFmpeg implements natively.
-  Done when decoding is within tolerance of the reference, and FFmpeg decodes
-  encoder output with bitrate and an objective quality metric recorded per
-  encoder; byte equality is not required.
+  - [ ] **T32a — AC-3 decoder.** Needs T16 and T27c.
+    Done when the required streams match the reference within tolerance.
+  - [ ] **T32b — E-AC-3 decoder.** Needs T32a.
+    Done when the required streams match within tolerance.
+  - [ ] **T32c — AC-3 encoder.** Needs T32a.
+    Done when FFmpeg decodes our output, with bitrate and a declared quality
+    metric recorded against FFmpeg's encoder.
+  - [ ] **T32d — AAC-LC encoder.** Needs T30b.
+    Done under the same rule as T32c.
 
 ## Milestone 7: containers
 
-- [ ] **T33 — MP4/MOV demuxer.** Depends on T14, T15, T16, T17 and T30.
-  Reference: `libavformat/mov.c`, `isom.c`, `mov_chan.c`; `tests/fate/mov.mak`.
-  Box parsing with nesting and size limits; sample tables (`stsz`, `stco`,
-  `co64`, `stsc`, `stts`, `ctts`, `stss`); edit lists with FFmpeg's semantics;
-  fragmented MP4 (`moof`, `trun`, `sidx`, `mfra`); metadata and chapters; codec
-  configuration boxes (`esds`, `avcC`, `hvcC`, `dOps`, `dfLa`, ALAC); seeking by
-  sync samples. A `moov` after `mdat` on non-seekable input is reported as
-  unsupported.
-  Done when packet timestamps, durations, sizes and flags equal the reference's
-  (`-c copy -f framecrc` or `ffprobe -show_packets`) for audio-only, video,
-  fragmented and edit-list fixtures.
+Each container subtask first compares demuxed packets and timing, then muxing
+and remuxing; seeking and fragmentation are explicit subsets. Codec
+configuration parsing is exercised without needing a full decoder.
 
-- [ ] **T34 — MP4/MOV muxer.** Depends on T33.
-  Reference: `libavformat/movenc.c`.
-  Progressive output, `+faststart`, fragmented output (`frag_keyframe`,
-  `empty_moov`, CMAF), edit lists for encoder delay, metadata.
-  Done when FFmpeg demuxes our output to identical packets and timestamps.
+- [ ] **T33 — MP4/MOV demuxer.** Checked when T33a–T33c are. Reference:
+  `libavformat/mov.c`, `isom.c`, `mov_chan.c`; `tests/fate/mov.mak`.
+  - [ ] **T33a — Boxes, sample tables and codec configuration.** Needs T14a,
+    T15, T16, T17b and T30a. Box parsing with nesting and size limits; `stsz`,
+    `stco`, `co64`, `stsc`, `stts`, `ctts` and `stss`; metadata and chapters;
+    codec configuration boxes (`esds`, `avcC`, `hvcC`, `dOps`, `dfLa`, ALAC).
+    A `moov` after `mdat` on non-seekable input is reported as unsupported.
+    Done when packet timestamps, durations, sizes, flags and configurations
+    equal the reference's (`-c copy -f framecrc`, `ffprobe -show_packets`) on
+    audio-only and video fixtures.
+  - [ ] **T33b — Edit lists and seeking.** Needs T33a and T52a. Edit lists with
+    FFmpeg's semantics and seeking by sync samples.
+    Done when edit-list fixtures and seeks match the reference.
+  - [ ] **T33c — Fragmented MP4.** Needs T33a. `moof`, `trun`, `sidx` and
+    `mfra`.
+    Done when fragmented fixtures match the reference's packets.
 
-- [ ] **T35 — Matroska and WebM.** Depends on T14, T15, T16 and T17.
-  Reference: `libavformat/matroskadec.c`, `matroskaenc.c`, `matroska.c`;
+- [ ] **T34 — MP4/MOV muxer.** Checked when T34a–T34c are. Reference:
+  `libavformat/movenc.c`.
+  - [ ] **T34a — Progressive output and faststart.** Needs T33a.
+    Done when FFmpeg demuxes our output to identical packets, timestamps and
+    configurations, with and without `+faststart`.
+  - [ ] **T34b — Fragmented output and CMAF.** Needs T33c and T34a.
+    Done under the same rule for `frag_keyframe`, `empty_moov` and CMAF.
+  - [ ] **T34c — Edit lists for encoder delay.** Needs T33b and T34a.
+    Done when FFmpeg reports the same start time and duration as for its own
+    output.
+
+- [ ] **T35 — Matroska and WebM.** Checked when T35a–T35c are. Reference:
+  `libavformat/matroskadec.c`, `matroskaenc.c`, `matroska.c`;
   `tests/fate/matroska.mak`.
-  EBML with element size and depth limits and unknown-size (live) elements;
-  tracks, SimpleBlock and BlockGroup with Xiph, EBML and fixed lacing; cues;
-  chapters and tags; codec private data; a WebM muxer for VP8, VP9, Opus and
-  Vorbis, with cues.
-  Done when demuxed packets equal the reference's and FFmpeg reads our output
-  to identical packets.
+  - [ ] **T35a — Demux core.** Needs T14a, T15, T16 and T17b. EBML with
+    element size and depth limits; tracks; SimpleBlock and BlockGroup with
+    Xiph, EBML and fixed lacing; chapters, tags and codec private data.
+    Done when demuxed packets equal the reference's.
+  - [ ] **T35b — Cues, seeking and live streams.** Needs T35a and T52a.
+    Unknown-size elements and cue-based seeking.
+    Done when seeks and live-stream fixtures match the reference.
+  - [ ] **T35c — Matroska and WebM muxing.** Needs T35a. WebM for VP8, VP9,
+    Opus and Vorbis, with cues.
+    Done when FFmpeg reads our output to identical packets.
 
-- [ ] **T36 — MPEG-TS and MPEG-PS.** Depends on T14, T15 and T16.
-  Reference: `libavformat/mpegts.c`, `mpegtsenc.c`, `mpeg.c`, `mpegenc.c`;
+- [ ] **T36 — MPEG-TS and MPEG-PS.** Checked when T36a–T36c are. Reference:
+  `libavformat/mpegts.c`, `mpegtsenc.c`, `mpeg.c`, `mpegenc.c`;
   `tests/fate/mpegts.mak`.
-  TS sync and resync, PAT/PMT/SDT, PES assembly, PCR, continuity counters,
-  33-bit timestamp wrap (T15), stream type mapping; a TS muxer with PCR and PSI
-  repetition; PS demux and mux.
-  Done when demuxed packets equal the reference's, including wrap-around and
-  corrupted-packet fixtures, and FFmpeg demuxes our TS output identically.
+  - [ ] **T36a — TS demux.** Needs T14a, T15 and T16. Sync and resync,
+    PAT/PMT/SDT, PES assembly, PCR, continuity counters, 33-bit timestamp wrap
+    and stream type mapping.
+    Done when packets equal the reference's, including wrap-around and
+    corrupted-packet fixtures.
+  - [ ] **T36b — TS mux.** Needs T36a. PCR and PSI repetition.
+    Done when FFmpeg demuxes our output identically.
+  - [ ] **T36c — PS demux and mux.** Needs T36a.
+    Done when packets match both ways.
 
-- [ ] **T37 — Other containers, raw streams and bitstream filters.** Depends on
-  T16 and T22; the H.264/HEVC filters need T33's configuration parsing.
-  Reference: `libavformat/avidec.c`, `avienc.c`, `flvdec.c`, `flvenc.c`,
-  `ivfdec.c`, `ivfenc.c`, `rawdec.c`, `rawenc.c`, `concatdec.c`,
-  `libavcodec/h264_mp4toannexb_bsf.c`, `hevc_mp4toannexb_bsf.c`,
-  `aac_adtstoasc_bsf.c`, `extract_extradata_bsf.c`.
-  AVI (OpenDML past 1 GiB, index), FLV, IVF, raw elementary streams (Annex B
-  H.264/HEVC, ADTS, MP3, FLAC), the concat demuxer, a null muxer, and the
-  bitstream filters that stream copy between containers needs.
-  Done when each matches the reference's packets and remuxed output demuxes
-  identically in FFmpeg.
+- [ ] **T37 — Other containers, raw streams and bitstream filters.** Checked
+  when T37a–T37e are. Reference: `libavformat/avidec.c`, `avienc.c`,
+  `flvdec.c`, `flvenc.c`, `ivfdec.c`, `ivfenc.c`, `rawdec.c`, `rawenc.c`,
+  `concatdec.c`, `libavcodec/*_bsf.c`.
+  - [ ] **T37a — AVI.** Needs T14a and T16. OpenDML past 1 GiB and the index.
+    Done when demuxed packets match and FFmpeg reads our output identically.
+  - [ ] **T37b — FLV.** Needs T14a and T16.
+    Done under the same rule.
+  - [ ] **T37c — IVF and raw elementary streams.** Needs T16. Annex B
+    H.264/HEVC, ADTS, MP3 and FLAC as raw streams.
+    Done under the same rule.
+  - [ ] **T37d — The concat demuxer and the null muxer.** Needs T52a.
+    Done when concatenated timestamps match the reference.
+  - [ ] **T37e — Bitstream filters for stream copy.** Needs T33a.
+    `h264_mp4toannexb`, `hevc_mp4toannexb`, `aac_adtstoasc` and
+    `extract_extradata`, using parameter-set parsing only, no decoder.
+    Done when filtered packets equal the reference's.
 
 ## Milestone 8: video foundations
 
-- [ ] **T38 — Pixel formats, video frames and raw video.** Depends on T14.
-  Reference: `libavutil/pixdesc.c`, `pixfmt.h`, `imgutils.c`, `frame.c`,
-  `libavcodec/rawdec.c`, `rawenc.c`, `libavformat/yuv4mpegdec.c`,
-  `yuv4mpegenc.c`, `rawvideodec.c`.
-  Pixel format descriptors (components, planes, chroma shifts, depth, byte
-  order, alpha); frame storage with alignment, arbitrary and negative strides
-  and cropping; color properties (range, primaries, transfer, matrix, chroma
-  location) and sample aspect ratio; image copy and fill helpers; the rawvideo
-  codec; Y4M demux and mux.
-  Done when plane sizes and line sizes equal `av_image_fill_*` for every
-  supported format, and frames round-trip through Y4M and rawvideo bit-exactly
-  against the reference.
+- [ ] **T38 — Pixel formats, video frames and raw video.** Checked when
+  T38a–T38c are. Reference: `libavutil/pixdesc.c`, `pixfmt.h`, `imgutils.c`,
+  `frame.c`, `libavcodec/rawdec.c`, `rawenc.c`,
+  `libavformat/yuv4mpegdec.c`, `yuv4mpegenc.c`, `rawvideodec.c`.
+  - [ ] **T38a — Pixel format descriptors and plane math.** Needs T14a.
+    Components, planes, chroma shifts, depth, byte order, alpha; color
+    properties and sample aspect ratio.
+    Done when plane sizes and line sizes equal `av_image_fill_*` for every
+    supported format.
+  - [ ] **T38b — Frame storage and rawvideo.** Needs T38a. Alignment,
+    arbitrary and negative strides, cropping, copy and fill helpers, and the
+    rawvideo codec, with dimension limits enforced.
+    Done when rawvideo round-trips bit-exactly against the reference.
+  - [ ] **T38c — Y4M.** Needs T38b.
+    Done when Y4M demux and mux match the reference both ways.
 
-- [ ] **T39 — Color conversion and scaling.** Depends on T38.
-  Reference: `libswscale/` (input and output stages, `yuv2rgb.c`, `rgb2rgb.c`,
-  filter initialization, the newer graph code).
-  YUV↔RGB with BT.601, BT.709 and BT.2020 matrices and limited or full range;
-  chroma resampling between 4:2:0, 4:2:2 and 4:4:4; bit-depth changes with
-  FFmpeg's dithering; packed↔planar; point, fast-bilinear, bilinear, bicubic
-  and Lanczos scalers with swscale's coefficient generation; `sws_flags`,
-  including `accurate_rnd`, `full_chroma_int` and `bitexact`.
-  Done when outputs match swscale run with `+bitexact+accurate_rnd`, exactly
-  where it is deterministic and otherwise within a documented per-pixel
-  tolerance, for every supported format pair.
+- [ ] **T39 — Color conversion and scaling.** Checked when T39a–T39c are.
+  Reference: `libswscale/` (input and output stages, `yuv2rgb.c`,
+  `rgb2rgb.c`, filter initialization, the newer graph code). Outputs are
+  compared with swscale run with `+bitexact+accurate_rnd`.
+  - [ ] **T39a — YUV↔RGB at equal size.** Needs T38b. BT.601, BT.709 and
+    BT.2020 matrices, limited and full range, packed↔planar.
+    Done when outputs match exactly where swscale is deterministic, otherwise
+    within a declared per-pixel tolerance.
+  - [ ] **T39b — Chroma resampling and bit depth.** Needs T39a. 4:2:0, 4:2:2
+    and 4:4:4, and bit-depth changes with FFmpeg's dithering.
+    Done under the same rule.
+  - [ ] **T39c — Scalers.** Needs T39b. Point, fast-bilinear, bilinear,
+    bicubic and Lanczos, each a step with its own gate, using swscale's
+    coefficient generation and `sws_flags`.
+    Done when every listed scaler passes the same rule for every supported
+    format pair.
 
-- [ ] **T40 — Image formats and image sequences.** Depends on T18, T38 and T39.
-  Reference: `libavcodec/pnmdec.c`, `pnmenc.c`, `bmp.c`, `bmpenc.c`,
-  `pngdec.c`, `pngenc.c`, `gifdec.c`, `gif.c`; `libavformat/img2dec.c`,
-  `img2enc.c`, `apngdec.c`, `apngenc.c` and its own `gifdec.c` and `gif.c`;
-  `tests/fate/image.mak`.
-  PNM family, BMP, PNG and APNG (filters, interlacing, palettes, 16-bit,
-  gamma and ICC as side data), GIF decode and encode, and image2 sequences
-  with numbered patterns. Glob patterns are matched natively, not through
-  `glob(3)`. Before PNG, record the compression decision in port.md and
-  notes.md: `std.compress.flate`, which is native Zig, or a project inflate and
-  deflate.
-  Done when decoded images equal the reference's bit-exactly and FFmpeg
-  decodes our PNG, BMP and GIF output identically.
+- [ ] **T40 — Image formats and sequences.** Checked when T40a–T40g are.
+  Reference: `libavcodec/pnm*.c`, `bmp.c`, `bmpenc.c`, `png*.c`, `apng*`,
+  `gifdec.c`, `gif.c`, `libavformat/img2dec.c`, `img2enc.c`, `apngdec.c`,
+  `apngenc.c`; `tests/fate/image.mak`. Every encoder is validated by FFmpeg
+  decoding our output to identical pixels.
+  - [ ] **T40a — PNM.** Needs T38b. Decode and encode.
+    Done when decoding is bit-exact, FFmpeg decodes our output identically,
+    and output bytes equal FFmpeg's encoder where it is deterministic.
+  - [ ] **T40b — BMP.** Needs T38b. Decode and encode.
+    Done under the same rule.
+  - [ ] **T40c — Image sequences.** Needs T40a. image2 demux and mux with
+    numbered patterns; glob patterns are matched natively, not through
+    `glob(3)`.
+    Done when frame order and timestamps match the reference.
+  - [ ] **T40d — PNG decoding.** Needs T38b. Record the compression decision
+    in port.md and notes.md first: `std.compress.flate`, which is native Zig,
+    or a project inflate and deflate. Filters, interlacing, palettes, 16-bit,
+    and gamma and ICC as side data.
+    Done when the required images decode bit-exactly.
+  - [ ] **T40e — PNG encoding.** Needs T40d.
+    Done when FFmpeg decodes our output identically, and sizes per
+    compression level are recorded against FFmpeg's.
+  - [ ] **T40f — APNG.** Needs T40e. Its own contract for frames, blending and
+    timing.
+    Done when decoding matches and FFmpeg reads our output identically.
+  - [ ] **T40g — GIF.** Needs T38b. Its own contract for palettes, LZW and
+    animation; decode and encode.
+    Done when decoding matches and FFmpeg reads our output identically.
 
-- [ ] **T41 — Video filters.** Depends on T25 and T39.
-  Reference: `libavfilter/vf_null.c`, `vf_format.c`, `vf_scale.c`,
-  `vf_crop.c`, `vf_pad.c`, `vf_hflip.c`, `vf_vflip.c`, `vf_transpose.c`,
-  `vf_fps.c`, `setpts.c`, `trim.c`, `vf_aspect.c`, `vf_overlay.c`,
-  `split.c`, `avf_concat.c`, `vf_yadif.c`; `tests/fate/filter-video.mak`.
-  Video negotiation in the graph (pixel formats, automatic scale insertion);
-  null, format, scale, crop, pad, hflip, vflip, transpose, fps, setpts, trim,
-  setsar/setdar, overlay, split and concat, then yadif deinterlacing.
-  Done when each filter's frame hashes (`-f framemd5`) equal the reference's.
+- [ ] **T41 — Video filters.** Checked when T41a–T41e are. Reference:
+  `libavfilter/vf_*.c`, `setpts.c`, `trim.c`, `split.c`, `avf_concat.c`;
+  `tests/fate/filter-video.mak`. Each filter's frame hashes (`-f framemd5`)
+  must equal the reference's.
+  - [ ] **T41a — Video negotiation, null, format and scale.** Needs T25a and
+    T39c. Automatic scale insertion.
+    Done when negotiation inserts the same conversions and hashes match.
+  - [ ] **T41b — Geometry.** Needs T41a. crop, pad, hflip, vflip, transpose
+    and setsar/setdar.
+    Done when hashes match.
+  - [ ] **T41c — Timing.** Needs T41a. fps, setpts and trim.
+    Done when hashes and timestamps match.
+  - [ ] **T41d — Composition.** Needs T25c and T41a. overlay, split and
+    concat.
+    Done when hashes match.
+  - [ ] **T41e — Deinterlacing.** Needs T41a. yadif.
+    Done when hashes match.
 
 ## Milestone 9: video codecs
 
-FFmpeg itself implements these natively. Bit-exact decoding is the target,
-because FFmpeg's integer decoders are deterministic with `-flags +bitexact` and
-its default IDCT.
+FFmpeg implements these natively, and its integer decoders are deterministic
+with `-flags +bitexact` and the default IDCT, so bit-exact decoding is the
+target. Each subtask lists its profiles, tools and named conformance streams
+at G0, includes every reconstruction step those streams need (deblocking, for
+example), and rejects syntax outside its subset with an unsupported-format
+error. FFmpeg has no native H.264, HEVC or VP8/VP9 encoder, so these fixtures
+cannot come from the reference build. Conformance streams are required
+fixtures, committed when small and redistributable or fetched by pinned hash.
 
-- [ ] **T42 — JPEG and MJPEG.** Depends on T18, T38 and T40.
-  Reference: `libavcodec/mjpegdec.c`, `mjpegenc.c`, `mjpegenc_common.c`,
+- [ ] **T42 — JPEG and MJPEG.** Checked when T42a–T42c are. Reference:
+  `libavcodec/mjpegdec.c`, `mjpegenc.c`, `mjpegenc_common.c`,
   `jpegtables.c`, `simple_idct.c`, `jfdctint.c`.
-  Baseline and progressive Huffman JPEG, restart markers, 4:2:0, 4:2:2, 4:4:4
-  and gray, EXIF orientation as side data, FFmpeg's default IDCT, and a
-  baseline encoder.
-  Done when decoding is bit-exact against the reference and FFmpeg decodes our
-  encoder's output to the same frames as our decoder.
+  - [ ] **T42a — Baseline JPEG decoding.** Needs T18c, T38b and T40c.
+    Huffman decoding, restart markers, 4:2:0, 4:2:2, 4:4:4 and gray, EXIF
+    orientation as side data, and FFmpeg's default IDCT.
+    Done when the required images decode bit-exactly.
+  - [ ] **T42b — Progressive JPEG.** Needs T42a.
+    Done under the same rule.
+  - [ ] **T42c — JPEG and MJPEG encoding.** Needs T42a.
+    Done when FFmpeg decodes our output to the same frames as our decoder.
 
-- [ ] **T43 — H.264 decoder, part 1: syntax and intra.** Depends on T18, T33,
-  T37 and T38.
-  Reference: `libavcodec/h2645_parse.c`, `h264_ps.c`, `h264_sei.c`,
+- [ ] **T43 — H.264, part 1: syntax and intra.** Checked when T43a and T43b
+  are. Reference: `libavcodec/h2645_parse.c`, `h264_ps.c`, `h264_sei.c`,
   `h264_slice.c`, `h264_cavlc.c`, `h264_mb.c`, `h264pred.c`, `h264idct.c`,
-  `h264_parser.c`; `tests/fate/h264.mak` (JVT conformance).
-  NAL parsing (Annex B and length-prefixed), SPS, PPS and SEI (VUI, color,
-  timing), slice headers, POC types, CAVLC residuals, intra 4×4, 8×8, 16×16 and
-  chroma prediction, inverse transforms; I slices in Constrained Baseline.
-  Done when the I-only conformance streams decode with frame MD5s equal to the
-  reference's.
+  `h264_loopfilter.c`, `h264_parser.c`, `trace_headers_bsf.c`;
+  `tests/fate/h264.mak` (JVT conformance).
+  - [ ] **T43a — NAL units, parameter sets and slice headers.** Needs T33a
+    and T37c. Lands with T18d. Annex B and length-prefixed NAL units; SPS, PPS and SEI
+    (VUI, color, timing); slice headers and POC types.
+    Done when parsed syntax equals FFmpeg's `trace_headers` output on the
+    required streams.
+  - [ ] **T43b — I slices with CAVLC and intra deblocking.** Needs T38b and
+    T43a. Constrained Baseline, 8-bit 4:2:0, progressive frames: CAVLC
+    residuals, intra 4×4, 8×8, 16×16 and chroma prediction, inverse
+    transforms, and the deblocking filter on intra edges (boundary strengths 3
+    and 4), which FFmpeg applies to intra macroblocks. An earlier step may
+    accept only streams with deblocking disabled and reject the rest, but it
+    does not complete T43b.
+    Done when the named I-only streams, including some with active
+    deblocking, decode with frame MD5s equal to the reference's.
 
-- [ ] **T44 — H.264 decoder, part 2: inter, CABAC, Main and High.** Depends on
-  T43.
-  Reference: `h264_cabac.c`, `h264_mvpred.h`, `h264_direct.c`, `h264_refs.c`,
-  `h264qpel*.c`, `h264chroma*.c`, `h264_loopfilter.c`, `h264dsp*.c`,
-  `h264_picture.c`.
-  P and B slices, motion vector prediction, quarter-pel luma and eighth-pel
-  chroma motion compensation, direct modes, weighted prediction, reference list
-  management (MMCO, long-term), DPB output order, deblocking, CABAC, 8×8
-  transforms and scaling matrices, basic error concealment.
-  Done when the progressive 8-bit 4:2:0 Baseline, Main and High conformance
-  streams decode bit-exactly against the reference.
+- [ ] **T44 — H.264, part 2: inter prediction, CABAC, Main and High.** Checked
+  when T44a–T44c are. Reference: `h264_cabac.c`, `h264_mvpred.h`,
+  `h264_direct.c`, `h264_refs.c`, `h264qpel*.c`, `h264chroma*.c`,
+  `h264dsp*.c`, `h264_picture.c`.
+  - [ ] **T44a — P slices (Baseline).** Needs T43b. Motion vector prediction,
+    quarter-pel luma and eighth-pel chroma motion compensation, reference list
+    management (MMCO, long-term), DPB output order and inter deblocking.
+    Done when the named progressive Baseline streams decode bit-exactly.
+  - [ ] **T44b — CABAC, B slices and Main.** Needs T44a. CABAC, direct modes
+    and weighted prediction.
+    Done when the named Main streams decode bit-exactly.
+  - [ ] **T44c — High.** Needs T44b. 8×8 transforms and scaling matrices.
+    Done when the named 8-bit 4:2:0 High streams decode bit-exactly.
 
-- [ ] **T45 — H.264 decoder, part 3: interlaced and extended formats.** Depends
-  on T44.
-  PAFF and MBAFF, and the High 10, High 4:2:2 and High 4:4:4 profiles.
-  Done when the remaining applicable conformance streams pass.
+- [ ] **T45 — H.264, part 3: interlaced and extended formats.** Checked when
+  T45a–T45c are. Each subtask names its streams at G0; there is no
+  "remaining applicable" set.
+  - [ ] **T45a — PAFF and MBAFF.** Needs T44c.
+    Done when the named interlaced streams decode bit-exactly.
+  - [ ] **T45b — High 10.** Needs T44c.
+    Done when the named High 10 streams decode bit-exactly.
+  - [ ] **T45c — High 4:2:2 and High 4:4:4.** Needs T45b.
+    Done when the named streams decode bit-exactly.
 
-- [ ] **T46 — VP8 and VP9 decoders.** Depends on T18, T38, and T35 or T37.
-  Reference: `libavcodec/vp8.c`, `vp8dsp.c`, `vpx_rac.h`, `vp9*.c`,
-  `vp9dsp*.c`, `vp9_superframe_split_bsf.c`; `tests/fate/vpx.mak`.
-  VP8 (boolean decoder, intra and inter, loop filter, partitions), then VP9
-  profile 0 and profile 2 (10-bit), superframes, tiles and scaled references.
-  Done when the VP8 and VP9 test vectors in FATE decode bit-exactly.
+- [ ] **T46 — VP8 and VP9.** Checked when T46a–T46c are. Reference:
+  `libavcodec/vp8.c`, `vp8dsp.c`, `vpx_rac.h`, `vp9*.c`, `vp9dsp*.c`,
+  `vp9_superframe_split_bsf.c`; `tests/fate/vpx.mak`.
+  - [ ] **T46a — VP8.** Needs T37c and T38b. The boolean decoder, intra
+    and inter prediction, the loop filter and partitions.
+    Done when the named VP8 test vectors decode bit-exactly.
+  - [ ] **T46b — VP9 profile 0.** Needs T37c and T38b. Superframes, tiles and
+    scaled references.
+    Done when the named profile 0 vectors decode bit-exactly.
+  - [ ] **T46c — VP9 profile 2.** Needs T46b. 10-bit.
+    Done when the named profile 2 vectors decode bit-exactly.
 
-- [ ] **T47 — HEVC decoder.** Depends on T44 (shared H.2645 parsing), T33, T35
-  and T36.
-  Reference: `libavcodec/hevc/`; `tests/fate/hevc.mak`.
-  Main and Main 10: parameter sets, SEI, slices, CABAC, intra and inter
-  prediction, transforms, deblocking, SAO, tiles and WPP (threading in T59).
-  Done when the Main and Main 10 conformance streams in FATE decode bit-exactly.
+- [ ] **T47 — HEVC.** Checked when T47a–T47d are. Reference:
+  `libavcodec/hevc/`, `trace_headers_bsf.c`; `tests/fate/hevc.mak`.
+  - [ ] **T47a — HEVC syntax.** Needs T43a (shared H.2645 parsing). VPS, SPS,
+    PPS, SEI and slice headers.
+    Done when parsed syntax equals `trace_headers` output on the required
+    streams.
+  - [ ] **T47b — Main intra.** Needs T38b and T47a. CABAC, intra prediction,
+    transforms, deblocking and SAO.
+    Done when the named intra-only Main streams decode bit-exactly.
+  - [ ] **T47c — Main inter.** Needs T47b.
+    Done when the named Main streams decode bit-exactly.
+  - [ ] **T47d — Main 10, tiles and WPP.** Needs T47c. Tiles and WPP as data
+    layout; threading waits for T59.
+    Done when the named Main 10 streams decode bit-exactly.
 
-- [ ] **T48 — MPEG-1/2 and MPEG-4 Part 2 video.** Depends on T38, T36 and T37.
+- [ ] **T48 — MPEG-1/2 and MPEG-4 Part 2 video.** Checked when T48a–T48e are.
   Reference: `libavcodec/mpeg12dec.c`, `mpeg12.c`, `mpeg12enc.c`,
   `mpegvideo*.c`, `mpeg4videodec.c`, `mpeg4videoenc.c`, `h263dec.c`,
   `idctdsp.c`.
-  MPEG-1 and MPEG-2 (MP@ML and HL, interlaced and field pictures, 4:2:0 and
-  4:2:2) decoding; MPEG-4 ASP decoding (quarter-pel, packed B-frames in AVI);
-  the MPEG-2 and MPEG-4 Part 2 encoders.
-  Done when decoding is bit-exact with the reference's default IDCT and FFmpeg
-  decodes our encoders' output to the same frames as our decoder.
+  - [ ] **T48a — MPEG-2 decoding.** Needs T36a and T38b. Progressive, then
+    interlaced and field pictures; 4:2:0, then 4:2:2.
+    Done when the named streams decode bit-exactly with the default IDCT.
+  - [ ] **T48b — MPEG-1 decoding.** Needs T48a.
+    Done under the same rule.
+  - [ ] **T48c — MPEG-4 ASP decoding.** Needs T37a and T48a. Quarter-pel and
+    packed B-frames in AVI.
+    Done under the same rule.
+  - [ ] **T48d — MPEG-2 encoder.** Needs T48a.
+    Done when FFmpeg decodes our output to the same frames as our decoder.
+  - [ ] **T48e — MPEG-4 Part 2 encoder.** Needs T48c.
+    Done under the same rule.
 
-- [ ] **T49 — Lossless and intermediate video codecs.** Depends on T18 and T38.
-  Reference: `libavcodec/ffv1dec.c`, `ffv1enc.c`, `ffv1.c`, `huffyuvdec.c`,
-  `huffyuvenc.c`, `proresdec*.c`, `proresenc_kostya.c`, `dnxhddec.c`,
-  `dnxhdenc.c`; `tests/fate/vcodec.mak`, `prores.mak`.
-  FFV1 versions 1–3 (range coder, slices, CRC), HuffYUV and FFVHuff, then
-  ProRes and DNxHD decoding and encoding as later steps.
-  Done when lossless codecs round-trip exactly and every implemented decoder
-  is bit-exact against the reference.
+- [ ] **T49 — Lossless and intermediate video codecs.** Checked when
+  T49a–T49d are. Reference: `libavcodec/ffv1*.c`, `huffyuv*.c`, `prores*.c`,
+  `dnxhd*.c`; `tests/fate/vcodec.mak`, `prores.mak`.
+  - [ ] **T49a — FFV1.** Needs T18a and T38b. Versions 1–3, the range coder,
+    slices and CRC; decoding and encoding.
+    Done when output round-trips exactly and matches the reference both ways.
+  - [ ] **T49b — HuffYUV and FFVHuff.** Needs T18c and T38b.
+    Done under the same rule.
+  - [ ] **T49c — ProRes.** Needs T38b. Decoding and encoding.
+    Done when decoding is bit-exact and FFmpeg decodes our output to the same
+    frames as our decoder.
+  - [ ] **T49d — DNxHD.** Needs T38b. Decoding and encoding.
+    Done under the same rule.
 
-- [ ] **T50 — Subtitles.** Depends on T14, T33, T35 and T36.
-  Reference: `libavformat/srtdec.c`, `srtenc.c`, `webvttdec.c`, `webvttenc.c`,
+- [ ] **T50 — Subtitles.** Checked when T50a–T50c are. Reference:
+  `libavformat/srtdec.c`, `srtenc.c`, `webvttdec.c`, `webvttenc.c`,
   `assdec.c`, `assenc.c`; in `libavcodec/`, the decoders and encoders of the
   same names plus `ass_split.c`, `movtextdec.c` and `movtextenc.c`;
   `tests/fate/subtitles.mak`.
-  SRT, WebVTT and ASS demux and mux, conversion through an ASS-style internal
-  form, `mov_text` in MP4 and text tracks in Matroska, stream copy with timing.
-  Bitmap subtitles (DVB, PGS) come later.
-  Done when converted text output equals the reference's.
+  - [ ] **T50a — Text subtitles.** Needs T14a. SRT, WebVTT and ASS demux and
+    mux, and conversion through an ASS-style internal form.
+    Done when converted text output equals the reference's.
+  - [ ] **T50b — Subtitles in MP4 and Matroska.** Needs T33a, T35a and T50a.
+    `mov_text` and Matroska text tracks, with stream copy and timing.
+    Done when packets and converted text match.
+  - [ ] **T50c — Bitmap subtitles.** Needs T36a and T38b. DVB and PGS.
+    Done when decoded bitmaps and timing match.
 
 ## Milestone 10: tools and the public API
 
-- [ ] **T51 — zffprobe: full probing and output writers.** Depends on T16, T17
-  and the implemented formats.
-  Reference: `fftools/ffprobe.c` and its text writers; `tests/fate/ffprobe.mak`.
-  `-show_format`, `-show_streams`, `-show_packets`, `-show_frames`,
-  `-show_entries`, `-select_streams`, `-count_frames` and `-read_intervals`,
-  with the default and JSON writers first, as an FFprobe-compatible mode next
-  to the stable output defined in [port.md](port.md#initial-probe-output).
-  Done when JSON output equals the reference's after documented normalization
-  for every supported format.
+- [ ] **T51 — zffprobe: full probing and output writers.** Checked when
+  T51a–T51c are. Reference: `fftools/ffprobe.c` and its text writers;
+  `tests/fate/ffprobe.mak`. This is an FFprobe-compatible mode next to the
+  stable output defined in [port.md](port.md#initial-probe-output).
+  - [ ] **T51a — Formats and streams.** Needs T16 and T17b. `-show_format`,
+    `-show_streams` and `-show_entries` with the default and JSON writers.
+    Done when JSON output equals the reference's after documented
+    normalization for every supported format.
+  - [ ] **T51b — Packets and frames.** Needs T51a and T52a. `-show_packets`,
+    `-show_frames`, `-select_streams`, `-count_frames` and `-read_intervals`.
+    Done under the same rule.
+  - [ ] **T51c — The other writers.** Needs T51a. Compact, CSV, flat, INI and
+    XML.
+    Done when each writer's output equals the reference's.
 
-- [ ] **T52 — Seeking, stream copy and timestamp correctness.** Depends on T15
-  and T33–T37.
-  Reference: `libavformat/seek.c`, `demux.c`, `mux.c`, `mux_utils.c`;
+- [ ] **T52 — Seeking, stream copy and timestamps.** Checked when T52a–T52c
+  are. Reference: `libavformat/seek.c`, `demux.c`, `mux.c`, `mux_utils.c`;
   `tests/fate/seek.mak`.
-  Keyframe and accurate seeking (decode and discard), index building, timestamp
-  wrap detection, start time and negative timestamps (`avoid_negative_ts`),
-  edit-list-aware copy, remuxing between every supported container pair.
-  Done when the FATE seek-equivalent tests pass and every pair in the remux
-  matrix demuxes identically in FFmpeg.
+  - [ ] **T52a — Seek API and WAV seeking.** Needs T14a, T15 and T21a. The
+    seek API (keyframe and byte-position seeking) with WAV as its first
+    container; other containers add seeking in their own subtasks (T26b, T27a,
+    T33b, T35b).
+    Done when seek positions and the first decoded samples after each WAV seek
+    match the reference.
+  - [ ] **T52b — Accurate seeking.** Needs T52a. Decode and discard to the
+    exact position.
+    Done when the first decoded sample or frame after a seek matches the
+    reference.
+  - [ ] **T52c — Timestamp rules and the remux matrix.** Needs T52a. Start
+    time, negative timestamps (`avoid_negative_ts`), wrap detection and
+    edit-list-aware copy, across every supported container pair.
+    Done when every pair in the remux matrix demuxes identically in FFmpeg.
 
-- [ ] **T53 — zffmpeg: transcoding pipeline and CLI.** Depends on T13, T25,
-  T41, T52 and the implemented codecs and formats.
-  Reference: `fftools/ffmpeg.c`, `ffmpeg_opt.c`, `ffmpeg_demux.c`,
-  `ffmpeg_dec.c`, `ffmpeg_filter.c`, `ffmpeg_enc.c`, `ffmpeg_mux.c`,
-  `ffmpeg_mux_init.c`, `ffmpeg_sched.c`, `cmdutils.c`, `opt_common.c`;
+- [ ] **T53 — zffmpeg: transcoding pipeline and CLI.** Checked when T53a–T53d
+  are. Reference: `fftools/ffmpeg*.c`, `cmdutils.c`, `opt_common.c`;
   `tests/fate/ffmpeg.mak`.
-  Several inputs and outputs; `-map` and default stream selection; `-c` and
-  `-c copy`; `-f`; codec and format options; `-af`, `-vf` and
-  `-filter_complex`; `-ss`, `-t` and `-to` on input and output; `-ar`, `-ac`,
-  `-sample_fmt`, `-r`, `-s`, `-pix_fmt` and `-b`; metadata and chapter mapping;
-  interleaving by DTS; timestamp options (`-copyts`); progress output;
-  cancellation through `std.Io`; `-y`/`-n`; exit codes. A scheduler with
-  bounded queues that follows port.md's progress rule.
-  Done when an end-to-end command matrix (T13's operation matrix, extended)
-  produces output the reference judges equivalent (frame hashes), and option
-  errors match documented messages.
+  - [ ] **T53a — Inputs, outputs and stream selection.** Needs T13b, T16 and
+    T17a. Several inputs and outputs, `-map` and default stream selection,
+    `-c` and `-c copy`, `-f`, and codec and format options.
+    Done when an extended operation matrix (from T13) produces output the
+    reference judges equivalent by frame hashes, and option errors match
+    documented messages.
+  - [ ] **T53b — Filters on the command line.** Needs T25b and T53a; `-vf`
+    also needs T41a. `-af`, `-vf` and `-filter_complex`.
+    Done under the same rule.
+  - [ ] **T53c — Time options and interleaving.** Needs T52a and T53a. `-ss`,
+    `-t` and `-to` on input and output, interleaving by DTS, and `-copyts`.
+    Done when timestamps match the reference's.
+  - [ ] **T53d — Progress, cancellation and the scheduler.** Needs T53a.
+    Progress output, cancellation through `std.Io`, `-y`/`-n`, exit codes, and
+    a scheduler with bounded queues that follows port.md's progress rule.
+    Done when cancellation and failure cases are tested in process runs.
 
-- [ ] **T54 — Public Zig API and examples.** Depends on T14, T16, T17 and T53.
-  Reference: `doc/examples/decode_audio.c`, `decode_video.c`,
+- [ ] **T54 — Public Zig API and examples.** Needs T14a, T16, T17a, T17b and
+  T53a. Reference: `doc/examples/decode_audio.c`, `decode_video.c`,
   `demux_decode.c`, `encode_audio.c`, `mux.c`, `remux.c`, `transcode.c`.
-  A stable `av` facade: open input from a path, file or reader; stream
-  discovery; decoders and encoders with send/receive; filter graphs; muxers.
-  Examples in `zig/examples/` that mirror `doc/examples`, generated API
-  documentation (`getEmittedDocs`) published by CI, and a versioning and
-  deprecation policy for the package.
+  Ownership has been documented since T14a; this formalizes stability. A
+  stable `av` facade: open input from a path, file or reader; discover streams;
+  decoders and encoders with send/receive; filter graphs; muxers. Examples in
+  `zig/examples/` mirror `doc/examples`; CI publishes generated API
+  documentation (`getEmittedDocs`); the package gets a versioning and
+  deprecation policy.
   Done when every example builds and is tested in CI and the API reference is
   generated.
 
-- [ ] **T55 — Build-time component selection.** Depends on T16 and T54.
-  Reference: `configure` (component lists, `--enable-*`/`--disable-*`,
-  `_select` and `_deps`), `allcodecs.c`, `allformats.c`.
+- [ ] **T55 — Build-time component selection.** Needs T16 and T54. Reference:
+  `configure` (component lists, `--enable-*`/`--disable-*`, `_select` and
+  `_deps`), `allcodecs.c`, `allformats.c`.
   Build options that select codecs, formats and filters through the
-  compile-time registries, with dependency checks (a demuxer pulls its parsers)
-  and disabled components left out of the binary.
+  compile-time registries, with dependency checks, leaving disabled components
+  out of the binary.
   Done when CI builds a minimal and a full configuration and a disabled
   component is absent from both the registry and the binary.
 
-- [ ] **T56 — Optional C ABI adapter.** Depends on T54. Only when a consumer
-  needs it (port.md: a separate, optional adapter).
-  A C-callable subset in `zig/compat/` with opaque handles and error codes and
-  no libav* struct layouts, built as its own library artifact. Its tests may
-  use a small C program in a separate test step.
-  Done when the chosen subset is documented and tested. Leave this unchecked,
+- [ ] **T56 — Optional C ABI adapter.** Needs T54. Only when a consumer needs
+  it, and not counted in completion totals. A C-callable subset in
+  `zig/compat/` with opaque handles and error codes and no libav* struct
+  layouts, built as its own library artifact; its tests may use a small C
+  program in a separate test step.
+  Done when the chosen subset is documented and tested. Leave it unchecked,
   with the reason, if no consumer appears.
 
 ## Milestone 11: performance and hardening
 
-- [ ] **T57 — Benchmarks and performance baselines.** Depends on T19 and any
-  implemented decoder.
-  Reference: `-benchmark`, `tests/checkasm/` (bench mode).
-  `zig build bench` in ReleaseFast for kernels and end-to-end decoding and
-  encoding: throughput, peak memory and allocation counts, measured against
-  the C-only reference and against an asm-enabled FFmpeg build kept only for
-  benchmarks. Results are recorded per commit.
-  Done when every implemented codec has a recorded baseline and regressions are
-  reported (not failing CI until the numbers are stable).
+Every subtask already records its bounds, failure tests, fuzz seeds and
+coverage at its gates. These tasks add measurement infrastructure,
+optimization, concurrency, fuzz duration and corpus breadth.
 
-- [ ] **T58 — SIMD kernels.** Depends on T57.
-  Reference: `libavcodec/x86/`, `aarch64/` (algorithms only),
-  `tests/checkasm/`.
+- [ ] **T57 — Benchmarks and performance baselines.** Needs T19b and an
+  implemented decoder. Reference: `-benchmark`, `tests/checkasm/`.
+  `zig build bench` in ReleaseFast for kernels and end-to-end decoding and
+  encoding: throughput, peak memory and allocation counts, measured against the
+  C-only reference and an asm-enabled FFmpeg build kept only for benchmarks,
+  and recorded per commit.
+  Done when every implemented codec has a recorded baseline and regressions are
+  reported, without failing CI until the numbers are stable.
+
+- [ ] **T58 — SIMD kernels.** Needs T57. Reference: `libavcodec/x86/`,
+  `aarch64/` (algorithms only), `tests/checkasm/`.
   Portable `@Vector` versions of measured hot spots (transforms and IDCTs,
   motion compensation, deblocking, PCM conversion, resampler FIR, color
-  conversion, CRC), each with a checkasm-style test against the scalar
-  version over random inputs, tails and alignments, and a scalar fallback.
-  No inline assembly or target intrinsics during the Linux-only phase.
-  Done when each kernel is bit-identical to scalar (or within a documented
-  float tolerance) and its benchmark shows a measured gain.
+  conversion, CRC), each with a checkasm-style test against the scalar version
+  over random inputs, tails and alignments, and a scalar fallback. No inline
+  assembly or target intrinsics during the Linux-only phase.
+  Done when each kernel is bit-identical to scalar (or within a declared float
+  tolerance) and its benchmark shows a measured gain.
 
-- [ ] **T59 — Threading.** Depends on T53 and T57, and on slice-capable codecs
-  (T44, T47 or T49).
-  Reference: `libavcodec/pthread_frame.c`, `pthread_slice.c`,
+- [ ] **T59 — Threading.** Needs T53d and T57, and slice-capable codecs (T44,
+  T47 or T49). Reference: `libavcodec/pthread_frame.c`, `pthread_slice.c`,
   `fftools/ffmpeg_sched.c`.
   Slice and frame threading for decoders that support it, slice threading in
   encoders (FFV1) and filters (scale), and parallelism between demux, decode,
-  filter, encode and mux. All of it goes through the injected `std.Io` (`Io.Group`,
-  `Io.async`, `Io.concurrent`); cancellation and errors propagate across
-  workers.
+  filter, encode and mux. All of it goes through the injected `std.Io`
+  (`Io.Group`, `Io.async`, `Io.concurrent`); cancellation and errors propagate
+  across workers.
   Done when output is identical for 1 to N threads, throughput scales on the
   benchmark set, and cancellation stress tests pass in ReleaseSafe.
 
-- [ ] **T60 — Sustained fuzzing and resource limits.** Depends on T19 and each
-  parser and decoder.
-  Reference: `tools/target_dec_fuzzer.c`, `tools/target_dem_fuzzer.c`.
-  A fuzz entry for every demuxer, parser and decoder, seeded from fixtures and
-  FATE samples; a scheduled Linux CI job running `zig build --fuzz` for a time
-  budget; every crash or timeout becomes a committed regression fixture; global
-  limits (dimensions, packet and frame size, allocation, probe size) enforced
-  in ReleaseFast.
-  Done when every component has a fuzz entry, the scheduled job has run cleanly
-  for a recorded duration, and every finding has a regression test.
+- [ ] **T60 — Sustained fuzzing and global limits.** Needs T19c. Reference:
+  `tools/target_dec_fuzzer.c`, `tools/target_dem_fuzzer.c`.
+  A scheduled Linux CI job runs `zig build --fuzz` over every fuzz entry for a
+  time budget, with corpora seeded from fixtures and FATE samples; every crash
+  or timeout becomes a committed regression fixture; global limits (dimensions,
+  packet and frame size, allocation, probe size) are enforced in ReleaseFast.
+  Done when the scheduled job has run cleanly for a recorded duration over
+  every component and every finding has a regression test.
 
-- [ ] **T61 — FATE-equivalent regression suite.** Depends on T19 and the
-  implemented features.
-  Reference: `tests/fate/*.mak`, `tests/ref/fate/`.
+- [ ] **T61 — FATE-equivalent regression suite.** Needs T19c. Reference:
+  `tests/fate/*.mak`, `tests/ref/fate/`.
   Map each relevant FATE test to a native equivalent with the same input and
-  hashes regenerated from the pinned reference build. It runs with the
-  optional sample sync on Linux and produces a coverage report: ported, skipped
-  (sample missing) and not applicable.
+  hashes regenerated from the pinned reference build, run with the optional
+  sample sync on Linux, and extend the coverage report with ported, skipped
+  (sample missing) and not-applicable tests.
   Done when the report covers every implemented codec and format and CI
   publishes it.
 
 ## Milestone 12 (long-term): platforms and release
 
-Start these only when milestones 4–10 are largely complete. Until then the
-platform policy above applies.
+Start these only when milestones 4–10 are largely verified; until then the
+platform policy above applies. Define objective entry criteria (which
+subtasks must be verified) when the milestone is selected.
 
-- [ ] **T62 — Native Windows verification.** Depends on the end of the
-  Linux-only phase.
-  A Windows x86-64 CI job (`windows-latest`) running the build and every test in
-  Debug, ReleaseSafe and ReleaseFast; fixes for what the portable-code rules did
-  not prevent (paths, console stdio, file sharing, error names). Reference
+- [ ] **T62 — Native Windows verification.** Needs the end of the Linux-only
+  phase. A Windows x86-64 CI job (`windows-latest`) runs the build and every
+  test in Debug, ReleaseSafe and ReleaseFast. Fix what the portable-code rules
+  did not prevent (paths, console stdio, file sharing, error names). Reference
   comparisons stay on Linux. Neither Wine nor a cross-compile counts.
-  Done when the full suite passes natively and any platform differences are
+  Done when the full suite passes natively and platform differences are
   documented.
 
-- [ ] **T63 — ARM, macOS and big-endian verification.** Depends on T62 or runs
-  alongside it.
-  Native AArch64 Linux (for example `ubuntu-24.04-arm`) and AArch64 macOS
-  (`macos-latest`) jobs in all three modes. SIMD kernels are checked against
-  scalar on each. A big-endian target runs under QEMU user mode to check
-  byte-order code.
-  Done when the suite passes natively on each platform and SIMD fallbacks are
-  exercised.
+- [ ] **T63 — ARM, macOS and big-endian verification.** Needs the end of the
+  Linux-only phase; can run alongside T62. Native AArch64 Linux (for example
+  `ubuntu-24.04-arm`) and AArch64 macOS (`macos-latest`) jobs in all three
+  modes, with SIMD kernels checked against scalar on each; a big-endian target
+  under QEMU user mode checks byte-order code. Native and emulated results are
+  reported separately.
+  Done when the suite passes natively on each platform, SIMD fallbacks are
+  exercised, and the emulated big-endian run passes.
 
-- [ ] **T64 — Release engineering.** Depends on T54, T62 and T63.
-  Versioned releases with a changelog, binaries for the verified platforms, the
-  package published for `build.zig.zon` consumers, a license and provenance
-  audit of every derived file, and a security policy for fuzz findings.
-  Done when a tagged release builds reproducibly in CI.
+- [ ] **T64 — Release engineering.** Needs T54, T62 and T63. Define the release
+  scope when selected. Versioned releases with a changelog, binaries for the
+  verified platforms, the package published for `build.zig.zon` consumers, a
+  license and provenance audit of every derived file, and a security policy
+  for fuzz findings.
+  Done when two independent builds of a tagged release produce identical
+  artifacts and the release builds in CI.
 
 ## Not planned
 
