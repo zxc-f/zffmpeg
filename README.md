@@ -8,8 +8,9 @@ signed 16-bit PCM in WAV and in Sun AU (bounded parsers, known-length writers,
 file and pipe adapters), and the `zffprobe` tool detects WAV or AU from the
 content, validates the file and reports its stream. Both are checked against
 52 WAV and 29 AU fixtures and against a pinned FFmpeg build in CI (Linux). The
-library's synchronous WAV/AU conversion and stream-copy pipeline (T13a) is
-verified; the `zffmpeg` command follows in T13b. [TODO.md](TODO.md) holds the completion
+`zffmpeg` tool converts and stream-copies between WAV and AU through the
+library's synchronous pipeline (T13), and FFmpeg reads every output it writes
+for the fixtures. [TODO.md](TODO.md) holds the completion
 evidence and the roadmap. Development is verified on Linux only. The compiler
 is **Zig 0.17.0**, enforced by the build.
 
@@ -44,9 +45,10 @@ the [unplanned features](TODO.md#not-planned).
   FFmpeg reference build and the recorded comparison results.
 - [zig/format/wav.zig](zig/format/wav.zig), [zig/format/au.zig](zig/format/au.zig),
   [zig/format/detect.zig](zig/format/detect.zig), [zig/format/convert.zig](zig/format/convert.zig),
-  [zig/io/file.zig](zig/io/file.zig), [zig/cli/probe.zig](zig/cli/probe.zig):
-  WAV and AU parsers and writers, content detection, the conversion pipeline,
-  file adapters, and the `zffprobe` tool.
+  [zig/io/file.zig](zig/io/file.zig), [zig/cli/probe.zig](zig/cli/probe.zig),
+  [zig/cli/ffmpeg.zig](zig/cli/ffmpeg.zig): WAV and AU parsers and writers,
+  content detection, the conversion pipeline, file adapters, and the
+  `zffprobe` and `zffmpeg` tools.
 - [zig/examples/io_patterns.zig](zig/examples/io_patterns.zig): runnable I/O example.
 - [zig/codec/pcm.zig](zig/codec/pcm.zig): signed 16-bit PCM decode/encode kernels.
 - [zig/core/audio.zig](zig/core/audio.zig), [zig/core/time.zig](zig/core/time.zig):
@@ -98,15 +100,16 @@ reference clone or C compiler is needed. From the repository root:
 ```text
 zig build
 zig build probe -- zig/testing/fixtures/wav/stereo_44k1.wav
+zig build zffmpeg -- -i zig/testing/fixtures/wav/stereo_44k1.wav stereo.au
 zig build test
 zig build test -Doptimize=ReleaseSafe
 zig build test -Doptimize=ReleaseFast
 zig fmt --check build.zig build.zig.zon zig/
 ```
 
-`zig build` compiles the `av` library and installs `zig-out/bin/zffprobe`;
-`zig build test` runs the `av` module tests, every example's tests and the
-`zffprobe` process checks. Add `-Dtest-filter="text"` to run only
+`zig build` compiles the `av` library and installs `zig-out/bin/zffprobe` and
+`zig-out/bin/zffmpeg`; `zig build test` runs the `av` module tests, every
+example's tests and the `zffprobe` and `zffmpeg` process checks. Add `-Dtest-filter="text"` to run only
 matching tests and `--summary all` to list test counts.
 [zig/README.md](zig/README.md) covers the version policy, build graph and
 package manifest. A single example also runs with

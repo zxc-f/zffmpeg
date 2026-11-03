@@ -8,7 +8,7 @@ build (the `av` module, documented in [zig/README.md](zig/README.md)), the WAV
 and AU fixture contracts ([zig/testing/fixtures](zig/testing/fixtures/README.md))
 and two complete paths: PCM s16 kernels, audio/time types, bounded WAV and AU
 parsers and known-length writers, file and pipe adapters, content detection,
-a WAV/AU conversion pipeline and the `zffprobe` tool. Linux CI builds and tests it in every mode and compares it with a pinned
+a WAV/AU conversion pipeline and the `zffprobe` and `zffmpeg` tools. Linux CI builds and tests it in every mode and compares it with a pinned
 FFmpeg build ([zig/testing/reference](zig/testing/reference/README.md)).
 Development is verified on Linux only; see the
 [platform policy](#platform-policy-linux-only-during-development). FFmpeg and
@@ -16,9 +16,10 @@ zigimg are independent clones in ignored `.references/`; see
 [README.md](README.md#clone-the-reference-repositories) for setup.
 
 T12 is verified: the AU contract and 29 fixtures (T12a), the AU parser and
-writer (T12b) and AU in `zffprobe` with content detection (T12c). T13a, the
-synchronous conversion pipeline (`av.convert`), is verified. **Next: T13b, the `zffmpeg` command. See
-[Near-term order](#near-term-order).**
+writer (T12b) and AU in `zffprobe` with content detection (T12c). T13 is verified too: the
+synchronous conversion pipeline (`av.convert`, T13a) and the `zffmpeg`
+command (T13b). **Next: T14a, packet and frame ownership, and T16, dispatch
+extraction. See [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
 [How tasks are completed](#how-tasks-are-completed) describes. Tasks and
@@ -631,8 +632,9 @@ sample formats stay in T20.
     FFmpeg read 9/9 Zig-written files, and no check was listed as not
     implemented ([reference results](zig/testing/reference/README.md#results)).
 
-- [ ] **T13 — A minimal `zffmpeg` for conversion and stream copy.** Checked
-  when T13a and T13b are. The operation matrix:
+- [x] **T13 — A minimal `zffmpeg` for conversion and stream copy.** Checked
+  when T13a and T13b are. Evidence: T13a at `988e826` and T13b at `4433337`,
+  both on local Windows runs, recorded below. The operation matrix:
 
   | Input → output | Decode and encode | Stream copy |
   | --- | --- | --- |
@@ -711,7 +713,7 @@ sample formats stay in T20.
     allocator, and a 4 MiB stream converts to AU and copies to WAV through
     64 KiB file buffers, exact in frame count and samples, the copy
     byte-identical to its canonical input.
-  - [ ] **T13b — The `zffmpeg` command.** Needs T13a. A thin `zig/cli/`
+  - [x] **T13b — The `zffmpeg` command.** Needs T13a. A thin `zig/cli/`
     command: arguments, files, standard input and output, the policy for an
     existing output and for input and output being the same file, cleanup of
     partial output, and exit codes. Reject contradictory options and unsupported
@@ -721,6 +723,72 @@ sample formats stay in T20.
     FFmpeg reads every actual `zffmpeg` output through T19a with matching
     samples, parameters and timing. Commands rejected during preflight leave
     an existing output untouched and create no new output.
+    Revised at G5 (notes.md "zffmpeg command"): the synchronous command has
+    no source of `Canceled`, so no process case can produce it; status 6 stays
+    mapped, and its process case is due with the first cancellation source.
+
+    ```text
+    ID / parent: T13b / T13
+    State: verified
+    Supported behavior and explicit exclusions: port.md "zffmpeg command":
+      zffmpeg [-y | -n] -i <input | -> [-c copy] [-f wav|au] <output | ->
+      over av.convert. Excluded: other options (T17a, T53a), input options,
+      several inputs or outputs, prompting before overwriting, cancellation
+      (no source yet).
+    Needs (verified) / lands with / verified after: T13a (verified); alone.
+    Contract and source provenance: port.md "zffmpeg command" and "CLI
+      policy", notes.md "zffmpeg command". Original; fftools/ffmpeg_opt.c
+      (assert_file_overwrite) read for -y/-n and the same-file check.
+    Required fixtures / optional corpus: the 21 accepted WAV and AU fixtures
+      in every supported cell and their 21 cross-codec copies; process cases
+      over fixtures and prepared files. No optional corpus.
+    Ownership, state transitions and limits: input and output files are
+      opened and closed by the command; the output is created exclusively
+      unless -y and removed after a failure; 64 KiB I/O buffers each, no
+      allocation besides the argument list.
+    Comparison rule and intentional differences: exact output bytes for
+      the paired fixtures; FFmpeg must probe and decode every output to the
+      fixture's samples and stream, with the known channel_layout and
+      empty-WAV duration_ts differences. Differences from FFmpeg: no prompt,
+      same file by identity, partial output removed.
+    Implementation files and test entry points: zig/cli/ffmpeg.zig,
+      zig/cli/status.zig; convert_cases in build.zig;
+      zig/testing/zffmpeg_cases.zig; compare_zffmpeg in compare.py.
+    Evidence commit / Linux CI run / reference report: 4433337 / local
+      Windows runs instead (below) / local compare.py run (below).
+    Required cases: passed 36 convert_cases, every prepared-file case, 63
+      FFmpeg reads and 21 rejected copies / failed 0 / missing 0; not run on
+      Windows: the write-only standard input case (POSIX only).
+    Optional cases: none.
+    Fuzz seeds, budget and result: none new; the command parses no media
+      itself (av.convert's fuzz entry covers the pipeline).
+    Remaining work or blocker / next action: a cancellation process case
+      with the first cancellation source; next T14a and T16.
+    ```
+
+    Evidence (G5, local Windows runs with Zig 0.17.0 count as completion
+    evidence, by the project owner's decision): implementation commit
+    `4433337`. `zig build test` passed 73/73 steps in Debug, ReleaseSafe and
+    ReleaseFast: `av` 76 and `io_patterns` 7 tests, 24 `zffprobe` and 36
+    `zffmpeg` process runs with their output-file checks, and the
+    prepared-file cases. `zig fmt --check`, `generate.py --check`, the
+    compile-only cross builds and POSIX type checks of both tools and the case
+    tool passed. The process cases cover all six matrix cells through files
+    and pipes with exact expected bytes, the output format from `-f` and from
+    the extension, late (`duplicate_data`, a truncated pipe) and early media
+    errors, open failures of the input and the output, a read failure from a
+    write-only standard input (POSIX only: Windows' spawn reopens stdio files
+    with the access each stream needs), write failures at the final flush and
+    during the transfer (a closed standard output pipe), the command line, the
+    overwrite policy (`-y`, `-n`, neither, both), same-file refusal by name, by
+    another spelling and by redirected standard input, preflight leaving
+    existing outputs untouched and creating none, and removal of a partial
+    output. Mutations removing the removal, the same-file check or exclusive
+    creation each fail the cases. Reference: `compare.py` against the pinned
+    FFmpeg built locally by the unchanged `build-ffmpeg.sh` with MSYS2 clang
+    23.1.4 passed every section; FFmpeg read 63/63 `zffmpeg` outputs with the
+    expected samples and stream, each equal through pipes, and 21/21
+    cross-codec copies failed with status 3 before creating output.
 
 ### Near-term order
 

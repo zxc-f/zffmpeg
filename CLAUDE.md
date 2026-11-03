@@ -14,12 +14,14 @@ Current state: the WAV and AU PCM paths are complete (T01–T12). The `av`
 module (rooted at `zig/root.zig`) exports `pcm`, `audio`, `time`, `wav` and
 `au` (bounded parsers and known-length writers), `detect` (WAV or AU content
 detection), `convert` (the synchronous T13a conversion and stream-copy
-pipeline) and `file` (file and pipe adapters); `zffprobe` is the first tool
-and probes WAV and AU. Tests cover 52 WAV and 29 AU fixtures, process runs of
-`zffprobe`, and a CI comparison against a pinned FFmpeg build. Verification is
-Linux-only during development; Windows and ARM wait for T62–T63. T13a is
-verified; T13b (the `zffmpeg` command) is next,
-and TODO.md lays out the roadmap through T64. When the state changes, update the current-state statements in
+pipeline) and `file` (file and pipe adapters). Two tools sit on it:
+`zffprobe` probes WAV and AU, and `zffmpeg` (T13b) converts and stream-copies
+between them. Tests cover 52 WAV and 29 AU fixtures, process runs of both
+tools, and a CI comparison against a pinned FFmpeg build that also reads
+every `zffmpeg` output. Verification is Linux-only during development; Windows
+and ARM wait for T62–T63. T13 is verified; T14a (packet and frame ownership)
+and T16 (dispatch extraction) are next, and TODO.md lays out the roadmap
+through T64. When the state changes, update the current-state statements in
 README.md, port.md ("Status and scope"), the TODO.md introduction and this file
 together.
 
@@ -51,6 +53,7 @@ zig build test -Doptimize=ReleaseFast        # safety off; required for parser/s
 zig build test -Dtest-filter="truncation"    # only tests whose names contain the text
 zig build test --summary all                 # per-artifact test counts
 zig build probe -- file.wav                  # run zffprobe (`-` reads stdin)
+zig build zffmpeg -- -i in.wav out.au        # run zffmpeg (`-` for stdin/stdout)
 zig fmt --check build.zig build.zig.zon zig/
 zig test zig/examples/io_patterns.zig        # one standalone example, without the build
 python3 zig/testing/fixtures/generate.py --check   # WAV fixtures are current (Python 3, stdlib only)
@@ -75,9 +78,10 @@ When adding code:
 - Export only supported features from `zig/root.zig`.
 - Change WAV fixtures only in `zig/testing/fixtures/generate.py`, then rerun it;
   never edit the generated `.wav` files, `manifest.zon` or the README table.
-- Test CLI behavior by adding a `probe_cases` entry in `build.zig` (a separate
-  process run that checks stdout, stderr and the exit status), never by
-  printing from a unit test.
+- Test CLI behavior by adding a `probe_cases` or `convert_cases` entry in
+  `build.zig` (a separate process run that checks stdout, stderr and the exit
+  status), never by printing from a unit test. zffmpeg cases that need files
+  prepared on disk go in `zig/testing/zffmpeg_cases.zig`.
 - Keep parsing in `av`; `zig/cli/` only handles arguments, files and output.
 
 [zig/README.md](zig/README.md) documents the build graph, version policy,

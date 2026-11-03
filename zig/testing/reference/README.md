@@ -1,8 +1,8 @@
 # FFmpeg reference build and comparison
 
 This directory holds the C reference setup (TODO.md T03) and the differential
-checks of the WAV/PCM path (T10) and the AU path (T12, with T19a's oracle
-phase and write driver). The reference is an unmodified FFmpeg
+checks of the WAV/PCM path (T10), the AU path (T12, with T19a's oracle
+phase and write driver) and `zffmpeg`'s output (T13b). The reference is an unmodified FFmpeg
 built from the pinned commit with a minimal LGPL configuration. It is a test
 oracle only: nothing in the `av` module or the tools links to it, and its
 binaries are never committed.
@@ -10,7 +10,7 @@ binaries are never committed.
 | Path | Role |
 | --- | --- |
 | [build-ffmpeg.sh](build-ffmpeg.sh) | Clones or checks out `.references/ffmpeg` at the pinned commit, builds it out of tree in `.references/ffmpeg-build` and installs it to the given prefix. It records the configure arguments, commit, compiler and `config.log` in `<prefix>/share/zffmpeg-reference/`. |
-| [compare.py](compare.py) | Runs FFmpeg's `ffprobe` and `ffmpeg` and our `zffprobe` on every [WAV fixture](../fixtures/README.md) and [AU fixture](../fixtures/au/README.md), has FFmpeg read the files the Zig [write driver](../write_driver.zig) produces, checks `zffprobe` through a pipe, prints a Markdown report and exits with status 1 on any failure. Python 3, standard library only. |
+| [compare.py](compare.py) | Runs FFmpeg's `ffprobe` and `ffmpeg` and our `zffprobe` on every [WAV fixture](../fixtures/README.md) and [AU fixture](../fixtures/au/README.md), has FFmpeg read the files the Zig [write driver](../write_driver.zig) and `zffmpeg` produce, checks `zffprobe` through a pipe, prints a Markdown report and exits with status 1 on any failure. Python 3, standard library only. |
 
 ## Reproduce
 
@@ -26,7 +26,7 @@ zig build -Doptimize=ReleaseSafe install test-tools
 ```
 
 ```bash
-python3 zig/testing/reference/compare.py --ffmpeg .references/ffmpeg-install/bin/ffmpeg --ffprobe .references/ffmpeg-install/bin/ffprobe --zffprobe zig-out/bin/zffprobe --writer zig-out/bin/write-driver
+python3 zig/testing/reference/compare.py --ffmpeg .references/ffmpeg-install/bin/ffmpeg --ffprobe .references/ffmpeg-install/bin/ffprobe --zffprobe zig-out/bin/zffprobe --writer zig-out/bin/write-driver --zffmpeg zig-out/bin/zffmpeg
 ```
 
 CI runs the same three steps in the `reference` job of
@@ -118,6 +118,12 @@ fails the run. No optional external corpus is used, so nothing is skipped.
 - **Zig-written files.** The write driver writes every WAV and AU
   writer-output stream from raw samples. Each file must equal its fixture byte
   for byte, and FFmpeg must decode it to the expected samples and stream.
+- **zffmpeg (T13b).** Every accepted WAV and AU fixture is converted in each
+  supported cell of the operation matrix (transcode to WAV, transcode to AU,
+  copy within its own codec) into a real file, which FFmpeg must probe and
+  decode to the fixture's samples and stream; the same command through
+  standard input and output must give the same bytes. Copy into the other
+  codec must exit 3 with `UnsupportedOperation` and create no file.
 - **Pipes.** `zffprobe -` reading each of the 81 WAV and AU fixtures from a
   pipe must give the same status, report and error as reading the file, with
   the path shown as `-`.
@@ -145,6 +151,15 @@ Run 41660265753 reported:
 - Fixtures whose pipe result equals the file result: **81/81**.
 - Not implemented: none.
 
+T13b added the zffmpeg section. Its first run was local, on Windows at commit
+`4433337`, against this configuration built by the unchanged `build-ffmpeg.sh`
+with MSYS2 UCRT64 clang 23.1.4 (`ffmpeg version git-2026-11-02-5d5a38a`). Every
+section above gave the same counts, and:
+
+- zffmpeg outputs FFmpeg reads as expected, equal through pipes: **63/63**
+  (21 accepted fixtures in 3 cells each).
+- Copies across codecs rejected before any output: **21/21**.
+
 ### Accepted WAV fixtures
 
 FFmpeg decodes the same samples as the contract for every accepted fixture, and
@@ -170,7 +185,7 @@ FFmpeg decodes the same samples as the contract for every accepted fixture, and
 | Field | FFmpeg | Contract | Reason |
 | --- | --- | --- | --- |
 | `channel_layout`, every accepted WAV fixture | `unknown` | `mono` or `stereo` | A plain tag-1 `fmt ` has no channel mask, so FFmpeg's demuxer leaves the channel order unspecified and `ffprobe` prints `unknown`. The contract reports the default layout for one or two channels. FFmpeg does report `mono` for `fmt_extensible`, whose header carries a mask. |
-| `duration_ts`, `empty_data` only | `N/A` | `0` | FFmpeg reads a `data` size of 0 as unknown length and sets no duration; it still decodes zero samples. The contract treats 0 as an empty stream. |
+| `duration_ts`, `empty_data` and zffmpeg's WAV output of an empty stream | `N/A` | `0` | FFmpeg reads a `data` size of 0 as unknown length and sets no duration; it still decodes zero samples. The contract treats 0 as an empty stream. |
 | `channel_layout`, every accepted AU fixture | `unknown` | `mono` or `stereo` | An AU header has no channel layout. |
 | Decoded samples, `au_trailing_bytes_after_data` only | 6 samples | 4 samples | FFmpeg's AU demuxer reads to the end of input and decodes the bytes after the declared data; the contract never reads them. |
 | Content detection, `au_empty_data` only | not detected | detected | FFmpeg's `au_probe` needs every header field nonzero, including the data size; with `-f au` it reads the file as expected. Our detection checks only the `.snd` magic. |

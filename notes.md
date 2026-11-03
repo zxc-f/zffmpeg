@@ -143,12 +143,12 @@ port.md's contract table updated, and (after T06) the parser.
 | --- | --- | --- |
 | Arguments | Exactly one path, or `-` for standard input; `-h`/`--help` prints help. No options yet. | `zig/cli/probe.zig` and the `probe_cases` in `build.zig`. |
 | Diagnostics | One stderr line, `zffprobe: <path>: <ErrorName>`, using Zig error names rather than prose, so tests and scripts can match them. | Same places; `compare.py` matches the error name too. |
-| Exit-code mapping | Contract errors map to 2, 3 or 5; running out of memory for the arguments, `SystemResources` and descriptor-quota errors to 5; `Canceled` to 6; every other error to 4 (I/O). The statuses are the `ExitStatus` enum, converted to a number only in `main`; `exitStatus` takes the named `ProbeError` set, so a new error source must be added to it deliberately. | `ExitStatus`, `ProbeError` and `exitStatus` in `zig/cli/probe.zig`; `build.zig` keeps the expected statuses as independent literals. |
-| CLI tests and filters | The 15 process cases run in `zig build test` but are skipped when `-Dtest-filter` is given. | `build.zig`. |
+| Exit-code mapping | Contract errors map to 2, 3 or 5; running out of memory for the arguments, `SystemResources` and descriptor-quota errors to 5; `Canceled` to 6; every other error to 4 (I/O). The statuses are the `ExitStatus` enum, converted to a number only in `main`; `status.of` takes the named `status.Error` set, so a new error source must be added to it deliberately. zffmpeg shares the mapping and adds `UnsupportedOperation` (3) and `SizeOverflow` (5). | `zig/cli/status.zig`; `build.zig` keeps the expected statuses as independent literals. |
+| CLI tests and filters | The 24 `zffprobe` and 36 `zffmpeg` process cases and the prepared-file cases run in `zig build test` but are skipped when `-Dtest-filter` is given. | `build.zig`. |
 | Reference build | Linux x86-64, Clang, minimal LGPL configuration, `--disable-x86asm` (the C paths are the reference; no NASM dependency), built out of tree and cached in CI under a key from the Clang version and the build script. | `zig/testing/reference/build-ffmpeg.sh`; changing it or the runner's Clang rebuilds the cache. Update the recorded values in `zig/testing/reference/README.md`. |
 | Reference job | Runs on every pull request and push to `master`, after the first build only from the cache. | `.github/workflows/ci.yml`; move it to a schedule if it gets slow. |
 | Known FFmpeg differences | `compare.py` accepts exactly two metadata differences on accepted fixtures: `channel_layout=unknown` (a plain WAV header has no channel mask) and `duration_ts=N/A` for `empty_data` (FFmpeg reads data size 0 as unknown length). Any other value fails. FFmpeg's verdict on rejected fixtures is recorded, not checked. | `KNOWN_FIELD_DIFFERENCES` and `KNOWN_FIXTURE_DIFFERENCES` in `compare.py`, and the reference README. |
-| Writer verification | FFmpeg decodes the writer-output fixtures, and the writer is tested to produce those exact bytes; that pair stands in for FFmpeg decoding writer output directly. | Add a writer CLI (T13) to feed its output to FFmpeg directly. |
+| Writer verification | FFmpeg decodes the files the write driver (T19a) and `zffmpeg` (T13b) actually write, not only the writer-output fixtures. | `compare.py`'s writer and zffmpeg sections. |
 
 ## AU contract and the write driver
 
@@ -176,6 +176,20 @@ port.md's contract table updated, and (after T06) the parser.
 | Internal writer errors | `run` treats the writer's header, frame and count errors as unreachable: `init` ran the same header checks and the parser delivers exactly the declared whole frames. Only `WriteFailed` reaches callers. | `outputFailure` in `convert.zig`; revisit if writer limits ever differ between `check` and `begin`. |
 | Partial output on input failure | An exact transfer read that the input cannot fill delivers nothing, so the samples written before a truncation depend on the 4 KiB transfer boundaries. The failure itself is always reported. | `convert.zig`; delivering the readable prefix would need short reads in `readData`. |
 | Rejected-input oracle | Tests expect a rejected input to fail conversion with `detect.probe`'s error, which the fixture contracts already pin, instead of repeating the fixture-to-error mapping. | `convert.zig` tests. |
+
+## zffmpeg command
+
+| Decision | Current choice and reason | To change it |
+| --- | --- | --- |
+| Option order | `-f` and `-c` only after `-i`. In FFmpeg an option before `-i` applies to the input; reading it as an output option would silently change the command's meaning, so it is a usage error until input options exist. | `parse` in `zig/cli/ffmpeg.zig`, the usage cases in `build.zig`; T53a. |
+| Output container | `-f`, else the `.wav`/`.au` extension in any case, as FFmpeg; standard output needs `-f`. | `outputContainer`; port.md "zffmpeg command". |
+| Existing output | Refused without `-y`, by exclusive creation, with status 1; never an interactive prompt, so scripts and pipes behave the same everywhere. | `convert` in `ffmpeg.zig`; the prepared-file cases. |
+| Same file | Compared by `Stat.inode` instead of FFmpeg's name comparison, so other spellings and redirected input are caught. A false match across volumes (no device number in `Stat`) refuses the command; it never loses the input. | `sameFile`; switch to a device-qualified identity if std exposes one. |
+| Partial output | Removed after any failure once the file was created (closed first: Windows cannot delete an open file). Standard output keeps what was already written and is not flushed after a failure. | `convert` in `ffmpeg.zig`; port.md. |
+| Cancellation | No process case: the synchronous command has no source of `Canceled`, and the tools install no signal handlers (CLAUDE.md), so on POSIX SIGINT and SIGPIPE end it by signal. Status 6 stays mapped for when a source exists. | `status.zig`; add the process case with the first cancellation source. |
+| Read-failure case | The write-only standard input case runs only on POSIX: on Windows, std's spawn reopens a passed stdio file with the access its stream needs, so the failure cannot be set up. Write failures use a closed pipe, which fails everywhere. | `zig/testing/zffmpeg_cases.zig`; the zig-0-17 guide's process section. |
+| Shared statuses | `zig/cli/status.zig` holds the exit statuses, the error classification and stderr output for both tools: zffmpeg was the second caller. `SizeOverflow` (an output its container cannot hold) is a resource limit, status 5. | `status.zig`; port.md's status lists. |
+| Prepared-file cases | A separate tool, run by `zig build test` in a fresh output directory, because process runs in `build.zig` cannot prepare existing outputs or check that a file was removed without touching the build cache. It reads the fixtures from a directory argument: `fixtures.zig` already belongs to the `av` module. | `build.zig`, `zffmpeg_cases.zig`. |
 
 ## Probe output
 
