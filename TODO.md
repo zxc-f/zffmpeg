@@ -22,9 +22,9 @@ command (T13b). T14a, packets, frames and send/receive stages, T20a, decoded sam
 T20b, the PCM encodings, and T21, complete WAV (T21a, extensible headers and
 encodings; T21b, RF64/BW64, Sony Wave64 and unknown-length input; T21c, tags,
 with T17b's metadata dictionary), and T22a, every AU PCM encoding and
-unknown-length AU, are verified. **Next: T16, format descriptors and scored
-probing, with its first consumer T22b (AIFF and AIFF-C); T22c (raw PCM) is
-also ready. See [Near-term order](#near-term-order).**
+unknown-length AU, are verified. T16's scored probing with FFmpeg's winner and
+`-f` landed (part 1). **Next: T22b (AIFF and AIFF-C), with the rest of T16;
+T22c (raw PCM) is also ready. See [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
 [How tasks are completed](#how-tasks-are-completed) describes. Tasks and
@@ -956,6 +956,20 @@ names, not as an empty framework.
   Done when every implemented format is detected from content with the same
   winner as FFmpeg on the fixtures, including short and ambiguous inputs, and
   formats without a content signature (raw PCM) are never chosen by probing.
+
+  Progress (not yet checked): part 1 at `42a6cf5` replaced T12c's 4-byte
+  routing with FFmpeg's scored probing, as the project owner chose
+  (`zig/format/detect.zig`, `replay.zig`): the demuxer registry, checked at
+  compile time for duplicates and probe sizes; the ported `wav_probe`,
+  `w64_probe` and `au_probe`; FFmpeg's winner and tie rule over the first
+  2048 bytes, replayed to the parser; `UnknownFormat` for undetected input;
+  `-f` to force the input format in both tools. On local Windows, the
+  detection tests pass in every mode, and `compare.py` finds FFmpeg's probe
+  winner equal to each fixture's recorded one on 159/159 fixtures (19
+  detected by no demuxer, the short ones among them). Remaining: the codec
+  and muxer descriptor registries, AIFF's probe with T22b, the
+  never-chosen check once raw PCM lands (T22c), and FFmpeg's larger-buffer
+  retry when a probe can score at most 25.
 
 - [ ] **T17 — Options, metadata and diagnostics.** Checked when T17a and T17b
   are.
