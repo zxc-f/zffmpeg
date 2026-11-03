@@ -163,7 +163,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(probe);
 
     const run_probe = b.addRunArtifact(probe);
-    if (b.args) |args| run_probe.addArgs(args);
+    run_probe.addPassthruArgs();
     b.step("probe", "Run zffprobe; pass its arguments after --").dependOn(&run_probe.step);
 
     // zffprobe runs as a separate process, so its output never mixes with the
