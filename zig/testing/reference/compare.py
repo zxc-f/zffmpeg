@@ -89,6 +89,13 @@ KNOWN_UNKNOWN_LENGTH_REJECTIONS = {
     "w64_data_size_unknown": "FFmpeg's Wave64 demuxer rejects unknown sizes",
 }
 
+# Inputs whose tags FFmpeg's conversion carries but zffmpeg's cannot: FFmpeg
+# reads tags after `data` from a seekable input before writing its header,
+# while zffmpeg reads sequentially and writes the header first.
+KNOWN_TAG_CARRY_DIFFERENCES = {
+    "info_after_data": "the tags follow `data`, which FFmpeg reads first from a seekable file",
+}
+
 # The same field difference for AU, whose header has no layout field either.
 KNOWN_AU_FIELD_DIFFERENCES = {
     ("channel_layout", "unknown"): "an AU header has no channel layout",
@@ -567,8 +574,10 @@ def compare_writer(args, lines, failures):
             raw = work / f"{fixture.name}.raw"
             out = work / f"{fixture.name}.{container}"
             raw.write_bytes(generate.storage_bytes(stream))
-            rf64 = ["rf64"] if fixture.writer_header == "rf64" else []
-            process = run(args.writer, container, stream.codec, rate, channels, raw, out, *rf64)
+            options = ["rf64"] if fixture.writer_header == "rf64" else []
+            options += ["bext"] if fixture.writer_bext else []
+            options += [f"tag={key.decode()}={value.decode()}" for key, value in (fixture.writer_tags or fixture.tags)]
+            process = run(args.writer, container, stream.codec, rate, channels, raw, out, *options)
             problems, notes = [], []
             if process.returncode != 0:
                 problems.append(f"write-driver exited {process.returncode}: {first_line(text(process.stderr))}")
@@ -585,6 +594,13 @@ def compare_writer(args, lines, failures):
                         differences = w64_differences(written, stream.codec, channels, frames, differences)
                     stream_problems, notes = check_stream(args, fixture.name, out, expected, stream,
                                                           field_differences=differences)
+                    # T21c: FFmpeg reads back the tags the fixture reports.
+                    their_tags = ffprobe_tags(args.ffprobe, out)
+                    if their_tags != fixture.tags:
+                        stream_problems.append(f"FFmpeg reads tags {tags_text(their_tags)}, "
+                                               f"expected {tags_text(fixture.tags)}")
+                    elif fixture.tags:
+                        notes.append(f"FFmpeg reads its {len(fixture.tags)} tags")
                 else:
                     # Forced, because FFmpeg's probe does not detect an empty AU file.
                     stream_problems, notes = check_stream(args, fixture.name, out, expected, stream, "au",
@@ -678,6 +694,7 @@ def compare_zffmpeg(args, lines, failures):
                                                               "au" if output == "au" else None,
                                                               field_differences=differences)
                         problems += stream_problems
+                        problems += check_carried_tags(args, fixture, path, out, output, copy, work, notes)
                 read_total += 1
                 read_ok += not problems
                 verdict = "same samples and stream" if not problems else "differs"
@@ -694,6 +711,29 @@ def compare_zffmpeg(args, lines, failures):
         f"zffmpeg outputs FFmpeg reads as expected, equal through pipes: {read_ok}/{read_total}.",
         f"Unsupported cells rejected before any output: {rejected_ok}/{rejected_total}.",
     ]
+
+def check_carried_tags(args, fixture, path, out, output, copy, work, notes):
+    """T21c: a WAV output carries the tags FFmpeg's own conversion carries
+    (`ffmpeg -bitexact`, which adds no `encoder` tag), and other outputs none.
+    Returns the problems; appends notes."""
+    ours = ffprobe_tags(args.ffprobe, out, "au" if output == "au" else None)
+    if output != "wav" or not fixture.tags:
+        return [] if not ours else [f"output carries tags {tags_text(ours)}, expected none"]
+    reference = work / f"{fixture.name}-ffmpeg-{'copy' if copy else 'transcode'}.wav"
+    process = run(args.ffmpeg, "-v", "error", "-nostdin", "-y", "-i", path, "-bitexact",
+                  *(["-c:a", "copy"] if copy else ["-c:a", "pcm_s16le"]), "-f", "wav", reference)
+    if process.returncode != 0:
+        return [f"ffmpeg's own conversion failed: {first_line(text(process.stderr))}"]
+    theirs = ffprobe_tags(args.ffprobe, reference)
+    if ours == theirs:
+        notes.append(f"carries the same {len(ours)} tags as FFmpeg")
+        return []
+    reason = KNOWN_TAG_CARRY_DIFFERENCES.get(fixture.name)
+    if reason and not ours:
+        notes.append(f"carries no tags; FFmpeg carries {tags_text(theirs)} ({reason})")
+        return []
+    return [f"carries tags {tags_text(ours)}; FFmpeg carries {tags_text(theirs)}"]
+
 
 def compare_ffmpeg_w64(args, lines, failures):
     """Wave64 files FFmpeg's muxer writes, read by zffprobe and zffmpeg (T21b).
@@ -715,8 +755,10 @@ def compare_ffmpeg_w64(args, lines, failures):
 
     # FFmpeg's `data` size would count padding after an unaligned payload,
     # which it and every reader then decode as samples.
+    # Wave64 carries no tags, so tagged fixtures cannot come back unchanged.
     fixtures = [f for f in generate.build_fixtures()
                 if f.writer_output and f.writer_header == "riff" and f.accept.codec in generate.WAV_CODECS
+                and not f.tags and not f.writer_bext
                 and payload_len(f.accept) > 0 and payload_len(f.accept) % 8 == 0]
     passed = 0
     with tempfile.TemporaryDirectory() as tmp:

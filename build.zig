@@ -323,6 +323,8 @@ const au_empty_data = @embedFile("zig/testing/fixtures/au/au_empty_data.au");
 const au_mono_192k = @embedFile("zig/testing/fixtures/au/au_mono_192k_rate_limit.au");
 // mono_8k's samples as the Wave64 writer emits them.
 const w64_mono_8k = @embedFile("zig/testing/fixtures/wav/w64_mono_8k.wav");
+// T21c: tags as the writer emits them, so the tagged input converts to itself.
+const wav_info_tags = @embedFile("zig/testing/fixtures/wav/info_tags.wav");
 
 /// T13b: every cell of the operation matrix (files and pipes, transcode and
 /// copy), the output format from -f or the extension, late and early media
@@ -354,6 +356,9 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "Wave64 to WAV from a pipe", .args = &.{ "-i", "-" }, .stdin_input = "w64_mono_8k", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_mono_8k, .stderr = "" },
     .{ .name = "AU to Wave64 from the extension", .set = .au, .args = &.{"-i"}, .input = "au_mono_8k", .output_file = "out.w64", .output_bytes = w64_mono_8k, .exit_code = 0, .stderr = "" },
     .{ .name = "Wave64 copy to AU is rejected", .args = &.{"-i"}, .input = "w64_mono_8k", .tail = &.{ "-c", "copy", "-f", "au", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
+    // T21c: tags are carried into WAV, through files and pipes.
+    .{ .name = "tags carried to WAV", .args = &.{"-i"}, .input = "info_tags", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_info_tags, .stderr = "" },
+    .{ .name = "tags carried by copy from a pipe", .args = &.{ "-i", "-" }, .stdin_input = "info_tags", .tail = &.{ "-c", "copy", "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_info_tags, .stderr = "" },
     .{ .name = "24-bit transcode is rejected", .args = &.{"-i"}, .input = "s24_stereo_48k_extensible", .tail = &.{ "-f", "au", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
     .{ .name = "A-law copy to AU is rejected", .args = &.{"-i"}, .input = "alaw_mono_8k", .tail = &.{ "-c", "copy", "-f", "au", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
     .{ .name = "an error after the data", .args = &.{"-i"}, .input = "duplicate_data", .tail = &.{ "-f", "au", "-" }, .exit_code = 2, .stderr_contains = ": InvalidWave\n" },

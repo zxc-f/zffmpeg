@@ -40,6 +40,7 @@ const std = @import("std");
 const audio = @import("../core/audio.zig");
 const pcm = @import("../codec/pcm.zig");
 const Packet = @import("../core/packet.zig").Packet;
+const metadata = @import("../core/metadata.zig");
 const wav = @import("wav.zig");
 const au = @import("au.zig");
 const detect = @import("detect.zig");
@@ -60,6 +61,15 @@ pub const Mode = enum {
 pub const Request = struct {
     output: Container,
     mode: Mode,
+    /// Carry the input's tags (T21c): `init` puts the tags FFmpeg's command
+    /// would carry (`carriedTags`) from those before the input's `data` into
+    /// the empty `tags.dictionary`, under FFmpeg's names, and a WAV output
+    /// gets them as FFmpeg's writer would, in a `LIST`/`INFO` chunk. Only RIFF
+    /// and RF64 inputs have tags, and only RIFF and RF64 outputs carry them;
+    /// tags after the input's `data` come too late for the output header and
+    /// are not carried. The dictionary must outlive the conversion. Without
+    /// it nothing is allocated.
+    tags: ?wav.Tags = null,
 };
 
 /// Failures before any output exists: the input header, the request and the
@@ -109,6 +119,8 @@ pub const Conversion = struct {
     input: Input,
     limits: Limits,
     summary: Summary,
+    /// The input's tags, for the output header.
+    tags: ?*const metadata.Dictionary,
     /// Frames read so far: the next packet's timestamp.
     next_pts: i64 = 0,
 
@@ -127,6 +139,16 @@ pub const Conversion = struct {
             .wav, .w64 => .{ .wav = .initPrefixed(reader, limits.wav, detected.prefix) },
             .au => .{ .au = .initPrefixed(reader, limits.au, detected.prefix) },
         };
+        // The tags as the file stores them, renamed once the header is read.
+        var stored: metadata.Dictionary = .empty;
+        defer if (request.tags) |t| stored.deinit(t.gpa);
+        if (request.tags) |t| {
+            std.debug.assert(t.dictionary.count() == 0);
+            switch (input) {
+                .wav => |*parser| parser.collectTags(.{ .gpa = t.gpa, .dictionary = &stored }),
+                .au => {},
+            }
+        }
         const summary: Summary = switch (input) {
             inline else => |*parser| blk: {
                 const info = try parser.readHeader();
@@ -147,16 +169,30 @@ pub const Conversion = struct {
                 };
             },
         };
+        var tags: ?*const metadata.Dictionary = null;
+        if (request.tags) |t| {
+            // Later tags could not reach the output header; `stored` dies here.
+            switch (input) {
+                .wav => |*parser| parser.tags = null,
+                .au => {},
+            }
+            var generic = try wav.genericTags(t.gpa, &stored);
+            defer generic.deinit(t.gpa);
+            const carried = try carriedTags(t.gpa, &generic, request.mode);
+            t.dictionary.deinit(t.gpa);
+            t.dictionary.* = carried;
+            tags = t.dictionary;
+        }
         const supported = switch (request.mode) {
             .copy => request.output.carries(summary.input_codec),
             .transcode => summary.input_codec.storage() == .s16,
         };
         if (!supported) return error.UnsupportedOperation;
         switch (request.output) {
-            .wav, .w64 => |container| try wav.Writer.check(summary.output_codec, summary.format, summary.frame_count, wavOptions(limits, container)),
+            .wav, .w64 => |container| try wav.Writer.check(summary.output_codec, summary.format, summary.frame_count, wavOptions(limits, container, tags)),
             .au => try au.Writer.check(summary.format, summary.frame_count, limits.au),
         }
-        return .{ .input = input, .limits = limits, .summary = summary };
+        return .{ .input = input, .limits = limits, .summary = summary, .tags = tags };
     }
 
     /// Writes the output header, moves every frame, validates the rest of the
@@ -166,7 +202,7 @@ pub const Conversion = struct {
         const s = c.summary;
         switch (s.output) {
             .wav, .w64 => |container| {
-                var writer = wav.Writer.begin(out, s.output_codec, s.format, s.frame_count, wavOptions(c.limits, container)) catch |err| return outputFailure(err);
+                var writer = wav.Writer.begin(out, s.output_codec, s.format, s.frame_count, wavOptions(c.limits, container, c.tags)) catch |err| return outputFailure(err);
                 try c.transfer(wav.Writer, &writer);
             },
             .au => {
@@ -288,10 +324,78 @@ fn Transcoder(comptime W: type) type {
     };
 }
 
+/// Keys whose tags describe the source file or its encoding, as
+/// `copy_meta` in fftools/ffmpeg_mux_init.c removes them.
+const StaleKey = struct {
+    key: []const u8,
+    /// Also every key that starts with `key` (`AV_DICT_IGNORE_SUFFIX`).
+    prefix: bool = false,
+    /// Removed only when the audio is re-encoded, not stream-copied.
+    reencoded_only: bool = true,
+};
+
+/// `reenc_delete_keys`, in its order: exact-case matches.
+const stale_keys = [_]StaleKey{
+    .{ .key = "iTunPGAP" },
+    .{ .key = "comment-iTunPGAP-eng" },
+    .{ .key = "iTunSMPB" },
+    .{ .key = "comment-iTunSMPB-eng" },
+    .{ .key = "gapless_playback" },
+    .{ .key = "iTunNORM" },
+    .{ .key = "comment-iTunNORM-eng" },
+    .{ .key = "encoded_by" },
+    .{ .key = "encoding_tool" },
+    .{ .key = "vendor_id" },
+    .{ .key = "BPS", .prefix = true },
+    .{ .key = "DURATION", .prefix = true },
+    .{ .key = "NUMBER_OF_BYTES", .prefix = true },
+    .{ .key = "NUMBER_OF_FRAMES", .prefix = true },
+    .{ .key = "_STATISTICS_TAGS", .prefix = true },
+    .{ .key = "_STATISTICS_WRITING_APP", .prefix = true },
+    .{ .key = "_STATISTICS_WRITING_DATE_UTC", .prefix = true },
+    .{ .key = "major_brand", .reencoded_only = false },
+    .{ .key = "minor_version", .reencoded_only = false },
+    .{ .key = "compatible_brands", .reencoded_only = false },
+};
+
+/// The input tags FFmpeg's command carries by default (`copy_meta`): the
+/// first tag of each key (`av_dict_copy` with `AV_DICT_DONT_OVERWRITE`),
+/// without `creation_time`, `company_name`, `product_name` and
+/// `product_version`, then without the stale keys, the re-encoding ones only
+/// when transcoding. Removal follows `av_dict_set` with no value, so the
+/// order changes as in FFmpeg. FFmpeg's command also adds its own `encoder`
+/// tag unless `-bitexact`; this never does.
+fn carriedTags(gpa: std.mem.Allocator, input: *const metadata.Dictionary, mode: Mode) std.mem.Allocator.Error!metadata.Dictionary {
+    var out: metadata.Dictionary = .empty;
+    errdefer out.deinit(gpa);
+    for (input.items()) |entry| {
+        if (out.get(entry.key) != null) continue;
+        out.put(gpa, entry.key, entry.value, .keep) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidTag => unreachable, // copied from a dictionary
+        };
+    }
+    for ([_][]const u8{ "creation_time", "company_name", "product_name", "product_version" }) |key| {
+        _ = out.remove(gpa, key);
+    }
+    for (stale_keys) |stale| {
+        if (stale.reencoded_only and mode == .copy) continue;
+        // Each exact-case match goes, through a case-insensitive removal.
+        while (for (out.items()) |entry| {
+            const matches = if (stale.prefix) std.mem.startsWith(u8, entry.key, stale.key) else std.mem.eql(u8, entry.key, stale.key);
+            if (matches) break entry.key;
+        } else null) |key| {
+            _ = out.remove(gpa, key);
+        }
+    }
+    return out;
+}
+
 /// The WAV writer's options for a WAV or Wave64 `output`, from the
-/// conversion's limits: the same rate limit, and for WAV RF64 exactly when
-/// 32-bit sizes cannot hold the output.
-fn wavOptions(limits: Limits, output: Container) wav.WriteOptions {
+/// conversion's limits: the same rate limit, for WAV RF64 exactly when
+/// 32-bit sizes cannot hold the output, and the carried tags (which the
+/// writer leaves out of Wave64).
+fn wavOptions(limits: Limits, output: Container, tags: ?*const metadata.Dictionary) wav.WriteOptions {
     return .{
         .max_sample_rate = limits.wav.max_sample_rate,
         .variant = switch (output) {
@@ -299,6 +403,7 @@ fn wavOptions(limits: Limits, output: Container) wav.WriteOptions {
             .w64 => .w64,
             .au => unreachable, // the AU writer has its own options
         },
+        .tags = tags,
     };
 }
 
@@ -464,7 +569,8 @@ test "every accepted fixture gives its samples in every supported cell, and copy
             // The converter writes RF64 only when needed, so an RF64 writer
             // output converts to plain RIFF; Wave64 converts to itself.
             const bytes = fixtures.bytes(fixture.name);
-            const canonical = fixture.writer_output and fixture.writer_header != .rf64;
+            // Without a tag dictionary in the request, tags are not carried.
+            const canonical = fixture.writer_output and fixture.writer_header != .rf64 and fixture.untagged();
             try expectEveryCell(wavContainer(bytes), bytes, fixture.expected.accept, canonical);
         }
     }
@@ -566,6 +672,94 @@ test "every rejected fixture fails with the error probing reports" {
             };
         }
     }
+}
+
+/// Converts `input` with tags carried and returns the output's tags as the
+/// WAV parser reads them back, renamed.
+fn convertWithTags(gpa: std.mem.Allocator, input: []const u8, request: Request, output: []u8) !struct { metadata.Dictionary, []const u8 } {
+    var tags: metadata.Dictionary = .empty;
+    defer tags.deinit(gpa);
+    var with_tags = request;
+    with_tags.tags = .{ .gpa = gpa, .dictionary = &tags };
+    var reader: std.Io.Reader = .fixed(input);
+    var out: std.Io.Writer = .fixed(output);
+    _ = try convert(&reader, &out, with_tags, .{});
+    const written = out.buffered();
+    var read_back: metadata.Dictionary = .empty;
+    errdefer read_back.deinit(gpa);
+    if (request.output != .au) {
+        var stored: metadata.Dictionary = .empty;
+        defer stored.deinit(gpa);
+        var parser_reader: std.Io.Reader = .fixed(written);
+        var parser: wav.Parser = .init(&parser_reader, .{});
+        parser.collectTags(.{ .gpa = gpa, .dictionary = &stored });
+        _ = try parser.readHeader();
+        read_back.deinit(gpa);
+        read_back = try wav.genericTags(gpa, &stored);
+    }
+    return .{ read_back, written };
+}
+
+test "tags are carried into WAV output as FFmpeg's writer would, and only there" {
+    const gpa = std.testing.allocator;
+    var buffer: [2048]u8 = undefined;
+    // info_tags is the writer's own output, so it converts to itself in both modes.
+    for ([_]Mode{ .copy, .transcode }) |mode| {
+        var tags, const written = try convertWithTags(gpa, fixtures.bytes("info_tags"), .{ .output = .wav, .mode = mode }, &buffer);
+        defer tags.deinit(gpa);
+        try std.testing.expectEqualSlices(u8, fixtures.bytes("info_tags"), written);
+        try std.testing.expectEqual(5, tags.count());
+    }
+    // From bext, only what has an INFO code survives: comment, date and the
+    // first encoded_by, as FFmpeg's writer chooses them.
+    {
+        var tags, _ = try convertWithTags(gpa, fixtures.bytes("bext_tags"), .{ .output = .wav, .mode = .copy }, &buffer);
+        defer tags.deinit(gpa);
+        try std.testing.expectEqual(3, tags.count());
+        try std.testing.expectEqualStrings("comment", tags.items()[0].key);
+        try std.testing.expectEqualStrings("date", tags.items()[1].key);
+        try std.testing.expectEqualStrings("Recorder", tags.get("encoded_by") orelse return error.TestExpectedValue);
+    }
+    // Tags after the input's data, and Wave64 and AU outputs, carry none.
+    const none = [_]struct { name: []const u8, output: Container }{
+        .{ .name = "info_after_data", .output = .wav },
+        .{ .name = "info_tags", .output = .w64 },
+        .{ .name = "info_tags", .output = .au },
+    };
+    inline for (none) |case| {
+        var tags, _ = try convertWithTags(gpa, fixtures.bytes(case.name), .{ .output = case.output, .mode = .transcode }, &buffer);
+        defer tags.deinit(gpa);
+        try std.testing.expectEqual(0, tags.count());
+    }
+}
+
+test "the carried tags follow FFmpeg's command: first key wins, stale keys go" {
+    const gpa = std.testing.allocator;
+    var input: metadata.Dictionary = .empty;
+    defer input.deinit(gpa);
+    const pairs = [_][2][]const u8{
+        .{ "creation_time", "x" }, .{ "title", "T" },     .{ "TITLE", "second" },
+        .{ "encoded_by", "E" },    .{ "BPS-eng", "128" }, .{ "Encoding_Tool", "kept: not exact case" },
+        .{ "major_brand", "M" },   .{ "album", "A" },
+    };
+    for (pairs) |pair| try input.put(gpa, pair[0], pair[1], .keep);
+
+    // Copy keeps the encoding provenance; the source-file keys always go.
+    // Removing creation_time moves the last tag (album) into its place, as
+    // av_dict_set does; major_brand likewise.
+    var copied = try carriedTags(gpa, &input, .copy);
+    defer copied.deinit(gpa);
+    const copy_keys = [_][]const u8{ "album", "title", "encoded_by", "BPS-eng", "Encoding_Tool" };
+    try std.testing.expectEqual(copy_keys.len, copied.count());
+    for (copy_keys, copied.items()) |key, entry| try std.testing.expectEqualStrings(key, entry.key);
+    try std.testing.expectEqualStrings("T", copied.get("title") orelse return error.TestExpectedValue);
+
+    // Re-encoding also drops encoded_by and the BPS family.
+    var transcoded = try carriedTags(gpa, &input, .transcode);
+    defer transcoded.deinit(gpa);
+    try std.testing.expectEqual(null, transcoded.get("encoded_by"));
+    try std.testing.expectEqual(null, transcoded.get("BPS-eng"));
+    try std.testing.expectEqual(3, transcoded.count());
 }
 
 test "unknown-length input is refused before any output, because the writers need the length" {

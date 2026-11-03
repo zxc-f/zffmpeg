@@ -9,9 +9,10 @@
 //!
 //! The input container is detected from content. The output container is `-f`,
 //! or else the output name's `.wav`, `.w64` or `.au` extension; `-` (standard
-//! output) needs `-f`. `-c copy` copies the encoded samples, which works only when both
-//! containers carry the same codec; without it the samples are decoded and
-//! encoded again. Output options follow `-i`, as in FFmpeg, where an option
+//! output) needs `-f`. `-c copy` copies the encoded samples, which works only
+//! when both containers carry the same codec; without it the samples are
+//! decoded and encoded again. Tags before the input's `data` are carried into
+//! a WAV output, as FFmpeg's default `-map_metadata` does (T21c). Output options follow `-i`, as in FFmpeg, where an option
 //! before `-i` applies to the input.
 //!
 //! Every check that does not need the rest of the input happens before the
@@ -101,7 +102,15 @@ fn run(init: std.process.Init) ExitStatus {
             return .unsupported;
         },
     };
-    return convert(io, command, .{ .output = container, .mode = command.mode });
+    // The input's tags are carried, as FFmpeg's default -map_metadata does
+    // (T21c, the project owner's choice).
+    var tags: av.metadata.Dictionary = .empty;
+    defer tags.deinit(init.gpa);
+    return convert(io, command, .{
+        .output = container,
+        .mode = command.mode,
+        .tags = .{ .gpa = init.gpa, .dictionary = &tags },
+    });
 }
 
 fn parse(args: []const [:0]const u8) Parsed {

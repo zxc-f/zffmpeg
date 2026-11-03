@@ -102,6 +102,11 @@ pub const Fixture = struct {
     /// The tags an accepted stream reports (T21c), under FFmpeg's names and
     /// in its order, written by hand from the fixture's chunks.
     tags: []const Tag = &.{},
+    /// For writer output: the tags given to the writer, when not `tags`
+    /// (the `bext` names, which reading renames).
+    writer_tags: ?[]const Tag = null,
+    /// For writer output: written with the `bext` option.
+    writer_bext: bool = false,
 
     /// The expected result with the `unknown_length` option off or on.
     pub fn result(fixture: Fixture, unknown_length: bool) Expected {
@@ -109,9 +114,14 @@ pub const Fixture = struct {
         return fixture.expected;
     }
 
-    /// Writer output with the writer's default header, plain RIFF.
+    /// Writer output with the writer's default options: plain RIFF, no tags.
     pub fn plainWriterOutput(fixture: Fixture) bool {
-        return fixture.writer_output and fixture.writer_header == .riff;
+        return fixture.writer_output and fixture.writer_header == .riff and fixture.untagged();
+    }
+
+    /// Written, or read, without tags.
+    pub fn untagged(fixture: Fixture) bool {
+        return fixture.tags.len == 0 and fixture.writer_tags == null and !fixture.writer_bext;
     }
 };
 

@@ -807,6 +807,167 @@ fn renameTags(gpa: std.mem.Allocator, from: *const metadata.Dictionary, names: [
     return to;
 }
 
+/// The INFO codes FFmpeg's writer knows, in the order it writes them
+/// (`riff_tags` in riffenc.c).
+const riff_tags = [_]*const [4]u8{
+    "IARL", "IART", "IAS1", "IAS2", "IAS3", "IAS4", "IAS5", "IAS6", "IAS7",
+    "IAS8", "IAS9", "ICMS", "ICMT", "ICOP", "ICRD", "ICRP", "IDIM", "IDPI",
+    "IENG", "IGNR", "IKEY", "ILGT", "ILNG", "IMED", "INAM", "IPLT", "IPRD",
+    "IPRT", "ITRK", "ISBJ", "ISFT", "ISHP", "ISMP", "ISRC", "ISRF", "ITCH",
+};
+
+/// A tag's key as `ff_riff_write_info` sees it: a generic name becomes the
+/// first INFO code with that name, and any other key stays.
+fn nativeKey(key: []const u8) []const u8 {
+    for (info_names) |name| {
+        if (std.ascii.eqlIgnoreCase(key, name.generic)) return name.native;
+    }
+    return key;
+}
+
+/// The value FFmpeg's writer stores for `code`: the first tag whose renamed
+/// key is exactly `code`, skipping one that the renaming drops as a duplicate
+/// (an earlier tag with the same renamed key, in any case, and value). Found
+/// without allocating, which the writer never does.
+fn infoValue(tags: *const metadata.Dictionary, code: []const u8) ?[]const u8 {
+    const entries = tags.items();
+    for (entries, 0..) |entry, j| {
+        if (!std.mem.eql(u8, nativeKey(entry.key), code)) continue;
+        const dropped = for (entries[0..j]) |earlier| {
+            if (std.ascii.eqlIgnoreCase(nativeKey(earlier.key), code) and std.mem.eql(u8, earlier.value, entry.value)) break true;
+        } else false;
+        if (!dropped) return entry.value;
+    }
+    return null;
+}
+
+/// Bytes of the `LIST`/`INFO` chunk FFmpeg's writer emits for `tags`, header
+/// and pad included, or 0 when no tag has a known INFO code. A known code
+/// with an empty value is not written, but still makes the list.
+fn infoListLen(tags: *const metadata.Dictionary) u64 {
+    var any = false;
+    var body: u64 = 4; // "INFO"
+    for (riff_tags) |code| {
+        const value = infoValue(tags, code) orelse continue;
+        any = true;
+        if (value.len == 0) continue;
+        const size: u64 = value.len + 1; // with its NUL
+        body += 8 + size + size % 2;
+    }
+    return if (any) 8 + body else 0;
+}
+
+fn writeInfoList(out: *std.Io.Writer, tags: *const metadata.Dictionary, list_len: u64) std.Io.Writer.Error!void {
+    std.debug.assert(list_len >= 12);
+    try writeChunkHeader(out, "LIST", list_len - 8);
+    try out.writeAll("INFO");
+    for (riff_tags) |code| {
+        const value = infoValue(tags, code) orelse continue;
+        if (value.len == 0) continue;
+        const size = value.len + 1;
+        try writeChunkHeader(out, code, size);
+        try out.writeAll(value);
+        // The NUL, and a pad byte after an odd size.
+        try out.splatByteAll(0, 1 + size % 2);
+    }
+}
+
+fn writeChunkHeader(out: *std.Io.Writer, id: *const [4]u8, size: u64) std.Io.Writer.Error!void {
+    var header: [8]u8 = undefined;
+    header[0..4].* = id.*;
+    // Callers checked that the chunk fits a 32-bit RIFF size.
+    std.mem.writeInt(u32, header[4..8], @intCast(size), .little);
+    try out.writeAll(&header);
+}
+
+/// Bytes of the `bext` body FFmpeg's writer emits with `-write_bext`: 602
+/// fixed bytes, and the coding history with its NUL.
+fn bextBodyLen(tags: ?*const metadata.Dictionary) u64 {
+    var body: u64 = bext_fixed_len;
+    if (tags) |t| if (t.get("coding_history")) |history| {
+        body += history.len + 1;
+    };
+    return body;
+}
+
+/// `bwf_write_bext_chunk` in wavenc.c: the text fields cut to their lengths,
+/// the time reference parsed as `strtoll` does, version 1, the UMID parsed in
+/// 16-digit hexadecimal groups after its `0x` (at most 8), and the coding
+/// history. The keys are the `bext` names, which `genericTags` renames, so
+/// like FFmpeg's this writes back only what the caller names that way.
+fn writeBext(out: *std.Io.Writer, tags: ?*const metadata.Dictionary, body_len: u64) std.Io.Writer.Error!void {
+    try writeChunkHeader(out, "bext", body_len);
+    const fields = [_]struct { key: []const u8, len: usize }{
+        .{ .key = "description", .len = 256 },
+        .{ .key = "originator", .len = 32 },
+        .{ .key = "originator_reference", .len = 32 },
+        .{ .key = "origination_date", .len = 10 },
+        .{ .key = "origination_time", .len = 8 },
+    };
+    for (fields) |field| {
+        const value = if (tags) |t| t.get(field.key) orelse "" else "";
+        const text = value[0..@min(value.len, field.len)];
+        try out.writeAll(text);
+        try out.splatByteAll(0, field.len - text.len);
+    }
+    var numbers: [10]u8 = undefined;
+    const time_reference: i64 = if (tags) |t| parseDecimal(t.get("time_reference") orelse "") else 0;
+    const time_bits: u64 = @bitCast(time_reference);
+    std.mem.writeInt(u64, numbers[0..8], time_bits, .little);
+    std.mem.writeInt(u16, numbers[8..10], 1, .little);
+    try out.writeAll(&numbers);
+    var umid_parts: usize = 0;
+    if (tags) |t| if (t.get("umid")) |umid| if (umid.len > 2) {
+        const digits = umid[2..];
+        umid_parts = @min(digits.len / 16, 8);
+        for (0..umid_parts) |i| {
+            var part: [8]u8 = undefined;
+            std.mem.writeInt(u64, &part, parseHex(digits[16 * i ..][0..16]), .big);
+            try out.writeAll(&part);
+        }
+    };
+    try out.splatByteAll(0, 64 - 8 * umid_parts + 190);
+    if (tags) |t| if (t.get("coding_history")) |history| {
+        try out.writeAll(history);
+        try out.writeByte(0);
+    };
+    try out.splatByteAll(0, body_len % 2);
+}
+
+/// `strtoll` base 10: leading space, a sign, then digits up to the first
+/// other byte; out of range saturates.
+fn parseDecimal(text: []const u8) i64 {
+    var rest = std.mem.trimStart(u8, text, " \t\n\r\x0b\x0c");
+    var negative = false;
+    if (rest.len > 0 and (rest[0] == '+' or rest[0] == '-')) {
+        negative = rest[0] == '-';
+        rest = rest[1..];
+    }
+    var magnitude: u64 = 0;
+    for (rest) |byte| {
+        const digit = std.fmt.charToDigit(byte, 10) catch break;
+        magnitude = std.math.add(u64, std.math.mul(u64, magnitude, 10) catch std.math.maxInt(u64), digit) catch std.math.maxInt(u64);
+    }
+    if (negative) {
+        const limit: u64 = 1 << 63;
+        if (magnitude >= limit) return std.math.minInt(i64);
+        const positive: i64 = @intCast(magnitude);
+        return -positive;
+    }
+    return std.math.cast(i64, magnitude) orelse std.math.maxInt(i64);
+}
+
+/// `strtoull` base 16 over one 16-character group: digits up to the first
+/// other byte.
+fn parseHex(group: *const [16]u8) u64 {
+    var value: u64 = 0;
+    for (group) |byte| {
+        const digit = std.fmt.charToDigit(byte, 16) catch break;
+        value = value << 4 | digit;
+    }
+    return value;
+}
+
 /// Short reads end at the end of the stream; the caller decides what that means.
 fn mapShort(err: std.Io.Reader.ShortError) Error {
     return switch (err) {
@@ -886,6 +1047,14 @@ pub const WriteOptions = struct {
     /// RIFF only: Wave64 sizes are always 64 bits.
     rf64: Rf64 = .auto,
     variant: Variant = .wav,
+    /// Tags to write (T21c), under FFmpeg's names as `genericTags` gives
+    /// them: a `LIST`/`INFO` chunk before `data` holds every tag with an INFO
+    /// code (`riff_tags`), as FFmpeg's writer chooses them. Read only by
+    /// `begin`. RIFF only: Wave64 gets none, as from FFmpeg's.
+    tags: ?*const metadata.Dictionary = null,
+    /// Write a `bext` chunk from the `description`, `originator`, ...
+    /// tags, as FFmpeg's `-write_bext`; RIFF only.
+    bext: bool = false,
 };
 
 /// The header layouts the writer emits.
@@ -902,13 +1071,20 @@ comptime {
     std.debug.assert(max_header_len >= 12 + ds64_len + 8 + 40 + 12 + 8);
 }
 
+/// The fixed part of a header; the tag chunks go between `bytes[0..data_at]`
+/// and the `data` chunk header after it.
 const Header = struct {
     bytes: [max_header_len]u8,
     len: usize,
+    data_at: usize,
+    /// Body of the `bext` chunk, when one is written.
+    bext_body: ?u64,
+    /// The whole `LIST`/`INFO` chunk; 0 for none.
+    info_len: u64,
 };
 
-/// The bytes before the samples, as the writer emits them for `codec` and
-/// `format` in `form`.
+/// The bytes before the samples, without tags, as the writer emits them for
+/// `codec` and `format` in `form`.
 pub fn headerLen(codec: pcm.Codec, format: audio.Format, form: HeaderForm) usize {
     const fmt_len = fmtLen(codec, format.sample_rate);
     const fact = tagFor(codec) != tag_pcm;
@@ -956,7 +1132,14 @@ pub const Writer = struct {
     /// check fails. `format.sample_format` must be `codec.storage()`.
     pub fn begin(out: *std.Io.Writer, codec: pcm.Codec, format: audio.Format, frame_count: u64, options: WriteOptions) WriteError!Writer {
         const header = try encodeHeader(codec, format, frame_count, options);
-        try out.writeAll(header.bytes[0..header.len]);
+        try out.writeAll(header.bytes[0..header.data_at]);
+        // wavenc.c's order: `bext`, then `LIST`, then `data`.
+        if (header.bext_body) |body| try writeBext(out, options.tags, body);
+        if (header.info_len > 0) {
+            // A nonzero length means encodeHeader found tags.
+            try writeInfoList(out, options.tags orelse unreachable, header.info_len);
+        }
+        try out.writeAll(header.bytes[header.data_at..header.len]);
         return .{ .out = out, .codec = codec, .format = format, .variant = options.variant, .frames_expected = frame_count };
     }
 
@@ -977,13 +1160,20 @@ pub const Writer = struct {
         const block_align = sample_bytes * format.channelCount();
         const byte_rate = std.math.mul(u32, format.sample_rate, block_align) catch return error.SizeOverflow;
         const data_bytes = std.math.mul(u64, frame_count, block_align) catch return error.SizeOverflow;
-        // Pad bytes follow the data inside the extent.
-        const padded_data = std.math.add(u64, data_bytes, options.variant.padAfter(data_bytes)) catch return error.SizeOverflow;
         const max32 = std.math.maxInt(u32);
+        // The tag chunks of a RIFF stream, each limited to a 32-bit size.
+        const riff_tags_dictionary = if (options.variant == .wav) options.tags else null;
+        const bext_body: ?u64 = if (options.bext and options.variant == .wav) bextBodyLen(options.tags) else null;
+        const info_len: u64 = if (riff_tags_dictionary) |t| infoListLen(t) else 0;
+        if ((bext_body orelse 0) > max32 or info_len > max32) return error.SizeOverflow;
+        const tag_chunks = if (bext_body) |body| 8 + body + body % 2 + info_len else info_len;
+        // Pad bytes follow the data inside the extent; the tag chunks precede it.
+        const padded_data = std.math.add(u64, data_bytes, options.variant.padAfter(data_bytes)) catch return error.SizeOverflow;
+        const after_header = std.math.add(u64, padded_data, tag_chunks) catch return error.SizeOverflow;
         const form: HeaderForm = switch (options.variant) {
             .w64 => .w64,
             .wav => form: {
-                const plain_riff = std.math.add(u64, padded_data, headerLen(codec, format, .riff) - 8) catch return error.SizeOverflow;
+                const plain_riff = std.math.add(u64, after_header, headerLen(codec, format, .riff) - 8) catch return error.SizeOverflow;
                 break :form switch (options.rf64) {
                     .always => .rf64,
                     .auto => if (plain_riff > max32) .rf64 else .riff,
@@ -1015,13 +1205,20 @@ pub const Writer = struct {
         }
         std.debug.assert(f.buffered().len == fmt_len);
 
-        var header: Header = .{ .bytes = undefined, .len = header_len };
+        const data_header_len: usize = if (form == .w64) w64_chunk_header_len else 8;
+        var header: Header = .{
+            .bytes = undefined,
+            .len = header_len,
+            .data_at = header_len - data_header_len,
+            .bext_body = bext_body,
+            .info_len = info_len,
+        };
         var w: std.Io.Writer = .fixed(&header.bytes);
         // max_header_len bytes always hold these fields.
         switch (form) {
             .riff, .rf64 => {
                 const rf64 = form == .rf64;
-                const riff_size = std.math.add(u64, padded_data, header_len - 8) catch return error.SizeOverflow;
+                const riff_size = std.math.add(u64, after_header, header_len - 8) catch return error.SizeOverflow;
                 // In RF64 the 32-bit sizes say 0xFFFFFFFF: the real ones are in `ds64`.
                 w.writeAll(if (rf64) "RF64" else "RIFF") catch unreachable;
                 writeLittle(&w, u32, if (rf64) max32 else @intCast(riff_size));
@@ -1051,7 +1248,7 @@ pub const Writer = struct {
                 // as the Sony specification and libsndfile write them
                 // (FFmpeg's muxer also counts the padding). FFmpeg reads them
                 // as signed, so the whole file stays below 2^63.
-                const file_size = std.math.add(u64, padded_data, header_len) catch return error.SizeOverflow;
+                const file_size = std.math.add(u64, after_header, header_len) catch return error.SizeOverflow;
                 if (file_size > std.math.maxInt(i64)) return error.SizeOverflow;
                 w.writeAll("riff" ++ w64_riff_suffix) catch unreachable;
                 writeLittle(&w, u64, file_size);
@@ -1513,11 +1710,17 @@ test "the writer reproduces every writer-output fixture byte for byte" {
             const data = try encodeExpected(stream, &encoded);
             var buffer: [1024]u8 = undefined;
             var out: std.Io.Writer = .fixed(&buffer);
-            const options: WriteOptions = switch (fixture.writer_header) {
+            const gpa = std.testing.allocator;
+            var tags: metadata.Dictionary = .empty;
+            defer tags.deinit(gpa);
+            for (fixture.writer_tags orelse fixture.tags) |tag| try tags.put(gpa, tag.key, tag.value, .keep);
+            var options: WriteOptions = switch (fixture.writer_header) {
                 .riff => .{},
                 .rf64 => .{ .rf64 = .always },
                 .w64 => .{ .variant = .w64 },
             };
+            options.tags = &tags;
+            options.bext = fixture.writer_bext;
             const form: HeaderForm = switch (fixture.writer_header) {
                 .riff => .riff,
                 .rf64 => .rf64,
@@ -1533,13 +1736,15 @@ test "the writer reproduces every writer-output fixture byte for byte" {
                 std.debug.print("fixture {s}\n", .{fixture.name});
                 return err;
             };
-            const pad = options.variant.padAfter(data.len);
-            try std.testing.expectEqual(headerLen(codec, format, form), out.buffered().len - data.len - pad);
+            if (tags.count() == 0) {
+                const pad = options.variant.padAfter(data.len);
+                try std.testing.expectEqual(headerLen(codec, format, form), out.buffered().len - data.len - pad);
+            }
             count += 1;
         }
     }
-    // Every encoding, plain and extensible, and Wave64.
-    try std.testing.expect(count >= 16);
+    // Every encoding, plain and extensible, Wave64, and tags.
+    try std.testing.expect(count >= 18);
 }
 
 test "writeFrames encodes s16 samples as the writer's codec" {
@@ -1668,6 +1873,68 @@ test "a 5 GiB RF64 stream is written with exact sizes and frame counts" {
     try std.testing.expectError(error.TooManyFrames, writer.writeData(block[0..1]));
     try writer.finish();
     try std.testing.expectEqual(headerLen(.u8, mono, .rf64) + total, discarding.fullCount());
+}
+
+/// The bytes between `fmt ` and `data` the writer emits for `pairs`.
+fn writtenTagChunks(pairs: []const [2][]const u8, bext: bool, out: []u8) ![]const u8 {
+    const gpa = std.testing.allocator;
+    var tags: metadata.Dictionary = .empty;
+    defer tags.deinit(gpa);
+    for (pairs) |pair| try tags.put(gpa, pair[0], pair[1], .keep);
+    const mono = try audio.Format.init(8000, 1, .s16);
+    var w: std.Io.Writer = .fixed(out);
+    var writer = try Writer.begin(&w, .s16le, mono, 0, .{ .tags = &tags, .bext = bext });
+    try writer.finish();
+    const written = w.buffered();
+    const fmt_end = canonical_header_len - 8;
+    // The RIFF size counts the tag chunks.
+    try std.testing.expectEqual(written.len - 8, std.mem.readInt(u32, written[4..8], .little));
+    try std.testing.expectEqualStrings("data", written[written.len - 8 ..][0..4]);
+    return written[fmt_end .. written.len - 8];
+}
+
+test "the writer chooses INFO tags as FFmpeg's does" {
+    var buffer: [1024]u8 = undefined;
+    // Generic names become codes, written in riff_tags order; an exact code
+    // passes; a lowercase code is not one; an empty value is skipped; track's
+    // first code takes the first track.
+    const mixed = try writtenTagChunks(&.{
+        .{ "comment", "c" }, .{ "track", "7" }, .{ "IENG", "eng" }, .{ "iart", "lower" },
+        .{ "title", "" },    .{ "track", "8" }, .{ "artist", "A" },
+    }, false, &buffer);
+    try std.testing.expectEqualSlices(u8, "LIST\x2e\x00\x00\x00INFO" ++
+        "IART\x02\x00\x00\x00A\x00" ++ "ICMT\x02\x00\x00\x00c\x00" ++
+        "IENG\x04\x00\x00\x00eng\x00" ++ "IPRT\x02\x00\x00\x007\x00", mixed);
+    // A tag the renaming drops as a duplicate of an earlier one (same key in
+    // any case, same value) is not written; with no other, there is no list.
+    try std.testing.expectEqualSlices(u8, "", try writtenTagChunks(&.{ .{ "iart", "X" }, .{ "artist", "X" } }, false, &buffer));
+    // A known code with only an empty value still makes an empty list.
+    try std.testing.expectEqualSlices(u8, "LIST\x04\x00\x00\x00INFO", try writtenTagChunks(&.{.{ "title", "" }}, false, &buffer));
+    // Without tags, nothing at all.
+    try std.testing.expectEqualSlices(u8, "", try writtenTagChunks(&.{}, false, &buffer));
+}
+
+test "the bext option writes the fixed fields and reads back under FFmpeg's names" {
+    const gpa = std.testing.allocator;
+    var buffer: [1024]u8 = undefined;
+    // Too long a description is cut to 256 bytes; a negative time reference
+    // is stored as its two's complement, as strtoll and a 64-bit write do.
+    const long: [300]u8 = @splat('d');
+    const chunks = try writtenTagChunks(&.{ .{ "description", &long }, .{ "time_reference", " -2x" } }, true, &buffer);
+    try std.testing.expectEqualStrings("bext", chunks[0..4]);
+    try std.testing.expectEqual(bext_fixed_len, std.mem.readInt(u32, chunks[4..8], .little));
+    const body = chunks[8..];
+    try std.testing.expectEqualSlices(u8, long[0..256], body[0..256]);
+    try std.testing.expectEqual(-2, std.mem.readInt(i64, body[338..346], .little));
+    try std.testing.expectEqual(1, std.mem.readInt(u16, body[346..348], .little));
+
+    var stored: metadata.Dictionary = .empty;
+    defer stored.deinit(gpa);
+    try parseBext(.{ .gpa = gpa, .dictionary = &stored }, body);
+    var generic = try genericTags(gpa, &stored);
+    defer generic.deinit(gpa);
+    try std.testing.expectEqual(256, (generic.get("comment") orelse return error.TestExpectedValue).len);
+    try std.testing.expectEqualStrings("18446744073709551614", generic.get("time_reference") orelse return error.TestExpectedValue);
 }
 
 test "Wave64 past 4 GiB: 64-bit sizes are written and read, with the data's padding" {

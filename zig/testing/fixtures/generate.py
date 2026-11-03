@@ -344,6 +344,9 @@ class Fixture:
     # The tags an accepted stream reports (T21c): (key, value) byte pairs under
     # FFmpeg's names and in its order, written by hand.
     tags: list = dataclasses.field(default_factory=list)
+    # Writer output: the tags given to the writer when not `tags`, and the bext option.
+    writer_tags: list = None
+    writer_bext: bool = False
 
 
 def streaming(name, group, rule, data, accept=None, reject=None):
@@ -487,8 +490,8 @@ def build_fixtures():
 
     # Tags (T21c): LIST/INFO and bext, read as FFmpeg's demuxer does and
     # reported under its names. The expected tags are written by hand.
-    def tagged(name, rule, data, tags, samples=MONO[:4]):
-        fixture = accepted(name, "tags", rule, data, 1, 8000, samples)
+    def tagged(name, rule, data, tags, samples=MONO[:4], writer_output=False):
+        fixture = accepted(name, "tags", rule, data, 1, 8000, samples, writer_output=writer_output)
         fixture.tags = tags
         return fixture
 
@@ -499,7 +502,23 @@ def build_fixtures():
                                           info_tag(b"ICRD", b"2024"), info_tag(b"IGNR", b"Speech"),
                                           info_tag(b"INAM", b"Title"))),
                      [(b"artist", b"Artist"), (b"comment", b"A comment"), (b"date", b"2024"),
-                      (b"genre", b"Speech"), (b"title", b"Title")]))
+                      (b"genre", b"Speech"), (b"title", b"Title")], writer_output=True))
+    bext_umid = b"0x060A2B34" + b"01" * 28
+    fx.append(tagged("bext_written",
+                     "The writer's `bext` option: the 602 fixed bytes from the `bext`-named tags, version 1, "
+                     "the UMID parsed back to bytes, and the coding history with its NUL. Read back, the "
+                     "fields report under FFmpeg's names.",
+                     tagged_wav(bext_chunk(description=b"Desc", originator=b"Orig", originator_reference=b"Ref",
+                                           date=b"2024-01-01", time=b"10:11:12", time_reference=96000,
+                                           umid=bytes.fromhex(bext_umid[2:].decode()) + bytes(32),
+                                           coding_history=b"A=PCM\r\n\0")),
+                     [(b"comment", b"Desc"), (b"encoded_by", b"Orig"), (b"originator_reference", b"Ref"),
+                      (b"date", b"2024-01-01"), (b"creation_time", b"10:11:12"), (b"time_reference", b"96000"),
+                      (b"umid", bext_umid), (b"coding_history", b"A=PCM\r\n")], writer_output=True))
+    fx[-1].writer_bext = True
+    fx[-1].writer_tags = [(b"description", b"Desc"), (b"originator", b"Orig"), (b"originator_reference", b"Ref"),
+                          (b"origination_date", b"2024-01-01"), (b"origination_time", b"10:11:12"),
+                          (b"time_reference", b"96000"), (b"umid", bext_umid), (b"coding_history", b"A=PCM\r\n")]
     fx.append(tagged("info_after_data",
                      "A lowercase `list` INFO chunk after `data`: read with the trailing chunks.",
                      tagged_wav(after_data=[chunk(b"list", b"INFO" + info_tag(b"INAM", b"Late"))]),
@@ -1027,11 +1046,14 @@ def render_manifest(fixtures, entry_note):
             lines.append(f"        .writer_header = .{f.writer_header},")
         if f.unknown_accept is not None or f.unknown_reject is not None:
             lines.append(f"        .unknown_length = {render_expected(f.unknown_accept, f.unknown_reject)},")
-        if f.tags:
-            lines.append("        .tags = .{")
-            for key, value in f.tags:
-                lines.append(f"            .{{ .key = {zig_string(key)}, .value = {zig_string(value)} }},")
-            lines.append("        },")
+        for field, tags in (("tags", f.tags), ("writer_tags", f.writer_tags)):
+            if tags:
+                lines.append(f"        .{field} = .{{")
+                for key, value in tags:
+                    lines.append(f"            .{{ .key = {zig_string(key)}, .value = {zig_string(value)} }},")
+                lines.append("        },")
+        if f.writer_bext:
+            lines.append("        .writer_bext = true,")
         lines.append("    },")
     lines.append("}")
     return ("\n".join(lines) + "\n").encode()
