@@ -34,7 +34,7 @@ All header fields are big-endian `u32` values.
 | 16 | sample rate | 0 is `InvalidFormat`; above 192,000 Hz is `LimitExceeded` (configurable). |
 | 20 | channels | 0 is `InvalidFormat`; more than 2 is `UnsupportedFormat`. |
 | 24 | annotation | `offset − 24` bytes, skipped and ignored. Input ending inside them is `Truncated`. |
-| offset | data | `data size` bytes of interleaved samples. Input ending inside them is `Truncated`, reported after the complete frames before it were delivered. Bytes after the data are ignored and never read. |
+| offset | data | `data size` bytes of interleaved samples. Input ending inside them is `Truncated`; output is not atomic, so samples returned by earlier reads stay delivered. Bytes after the data are ignored and never read. |
 
 ## Expected results
 
