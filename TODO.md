@@ -1718,11 +1718,62 @@ names, not as an empty framework.
 - [ ] **T23 — Sample format conversion, channel layouts and rematrixing.**
   Checked when T23a–T23c are. Reference: `libswresample/audioconvert.c`,
   `rematrix.c`, `swresample.c`, `dither.c`, `libavutil/channel_layout.c`.
-  - [ ] **T23a — Sample format conversion.** Needs T20a. Conversions between
+  - [x] **T23a — Sample format conversion.** Needs T20a. Conversions between
     all T20a formats, packed and planar, with FFmpeg's rounding and clipping,
     and dither as an option.
     Done when integer conversions are bit-exact against the reference and
     float conversions stay within a declared ULP tolerance.
+
+    ```text
+    ID / parent: T23a / T23
+    State: verified
+    Supported behavior and explicit exclusions: every pair of the twelve T20a
+      sample formats, packed or planar, as libswresample converts without
+      resampling or rematrixing, floats included bit-exact (no ULP tolerance
+      needed); every dither method (rectangular, triangular, triangular_hp
+      and the seven noise-shaping ones), dither_scale and
+      output_sample_bits; transcoding to any encoder the output carries
+      (-c:a). Excluded: resampling (T24), rematrixing and layouts beyond
+      stereo (T23b, T23c), libswresample's SIMD kernels, option expressions.
+    Needs (verified) / lands with / verified after: T20a, T20b.
+    Contract and source provenance: port.md "Sample format conversion";
+      notes.md "Sample format conversion"; audioconvert.c, dither.c,
+      dither_template.c, noise_shaping_data.c (coefficients copied),
+      swresample.c, ffmpeg_filter.c and the demuxers' packet sizes.
+    Required fixtures / optional corpus: 232 conversion and 133 dither
+      vectors from the pinned libswresample; every accepted fixture; seven
+      generated 200000-frame inputs; no optional corpus.
+    Ownership, state transitions and limits: caller storage and scratch;
+      nothing allocates; the dither's noise runs on across frames.
+    Comparison rule and intentional differences: bit-exact; NaN and float
+      overflow follow x86-64; option errors are usage errors before output,
+      and dither options before -i are refused rather than ignored.
+    Implementation files and test entry points: resample/audioconvert.zig,
+      resample/dither.zig, core/frame.zig, codec/pcm.zig, format/convert.zig,
+      cli/ffmpeg.zig, build.zig cases, compare.py compare_zffmpeg and
+      compare_dither.
+    Evidence commit / Linux CI run / reference report: acdf6eb, 96eed95,
+      877dc97 / local Windows runs / below.
+    Required cases: passed all / failed 0 / missing 0
+    Optional cases: none
+    Fuzz seeds, budget and result: the conversion fuzz test, unchanged.
+    Remaining work or blocker / next action: T23b.
+    ```
+
+    Evidence (G5, local Windows runs with Zig 0.17.0): commits `acdf6eb`
+    (kernels), `96eed95` (any storage through the pipeline, `-c:a`) and
+    `877dc97` (dither). `zig build test` passed 156/156 steps and 205/205
+    tests in Debug, ReleaseSafe and ReleaseFast (the 232 conversion and 133
+    dither vectors, the dither's call emulation over other chunk sizes, the
+    transcoder's packet sizes); fmt, `generate.py --check`, the four cross
+    builds and Linux and big-endian type checks passed, and both vector
+    generators reproduce their files. `compare.py` against the reference
+    ran with no failures: 1201/1201 `zffmpeg` outputs, 462 of them
+    converted cells whose samples equal FFmpeg's own conversion; 493/493
+    unsupported cells; 364/364 dithered conversions equal to FFmpeg's
+    (seven inputs, one per input container, ten methods and three scales,
+    to `pcm_s16le`, `pcm_u8`, `pcm_s24le` and `pcm_s32le`); every other
+    section as for T22d.
   - [ ] **T23b — Channel layouts.** Needs T20a. Layouts beyond mono and
     stereo: native masks, named and custom orders. Ambisonics is excluded.
     Done when layout descriptions and parsing equal FFmpeg's
@@ -2395,6 +2446,11 @@ subtasks must be verified) when the milestone is selected.
   comparisons stay on Linux. Neither Wine nor a cross-compile counts.
   Done when the full suite passes natively and platform differences are
   documented.
+  Known issue, found during T23a: Zig 0.17.0's `File.stat` on Windows
+  reports an anonymous pipe as a regular file of size 0, so
+  `file.regularLength` gives raw PCM piped on standard input a length of 0
+  and it converts as empty (a redirected file is fine). Detect pipes another
+  way there, behind `zig/io/`.
 
 - [ ] **T63 — ARM, macOS and big-endian verification.** Needs the end of the
   Linux-only phase; can run alongside T62. Native AArch64 Linux (for example

@@ -280,6 +280,18 @@ build include the WAV muxer. Its first run, locally on Windows at commit
   s16) rejected before any output: **54/54**.
 - Fixtures whose pipe result equals the file result: **105/105**.
 
+T23a added sample format conversion and dither, with no reference
+configuration change. The run, locally on Windows at commit `877dc97` with
+MSYS2 UCRT64 clang 23.1.4, reported no failures:
+
+- zffmpeg outputs FFmpeg reads as expected, equal through pipes:
+  **1201/1201**, of which 462 converted cells (a storage change or G.711)
+  decode to the samples of FFmpeg's own conversion; unsupported cells
+  (copy across codecs only, since any storage now transcodes): **493/493**.
+- Dithered conversions equal to FFmpeg's: **364/364**.
+- The other sections as for T22d. The sample conversion and dither vector
+  generators reproduce their committed files.
+
 T22d added CAF demuxing, and the CAF demuxer (not the muxer) to the reference
 build. The run, locally on Windows at commit `bbec9d6` with MSYS2 UCRT64 clang
 23.1.4, reported no failures:
