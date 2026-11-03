@@ -203,6 +203,29 @@ def canonical_wav(codec, channels, rate, data):
     return riff(*chunks)
 
 
+def rf64_wav(*chunks, tag=b"RF64", data_size=None, frames=0, riff_field=0xFFFFFFFF, riff_size=None,
+             ds64_size=28, table=0):
+    """An RF64/BW64 file: `ds64` first, with the 64-bit sizes, then `chunks`.
+    `data_size` is the `ds64` data size; `riff_size` overrides its RIFF size."""
+    body = struct.pack("<QQQI", 0, data_size or 0, frames, table) + bytes(max(ds64_size - 28, 0))
+    rest = b"".join(chunks)
+    declared = 4 + 8 + ds64_size + (ds64_size & 1) + len(rest) if riff_size is None else riff_size
+    body = struct.pack("<Q", declared) + body[8:]
+    return tag + u32(riff_field) + b"WAVE" + chunk(b"ds64", body[:ds64_size]) + rest
+
+
+def canonical_rf64(codec, channels, rate, data):
+    """The writer's RF64 output (`rf64 = .always`): the same `fmt ` and `fact`
+    as `canonical_wav`, with 0xFFFFFFFF in the 32-bit RIFF and `data` sizes."""
+    plain = canonical_wav(codec, channels, rate, data)
+    tag, bits, _ = WAV_CODECS[codec]
+    frames = len(data) // (channels * bits // 8)
+    chunks = plain[12:]  # fmt, optional fact, data
+    data_at = chunks.index(b"data" + u32(len(data)))
+    chunks = chunks[:data_at] + b"data" + u32(0xFFFFFFFF) + chunks[data_at + 8:]
+    return rf64_wav(chunks, data_size=len(data), frames=frames)
+
+
 def extensible_fmt(channels=1, rate=8000, bits=16, sub_tag=1, valid=None, mask=None,
                    cb_size=22, block_align=None, subformat=None):
     """A 40-byte WAVE_FORMAT_EXTENSIBLE `fmt ` body; every field can be overridden."""
@@ -239,6 +262,7 @@ class Fixture:
     accept: Stream = None
     reject: str = None  # contract error name
     writer_output: bool = False
+    writer_rf64: bool = False  # writer output with `rf64 = .always`
 
 
 def accepted(name, group, rule, data, channels, rate, samples, writer_output=False, codec=None):
@@ -382,13 +406,34 @@ def build_fixtures():
     fx.append(rejected("rifx_truncated", "riff header",
                        "Precedence: the container tag is checked as soon as it is read, before the "
                        "input runs out.", b"RIFX\x24\x00", "UnsupportedFormat"))
-    ds64 = chunk(b"ds64", bytes(28))
-    fx.append(rejected("rf64", "riff header", "RF64 container (64-bit sizes in `ds64`).",
-                       riff(ds64, fmt_chunk(), data_chunk(MONO[:4]), tag=b"RF64", size=0xFFFFFFFF),
-                       "UnsupportedFormat"))
-    fx.append(rejected("bw64", "riff header", "BW64 container (64-bit sizes in `ds64`).",
-                       riff(ds64, fmt_chunk(), data_chunk(MONO[:4]), tag=b"BW64", size=0xFFFFFFFF),
-                       "UnsupportedFormat"))
+    # RF64 and BW64 (T21b): 64-bit sizes in a leading `ds64` chunk.
+    rf64_data = pcm(MONO[:4])
+    rf64_rest = fmt_chunk() + chunk(b"data", rf64_data, size=0xFFFFFFFF)
+    fx.append(accepted("rf64", "rf64",
+                       "RF64 as the writer emits it with `rf64 = .always`: 0xFFFFFFFF in the 32-bit RIFF and "
+                       "`data` sizes, the real ones in `ds64` (rejected before T21b).",
+                       canonical_rf64("pcm_s16le", 1, 8000, rf64_data), 1, 8000, MONO[:4], writer_output=True))
+    fx[-1].writer_rf64 = True
+    fx.append(accepted("bw64", "rf64", "BW64, the EBU's RF64 (rejected before T21b).",
+                       rf64_wav(rf64_rest, tag=b"BW64", data_size=len(rf64_data), frames=4), 1, 8000, MONO[:4]))
+    fx.append(accepted("rf64_data_size_in_chunk", "rf64",
+                       "RF64 whose small `data` chunk holds its own size: `ds64`'s is used only for 0xFFFFFFFF.",
+                       rf64_wav(fmt_chunk(), data_chunk(MONO[:4]), data_size=0xFFFF, frames=4), 1, 8000, MONO[:4]))
+    fx.append(rejected("rf64_riff_size_not_sentinel", "rf64",
+                       "RF64 with a 32-bit RIFF size other than 0xFFFFFFFF. FFmpeg ignores the field.",
+                       rf64_wav(rf64_rest, data_size=len(rf64_data), riff_field=56), "InvalidRiff"))
+    fx.append(rejected("rf64_missing_ds64", "rf64", "RF64 whose first chunk is `fmt `, not `ds64`.",
+                       b"RF64" + u32(0xFFFFFFFF) + b"WAVE" + rf64_rest, "InvalidRiff"))
+    fx.append(rejected("rf64_ds64_short", "rf64",
+                       "A 24-byte `ds64` without the table count. FFmpeg accepts 24 bytes.",
+                       rf64_wav(rf64_rest, data_size=len(rf64_data), ds64_size=24), "InvalidRiff"))
+    fx.append(rejected("rf64_ds64_table", "rf64", "A `ds64` with one table entry (64-bit sizes of other chunks).",
+                       rf64_wav(rf64_rest, data_size=len(rf64_data), table=1), "UnsupportedFormat"))
+    fx.append(rejected("rf64_data_exceeds_extent", "rf64",
+                       "`ds64` declares 64 data bytes, but the RF64 extent ends after 8.",
+                       rf64_wav(rf64_rest, data_size=64), "InvalidRiff"))
+    fx.append(rejected("rf64_truncated_ds64", "rf64", "Input ends inside `ds64`.",
+                       rf64_wav(rf64_rest, data_size=len(rf64_data))[:30], "Truncated"))
     w64 = W64_RIFF_GUID + struct.pack("<Q", 40) + W64_WAVE_GUID
     fx.append(rejected("w64", "riff header", "Sony Wave64 (starts with the lowercase `riff` GUID).",
                        w64, "UnsupportedFormat"))
@@ -702,6 +747,8 @@ def render_manifest(fixtures, entry_note):
             lines.append(f"        .expected = .{{ .reject = .{f.reject} }},")
         if f.writer_output:
             lines.append("        .writer_output = true,")
+        if f.writer_rf64:
+            lines.append("        .writer_rf64 = true,")
         lines.append("    },")
     lines.append("}")
     return ("\n".join(lines) + "\n").encode()

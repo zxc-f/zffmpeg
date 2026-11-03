@@ -93,6 +93,8 @@ pub const Fixture = struct {
     expected: Expected,
     /// The writer (T08) must produce exactly these bytes from `expected.accept`.
     writer_output: bool = false,
+    /// ... with `rf64 = .always` (T21b), rather than the default.
+    writer_rf64: bool = false,
 };
 
 pub const all: []const Fixture = @import("fixtures/manifest.zon");

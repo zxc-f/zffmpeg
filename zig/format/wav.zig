@@ -140,8 +140,10 @@ pub const Parser = struct {
     limits: Limits,
     /// Bytes content detection already read; they come before the reader's.
     prefix: Prefix = .{},
-    /// Bytes of the declared RIFF extent not yet consumed.
-    extent_left: u32 = 0,
+    /// Bytes of the declared RIFF (or RF64) extent not yet consumed.
+    extent_left: u64 = 0,
+    /// RF64/BW64: the `data` size from `ds64`, for a `data` chunk sized 0xFFFFFFFF.
+    ds64_data_size: ?u64 = null,
     chunks: u32 = 0,
     /// Set together by the `fmt ` chunk.
     format: ?audio.Format = null,
@@ -149,7 +151,7 @@ pub const Parser = struct {
     /// Bytes of one encoded frame.
     frame_bytes: u32 = 0,
     /// Bytes of `data` not yet delivered.
-    data_left: u32 = 0,
+    data_left: u64 = 0,
     /// The `data` size is odd, so a pad byte follows it.
     data_padded: bool = false,
     state: State = .header,
@@ -166,23 +168,30 @@ pub const Parser = struct {
         return .{ .reader = reader, .limits = limits, .prefix = prefix };
     }
 
-    /// Reads the RIFF header and every chunk up to the start of `data`.
+    /// Reads the RIFF (or RF64/BW64) header and every chunk up to the start
+    /// of `data`.
     pub fn readHeader(p: *Parser) Error!Info {
         std.debug.assert(p.state == .header);
         const tag = try p.readArray(4);
-        if (!std.mem.eql(u8, &tag, "RIFF")) {
-            for ([_]*const [4]u8{ "RIFX", "RF64", "BW64", "riff" }) |unsupported| {
+        const rf64 = std.mem.eql(u8, &tag, "RF64") or std.mem.eql(u8, &tag, "BW64");
+        if (!rf64 and !std.mem.eql(u8, &tag, "RIFF")) {
+            for ([_]*const [4]u8{ "RIFX", "riff" }) |unsupported| {
                 if (std.mem.eql(u8, &tag, unsupported)) return error.UnsupportedFormat;
             }
             return error.InvalidRiff;
         }
         const size_bytes = try p.readArray(4);
         const riff_size = std.mem.readInt(u32, &size_bytes, .little);
-        if (riff_size == 0 or riff_size == std.math.maxInt(u32)) return error.UnsupportedStreamingSize;
-        if (riff_size < 4) return error.InvalidRiff;
+        if (rf64) {
+            // RF64 keeps its sizes in `ds64`; the 32-bit field must say so.
+            if (riff_size != std.math.maxInt(u32)) return error.InvalidRiff;
+        } else {
+            if (riff_size == 0 or riff_size == std.math.maxInt(u32)) return error.UnsupportedStreamingSize;
+            if (riff_size < 4) return error.InvalidRiff;
+        }
         const form = try p.readArray(4);
         if (!std.mem.eql(u8, &form, "WAVE")) return error.InvalidWave;
-        p.extent_left = riff_size - 4;
+        if (rf64) try p.readDs64() else p.extent_left = riff_size - 4;
 
         while (true) {
             // The extent ended before `data`: `fmt ` or `data` is missing.
@@ -225,7 +234,7 @@ pub const Parser = struct {
     /// hold one frame.
     pub fn readData(p: *Parser, output: []u8) Error![]u8 {
         std.debug.assert(p.state == .data);
-        const data_left: usize = p.data_left;
+        const data_left = std.math.cast(usize, p.data_left) orelse std.math.maxInt(usize);
         const want = @min(data_left, output.len - output.len % p.frame_bytes);
         p.reader.readSliceAll(output[0..want]) catch |err| return mapRead(err);
         p.data_left -= @intCast(want);
@@ -236,7 +245,7 @@ pub const Parser = struct {
     /// end of the RIFF extent. Bytes after the extent are never read.
     pub fn finish(p: *Parser) Error!void {
         std.debug.assert(p.state == .data);
-        p.reader.discardAll(p.data_left) catch |err| return mapRead(err);
+        p.reader.discardAll64(p.data_left) catch |err| return mapRead(err);
         p.data_left = 0;
         if (p.data_padded) try p.skipPad(1);
         while (try p.nextChunk()) |header| {
@@ -320,11 +329,14 @@ pub const Parser = struct {
         p.frame_bytes = frame_bytes;
     }
 
-    fn beginData(p: *Parser, size: u32) Error!Info {
+    fn beginData(p: *Parser, declared_size: u32) Error!Info {
         // Data is read straight from the reader; the prefix was consumed first.
         std.debug.assert(p.prefix.pending().len == 0);
         const format = p.format orelse return error.InvalidWave;
-        if (size == std.math.maxInt(u32)) return error.UnsupportedStreamingSize;
+        const size: u64 = if (declared_size == std.math.maxInt(u32))
+            p.ds64_data_size orelse return error.UnsupportedStreamingSize
+        else
+            declared_size;
         if (size % p.frame_bytes != 0) return error.InvalidFormat;
         try p.checkExtent(size);
         p.extent_left -= size;
@@ -351,7 +363,32 @@ pub const Parser = struct {
         }
     }
 
-    fn checkExtent(p: *Parser, size: u32) Error!void {
+    /// RF64/BW64: the `ds64` chunk that must come first, holding the 64-bit
+    /// RIFF and `data` sizes. Its sample count is informational, like `fact`;
+    /// a table of other chunks' 64-bit sizes is not supported.
+    fn readDs64(p: *Parser) Error!void {
+        const header = try p.readArray(8);
+        if (!std.mem.eql(u8, header[0..4], "ds64")) return error.InvalidRiff;
+        const size = std.mem.readInt(u32, header[4..8], .little);
+        if (size < 28) return error.InvalidRiff;
+        const fields = try p.readArray(28);
+        const riff_size = std.mem.readInt(u64, fields[0..8], .little);
+        const data_size = std.mem.readInt(u64, fields[8..16], .little);
+        // fields[16..24] is the sample count: informational, never used.
+        const table_len = std.mem.readInt(u32, fields[24..28], .little);
+        // The extent after the form type must hold this chunk and its pad.
+        const body: u64 = size;
+        const chunk_len = 8 + body + body % 2;
+        if (riff_size < 4 or riff_size - 4 < chunk_len) return error.InvalidRiff;
+        if (table_len != 0) return error.UnsupportedFormat;
+        p.reader.discardAll64(body - 28 + body % 2) catch |err| return mapRead(err);
+        p.extent_left = riff_size - 4 - chunk_len;
+        // `ds64` counts toward the chunk limit like every other header.
+        p.chunks = 1;
+        p.ds64_data_size = data_size;
+    }
+
+    fn checkExtent(p: *Parser, size: u64) Error!void {
         if (size > p.extent_left) return error.InvalidRiff;
     }
 
@@ -411,9 +448,9 @@ pub const HeaderError = error{
     UnsupportedFormat,
     /// A zero sample rate.
     InvalidFormat,
-    /// The sample rate is above `Limits.max_sample_rate`.
+    /// The sample rate is above `WriteOptions.max_sample_rate`.
     LimitExceeded,
-    /// The `data` or RIFF size would not fit in 32 bits.
+    /// The sizes do not fit: 32 bits with `rf64 = .never`, else 64.
     SizeOverflow,
 };
 
@@ -426,9 +463,29 @@ pub const WriteError = std.Io.Writer.Error || HeaderError || error{
     TooFewFrames,
 };
 
-/// The largest header: RIFF header, a 40-byte extensible `fmt `, `fact`, and
-/// the `data` chunk header.
-const max_header_len = 12 + 8 + 40 + 12 + 8;
+/// When the writer emits RF64 (64-bit sizes in a `ds64` chunk), as FFmpeg's
+/// `-rf64` option names it.
+pub const Rf64 = enum {
+    /// Never: sizes past 32 bits are `SizeOverflow`.
+    never,
+    /// Exactly when the RIFF or `data` size would not fit in 32 bits; the
+    /// writer knows the length up front, so it decides before the header.
+    auto,
+    /// Always, also for small streams.
+    always,
+};
+
+pub const WriteOptions = struct {
+    max_sample_rate: u32 = 192_000,
+    rf64: Rf64 = .auto,
+};
+
+/// The largest header: RF64 header, `ds64`, a 40-byte extensible `fmt `,
+/// `fact`, and the `data` chunk header.
+const max_header_len = 12 + 36 + 8 + 40 + 12 + 8;
+
+/// Bytes of the `ds64` chunk, header included.
+const ds64_len = 8 + 28;
 
 const Header = struct {
     bytes: [max_header_len]u8,
@@ -436,12 +493,13 @@ const Header = struct {
 };
 
 /// The bytes before the samples, as the writer emits them for `codec` and
-/// `format`.
-pub fn headerLen(codec: pcm.Codec, format: audio.Format) usize {
+/// `format`, with or without RF64's `ds64` chunk.
+pub fn headerLen(codec: pcm.Codec, format: audio.Format, rf64: bool) usize {
     const tag = tagFor(codec) orelse 1;
     const fmt_len: usize = if (useExtensible(codec, format.sample_rate)) 40 else if (tag == tag_pcm) 16 else 18;
     const fact_len: usize = if (tag == tag_pcm) 0 else 12;
-    return 12 + 8 + fmt_len + fact_len + 8;
+    const ds64: usize = if (rf64) ds64_len else 0;
+    return 12 + ds64 + 8 + fmt_len + fact_len + 8;
 }
 
 /// `riffenc.c`'s choice for mono and stereo: extensible above 48 kHz, or
@@ -453,52 +511,68 @@ fn useExtensible(codec: pcm.Codec, sample_rate: u32) bool {
 }
 
 /// Writes one known-length WAV stream to a borrowed writer: the header with
-/// exact sizes, then the samples. No seeking and no placeholder sizes.
+/// exact sizes (RIFF, or RF64 as `WriteOptions.rf64` decides), then the
+/// samples. No seeking and no placeholder sizes.
 pub const Writer = struct {
     out: *std.Io.Writer,
     codec: pcm.Codec,
     format: audio.Format,
-    frames_expected: u32,
-    frames_written: u32 = 0,
+    frames_expected: u64,
+    frames_written: u64 = 0,
 
     /// Checks every size, then writes the header. Nothing is written when a
     /// check fails. `format.sample_format` must be `codec.storage()`.
-    pub fn begin(out: *std.Io.Writer, codec: pcm.Codec, format: audio.Format, frame_count: u64, limits: Limits) WriteError!Writer {
-        const header = try encodeHeader(codec, format, frame_count, limits);
+    pub fn begin(out: *std.Io.Writer, codec: pcm.Codec, format: audio.Format, frame_count: u64, options: WriteOptions) WriteError!Writer {
+        const header = try encodeHeader(codec, format, frame_count, options);
         try out.writeAll(header.bytes[0..header.len]);
-        // encodeHeader checked that the data size, and so the frame count, fits in u32.
-        return .{ .out = out, .codec = codec, .format = format, .frames_expected = @intCast(frame_count) };
+        return .{ .out = out, .codec = codec, .format = format, .frames_expected = frame_count };
     }
 
     /// Runs `begin`'s checks without writing, so a caller can reject an
     /// operation before its output exists.
-    pub fn check(codec: pcm.Codec, format: audio.Format, frame_count: u64, limits: Limits) HeaderError!void {
-        _ = try encodeHeader(codec, format, frame_count, limits);
+    pub fn check(codec: pcm.Codec, format: audio.Format, frame_count: u64, options: WriteOptions) HeaderError!void {
+        _ = try encodeHeader(codec, format, frame_count, options);
     }
 
-    fn encodeHeader(codec: pcm.Codec, format: audio.Format, frame_count: u64, limits: Limits) HeaderError!Header {
+    fn encodeHeader(codec: pcm.Codec, format: audio.Format, frame_count: u64, options: WriteOptions) HeaderError!Header {
         const tag = tagFor(codec) orelse return error.UnsupportedFormat;
         if (format.sample_format != codec.storage()) return error.UnsupportedFormat;
         if (format.sample_rate == 0) return error.InvalidFormat;
-        if (format.sample_rate > limits.max_sample_rate) return error.LimitExceeded;
+        if (format.sample_rate > options.max_sample_rate) return error.LimitExceeded;
         const sample_bytes: u16 = codec.bytesPerSample();
         const bits = sample_bytes * 8;
         // At most 8 bytes times 2 channels.
         const block_align = sample_bytes * format.channelCount();
-        const header_len = headerLen(codec, format);
+        const byte_rate = std.math.mul(u32, format.sample_rate, block_align) catch return error.SizeOverflow;
         const data_bytes = std.math.mul(u64, frame_count, block_align) catch return error.SizeOverflow;
         // A pad byte follows odd data, inside the RIFF extent.
-        const riff_size = std.math.add(u64, data_bytes + data_bytes % 2, header_len - 8) catch return error.SizeOverflow;
-        if (riff_size > std.math.maxInt(u32)) return error.SizeOverflow;
-        const byte_rate = std.math.mul(u32, format.sample_rate, block_align) catch return error.SizeOverflow;
+        const padded_data = std.math.add(u64, data_bytes, data_bytes % 2) catch return error.SizeOverflow;
+        const plain_riff = std.math.add(u64, padded_data, headerLen(codec, format, false) - 8) catch return error.SizeOverflow;
+        const max32 = std.math.maxInt(u32);
+        const rf64 = switch (options.rf64) {
+            .always => true,
+            .auto => plain_riff > max32,
+            .never => if (plain_riff > max32) return error.SizeOverflow else false,
+        };
+        const header_len = headerLen(codec, format, rf64);
+        const riff_size = std.math.add(u64, padded_data, header_len - 8) catch return error.SizeOverflow;
         const extensible = useExtensible(codec, format.sample_rate);
 
         var header: Header = .{ .bytes = undefined, .len = header_len };
         var w: std.Io.Writer = .fixed(&header.bytes);
-        // max_header_len bytes always hold these fields.
-        w.writeAll("RIFF") catch unreachable;
-        writeLittle(&w, u32, @intCast(riff_size));
+        // max_header_len bytes always hold these fields. In RF64 the 32-bit
+        // sizes say 0xFFFFFFFF: the real ones are in `ds64`.
+        w.writeAll(if (rf64) "RF64" else "RIFF") catch unreachable;
+        writeLittle(&w, u32, if (rf64) max32 else @intCast(riff_size));
         w.writeAll("WAVE") catch unreachable;
+        if (rf64) {
+            w.writeAll("ds64") catch unreachable;
+            writeLittle(&w, u32, 28);
+            writeLittle(&w, u64, riff_size);
+            writeLittle(&w, u64, data_bytes);
+            writeLittle(&w, u64, frame_count);
+            writeLittle(&w, u32, 0); // no table of other chunks' sizes
+        }
         w.writeAll("fmt ") catch unreachable;
         writeLittle(&w, u32, if (extensible) 40 else if (tag == tag_pcm) 16 else 18);
         writeLittle(&w, u16, if (extensible) tag_extensible else tag);
@@ -519,10 +593,11 @@ pub const Writer = struct {
         if (tag != tag_pcm) {
             w.writeAll("fact") catch unreachable;
             writeLittle(&w, u32, 4);
-            writeLittle(&w, u32, @intCast(frame_count));
+            // As FFmpeg's RF64 writer: 0xFFFFFFFF when the count needs ds64.
+            writeLittle(&w, u32, std.math.cast(u32, frame_count) orelse max32);
         }
         w.writeAll("data") catch unreachable;
-        writeLittle(&w, u32, @intCast(data_bytes));
+        writeLittle(&w, u32, if (rf64) max32 else @intCast(data_bytes));
         std.debug.assert(w.buffered().len == header_len);
         return header;
     }
@@ -556,20 +631,19 @@ pub const Writer = struct {
         const frames = bytes.len / frame_bytes;
         if (frames > w.frames_expected - w.frames_written) return error.TooManyFrames;
         try w.out.writeAll(bytes);
-        w.frames_written += @intCast(frames);
+        w.frames_written += frames;
     }
 
     /// Verifies that every declared frame was written, writes the pad byte
     /// that odd data needs, then flushes `out`.
     pub fn finish(w: *Writer) WriteError!void {
         if (w.frames_written != w.frames_expected) return error.TooFewFrames;
-        const frames: u64 = w.frames_written;
-        const data_bytes = frames * w.codec.bytesPerSample() * w.format.channelCount();
+        // begin checked that the data size fits in u64.
+        const data_bytes = w.frames_written * w.codec.bytesPerSample() * w.format.channelCount();
         if (data_bytes % 2 == 1) try w.out.writeAll(&.{0});
         try w.out.flush();
     }
 };
-
 fn writeLittle(w: *std.Io.Writer, comptime T: type, value: T) void {
     var bytes: [@sizeOf(T)]u8 = undefined;
     std.mem.writeInt(T, &bytes, value, .little);
@@ -758,7 +832,7 @@ test "odd data is followed by a pad byte, which both directions handle" {
     try writer.writeData(&.{ 1, 2, 3 });
     try writer.finish();
     const written = out.buffered();
-    try std.testing.expectEqual(headerLen(.u8, mono) + 4, written.len);
+    try std.testing.expectEqual(headerLen(.u8, mono, false) + 4, written.len);
     try std.testing.expectEqual(written.len - 8, std.mem.readInt(u32, written[4..8], .little));
 
     var file: [128]u8 = undefined;
@@ -821,7 +895,8 @@ test "the writer reproduces every writer-output fixture byte for byte" {
             const data = try encodeExpected(stream, &encoded);
             var buffer: [1024]u8 = undefined;
             var out: std.Io.Writer = .fixed(&buffer);
-            var writer = try Writer.begin(&out, codec, format, stream.frameCount(), .{});
+            const options: WriteOptions = .{ .rf64 = if (fixture.writer_rf64) .always else .auto };
+            var writer = try Writer.begin(&out, codec, format, stream.frameCount(), options);
             // One frame per call exercises repeated writes.
             const frame_bytes = codec.bytesPerSample() * stream.channels;
             var i: usize = 0;
@@ -831,7 +906,7 @@ test "the writer reproduces every writer-output fixture byte for byte" {
                 std.debug.print("fixture {s}\n", .{fixture.name});
                 return err;
             };
-            try std.testing.expectEqual(headerLen(codec, format), out.buffered().len - data.len - data.len % 2);
+            try std.testing.expectEqual(headerLen(codec, format, fixture.writer_rf64), out.buffered().len - data.len - data.len % 2);
             count += 1;
         }
     }
@@ -882,7 +957,9 @@ test "the writer checks every size and the codec before writing the header" {
     try std.testing.expectError(error.SizeOverflow, Writer.begin(&out, .s16le, mono, std.math.maxInt(u64), .{}));
     // The largest mono stream whose RIFF size still fits in 32 bits.
     const max_frames = (std.math.maxInt(u32) - 36) / 2;
-    try std.testing.expectError(error.SizeOverflow, Writer.begin(&out, .s16le, mono, max_frames + 1, .{}));
+    try std.testing.expectError(error.SizeOverflow, Writer.begin(&out, .s16le, mono, max_frames + 1, .{ .rf64 = .never }));
+    // 64 bits overflow whatever the option.
+    try std.testing.expectError(error.SizeOverflow, Writer.begin(&out, .s16le, mono, std.math.maxInt(u64) / 2, .{}));
     const fast = try audio.Format.init(192_001, 1, .s16);
     try std.testing.expectError(error.LimitExceeded, Writer.begin(&out, .s16le, fast, 0, .{}));
     const zero_rate: audio.Format = .{ .sample_rate = 0, .layout = .mono, .sample_format = .s16 };
@@ -900,10 +977,10 @@ test "the writer checks every size and the codec before writing the header" {
 
     // A 24-bit stream has the extensible header and a 3-byte frame.
     const s24 = try audio.Format.init(8000, 1, .s32);
-    try std.testing.expectEqual(68, headerLen(.s24le, s24));
+    try std.testing.expectEqual(68, headerLen(.s24le, s24, false));
     const max_s24 = (std.math.maxInt(u32) - (68 - 8) - 1) / 3;
     try Writer.check(.s24le, s24, max_s24, .{});
-    try std.testing.expectError(error.SizeOverflow, Writer.check(.s24le, s24, max_s24 + 1, .{}));
+    try std.testing.expectError(error.SizeOverflow, Writer.check(.s24le, s24, max_s24 + 1, .{ .rf64 = .never }));
     try std.testing.expect(carries(.f64le) and !carries(.s8) and !carries(.f32be));
 }
 
@@ -919,4 +996,61 @@ test "the writer reports write and flush failures" {
     var writer = try Writer.begin(&failing_flush, .s16le, mono, 1, .{});
     try writer.writeFrames(&.{7});
     try std.testing.expectError(error.WriteFailed, writer.finish());
+}
+
+const synthetic = @import("../testing/synthetic.zig");
+
+/// The header the writer emits for `frame_count` frames, with `options`.
+fn writtenHeader(codec: pcm.Codec, format: audio.Format, frame_count: u64, options: WriteOptions, out: []u8) ![]const u8 {
+    var w: std.Io.Writer = .fixed(out);
+    _ = try Writer.begin(&w, codec, format, frame_count, options);
+    return w.buffered();
+}
+
+test "RF64 past 4 GiB: the writer switches to it, and the parser reads it" {
+    const mono = try audio.Format.init(8000, 1, .s16);
+    const frames: u64 = (5 << 30) / 2; // 5 GiB of 16-bit samples
+    var buffer: [max_header_len]u8 = undefined;
+    // auto (the default) chooses RF64 because 32 bits cannot hold the sizes.
+    const header = try writtenHeader(.s16le, mono, frames, .{}, &buffer);
+    try std.testing.expectEqualStrings("RF64", header[0..4]);
+    try std.testing.expectEqual(headerLen(.s16le, mono, true), header.len);
+    // ds64: the RIFF size (data plus the header after the first 8 bytes), then the data size.
+    try std.testing.expectEqual((5 << 30) + header.len - 8, std.mem.readInt(u64, header[20..28], .little));
+    try std.testing.expectEqual(5 << 30, std.mem.readInt(u64, header[28..36], .little));
+    try std.testing.expectEqual(std.math.maxInt(u32), std.mem.readInt(u32, header[header.len - 4 ..][0..4], .little));
+
+    // The parser reads the 5 GiB stream through the synthetic reader; probing
+    // skips the zeros without producing them.
+    var reader_buffer: [64]u8 = undefined;
+    var stream: synthetic.ZeroStream = .init(header, 5 << 30, "", &reader_buffer);
+    const info = try probe(&stream.interface, .{});
+    try std.testing.expectEqual(frames, info.frame_count);
+}
+
+test "a 5 GiB RF64 stream is written with exact sizes and frame counts" {
+    const mono = try audio.Format.init(8000, 1, .u8);
+    const total: u64 = 5 << 30;
+    var discard_buffer: [0]u8 = .{};
+    var discarding: std.Io.Writer.Discarding = .init(&discard_buffer);
+    var writer = try Writer.begin(&discarding.writer, .u8, mono, total, .{});
+    const block: [1 << 20]u8 = @splat(0x80);
+    var written: u64 = 0;
+    while (written < total) : (written += block.len) try writer.writeData(&block);
+    try std.testing.expectError(error.TooManyFrames, writer.writeData(block[0..1]));
+    try writer.finish();
+    try std.testing.expectEqual(headerLen(.u8, mono, true) + total, discarding.fullCount());
+}
+
+test "RF64 and plain RIFF agree below 4 GiB, and never refuses what needs 64 bits" {
+    const stereo = try audio.Format.init(48000, 2, .s32);
+    var rf64_buffer: [max_header_len]u8 = undefined;
+    var riff_buffer: [max_header_len]u8 = undefined;
+    const rf64 = try writtenHeader(.s24le, stereo, 100, .{ .rf64 = .always }, &rf64_buffer);
+    const riff = try writtenHeader(.s24le, stereo, 100, .{}, &riff_buffer);
+    try std.testing.expectEqualStrings("RIFF", riff[0..4]);
+    // Same fmt and data chunk header after RF64's ds64.
+    try std.testing.expectEqualSlices(u8, riff[12 .. riff.len - 4], rf64[12 + ds64_len .. rf64.len - 4]);
+    const mono = try audio.Format.init(8000, 1, .s16);
+    try std.testing.expectError(error.SizeOverflow, Writer.check(.s16le, mono, 3 << 30, .{ .rf64 = .never }));
 }

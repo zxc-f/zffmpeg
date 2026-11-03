@@ -86,6 +86,8 @@ so most of the bounds rules here are stricter than FFmpeg's on purpose.
 | `riff_size` disagrees with the input length | Input longer than the extent: the extra bytes are ignored (`trailing_bytes_after_riff`). Input shorter: `Truncated` (`riff_size_exceeds_input`). A known input size may report this before any audio; otherwise it appears while reading. | Ignores `riff_size`. |
 | Fewer than 8 bytes of extent left where a chunk header should start | `InvalidRiff` (`partial_chunk_header_in_extent`). | Stops at EOF. |
 | `riff_size` sentinels | 0 and 0xFFFFFFFF are unknown sizes: `UnsupportedStreamingSize`. 1 to 3 cannot hold the form type: `InvalidRiff`. | Ignores `riff_size`. |
+| RF64 and BW64 (T21b) | Accepted (`rf64`, `bw64`): the 32-bit RIFF size must be 0xFFFFFFFF (`rf64_riff_size_not_sentinel`), `ds64` must come first (`rf64_missing_ds64`) with at least 28 bytes (`rf64_ds64_short`) and no table of other chunks' sizes (`rf64_ds64_table`, `UnsupportedFormat`); its RIFF size bounds the extent, and its data size is used only when `data`'s own is 0xFFFFFFFF (`rf64_data_size_in_chunk`); the sample count is ignored like `fact`'s. | Ignores the 32-bit size and the table, accepts a 24-byte `ds64`, and reads `data` past the extent (`rf64_data_exceeds_extent`). |
+| RF64 in the writer | `WriteOptions.rf64`: `.auto` (the default) writes RF64 exactly when the RIFF or `data` size would not fit in 32 bits, decided before the header since the length is known; `.always` writes it for any stream (`rf64`); `.never` makes such sizes `SizeOverflow`. The layout is FFmpeg's: `ds64` (28 bytes, no table) after `WAVE`, then the same `fmt ` and `fact` (0xFFFFFFFF when the count needs 64 bits), and `data` sized 0xFFFFFFFF. | `-rf64` defaults to `never`, which writes broken sizes past 4 GiB; `auto` needs seekable output. |
 | `fmt ` declaring fewer than 16 bytes | `InvalidFormat`: a complete but malformed chunk (`fmt_size_14`). Input ending inside `fmt ` is `Truncated` (`fmt_truncated`). This is what the contract's "short fields are truncated" means. | Rejects. |
 | `fmt ` sizes other than 16, or 18 with `cbSize == 0` (40 with `cbSize == 22` when extensible) | `UnsupportedFormat` (`fmt20_cbsize2`, `extensible_fmt18`, `extensible_cbsize_short`). | Accepts more variants and keeps the extra bytes as extradata. |
 | Bit depths that are not whole bytes | `UnsupportedFormat` (`fmt_bits12`): tag 1 takes 8, 16, 24, 32 or 64 bits, float 32 or 64, A-law and mu-law 8. | Rounds up to the next byte (12 bits reads as `pcm_s16le`). |
@@ -109,19 +111,23 @@ so most of the bounds rules here are stricter than FFmpeg's on purpose.
 The parser reads sequentially, and the first violation in stream order wins.
 Within one structure, checks run in this order:
 
-1. **RIFF header** (12 bytes): the container tag (`RIFF`; `RIFX`, `RF64`,
-   `BW64` and the W64 `riff` GUID are `UnsupportedFormat`; anything else is
-   `InvalidRiff`), then `riff_size` (sentinels, then the minimum of 4), then the
-   form type (`WAVE`, else `InvalidWave`). Input that ends before a check's
-   bytes are complete is `Truncated`.
+1. **RIFF header** (12 bytes): the container tag (`RIFF`, `RF64` or `BW64`;
+   `RIFX` and the W64 `riff` GUID are `UnsupportedFormat`; anything else is
+   `InvalidRiff`), then `riff_size` (RF64: not 0xFFFFFFFF is `InvalidRiff`;
+   RIFF: sentinels, then the minimum of 4), then the form type (`WAVE`, else
+   `InvalidWave`). For RF64 the `ds64` chunk follows: another chunk ID, a size
+   below 28, or a RIFF size that cannot hold `ds64` is `InvalidRiff`; a table
+   is `UnsupportedFormat`. Input that ends before a check's bytes are complete
+   is `Truncated`.
 2. **Each chunk header** inside the extent:
    1. fewer than 8 bytes of extent left: `InvalidRiff`; input ends inside the
       header: `Truncated`;
    2. chunk count above 4,096: `LimitExceeded`;
    3. `fmt `: a second one is `InvalidWave`; a declared size below 16 is
       `InvalidFormat`. `data`: no `fmt ` yet or a second `data` is
-      `InvalidWave`; size 0xFFFFFFFF is `UnsupportedStreamingSize`; a size that
-      is not a multiple of `block_align` is `InvalidFormat`;
+      `InvalidWave`; size 0xFFFFFFFF is `UnsupportedStreamingSize` (RF64: the
+      `ds64` data size instead); a size that is not a multiple of `block_align`
+      is `InvalidFormat`;
    4. the body ends beyond the extent: `InvalidRiff`;
    5. the body, and its pad byte when the pad lies inside the extent: input
       ends early: `Truncated`.
@@ -214,8 +220,15 @@ of the Zig tables.
 | `not_riff` | riff header | 60 | reject: `InvalidRiff` | Unknown container tag `JUNK`. | `b3124366628d32f43bff7df698a2beadf8a14cbf26cf1255ea8338b48ee962f0` |
 | `rifx_big_endian` | riff header | 60 | reject: `UnsupportedFormat` | Big-endian RIFX container. | `5ba707782a9dd8287a62fc2862d9a00c043d03bc80e615dc59c21c5845a91fb7` |
 | `rifx_truncated` | riff header | 6 | reject: `UnsupportedFormat` | Precedence: the container tag is checked as soon as it is read, before the input runs out. | `747a7d80b921cad654cf7d736c5eaf96d8e51f4f4aaba69f29ebc7a3f4356e7e` |
-| `rf64` | riff header | 88 | reject: `UnsupportedFormat` | RF64 container (64-bit sizes in `ds64`). | `c6c601df92748e7556325628f7434aa9c7b9e18784af693f82ba721d63c0b584` |
-| `bw64` | riff header | 88 | reject: `UnsupportedFormat` | BW64 container (64-bit sizes in `ds64`). | `b7ffb31995ecc74af941a95e8333641d73b8d9d993c2e280b39559c0e767dbfa` |
+| `rf64` | rf64 | 88 | accept: mono, 8000 Hz, 4 frames; writer output | RF64 as the writer emits it with `rf64 = .always`: 0xFFFFFFFF in the 32-bit RIFF and `data` sizes, the real ones in `ds64` (rejected before T21b). | `908d7944bcb48cec43734a4c051e73369ca6fa33fa05772d2efa811a2ccc2036` |
+| `bw64` | rf64 | 88 | accept: mono, 8000 Hz, 4 frames | BW64, the EBU's RF64 (rejected before T21b). | `e38fae0af5bfb6da5b3031f1c8e853c8f08d935cc663941af42c0dce82f2d616` |
+| `rf64_data_size_in_chunk` | rf64 | 88 | accept: mono, 8000 Hz, 4 frames | RF64 whose small `data` chunk holds its own size: `ds64`'s is used only for 0xFFFFFFFF. | `9869cb2e55b60327c5414ad77734f62599bbfa23df77e81a7dbcc6843e34a851` |
+| `rf64_riff_size_not_sentinel` | rf64 | 88 | reject: `InvalidRiff` | RF64 with a 32-bit RIFF size other than 0xFFFFFFFF. FFmpeg ignores the field. | `8b035e483117536abba7dec3f5774a61a9362bfcfa42169c5e78dff995eb2dd7` |
+| `rf64_missing_ds64` | rf64 | 52 | reject: `InvalidRiff` | RF64 whose first chunk is `fmt `, not `ds64`. | `01eeb370eeda2363edc3e07c9af3449a5e81c494e290da65386e61da32a3c4e4` |
+| `rf64_ds64_short` | rf64 | 84 | reject: `InvalidRiff` | A 24-byte `ds64` without the table count. FFmpeg accepts 24 bytes. | `25ec7abe69bac79d164fb55431d51412bb9cfff00cd6e0f848431ac62637dbb4` |
+| `rf64_ds64_table` | rf64 | 88 | reject: `UnsupportedFormat` | A `ds64` with one table entry (64-bit sizes of other chunks). | `2e0622a8b237f23435446ea211ffd10214422a1a80551ebda7f4ce21ac464ccf` |
+| `rf64_data_exceeds_extent` | rf64 | 88 | reject: `InvalidRiff` | `ds64` declares 64 data bytes, but the RF64 extent ends after 8. | `842d16c4389674b69a28bd5d74f59a6929300a3adf432223b5fac524ee6286ec` |
+| `rf64_truncated_ds64` | rf64 | 30 | reject: `Truncated` | Input ends inside `ds64`. | `396b56f69749b010a61d32aec205ffdbfd4aa5f9f4293a97fed1512004308d23` |
 | `w64` | riff header | 40 | reject: `UnsupportedFormat` | Sony Wave64 (starts with the lowercase `riff` GUID). | `c241923d87f74120fe400a96583693c9e1c64984f3dc3d57939b27e3533bdaf2` |
 | `riff_size_unknown` | riff header | 52 | reject: `UnsupportedStreamingSize` | `riff_size` is the 0xFFFFFFFF unknown-size sentinel. | `6f4aee6c2e8c23872b15942f3873525270ed8be04fb64aa0907e7f13f86a528a` |
 | `riff_size_zero` | riff header | 52 | reject: `UnsupportedStreamingSize` | `riff_size` is 0, the other unknown-size sentinel. | `2efc1f7b368fa82528aaf298aa8a1b0c69c0bae297d8b7c2fb5a0b35a5034c50` |

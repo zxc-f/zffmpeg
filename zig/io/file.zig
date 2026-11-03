@@ -77,10 +77,10 @@ pub fn writeFile(
     buffer: []u8,
     format: audio.Format,
     samples: []const i16,
-    limits: wav.Limits,
+    options: wav.WriteOptions,
 ) WriteError!void {
     var file_writer = file.writerStreaming(io, buffer);
-    writeStream(&file_writer.interface, format, samples, limits) catch |err| {
+    writeStream(&file_writer.interface, format, samples, options) catch |err| {
         return withWriteCause(err, &file_writer);
     };
 }
@@ -93,17 +93,17 @@ pub fn writePath(
     buffer: []u8,
     format: audio.Format,
     samples: []const i16,
-    limits: wav.Limits,
+    options: wav.WriteOptions,
 ) (WriteError || std.Io.File.OpenError)!void {
     const file = try dir.createFile(io, sub_path, .{});
     defer file.close(io);
-    return writeFile(io, file, buffer, format, samples, limits);
+    return writeFile(io, file, buffer, format, samples, options);
 }
 
-fn writeStream(out: *std.Io.Writer, format: audio.Format, samples: []const i16, limits: wav.Limits) wav.WriteError!void {
+fn writeStream(out: *std.Io.Writer, format: audio.Format, samples: []const i16, options: wav.WriteOptions) wav.WriteError!void {
     const channels = format.channelCount();
     if (samples.len % channels != 0) return error.IncompleteFrame;
-    var writer = try wav.Writer.begin(out, .s16le, format, samples.len / channels, limits);
+    var writer = try wav.Writer.begin(out, .s16le, format, samples.len / channels, options);
     try writer.writeFrames(samples);
     try writer.finish();
 }
@@ -293,7 +293,7 @@ test "writer adapters produce the writer-output fixtures" {
 
     // The helpers write pcm_s16le from s16 samples, plain or extensible.
     inline for (fixtures.all) |fixture| {
-        if (fixture.writer_output and fixture.expected.accept.codec == .pcm_s16le) {
+        if (fixture.writer_output and !fixture.writer_rf64 and fixture.expected.accept.codec == .pcm_s16le) {
             const stream = fixture.expected.accept;
             const format = try audio.Format.init(stream.sample_rate, stream.channels, .s16);
             try writePath(io, tmp.dir, fixture.name ++ ".wav", &buffer, format, stream.samples.s16, .{});

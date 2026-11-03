@@ -448,7 +448,8 @@ def compare_writer(args, lines, failures):
             raw = work / f"{fixture.name}.raw"
             out = work / f"{fixture.name}.{container}"
             raw.write_bytes(generate.storage_bytes(stream))
-            process = run(args.writer, container, stream.codec, rate, channels, raw, out)
+            rf64 = ["rf64"] if fixture.writer_rf64 else []
+            process = run(args.writer, container, stream.codec, rate, channels, raw, out, *rf64)
             problems, notes = [], []
             if process.returncode != 0:
                 problems.append(f"write-driver exited {process.returncode}: {first_line(text(process.stderr))}")

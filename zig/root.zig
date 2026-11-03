@@ -63,4 +63,5 @@ test {
     // checks, and the controlled buffering stage for the stage contract.
     _ = @import("testing/fixtures.zig");
     _ = @import("testing/delay_stage.zig");
+    _ = @import("testing/synthetic.zig");
 }

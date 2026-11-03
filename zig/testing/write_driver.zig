@@ -5,11 +5,12 @@
 //! reference reads the actual Zig output rather than only fixtures the writer
 //! is tested to reproduce.
 //!
-//!     write-driver <wav|au> <codec> <sample_rate> <channels> <input.raw> <output>
+//!     write-driver <wav|au> <codec> <sample_rate> <channels> <input.raw> <output> [rf64]
 //!
 //! `codec` is an FFmpeg PCM codec name such as `pcm_s24le`. The input holds
 //! interleaved samples in that codec's storage format (`s32` for 24-bit),
-//! little-endian, at most `max_input_bytes` of them. Exit status: 0 on success, 1 for usage errors, 2
+//! little-endian, at most `max_input_bytes` of them. A trailing `rf64` makes
+//! the WAV writer emit RF64 even for a small stream (`rf64 = .always`, T21b). Exit status: 0 on success, 1 for usage errors, 2
 //! for any other failure, with one diagnostic line on stderr.
 //! zig/testing/reference/compare.py runs it. It is a test tool, not a product:
 //! `zig build test-tools` installs it, and `zig build test` compiles it.
@@ -17,7 +18,7 @@
 const std = @import("std");
 const av = @import("av");
 
-const usage = "usage: write-driver <wav|au> <codec> <sample_rate> <channels> <input.raw> <output>\n";
+const usage = "usage: write-driver <wav|au> <codec> <sample_rate> <channels> <input.raw> <output> [rf64]\n";
 
 const Container = enum { wav, au };
 
@@ -43,10 +44,14 @@ fn run(init: std.process.Init) Status {
         printError(io, "write-driver: out of memory\n", .{});
         return .failure;
     };
-    if (args.len != 7) return usageError(io);
+    if (args.len != 7 and args.len != 8) return usageError(io);
     const container = std.meta.stringToEnum(Container, args[1]) orelse return usageError(io);
     const codec = codecFromName(args[2]) orelse return usageError(io);
-    write(io, init.gpa, container, codec, args[3], args[4], args[5], args[6]) catch |err| {
+    const rf64: av.wav.Rf64 = if (args.len == 8) blk: {
+        if (!std.mem.eql(u8, args[7], "rf64")) return usageError(io);
+        break :blk .always;
+    } else .auto;
+    write(io, init.gpa, container, codec, rf64, args[3], args[4], args[5], args[6]) catch |err| {
         printError(io, "write-driver: {t}\n", .{err});
         return .failure;
     };
@@ -68,6 +73,7 @@ fn write(
     gpa: std.mem.Allocator,
     container: Container,
     codec: av.pcm.Codec,
+    rf64: av.wav.Rf64,
     rate_text: []const u8,
     channels_text: []const u8,
     input_path: []const u8,
@@ -101,7 +107,7 @@ fn write(
     var file_writer = file.writerStreaming(io, &buffer);
     switch (container) {
         .wav => {
-            var writer = try av.wav.Writer.begin(&file_writer.interface, codec, format, frames, .{});
+            var writer = try av.wav.Writer.begin(&file_writer.interface, codec, format, frames, .{ .rf64 = rf64 });
             try writer.writeData(encoded);
             try writer.finish();
         },

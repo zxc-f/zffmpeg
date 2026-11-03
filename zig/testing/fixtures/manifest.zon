@@ -161,13 +161,50 @@
     },
     .{
         .name = "rf64",
-        .sha256 = "c6c601df92748e7556325628f7434aa9c7b9e18784af693f82ba721d63c0b584",
-        .expected = .{ .reject = .UnsupportedFormat },
+        .sha256 = "908d7944bcb48cec43734a4c051e73369ca6fa33fa05772d2efa811a2ccc2036",
+        .expected = .{ .accept = .{ .codec = .pcm_s16le, .channels = 1, .sample_rate = 8000, .samples = .{ .s16 = .{ 0, 1, -1, 32767 } } } },
+        .writer_output = true,
+        .writer_rf64 = true,
     },
     .{
         .name = "bw64",
-        .sha256 = "b7ffb31995ecc74af941a95e8333641d73b8d9d993c2e280b39559c0e767dbfa",
+        .sha256 = "e38fae0af5bfb6da5b3031f1c8e853c8f08d935cc663941af42c0dce82f2d616",
+        .expected = .{ .accept = .{ .codec = .pcm_s16le, .channels = 1, .sample_rate = 8000, .samples = .{ .s16 = .{ 0, 1, -1, 32767 } } } },
+    },
+    .{
+        .name = "rf64_data_size_in_chunk",
+        .sha256 = "9869cb2e55b60327c5414ad77734f62599bbfa23df77e81a7dbcc6843e34a851",
+        .expected = .{ .accept = .{ .codec = .pcm_s16le, .channels = 1, .sample_rate = 8000, .samples = .{ .s16 = .{ 0, 1, -1, 32767 } } } },
+    },
+    .{
+        .name = "rf64_riff_size_not_sentinel",
+        .sha256 = "8b035e483117536abba7dec3f5774a61a9362bfcfa42169c5e78dff995eb2dd7",
+        .expected = .{ .reject = .InvalidRiff },
+    },
+    .{
+        .name = "rf64_missing_ds64",
+        .sha256 = "01eeb370eeda2363edc3e07c9af3449a5e81c494e290da65386e61da32a3c4e4",
+        .expected = .{ .reject = .InvalidRiff },
+    },
+    .{
+        .name = "rf64_ds64_short",
+        .sha256 = "25ec7abe69bac79d164fb55431d51412bb9cfff00cd6e0f848431ac62637dbb4",
+        .expected = .{ .reject = .InvalidRiff },
+    },
+    .{
+        .name = "rf64_ds64_table",
+        .sha256 = "2e0622a8b237f23435446ea211ffd10214422a1a80551ebda7f4ce21ac464ccf",
         .expected = .{ .reject = .UnsupportedFormat },
+    },
+    .{
+        .name = "rf64_data_exceeds_extent",
+        .sha256 = "842d16c4389674b69a28bd5d74f59a6929300a3adf432223b5fac524ee6286ec",
+        .expected = .{ .reject = .InvalidRiff },
+    },
+    .{
+        .name = "rf64_truncated_ds64",
+        .sha256 = "396b56f69749b010a61d32aec205ffdbfd4aa5f9f4293a97fed1512004308d23",
+        .expected = .{ .reject = .Truncated },
     },
     .{
         .name = "w64",

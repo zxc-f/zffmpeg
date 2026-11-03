@@ -109,6 +109,7 @@ port.md's contract table updated, and (after T06) the parser.
 
 | Decision | Current choice and reason | To change it |
 | --- | --- | --- |
+| RF64 | Read: RF64 and BW64 with a 28-byte `ds64` first and no size table, stricter than FFmpeg (which ignores the 32-bit size and the table). Written: `WriteOptions.rf64 = .auto` by default, deciding up front from the known length, where FFmpeg's default `never` writes broken sizes past 4 GiB; `.always` exists to compare small RF64 files with FFmpeg. | `wav.zig`, the `rf64*` fixtures, `write_driver.zig` (`rf64` argument). |
 | Header format | Since T21a, the `fmt ` FFmpeg's `riffenc.c` chooses: extensible above 48 kHz or above 16 bits unless float, else plain (16 bytes for tag 1, 18 with `cbSize` 0 otherwise), plus a `fact` chunk for every encoding but tag 1, which FFmpeg writes on seekable output and we always can. This replaced T08's tag 1 at every rate: TODO.md T21a asked for FFmpeg's choice, and plain high-rate files remain accepted input. Compare decoded samples and metadata with FFmpeg, not file bytes (FFmpeg adds LIST/INFO). | `canonical_wav` in `generate.py`, `Writer` in `wav.zig`, the writer-output fixtures. |
 | Known length | The frame count is required up front; exact sizes are written with no seeking or placeholder sizes. | T08; streaming output would need seekable writers or placeholder patching. |
 

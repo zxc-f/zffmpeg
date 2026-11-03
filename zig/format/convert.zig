@@ -147,7 +147,7 @@ pub const Conversion = struct {
         };
         if (!supported) return error.UnsupportedOperation;
         switch (request.output) {
-            .wav => try wav.Writer.check(summary.output_codec, summary.format, summary.frame_count, limits.wav),
+            .wav => try wav.Writer.check(summary.output_codec, summary.format, summary.frame_count, wavOptions(limits)),
             .au => try au.Writer.check(summary.format, summary.frame_count, limits.au),
         }
         return .{ .input = input, .limits = limits, .summary = summary };
@@ -160,7 +160,7 @@ pub const Conversion = struct {
         const s = c.summary;
         switch (s.output) {
             .wav => {
-                var writer = wav.Writer.begin(out, s.output_codec, s.format, s.frame_count, c.limits.wav) catch |err| return outputFailure(err);
+                var writer = wav.Writer.begin(out, s.output_codec, s.format, s.frame_count, wavOptions(c.limits)) catch |err| return outputFailure(err);
                 try c.transfer(wav.Writer, &writer);
             },
             .au => {
@@ -282,6 +282,12 @@ fn Transcoder(comptime W: type) type {
     };
 }
 
+/// The WAV writer's options from the conversion's limits: the same rate
+/// limit, and RF64 exactly when 32-bit sizes cannot hold the output.
+fn wavOptions(limits: Limits) wav.WriteOptions {
+    return .{ .max_sample_rate = limits.wav.max_sample_rate };
+}
+
 /// The writer's own failure. `init` already ran the header checks `begin`
 /// repeats, with the same arguments; the parser delivers whole frames of the
 /// same format, exactly the declared count, before `finish`. So only the
@@ -362,7 +368,7 @@ fn canonicalHeaderLen(container: Container) usize {
 /// The bytes before the samples in an output the writers produce.
 fn headerLenOf(container: Container, codec: pcm.Codec, format: audio.Format) usize {
     return switch (container) {
-        .wav => wav.headerLen(codec, format),
+        .wav => wav.headerLen(codec, format, false), // small test outputs: plain RIFF
         .au => au.canonical_header_len,
     };
 }
@@ -426,7 +432,9 @@ fn expectEveryCell(input: Container, bytes: []const u8, comptime stream: fixture
 test "every accepted fixture gives its samples in every supported cell, and copy across codecs is rejected" {
     inline for (fixtures.all) |fixture| {
         if (fixture.expected == .accept) {
-            try expectEveryCell(.wav, fixtures.bytes(fixture.name), fixture.expected.accept, fixture.writer_output);
+            // The converter writes RF64 only when needed, so an RF64 writer
+            // output converts to plain RIFF.
+            try expectEveryCell(.wav, fixtures.bytes(fixture.name), fixture.expected.accept, fixture.writer_output and !fixture.writer_rf64);
         }
     }
     inline for (fixtures.au.all) |fixture| {
