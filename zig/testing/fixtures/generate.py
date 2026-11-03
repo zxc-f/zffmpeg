@@ -226,6 +226,50 @@ def canonical_rf64(codec, channels, rate, data):
     return rf64_wav(chunks, data_size=len(data), frames=frames)
 
 
+# Sony Wave64 (T21b): GUIDs for the chunk IDs and 64-bit sizes that count the
+# 24-byte chunk header; chunks are padded to 8 bytes. libavformat/w64.c.
+W64_RIFF_GUID = b"riff" + bytes.fromhex("2e91cf11a5d628db04c10000")
+W64_SUFFIX = bytes.fromhex("f3acd3118cd100c04f8edb8a")
+W64_HEADER_LEN = 40  # riff GUID, file size, wave GUID
+W64_UNKNOWN_DATA = 0x7FFFFFFFFFFFFFFF  # what FFmpeg's muxer leaves in `data` on a pipe
+
+
+def w64_guid(code):
+    return code + W64_SUFFIX
+
+
+def w64_chunk(guid, body, size=None, pad=True):
+    """A Wave64 chunk. `size` overrides the declared size, which by default counts
+    the header and body but not the padding, as the Sony specification has it."""
+    declared = 24 + len(body) if size is None else size
+    out = guid + struct.pack("<Q", declared) + body
+    if pad:
+        out += bytes(-len(out) % 8)
+    return out
+
+
+def w64(*chunks, size=None, size_delta=0, riff_guid=W64_RIFF_GUID, wave_guid=None):
+    """A Wave64 file. `size` overrides the file size; `size_delta` adjusts the computed one."""
+    rest = b"".join(chunks)
+    declared = W64_HEADER_LEN + len(rest) + size_delta if size is None else size
+    return riff_guid + struct.pack("<Q", declared) + (wave_guid or w64_guid(b"wave")) + rest
+
+
+def canonical_w64(codec, channels, rate, data):
+    """The writer's Wave64 output: the same `fmt ` as `canonical_wav`, a `fact`
+    chunk with a 64-bit count for every encoding but tag 1, then `data`, with
+    sizes that do not count the padding."""
+    plain = canonical_wav(codec, channels, rate, data)
+    tag, bits, _ = WAV_CODECS[codec]
+    frames = len(data) // (channels * bits // 8)
+    fmt_len = int.from_bytes(plain[16:20], "little")
+    chunks = [w64_chunk(w64_guid(b"fmt "), plain[20:20 + fmt_len])]
+    if tag != 1:
+        chunks.append(w64_chunk(w64_guid(b"fact"), struct.pack("<Q", frames)))
+    chunks.append(w64_chunk(w64_guid(b"data"), data))
+    return w64(*chunks)
+
+
 def extensible_fmt(channels=1, rate=8000, bits=16, sub_tag=1, valid=None, mask=None,
                    cb_size=22, block_align=None, subformat=None):
     """A 40-byte WAVE_FORMAT_EXTENSIBLE `fmt ` body; every field can be overridden."""
@@ -262,7 +306,7 @@ class Fixture:
     accept: Stream = None
     reject: str = None  # contract error name
     writer_output: bool = False
-    writer_rf64: bool = False  # writer output with `rf64 = .always`
+    writer_header: str = "riff"  # writer output as riff, rf64 (`rf64 = .always`) or w64
     # The result with the parser's `unknown_length` option (T21b), where it differs.
     unknown_accept: Stream = None
     unknown_reject: str = None
@@ -300,8 +344,6 @@ def rejected(name, group, rule, data, error):
 
 
 EXTENSIBLE_PCM_GUID = bytes.fromhex("0100000000001000800000aa00389b71")
-W64_RIFF_GUID = bytes.fromhex("72696666" "2e91cf11a5d628db04c10000")
-W64_WAVE_GUID = bytes.fromhex("77617665" "f3acd3118cd100c04f8edb8a")
 
 
 def build_fixtures():
@@ -427,7 +469,7 @@ def build_fixtures():
                        "RF64 as the writer emits it with `rf64 = .always`: 0xFFFFFFFF in the 32-bit RIFF and "
                        "`data` sizes, the real ones in `ds64` (rejected before T21b).",
                        canonical_rf64("pcm_s16le", 1, 8000, rf64_data), 1, 8000, MONO[:4], writer_output=True))
-    fx[-1].writer_rf64 = True
+    fx[-1].writer_header = "rf64"
     fx.append(accepted("bw64", "rf64", "BW64, the EBU's RF64 (rejected before T21b).",
                        rf64_wav(rf64_rest, tag=b"BW64", data_size=len(rf64_data), frames=4), 1, 8000, MONO[:4]))
     fx.append(accepted("rf64_data_size_in_chunk", "rf64",
@@ -448,9 +490,70 @@ def build_fixtures():
                        rf64_wav(rf64_rest, data_size=64), "InvalidRiff"))
     fx.append(rejected("rf64_truncated_ds64", "rf64", "Input ends inside `ds64`.",
                        rf64_wav(rf64_rest, data_size=len(rf64_data))[:30], "Truncated"))
-    w64 = W64_RIFF_GUID + struct.pack("<Q", 40) + W64_WAVE_GUID
-    fx.append(rejected("w64", "riff header", "Sony Wave64 (starts with the lowercase `riff` GUID).",
-                       w64, "UnsupportedFormat"))
+    # Sony Wave64 (T21b): GUIDs and 64-bit sizes, chunks padded to 8 bytes.
+    for name, codec, channels, payload, rule in [
+        ("w64_mono_8k", "pcm_s16le", 1, pcm(MONO),
+         "Wave64 as the writer emits it: the `fmt ` of WAV, sizes that count the 24-byte chunk header."),
+        ("w64_u8_odd", "pcm_u8", 1, bytes([0x00, 0x80, 0xFF]),
+         "Three u8 frames: `data` declares 27 bytes and 5 pad bytes follow, outside its size."),
+        ("w64_alaw_mono_8k", "pcm_alaw", 1, alaw_bytes,
+         "A-law: the 18-byte `fmt ` is padded to 8 bytes, and a `fact` chunk holds a 64-bit count."),
+        ("w64_s24_stereo_extensible", "pcm_s24le", 2, s24_bytes, "24-bit stereo: the extensible `fmt `."),
+    ]:
+        fx.append(accepted_encoded(name, "w64", rule, canonical_w64(codec, channels, 8000, payload),
+                                   codec, channels, 8000, payload, writer_output=True))
+        fx[-1].writer_header = "w64"
+    w64_fmt = w64_chunk(w64_guid(b"fmt "), fmt_body())
+    w64_data = w64_chunk(w64_guid(b"data"), pcm(MONO[:4]))
+    fx.append(accepted_encoded("w64_ffmpeg_padded_sizes", "w64",
+                               "Float as FFmpeg's muxer writes it: its sizes count the padding, so the 18-byte "
+                               "`fmt ` declares 48 bytes, a 24-byte body whose last 6 are skipped.",
+                               w64(w64_chunk(w64_guid(b"fmt "), fmt_body(tag=3, bits=32, cb_size=0) + bytes(6)),
+                                   w64_chunk(w64_guid(b"fact"), struct.pack("<Q", 4)),
+                                   w64_chunk(w64_guid(b"data"), f32_bytes[:16])),
+                               "pcm_f32le", 1, 8000, f32_bytes[:16]))
+    summary_list = bytes.fromhex("bc945f925a52d21186dc00c04f8edb8a")
+    fx.append(accepted_encoded("w64_unknown_chunks", "w64",
+                               "A `summarylist` GUID chunk with a 5-byte body before `data` and a `levl` chunk "
+                               "after it are skipped, with their padding.",
+                               w64(w64_fmt, w64_chunk(summary_list, b"abcde"), w64_data,
+                                   w64_chunk(w64_guid(b"levl"), b"xyz")),
+                               "pcm_s16le", 1, 8000, pcm(MONO[:4])))
+    fx.append(accepted("w64_pad_outside_extent", "w64",
+                       "The file size ends with 3 frames (6 data bytes); the 2 pad bytes after them are absent.",
+                       w64(w64_fmt, w64_chunk(w64_guid(b"data"), pcm(MONO[:3]), pad=False)), 1, 8000, MONO[:3]))
+    fx.append(rejected("w64_pad_missing", "w64",
+                       "The file size counts the 2 pad bytes after 6 data bytes, but the input ends before them.",
+                       w64(w64_fmt, w64_chunk(w64_guid(b"data"), pcm(MONO[:3])))[:-2], "Truncated"))
+    fx.append(rejected("w64_no_chunks", "w64", "A Wave64 header with no chunks: `fmt ` and `data` are missing.",
+                       w64(), "InvalidWave"))
+    fx.append(rejected("w64_bad_riff_guid", "w64", "`riff` followed by another GUID's last 12 bytes.",
+                       w64(w64_fmt, w64_data, riff_guid=b"riff" + W64_SUFFIX), "InvalidRiff"))
+    fx.append(rejected("w64_bad_wave_guid", "w64", "The form GUID is not `wave`'s.",
+                       w64(w64_fmt, w64_data, wave_guid=w64_guid(b"WAVE")), "InvalidWave"))
+    fx.append(rejected("w64_size_too_small", "w64", "A file size of 39, less than the 40-byte header.",
+                       w64(w64_fmt, w64_data, size=39), "InvalidRiff"))
+    fx.append(rejected("w64_chunk_size_below_header", "w64",
+                       "A `fmt ` chunk declaring 16 bytes, less than its own 24-byte header.",
+                       w64(w64_chunk(w64_guid(b"fmt "), fmt_body(), size=16), w64_data), "InvalidRiff"))
+    fx.append(rejected("w64_data_exceeds_extent", "w64", "`data` declares 64 bytes past the file size.",
+                       w64(w64_fmt, w64_chunk(w64_guid(b"data"), pcm(MONO[:4]), size=24 + 8 + 64)),
+                       "InvalidRiff"))
+    fx.append(rejected("w64_fmt_size_20", "w64",
+                       "A plain `fmt ` of 20 bytes: Wave64 adds only FFmpeg's padded 24 to 16 and 18.",
+                       w64(w64_chunk(w64_guid(b"fmt "), fmt_body(cb_size=2, extra=b"\0\0")), w64_data),
+                       "UnsupportedFormat"))
+    fx.append(rejected("w64_truncated_chunk_header", "w64", "Input ends inside the `data` chunk's GUID.",
+                       w64(w64_fmt, w64_data)[:W64_HEADER_LEN + len(w64_fmt) + 10], "Truncated"))
+    fx.append(streaming("w64_unknown_length_pipe", "w64",
+                        "As FFmpeg's muxer writes Wave64 to a pipe: file size all ones, `data` size INT64_MAX.",
+                        w64(w64_fmt, w64_chunk(w64_guid(b"data"), pcm(MONO), size=W64_UNKNOWN_DATA, pad=False),
+                            size=0xFFFFFFFFFFFFFFFF),
+                        accept=wav_stream("pcm_s16le", 1, 8000, pcm(MONO))))
+    fx.append(streaming("w64_data_size_unknown", "w64",
+                        "A known file size with `data` size all ones: with `unknown_length` the rest of the stream.",
+                        w64(w64_fmt, w64_chunk(w64_guid(b"data"), pcm(MONO[:2]), size=0xFFFFFFFFFFFFFFFF, pad=False)),
+                        accept=wav_stream("pcm_s16le", 1, 8000, pcm(MONO[:2]))))
     fx.append(streaming("riff_size_unknown", "riff header",
                         "`riff_size` is the 0xFFFFFFFF unknown-size sentinel. With `unknown_length` the extent "
                         "is the rest of the stream.",
@@ -808,8 +911,8 @@ def render_manifest(fixtures, entry_note):
         lines.append(f"        .expected = {render_expected(f.accept, f.reject)},")
         if f.writer_output:
             lines.append("        .writer_output = true,")
-        if f.writer_rf64:
-            lines.append("        .writer_rf64 = true,")
+        if f.writer_header != "riff":
+            lines.append(f"        .writer_header = .{f.writer_header},")
         if f.unknown_accept is not None or f.unknown_reject is not None:
             lines.append(f"        .unknown_length = {render_expected(f.unknown_accept, f.unknown_reject)},")
         lines.append("    },")

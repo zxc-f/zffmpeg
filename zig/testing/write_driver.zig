@@ -1,26 +1,27 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Original file for this project.
-//! Test driver for the FFmpeg comparison (TODO.md T19a, T21a). It writes one
+//! Test driver for the FFmpeg comparison (TODO.md T19a, T21a, T21b). It writes one
 //! media file from decoded samples with the `av` encoders and writers, so the
 //! reference reads the actual Zig output rather than only fixtures the writer
 //! is tested to reproduce.
 //!
-//!     write-driver <wav|au> <codec> <sample_rate> <channels> <input.raw> <output> [rf64]
+//!     write-driver <wav|w64|au> <codec> <sample_rate> <channels> <input.raw> <output> [rf64]
 //!
 //! `codec` is an FFmpeg PCM codec name such as `pcm_s24le`. The input holds
 //! interleaved samples in that codec's storage format (`s32` for 24-bit),
 //! little-endian, at most `max_input_bytes` of them. A trailing `rf64` makes
-//! the WAV writer emit RF64 even for a small stream (`rf64 = .always`, T21b). Exit status: 0 on success, 1 for usage errors, 2
-//! for any other failure, with one diagnostic line on stderr.
+//! the WAV writer emit RF64 even for a small stream (`rf64 = .always`, T21b);
+//! `w64` writes Sony Wave64. Exit status: 0 on success, 1 for usage errors,
+//! 2 for any other failure, with one diagnostic line on stderr.
 //! zig/testing/reference/compare.py runs it. It is a test tool, not a product:
 //! `zig build test-tools` installs it, and `zig build test` compiles it.
 
 const std = @import("std");
 const av = @import("av");
 
-const usage = "usage: write-driver <wav|au> <codec> <sample_rate> <channels> <input.raw> <output> [rf64]\n";
+const usage = "usage: write-driver <wav|w64|au> <codec> <sample_rate> <channels> <input.raw> <output> [rf64]\n";
 
-const Container = enum { wav, au };
+const Container = enum { wav, w64, au };
 
 /// Inputs are fixture-sized; the bound keeps a wrong argument from reading a
 /// large file into memory.
@@ -106,8 +107,9 @@ fn write(
     var buffer: [av.file.default_buffer_len]u8 = undefined;
     var file_writer = file.writerStreaming(io, &buffer);
     switch (container) {
-        .wav => {
-            var writer = try av.wav.Writer.begin(&file_writer.interface, codec, format, frames, .{ .rf64 = rf64 });
+        .wav, .w64 => {
+            const variant: av.wav.Variant = if (container == .w64) .w64 else .wav;
+            var writer = try av.wav.Writer.begin(&file_writer.interface, codec, format, frames, .{ .rf64 = rf64, .variant = variant });
             try writer.writeData(encoded);
             try writer.finish();
         },

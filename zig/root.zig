@@ -17,14 +17,14 @@
 //!   with explicit `clone`d ownership (`core/packet.zig`, `core/frame.zig`).
 //! - `stage`: the send/receive contract of buffering stages, which
 //!   `pcm.Decoder` and `pcm.Encoder` follow (`core/stage.zig`).
-//! - `wav`: bounded RIFF/WAVE parsing and known-length writing for s16 PCM
-//!   (`format/wav.zig`).
+//! - `wav`: bounded RIFF/WAVE, RF64/BW64 and Sony Wave64 parsing and
+//!   known-length writing for the WAV PCM encodings (`format/wav.zig`).
 //! - `au`: bounded Sun AU parsing and known-length writing for s16 big-endian
 //!   PCM (`format/au.zig`).
-//! - `detect`: WAV or AU content detection that hands the bytes it read to the
-//!   chosen parser (`format/detect.zig`).
-//! - `convert`: synchronous WAV/AU conversion and stream copy, with every
-//!   check made before output starts (`format/convert.zig`).
+//! - `detect`: WAV, Wave64 or AU content detection that hands the bytes it
+//!   read to the chosen parser (`format/detect.zig`).
+//! - `convert`: synchronous WAV/Wave64/AU conversion and stream copy, with
+//!   every check made before output starts (`format/convert.zig`).
 //! - `file`: file and stream adapters for the WAV and AU paths, with
 //!   borrowed-handle and path variants (`io/file.zig`).
 //!

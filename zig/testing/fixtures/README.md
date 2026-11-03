@@ -102,7 +102,9 @@ so most of the bounds rules here are stricter than FFmpeg's on purpose.
 | `data` size not a multiple of `block_align` | `InvalidFormat` (`data_not_block_aligned`). | Drops the partial frame. |
 | Second `fmt ` | `InvalidWave` (`duplicate_fmt`). | Ignores it. |
 | Inconsistent `byte_rate` | Accepted and ignored (`byte_rate_mismatch`). | Does not check it. |
-| Sony Wave64 (`riff` GUID) | `UnsupportedFormat` (`w64`). | A separate demuxer (`w64.c`); `wavdec.c` rejects it. |
+| Sony Wave64 (T21b) | Accepted through the same parser, reported as the `w64` container: the `riff` GUID (another suffix is `InvalidRiff`, `w64_bad_riff_guid`), a 64-bit file size counting the whole file (below 40 is `InvalidRiff`, `w64_size_too_small`), the `wave` GUID (`w64_bad_wave_guid`, `InvalidWave`), then chunks of a 16-byte GUID and a 64-bit size that counts the 24-byte header (below 24 is `InvalidRiff`, `w64_chunk_size_below_header`), padded to 8 bytes. `fmt ` and `data` are the GUIDs `libavformat/w64.c` names; other GUIDs are skipped (`w64_unknown_chunks`). Everything else, the `fmt ` body included, follows the WAV rules. Pad bytes follow the RIFF rule: outside the extent they are not read (`w64_pad_outside_extent`), inside it they must be present (`w64_pad_missing`). | Its own demuxer: reads the sizes as signed and ignores the file size past a minimum of 72; rejects a chunk of 24 bytes or less, so an empty `data` too. |
+| Wave64 sizes and padding | Sizes count the header but not the padding, as the Sony specification and libsndfile write them; the writer does so (`w64_mono_8k`, `w64_u8_odd`, `w64_alaw_mono_8k`, `w64_s24_stereo_extensible`). FFmpeg's muxer counts the padding instead: its 18-byte `fmt ` declares 48 bytes, so a plain `fmt ` body may be 24 bytes in Wave64, the last 6 skipped (`w64_ffmpeg_padded_sizes`); any other plain size stays `UnsupportedFormat` (`w64_fmt_size_20`). Its `data` size after an unaligned payload counts the pad bytes as data, which every reader then decodes. | The muxer writes padded sizes; its demuxer estimates the duration from the bytes after the data start, padding and later chunks included. |
+| Wave64 unknown sizes | Off by default, `UnsupportedStreamingSize`; with `unknown_length`, a file size of all ones is unknown, and a `data` size of all ones or INT64_MAX (what FFmpeg's muxer leaves on a pipe) runs to the end of the input (`w64_unknown_length_pipe`, `w64_data_size_unknown`). | Rejects them, its own pipe output included. |
 | Chunk-count limit | Every chunk header inside the extent counts, `fmt ` and `data` included. 4,096 is accepted (`chunks_at_limit`); the 4,097th header is `LimitExceeded` (`chunks_over_limit`). | No limit. |
 | 1 MiB retained non-audio bytes | This parser keeps only the `fmt ` fields (at most 18 bytes), so no committed file can reach the limit. The synthesized `large_skip_2mib` vector shows that skipped bytes do not count. | No limit. |
 | The writer's header | Since T21a, the `fmt ` FFmpeg's `riffenc.c` chooses: WAVE_FORMAT_EXTENSIBLE above 48 kHz (`s16_stereo_96k_extensible`, `s16_mono_192k_extensible`, `f64_stereo_96k_extensible`) or above 16 bits except float (`s24_stereo_48k_extensible`, `s32_mono_8k_extensible`, `s64_mono_8k_extensible`), with the channel mask, and a `fact` chunk for float, A-law and mu-law. Plain tag-1 high-rate files (`stereo_96k_tag1`, `mono_192k_rate_limit`) are still accepted input. Header bytes still differ where FFmpeg adds its LIST/INFO tags; compare samples and metadata. | Same choice; also writes LIST/INFO unless bit-exact. |
@@ -112,27 +114,32 @@ so most of the bounds rules here are stricter than FFmpeg's on purpose.
 The parser reads sequentially, and the first violation in stream order wins.
 Within one structure, checks run in this order:
 
-1. **RIFF header** (12 bytes): the container tag (`RIFF`, `RF64` or `BW64`;
-   `RIFX` and the W64 `riff` GUID are `UnsupportedFormat`; anything else is
-   `InvalidRiff`), then `riff_size` (RF64: not 0xFFFFFFFF is `InvalidRiff`;
-   RIFF: sentinels unless `unknown_length`, then the minimum of 4), then the form type (`WAVE`, else
-   `InvalidWave`). For RF64 the `ds64` chunk follows: another chunk ID, a size
-   below 28, or a RIFF size that cannot hold `ds64` is `InvalidRiff`; a table
-   is `UnsupportedFormat`. Input that ends before a check's bytes are complete
+1. **RIFF header** (12 bytes; 40 for Wave64): the container tag (`RIFF`,
+   `RF64`, `BW64`, or `riff` for Wave64; `RIFX` is `UnsupportedFormat`;
+   anything else is `InvalidRiff`), then `riff_size` (RF64: not 0xFFFFFFFF is
+   `InvalidRiff`; RIFF: sentinels unless `unknown_length`, then the minimum
+   of 4), then the form type (`WAVE`, else `InvalidWave`). For RF64 the `ds64`
+   chunk follows: another chunk ID, a size below 28, or a RIFF size that
+   cannot hold `ds64` is `InvalidRiff`; a table is `UnsupportedFormat`. For
+   Wave64: the rest of the `riff` GUID (`InvalidRiff`), the 64-bit file size
+   (all ones unless `unknown_length`, then the minimum of 40), then the `wave`
+   GUID (`InvalidWave`). Input that ends before a check's bytes are complete
    is `Truncated`.
-2. **Each chunk header** inside the extent:
-   1. fewer than 8 bytes of extent left: `InvalidRiff`; input ends inside the
-      header: `Truncated` (an unknown extent ends where the input does, between
-      chunks);
-   2. chunk count above 4,096: `LimitExceeded`;
+2. **Each chunk header** (8 bytes; 24 for Wave64) inside the extent:
+   1. fewer bytes of extent left than a header: `InvalidRiff`; input ends
+      inside the header: `Truncated` (an unknown extent ends where the input
+      does, between chunks);
+   2. chunk count above 4,096: `LimitExceeded`; then for Wave64 a declared size
+      below 24: `InvalidRiff`;
    3. `fmt `: a second one is `InvalidWave`; a declared size below 16 is
       `InvalidFormat`. `data`: no `fmt ` yet or a second `data` is
-      `InvalidWave`; size 0xFFFFFFFF is `UnsupportedStreamingSize` (RF64: the
-      `ds64` data size instead; with `unknown_length`, the rest of the input,
-      where a partial final frame is `Truncated`); a size that is not a
-      multiple of `block_align` is `InvalidFormat`;
+      `InvalidWave`; size 0xFFFFFFFF (Wave64: all ones or INT64_MAX) is
+      `UnsupportedStreamingSize` (RF64: the `ds64` data size instead; with
+      `unknown_length`, the rest of the input, where a partial final frame is
+      `Truncated`); a size that is not a multiple of `block_align` is
+      `InvalidFormat`;
    4. the body ends beyond the extent: `InvalidRiff`;
-   5. the body, and its pad byte when the pad lies inside the extent: input
+   5. the body, and its pad bytes where they lie inside the extent: input
       ends early: `Truncated`.
 3. **`fmt ` fields**: format tag (not 1, 3, 6, 7 or 0xFFFE:
    `UnsupportedFormat`); for 0xFFFE, the chunk size (not 40) and `cbSize`
@@ -144,8 +151,8 @@ Within one structure, checks run in this order:
    extensible the channel mask (not 0 or the layout's: `UnsupportedFormat`);
    sample rate (0: `InvalidFormat`; above the limit: `LimitExceeded`);
    `block_align` (not `channels * bits / 8`: `InvalidFormat`); then, for a
-   plain `fmt `, the chunk size (16, or 18 with `cbSize == 0`; anything else is
-   `UnsupportedFormat`).
+   plain `fmt `, the chunk size (16, or 18 with `cbSize == 0`, or in Wave64
+   also 24 with `cbSize == 0`; anything else is `UnsupportedFormat`).
 4. **End of the extent**: a missing `fmt ` or `data` is `InvalidWave`.
 
 Fixtures that pin precedence: `rifx_truncated` (tag before truncation),
@@ -232,7 +239,24 @@ of the Zig tables.
 | `rf64_ds64_table` | rf64 | 88 | reject: `UnsupportedFormat` | A `ds64` with one table entry (64-bit sizes of other chunks). | `2e0622a8b237f23435446ea211ffd10214422a1a80551ebda7f4ce21ac464ccf` |
 | `rf64_data_exceeds_extent` | rf64 | 88 | reject: `InvalidRiff` | `ds64` declares 64 data bytes, but the RF64 extent ends after 8. | `842d16c4389674b69a28bd5d74f59a6929300a3adf432223b5fac524ee6286ec` |
 | `rf64_truncated_ds64` | rf64 | 30 | reject: `Truncated` | Input ends inside `ds64`. | `396b56f69749b010a61d32aec205ffdbfd4aa5f9f4293a97fed1512004308d23` |
-| `w64` | riff header | 40 | reject: `UnsupportedFormat` | Sony Wave64 (starts with the lowercase `riff` GUID). | `c241923d87f74120fe400a96583693c9e1c64984f3dc3d57939b27e3533bdaf2` |
+| `w64_mono_8k` | w64 | 120 | accept: mono, 8000 Hz, 8 frames; writer output | Wave64 as the writer emits it: the `fmt ` of WAV, sizes that count the 24-byte chunk header. | `f28cafb2b9124a673d72bc8716eaa2c57cb48279ef1a841341179aacd8491ff9` |
+| `w64_u8_odd` | w64 | 112 | accept: mono, 8000 Hz, 3 frames, `pcm_u8`; writer output | Three u8 frames: `data` declares 27 bytes and 5 pad bytes follow, outside its size. | `411de02c8dce8ac243c6d761302f305299dcb967fdd9b76651c0c0a340f5a81a` |
+| `w64_alaw_mono_8k` | w64 | 152 | accept: mono, 8000 Hz, 8 frames, `pcm_alaw`; writer output | A-law: the 18-byte `fmt ` is padded to 8 bytes, and a `fact` chunk holds a 64-bit count. | `7e8162072976ee575743aec27529b79022a34f0ba99b1451220f27c677ad8b72` |
+| `w64_s24_stereo_extensible` | w64 | 152 | accept: stereo, 8000 Hz, 4 frames, `pcm_s24le`; writer output | 24-bit stereo: the extensible `fmt `. | `d7c62199bd6878643a276338add2e6e952d5ce3b7e698d37a404d0193525cdb8` |
+| `w64_ffmpeg_padded_sizes` | w64 | 160 | accept: mono, 8000 Hz, 4 frames, `pcm_f32le` | Float as FFmpeg's muxer writes it: its sizes count the padding, so the 18-byte `fmt ` declares 48 bytes, a 24-byte body whose last 6 are skipped. | `d54baa587a37d5244b4f57dadfb8980e67b31794e633f11eeeb83b2143af8a09` |
+| `w64_unknown_chunks` | w64 | 176 | accept: mono, 8000 Hz, 4 frames | A `summarylist` GUID chunk with a 5-byte body before `data` and a `levl` chunk after it are skipped, with their padding. | `e97352e15f54ca2261431a1bbc13794c9c0a7d4081c8c2a00dca37f4c2bb79fd` |
+| `w64_pad_outside_extent` | w64 | 110 | accept: mono, 8000 Hz, 3 frames | The file size ends with 3 frames (6 data bytes); the 2 pad bytes after them are absent. | `36d5bab01f796cb6b4b31faab6d3948bfdfae3f0a1d5fb03e1d379eef4ada8ef` |
+| `w64_pad_missing` | w64 | 110 | reject: `Truncated` | The file size counts the 2 pad bytes after 6 data bytes, but the input ends before them. | `621fe993315cbf3a126d2203def3ed6eb70f1b743ff35a454939108e18426f31` |
+| `w64_no_chunks` | w64 | 40 | reject: `InvalidWave` | A Wave64 header with no chunks: `fmt ` and `data` are missing. | `c241923d87f74120fe400a96583693c9e1c64984f3dc3d57939b27e3533bdaf2` |
+| `w64_bad_riff_guid` | w64 | 112 | reject: `InvalidRiff` | `riff` followed by another GUID's last 12 bytes. | `f96e6c4734cf0942041f0ad3a827270c8e99af074608dbad29c7db9e49e997d9` |
+| `w64_bad_wave_guid` | w64 | 112 | reject: `InvalidWave` | The form GUID is not `wave`'s. | `f28cdd76df2c225214cf6d46d0cf24853bf453de24f1b6cffa8041c239d05631` |
+| `w64_size_too_small` | w64 | 112 | reject: `InvalidRiff` | A file size of 39, less than the 40-byte header. | `603b006075b7c8fdffd3e1bdb5df448e9d3e57d0d43054f8dfdb2c4088f65675` |
+| `w64_chunk_size_below_header` | w64 | 112 | reject: `InvalidRiff` | A `fmt ` chunk declaring 16 bytes, less than its own 24-byte header. | `56e3a713c07bc4378f0e1d2bf869e3769fae884f9e00034ee082ef0ef91ca4e8` |
+| `w64_data_exceeds_extent` | w64 | 112 | reject: `InvalidRiff` | `data` declares 64 bytes past the file size. | `386a03d36c3173febb454941a65f17c4d46f53fb2e8067a26bc6a80c12496283` |
+| `w64_fmt_size_20` | w64 | 120 | reject: `UnsupportedFormat` | A plain `fmt ` of 20 bytes: Wave64 adds only FFmpeg's padded 24 to 16 and 18. | `4bba683d75f97855d006e76c3fec154946b93f3103f65b7cc5394e3aa945d71c` |
+| `w64_truncated_chunk_header` | w64 | 90 | reject: `Truncated` | Input ends inside the `data` chunk's GUID. | `c9e077a63e0a3a0d30c4df568da54df4c0115a9d136187c09eab59339067bdf9` |
+| `w64_unknown_length_pipe` | w64 | 120 | reject: `UnsupportedStreamingSize`; with `unknown_length`, accept: mono, 8000 Hz, 8 frames | As FFmpeg's muxer writes Wave64 to a pipe: file size all ones, `data` size INT64_MAX. | `0c0320f09899281b445876086c345457ecfb3050c76d6c197905109df7124333` |
+| `w64_data_size_unknown` | w64 | 108 | reject: `UnsupportedStreamingSize`; with `unknown_length`, accept: mono, 8000 Hz, 2 frames | A known file size with `data` size all ones: with `unknown_length` the rest of the stream. | `bb4c3699594d24da71bff6678c055546cf752ba14740241a48e66aecd95ef0a4` |
 | `riff_size_unknown` | riff header | 52 | reject: `UnsupportedStreamingSize`; with `unknown_length`, accept: mono, 8000 Hz, 4 frames | `riff_size` is the 0xFFFFFFFF unknown-size sentinel. With `unknown_length` the extent is the rest of the stream. | `6f4aee6c2e8c23872b15942f3873525270ed8be04fb64aa0907e7f13f86a528a` |
 | `riff_size_zero` | riff header | 52 | reject: `UnsupportedStreamingSize`; with `unknown_length`, accept: mono, 8000 Hz, 4 frames | `riff_size` is 0, the other unknown-size sentinel. | `2efc1f7b368fa82528aaf298aa8a1b0c69c0bae297d8b7c2fb5a0b35a5034c50` |
 | `riff_size_too_small` | riff header | 52 | reject: `InvalidRiff` | `riff_size` 2 cannot hold the form type. | `00ef3e3b7d407394188f7d35cb008f353e8866c0f2d8ba1274742d37dc577700` |

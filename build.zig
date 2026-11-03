@@ -50,7 +50,7 @@ const ProbeCase = struct {
     stderr_contains: ?[]const u8 = null,
 };
 
-const usage_line = "usage: zffprobe <file.wav | file.au | ->\n";
+const usage_line = "usage: zffprobe <file.wav | file.w64 | file.au | ->\n";
 
 const mono_8k_report =
     \\format=wav
@@ -169,6 +169,32 @@ const alaw_report =
     \\
 ;
 
+const w64_mono_8k_report =
+    \\format=w64
+    \\codec=pcm_s16le
+    \\sample_fmt=s16
+    \\channels=1
+    \\channel_layout=mono
+    \\sample_rate=8000
+    \\nb_samples=8
+    \\duration_num=8
+    \\duration_den=8000
+    \\
+;
+
+const w64_alaw_report =
+    \\format=w64
+    \\codec=pcm_alaw
+    \\sample_fmt=s16
+    \\channels=1
+    \\channel_layout=mono
+    \\sample_rate=8000
+    \\nb_samples=8
+    \\duration_num=8
+    \\duration_den=8000
+    \\
+;
+
 /// T09: valid, empty, malformed, unsupported, I/O, resource-limit and usage
 /// cases, each checking stdout, stderr and the exit status. T12c adds the same
 /// for AU, including a pipe, and a non-AU magic that detection sends to WAV.
@@ -202,6 +228,11 @@ const probe_cases = [_]ProbeCase{
     .{ .name = "float from a pipe", .args = &.{"-"}, .stdin_fixture = "f32_mono_8k", .exit_code = 0, .stdout = f32_report, .stderr = "" },
     .{ .name = "A-law", .fixture = "alaw_mono_8k", .exit_code = 0, .stdout = alaw_report, .stderr = "" },
     .{ .name = "an unknown extensible subformat", .fixture = "extensible_unknown_subformat", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
+    // T21b: Wave64, detected from content.
+    .{ .name = "Wave64", .fixture = "w64_mono_8k", .exit_code = 0, .stdout = w64_mono_8k_report, .stderr = "" },
+    .{ .name = "Wave64 A-law from a pipe", .args = &.{"-"}, .stdin_fixture = "w64_alaw_mono_8k", .exit_code = 0, .stdout = w64_alaw_report, .stderr = "" },
+    .{ .name = "a truncated Wave64 header", .fixture = "w64_truncated_chunk_header", .exit_code = 2, .stderr_contains = ": Truncated\n" },
+    .{ .name = "unknown Wave64 sizes", .fixture = "w64_unknown_length_pipe", .exit_code = 3, .stderr_contains = ": UnsupportedStreamingSize\n" },
 };
 
 /// A zffmpeg process run: `args`, then the input fixture's path (or standard
@@ -231,7 +262,7 @@ const ConvertCase = struct {
     stderr_contains: ?[]const u8 = null,
 };
 
-const zffmpeg_usage = "usage: zffmpeg [-y | -n] -i <input | -> [-c copy] [-f wav|au] <output | ->\n";
+const zffmpeg_usage = "usage: zffmpeg [-y | -n] -i <input | -> [-c copy] [-f wav|w64|au] <output | ->\n";
 
 // The paired WAV and AU fixtures hold the same samples, so each is the exact
 // expected output of converting the other.
@@ -245,6 +276,8 @@ const au_mono_8k = @embedFile("zig/testing/fixtures/au/au_mono_8k.au");
 const au_stereo_44k1 = @embedFile("zig/testing/fixtures/au/au_stereo_44k1.au");
 const au_empty_data = @embedFile("zig/testing/fixtures/au/au_empty_data.au");
 const au_mono_192k = @embedFile("zig/testing/fixtures/au/au_mono_192k_rate_limit.au");
+// mono_8k's samples as the Wave64 writer emits them.
+const w64_mono_8k = @embedFile("zig/testing/fixtures/wav/w64_mono_8k.wav");
 
 /// T13b: every cell of the operation matrix (files and pipes, transcode and
 /// copy), the output format from -f or the extension, late and early media
@@ -271,6 +304,11 @@ const convert_cases = [_]ConvertCase{
     // T21a: copy keeps any WAV encoding; transcoding needs samples stored as
     // s16 until sample-format conversion (T23a).
     .{ .name = "24-bit copy to WAV", .args = &.{"-i"}, .input = "s24_stereo_48k_extensible", .tail = &.{ "-c", "copy", "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_s24_stereo, .stderr = "" },
+    // T21b: Wave64 in both directions; it carries the WAV codecs.
+    .{ .name = "WAV copy to Wave64", .args = &.{"-i"}, .input = "mono_8k", .tail = &.{ "-c", "copy", "-f", "w64", "-" }, .exit_code = 0, .stdout = w64_mono_8k, .stderr = "" },
+    .{ .name = "Wave64 to WAV from a pipe", .args = &.{ "-i", "-" }, .stdin_input = "w64_mono_8k", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_mono_8k, .stderr = "" },
+    .{ .name = "AU to Wave64 from the extension", .set = .au, .args = &.{"-i"}, .input = "au_mono_8k", .output_file = "out.w64", .output_bytes = w64_mono_8k, .exit_code = 0, .stderr = "" },
+    .{ .name = "Wave64 copy to AU is rejected", .args = &.{"-i"}, .input = "w64_mono_8k", .tail = &.{ "-c", "copy", "-f", "au", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
     .{ .name = "24-bit transcode is rejected", .args = &.{"-i"}, .input = "s24_stereo_48k_extensible", .tail = &.{ "-f", "au", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
     .{ .name = "A-law copy to AU is rejected", .args = &.{"-i"}, .input = "alaw_mono_8k", .tail = &.{ "-c", "copy", "-f", "au", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
     .{ .name = "an error after the data", .args = &.{"-i"}, .input = "duplicate_data", .tail = &.{ "-f", "au", "-" }, .exit_code = 2, .stderr_contains = ": InvalidWave\n" },

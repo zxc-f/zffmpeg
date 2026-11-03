@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Original file for this project.
-//! Synchronous conversion and stream copy between WAV and AU (TODO.md T13a).
+//! Synchronous conversion and stream copy between WAV, Wave64 and AU (TODO.md
+//! T13a, T21b).
 //!
-//! The operation matrix (TODO.md T13):
+//! The operation matrix (TODO.md T13), where WAV stands for WAV or Wave64 on
+//! either side:
 //!
 //! | Input → output     | `transcode`                  | `copy`                                   |
 //! | ------------------ | ---------------------------- | ---------------------------------------- |
@@ -110,7 +112,8 @@ pub const Conversion = struct {
     /// Frames read so far: the next packet's timestamp.
     next_pts: i64 = 0,
 
-    const Input = union(Container) {
+    /// One parser per format; the WAV parser also reads Wave64.
+    const Input = union(enum) {
         wav: wav.Parser,
         au: au.Parser,
     };
@@ -121,16 +124,16 @@ pub const Conversion = struct {
     pub fn init(reader: *std.Io.Reader, request: Request, limits: Limits) InitError!Conversion {
         const detected = try detect.detect(reader);
         var input: Input = switch (detected.container) {
-            .wav => .{ .wav = .initPrefixed(reader, limits.wav, detected.prefix) },
+            .wav, .w64 => .{ .wav = .initPrefixed(reader, limits.wav, detected.prefix) },
             .au => .{ .au = .initPrefixed(reader, limits.au, detected.prefix) },
         };
         const summary: Summary = switch (input) {
-            inline else => |*parser, container| blk: {
+            inline else => |*parser| blk: {
                 const info = try parser.readHeader();
                 // Only WAV can have unknown-length data, and only on request.
                 const frame_count: ?u64 = info.frame_count;
                 break :blk .{
-                    .input = container,
+                    .input = detected.container,
                     .output = request.output,
                     .mode = request.mode,
                     .input_codec = info.codec,
@@ -150,7 +153,7 @@ pub const Conversion = struct {
         };
         if (!supported) return error.UnsupportedOperation;
         switch (request.output) {
-            .wav => try wav.Writer.check(summary.output_codec, summary.format, summary.frame_count, wavOptions(limits)),
+            .wav, .w64 => |container| try wav.Writer.check(summary.output_codec, summary.format, summary.frame_count, wavOptions(limits, container)),
             .au => try au.Writer.check(summary.format, summary.frame_count, limits.au),
         }
         return .{ .input = input, .limits = limits, .summary = summary };
@@ -162,8 +165,8 @@ pub const Conversion = struct {
     pub fn run(c: *Conversion, out: *std.Io.Writer) RunError!void {
         const s = c.summary;
         switch (s.output) {
-            .wav => {
-                var writer = wav.Writer.begin(out, s.output_codec, s.format, s.frame_count, wavOptions(c.limits)) catch |err| return outputFailure(err);
+            .wav, .w64 => |container| {
+                var writer = wav.Writer.begin(out, s.output_codec, s.format, s.frame_count, wavOptions(c.limits, container)) catch |err| return outputFailure(err);
                 try c.transfer(wav.Writer, &writer);
             },
             .au => {
@@ -285,10 +288,18 @@ fn Transcoder(comptime W: type) type {
     };
 }
 
-/// The WAV writer's options from the conversion's limits: the same rate
-/// limit, and RF64 exactly when 32-bit sizes cannot hold the output.
-fn wavOptions(limits: Limits) wav.WriteOptions {
-    return .{ .max_sample_rate = limits.wav.max_sample_rate };
+/// The WAV writer's options for a WAV or Wave64 `output`, from the
+/// conversion's limits: the same rate limit, and for WAV RF64 exactly when
+/// 32-bit sizes cannot hold the output.
+fn wavOptions(limits: Limits, output: Container) wav.WriteOptions {
+    return .{
+        .max_sample_rate = limits.wav.max_sample_rate,
+        .variant = switch (output) {
+            .wav => .wav,
+            .w64 => .w64,
+            .au => unreachable, // the AU writer has its own options
+        },
+    };
 }
 
 /// The writer's own failure. `init` already ran the header checks `begin`
@@ -321,6 +332,8 @@ const fixtures = @import("../testing/fixtures.zig");
 const all_cells = [_]Request{
     .{ .output = .wav, .mode = .transcode },
     .{ .output = .wav, .mode = .copy },
+    .{ .output = .w64, .mode = .transcode },
+    .{ .output = .w64, .mode = .copy },
     .{ .output = .au, .mode = .transcode },
     .{ .output = .au, .mode = .copy },
 };
@@ -336,7 +349,7 @@ const Decoded = struct {
 fn decodeOutput(container: Container, bytes: []const u8, storage: []i16) !Decoded {
     var reader: std.Io.Reader = .fixed(bytes);
     switch (container) {
-        .wav => {
+        .wav, .w64 => {
             var parser: wav.Parser = .init(&reader, .{});
             return decodeWith(wav.Parser, &parser, storage);
         },
@@ -364,19 +377,27 @@ fn decodeWith(comptime P: type, parser: *P, storage: []i16) !Decoded {
     return .{ .format = info.format, .frame_count = frame_count, .samples = storage[0..len] };
 }
 
-fn canonicalHeaderLen(container: Container) usize {
+/// The bytes before the samples in an output the writers produce.
+fn headerLenOf(container: Container, codec: pcm.Codec, format: audio.Format) usize {
     return switch (container) {
-        .wav => wav.canonical_header_len,
+        .wav => wav.headerLen(codec, format, .riff), // small test outputs: plain RIFF
+        .w64 => wav.headerLen(codec, format, .w64),
         .au => au.canonical_header_len,
     };
 }
 
-/// The bytes before the samples in an output the writers produce.
-fn headerLenOf(container: Container, codec: pcm.Codec, format: audio.Format) usize {
+/// The pad bytes after `data_len` bytes of samples in an output.
+fn padOf(container: Container, data_len: usize) usize {
     return switch (container) {
-        .wav => wav.headerLen(codec, format, false), // small test outputs: plain RIFF
-        .au => au.canonical_header_len,
+        .wav => wav.Variant.wav.padAfter(data_len),
+        .w64 => wav.Variant.w64.padAfter(data_len),
+        .au => 0,
     };
+}
+
+/// The container detection names for an input the WAV parser reads.
+fn wavContainer(bytes: []const u8) Container {
+    return if (std.mem.startsWith(u8, bytes, "riff")) .w64 else .wav;
 }
 
 /// A stream's decoded samples, little-endian in their storage format, read by
@@ -385,25 +406,27 @@ fn rawOf(container: Container, bytes: []const u8, out: []u8) ![]const u8 {
     var reader: std.Io.Reader = .fixed(bytes);
     var writer: std.Io.Writer = .fixed(out);
     switch (container) {
-        .wav => _ = try wav.decodeToRaw(&reader, &writer, .{}),
+        .wav, .w64 => _ = try wav.decodeToRaw(&reader, &writer, .{}),
         .au => _ = try au.decodeToRaw(&reader, &writer, .{}),
     }
     return writer.buffered();
 }
 
-/// Runs every matrix cell on one accepted fixture. Neither container carries
-/// the other's codecs, so copy works only into the input's container, and
-/// transcoding only from samples stored as s16 (other storage needs T23a).
+/// Runs every matrix cell on one accepted fixture. WAV and Wave64 carry the
+/// same codecs and AU none of theirs, so copy works only within the WAV
+/// family or AU, and transcoding only from samples stored as s16 (other
+/// storage needs T23a).
 fn expectEveryCell(input: Container, bytes: []const u8, comptime stream: fixtures.Stream, writer_output: bool) !void {
     var expected_buffer: [1024]u8 = undefined;
     const expected = stream.samples.littleEndian(&expected_buffer);
+    const input_codec = comptime std.meta.stringToEnum(pcm.Codec, @tagName(stream.codec)["pcm_".len..]).?;
     for (all_cells) |request| {
         var reader: std.Io.Reader = .fixed(bytes);
         var buffer: [1024]u8 = undefined;
         var out: std.Io.Writer = .fixed(&buffer);
         const result = convert(&reader, &out, request, .{});
         const supported = switch (request.mode) {
-            .copy => request.output == input,
+            .copy => request.output.carries(input_codec),
             .transcode => stream.samples == .s16,
         };
         if (!supported) {
@@ -425,7 +448,7 @@ fn expectEveryCell(input: Container, bytes: []const u8, comptime stream: fixture
         const written = out.buffered();
         const data_len = frame_count * stream.channels * summary.output_codec.bytesPerSample();
         const header_len = headerLenOf(request.output, summary.output_codec, summary.format);
-        try std.testing.expectEqual(header_len + data_len + data_len % 2, written.len);
+        try std.testing.expectEqual(header_len + data_len + padOf(request.output, data_len), written.len);
         var raw_buffer: [1024]u8 = undefined;
         try std.testing.expectEqualSlices(u8, expected, try rawOf(request.output, written, &raw_buffer));
         // A canonical input converts to itself, byte for byte.
@@ -439,8 +462,10 @@ test "every accepted fixture gives its samples in every supported cell, and copy
     inline for (fixtures.all) |fixture| {
         if (fixture.expected == .accept) {
             // The converter writes RF64 only when needed, so an RF64 writer
-            // output converts to plain RIFF.
-            try expectEveryCell(.wav, fixtures.bytes(fixture.name), fixture.expected.accept, fixture.writer_output and !fixture.writer_rf64);
+            // output converts to plain RIFF; Wave64 converts to itself.
+            const bytes = fixtures.bytes(fixture.name);
+            const canonical = fixture.writer_output and fixture.writer_header != .rf64;
+            try expectEveryCell(wavContainer(bytes), bytes, fixture.expected.accept, canonical);
         }
     }
     inline for (fixtures.au.all) |fixture| {
@@ -479,10 +504,11 @@ test "the input is read as contiguous, timestamped packets of whole frames" {
 }
 
 test "copy keeps the encoded data and timing but not the container's metadata" {
-    // unknown_chunks carries chunks besides `fmt ` and `data`;
-    // au_annotation_text has a 16-byte annotation.
+    // unknown_chunks and w64_unknown_chunks carry chunks besides `fmt ` and
+    // `data`; au_annotation_text has a 16-byte annotation.
     const cases = [_]struct { container: Container, bytes: []const u8 }{
         .{ .container = .wav, .bytes = fixtures.bytes("unknown_chunks") },
+        .{ .container = .w64, .bytes = fixtures.bytes("w64_unknown_chunks") },
         .{ .container = .au, .bytes = fixtures.au.bytes("au_annotation_text") },
     };
     for (cases) |case| {
@@ -503,7 +529,8 @@ test "copy keeps the encoded data and timing but not the container's metadata" {
         try std.testing.expectEqualSlices(i16, input.samples, output.samples);
         // ... under the canonical header: the input's other bytes are gone.
         const data_len = 2 * input.samples.len;
-        try std.testing.expectEqual(canonicalHeaderLen(case.container) + data_len, copy_out.buffered().len);
+        const header_len = headerLenOf(case.container, copied.output_codec, copied.format);
+        try std.testing.expectEqual(header_len + data_len + padOf(case.container, data_len), copy_out.buffered().len);
         try std.testing.expect(case.bytes.len > copy_out.buffered().len);
     }
 }
@@ -756,7 +783,7 @@ fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
     for (all_cells) |request| {
         var reader: std.Io.Reader = .fixed(bytes);
         // 1 KiB of input holds at most 1 KiB of data; transcoding 1-byte
-        // samples doubles it, under a header of at most 80 bytes.
+        // samples doubles it, under a header of at most 160 bytes.
         var buffer: [4096]u8 = undefined;
         var out: std.Io.Writer = .fixed(&buffer);
         const result = convert(&reader, &out, request, .{});
@@ -764,7 +791,7 @@ fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
         // the same format and frame count; one it rejects never converts.
         if (probed) |info| {
             const supported = switch (request.mode) {
-                .copy => request.output == info.container,
+                .copy => request.output.carries(info.codec),
                 .transcode => info.format.sample_format == .s16,
             };
             if (!supported) {

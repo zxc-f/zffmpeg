@@ -1,16 +1,19 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Original file for this project.
-//! Content detection for the supported containers, WAV and AU (TODO.md T12c).
+//! Content detection for the supported containers, WAV, Wave64 and AU
+//! (TODO.md T12c, T21b).
 //!
 //! `detect` reads at most `prefix.max_len` bytes and hands them back to the
 //! chosen parser, so non-seekable input loses nothing and any reader buffer
 //! size works. A stream that starts with AU's `.snd` magic is AU. Anything
 //! else, including input shorter than 4 bytes, goes to the WAV parser, whose
 //! results and errors stay exactly as before: an unrecognized stream reports
-//! `InvalidRiff`. Detection and parser acceptance are separate: the AU parser
-//! rejects a wrong magic as `InvalidAu`, but detection never routes such a
-//! stream to it. Scored probing over a longer prefix replaces this when a
-//! third format lands (TODO.md T16).
+//! `InvalidRiff`. The WAV parser also reads Wave64, which starts with `riff`,
+//! so detection names that container but routes it the same way. Detection
+//! and parser acceptance are separate: the AU parser rejects a wrong magic as
+//! `InvalidAu`, but detection never routes such a stream to it. Scored
+//! probing over a longer prefix replaces this when a format needs its own
+//! parser and a longer magic (TODO.md T16).
 
 const std = @import("std");
 const audio = @import("../core/audio.zig");
@@ -21,6 +24,8 @@ const prefix = @import("prefix.zig");
 
 pub const Container = enum {
     wav,
+    /// Sony Wave64, read and written by format/wav.zig.
+    w64,
     au,
 
     /// The container name in probe output, as FFmpeg's `format_name`.
@@ -28,10 +33,18 @@ pub const Container = enum {
         return @tagName(container);
     }
 
+    /// The container of a stream the WAV parser read.
+    pub fn ofWav(variant: wav.Variant) Container {
+        return switch (variant) {
+            .wav => .wav,
+            .w64 => .w64,
+        };
+    }
+
     /// Whether this container can carry `codec`.
     pub fn carries(container: Container, codec: pcm.Codec) bool {
         return switch (container) {
-            .wav => wav.carries(codec),
+            .wav, .w64 => wav.carries(codec),
             .au => codec == .s16be, // until TODO.md T22a
         };
     }
@@ -39,7 +52,7 @@ pub const Container = enum {
     /// The codec transcoding writes, for samples stored as s16.
     pub fn s16Codec(container: Container) pcm.Codec {
         return switch (container) {
-            .wav => .s16le,
+            .wav, .w64 => .s16le,
             .au => .s16be,
         };
     }
@@ -76,7 +89,12 @@ pub fn detect(reader: *std.Io.Reader) error{IoFailure}!Detected {
     var bytes: [prefix.max_len]u8 = undefined;
     const len = reader.readSliceShort(&bytes) catch return error.IoFailure;
     const head = bytes[0..len];
-    const container: Container = if (std.mem.eql(u8, head, ".snd")) .au else .wav;
+    const container: Container = if (std.mem.eql(u8, head, ".snd"))
+        .au
+    else if (std.mem.eql(u8, head, "riff"))
+        .w64
+    else
+        .wav;
     return .{ .container = container, .prefix = .init(head) };
 }
 
@@ -85,11 +103,12 @@ pub fn detect(reader: *std.Io.Reader) error{IoFailure}!Detected {
 pub fn probe(reader: *std.Io.Reader, limits: Limits) Error!Probed {
     const detected = try detect(reader);
     switch (detected.container) {
-        .wav => {
+        .wav, .w64 => {
             var parser: wav.Parser = .initPrefixed(reader, limits.wav, detected.prefix);
             const info = try parser.readHeader();
             try parser.finish();
-            return .{ .container = .wav, .codec = info.codec, .format = info.format, .frame_count = info.frame_count };
+            std.debug.assert(Container.ofWav(info.variant) == detected.container);
+            return .{ .container = detected.container, .codec = info.codec, .format = info.format, .frame_count = info.frame_count };
         },
         .au => {
             var parser: au.Parser = .initPrefixed(reader, limits.au, detected.prefix);
@@ -101,6 +120,11 @@ pub fn probe(reader: *std.Io.Reader, limits: Limits) Error!Probed {
 }
 
 const fixtures = @import("../testing/fixtures.zig");
+
+/// The container detection names for a stream the WAV parser reads.
+fn wavContainer(bytes: []const u8) Container {
+    return if (std.mem.startsWith(u8, bytes, "riff")) .w64 else .wav;
+}
 
 /// Compares a probe through detection with one container parser's own probe.
 fn expectSameResult(expected: anytype, got: Error!Probed, container: Container) !void {
@@ -121,7 +145,7 @@ test "detection gives every WAV fixture the WAV parser's result, from one-byte r
         var buffer: [1]u8 = undefined;
         var source: std.testing.Reader = .init(&buffer, &.{.{ .buffer = bytes }});
         source.artificial_limit = .limited(1);
-        try expectSameResult(wav.probe(&direct, .{}), probe(&source.interface, .{}), .wav);
+        try expectSameResult(wav.probe(&direct, .{}), probe(&source.interface, .{}), wavContainer(bytes));
     }
 }
 
@@ -137,7 +161,7 @@ test "detection gives every AU fixture the AU parser's result, unless its magic 
             try expectSameResult(au.probe(&direct, .{}), got, .au);
         } else {
             // Not AU by content, so the WAV parser reports it.
-            try expectSameResult(wav.probe(&direct, .{}), got, .wav);
+            try expectSameResult(wav.probe(&direct, .{}), got, wavContainer(bytes));
         }
     }
 }
@@ -160,6 +184,8 @@ test "detection reports the container and passes limits to its parser" {
     try std.testing.expectError(error.LimitExceeded, probe(&fast, .{ .au = .{ .max_sample_rate = 191_999 } }));
     var wav_fast: std.Io.Reader = .fixed(fixtures.bytes("mono_192k_rate_limit"));
     try std.testing.expectError(error.LimitExceeded, probe(&wav_fast, .{ .wav = .{ .max_sample_rate = 191_999 } }));
+    var wave64: std.Io.Reader = .fixed(fixtures.bytes("w64_mono_8k"));
+    try std.testing.expectEqual(Container.w64, (try probe(&wave64, .{})).container);
 }
 
 fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
@@ -175,7 +201,7 @@ fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
     if (std.mem.startsWith(u8, bytes, ".snd")) {
         try expectSameResult(au.probe(&direct, .{}), got, .au);
     } else {
-        try expectSameResult(wav.probe(&direct, .{}), got, .wav);
+        try expectSameResult(wav.probe(&direct, .{}), got, wavContainer(bytes));
     }
 }
 
@@ -184,6 +210,7 @@ test "fuzz: detection agrees with the direct parser on arbitrary input" {
         fixtures.bytes("mono_8k"),
         fixtures.au.bytes("au_mono_8k"),
         fixtures.au.bytes("au_annotation_odd_length"),
+        fixtures.bytes("w64_alaw_mono_8k"),
         ".sn",
     } });
 }

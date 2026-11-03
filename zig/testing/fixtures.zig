@@ -93,8 +93,9 @@ pub const Fixture = struct {
     expected: Expected,
     /// The writer (T08) must produce exactly these bytes from `expected.accept`.
     writer_output: bool = false,
-    /// ... with `rf64 = .always` (T21b), rather than the default.
-    writer_rf64: bool = false,
+    /// ... with this header (T21b): RIFF is the default; RF64 is written
+    /// with `rf64 = .always`.
+    writer_header: WriterHeader = .riff,
     /// The result with the parser's `unknown_length` option (T21b), where it
     /// differs from `expected`.
     unknown_length: ?Expected = null,
@@ -104,7 +105,14 @@ pub const Fixture = struct {
         if (unknown_length) return fixture.unknown_length orelse fixture.expected;
         return fixture.expected;
     }
+
+    /// Writer output with the writer's default header, plain RIFF.
+    pub fn plainWriterOutput(fixture: Fixture) bool {
+        return fixture.writer_output and fixture.writer_header == .riff;
+    }
 };
+
+pub const WriterHeader = enum { riff, rf64, w64 };
 
 pub const all: []const Fixture = @import("fixtures/manifest.zon");
 
@@ -168,6 +176,11 @@ fn expectConsistent(comptime Contract: type) void {
         expectValidResult(fixture.name, fixture.expected);
         if (fixture.expected == .reject and fixture.writer_output) {
             @compileError("only accepted fixtures can be writer output: " ++ fixture.name);
+        }
+        if (@hasField(@TypeOf(fixture), "writer_header")) {
+            if (fixture.writer_header != .riff and !fixture.writer_output) {
+                @compileError("a writer header needs writer output: " ++ fixture.name);
+            }
         }
         if (@hasField(@TypeOf(fixture), "unknown_length")) {
             if (fixture.unknown_length) |unknown| {

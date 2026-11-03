@@ -293,7 +293,7 @@ test "writer adapters produce the writer-output fixtures" {
 
     // The helpers write pcm_s16le from s16 samples, plain or extensible.
     inline for (fixtures.all) |fixture| {
-        if (fixture.writer_output and !fixture.writer_rf64 and fixture.expected.accept.codec == .pcm_s16le) {
+        if (comptime fixture.plainWriterOutput() and fixture.expected.accept.codec == .pcm_s16le) {
             const stream = fixture.expected.accept;
             const format = try audio.Format.init(stream.sample_rate, stream.channels, .s16);
             try writePath(io, tmp.dir, fixture.name ++ ".wav", &buffer, format, stream.samples.s16, .{});

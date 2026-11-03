@@ -2,13 +2,14 @@
 // Original file for this project.
 // fftools/ffmpeg_opt.c at the pinned reference revision was read for the -y/-n
 // and same-file behavior; see port.md "zffmpeg command" for the differences.
-//! zffmpeg: converts or stream-copies one WAV or AU stream (TODO.md T13b).
+//! zffmpeg: converts or stream-copies one WAV, Wave64 or AU stream (TODO.md
+//! T13b, T21b).
 //!
-//!     zffmpeg [-y | -n] -i <input | -> [-c copy] [-f wav|au] <output | ->
+//!     zffmpeg [-y | -n] -i <input | -> [-c copy] [-f wav|w64|au] <output | ->
 //!
 //! The input container is detected from content. The output container is `-f`,
-//! or else the output name's `.wav` or `.au` extension; `-` (standard output)
-//! needs `-f`. `-c copy` copies the encoded samples, which works only when both
+//! or else the output name's `.wav`, `.w64` or `.au` extension; `-` (standard
+//! output) needs `-f`. `-c copy` copies the encoded samples, which works only when both
 //! containers carry the same codec; without it the samples are decoded and
 //! encoded again. Output options follow `-i`, as in FFmpeg, where an option
 //! before `-i` applies to the input.
@@ -28,13 +29,14 @@ const status = @import("status.zig");
 const ExitStatus = status.ExitStatus;
 const printError = status.printError;
 
-const usage = "usage: zffmpeg [-y | -n] -i <input | -> [-c copy] [-f wav|au] <output | ->\n";
+const usage = "usage: zffmpeg [-y | -n] -i <input | -> [-c copy] [-f wav|w64|au] <output | ->\n";
 const help = usage ++
     \\
-    \\Converts one WAV or AU stream (standard input or output with -). The output
-    \\container is -f, or the output name's .wav or .au extension. -c copy keeps
-    \\the encoded samples and needs the same codec on both sides. -y replaces an
-    \\existing output; without it (or with -n) an existing output is an error.
+    \\Converts one WAV, Wave64 or AU stream (standard input or output with -). The
+    \\output container is -f, or the output name's .wav, .w64 or .au extension.
+    \\-c copy keeps the encoded samples and needs the same codec on both sides.
+    \\-y replaces an existing output; without it (or with -n) an existing output
+    \\is an error.
     \\Exit codes: 0 success, 1 usage, 2 invalid or truncated media,
     \\3 unsupported media or operation, 4 I/O failure, 5 resource limit,
     \\6 cancellation.
@@ -164,6 +166,7 @@ fn outputContainer(command: Command) error{ FormatRequired, UnknownFormat, Unkno
     // FFmpeg matches extensions without regard to case.
     const extension = std.fs.path.extension(command.output);
     if (std.ascii.eqlIgnoreCase(extension, ".wav")) return .wav;
+    if (std.ascii.eqlIgnoreCase(extension, ".w64")) return .w64;
     if (std.ascii.eqlIgnoreCase(extension, ".au")) return .au;
     return error.UnknownExtension;
 }

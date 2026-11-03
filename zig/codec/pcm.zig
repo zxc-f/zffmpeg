@@ -596,7 +596,7 @@ test "kernels agree with the independently generated writer-output fixtures" {
     const max_samples = 64;
     inline for (fixtures.all) |fixture| {
         // 16-bit PCM up to 48 kHz has the plain 44-byte header.
-        const plain = fixture.writer_output and !fixture.writer_rf64 and fixture.expected.accept.codec == .pcm_s16le and
+        const plain = comptime fixture.plainWriterOutput() and fixture.expected.accept.codec == .pcm_s16le and
             fixture.expected.accept.sample_rate <= 48000;
         if (plain) {
             const stream = fixture.expected.accept;
