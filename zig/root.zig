@@ -46,6 +46,7 @@ pub const file = @import("io/file.zig");
 
 test {
     _ = @import("codec/pcm.zig");
+    _ = @import("codec/g711.zig");
     _ = @import("core/audio.zig");
     _ = @import("core/time.zig");
     _ = @import("core/samples.zig");

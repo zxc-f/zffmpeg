@@ -38,6 +38,13 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/samplefmt_v
 ./samplefmt-vectors | diff -u zig/testing/vectors/samplefmt.txt -
 ```
 
+The T20b PCM codec vectors come from the reference's `libavcodec` the same way:
+
+```bash
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/pcm_vectors.c .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o pcm-vectors
+./pcm-vectors | diff -u zig/testing/vectors/pcm.txt -
+```
+
 On Windows (MSYS2 UCRT64 clang) link with `-lm -lbcrypt` instead of
 `-pthread` and strip the carriage returns MinGW's text output adds
 (`tr -d '\015'`) before comparing.
@@ -59,14 +66,18 @@ with the install prefix and:
 --cc=clang --disable-everything --disable-autodetect --disable-doc
 --disable-network --disable-x86asm --disable-ffplay --disable-avdevice
 --enable-protocol=file,pipe --enable-demuxer=wav,au
---enable-decoder=pcm_s16le,pcm_s16be --enable-encoder=pcm_s16le
+--enable-decoder=$pcm_codecs --enable-encoder=$pcm_codecs
 --enable-muxer=pcm_s16le --enable-filter=aresample
+
+pcm_codecs=pcm_u8,pcm_s8,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,
+  pcm_s32be,pcm_s64le,pcm_s64be,pcm_f32le,pcm_f32be,pcm_f64le,pcm_f64be,
+  pcm_alaw,pcm_mulaw
 ```
 
 Everything is disabled and then only what the comparison needs is enabled: the
-file and pipe protocols, the WAV and AU demuxers (T12a added AU), the s16le and
-s16be PCM decoders, the s16le encoder and the raw s16le muxer for `-f s16le`
-output, and the `aresample` filter for the
+file and pipe protocols, the WAV and AU demuxers (T12a added AU), the PCM
+decoders and encoders T20b compares (T20b widened them from s16 alone), the
+raw s16le muxer for `-f s16le` output, and the `aresample` filter for the
 `ffmpeg` program's audio filter graph. The program itself selects the few other
 filters it always needs. There are no GPL, nonfree, external-library or
 hardware components, and autodetection is off. `--disable-x86asm` keeps the C
@@ -173,6 +184,14 @@ section above gave the same counts, and:
   (21 accepted fixtures in 3 cells each).
 - Copies across codecs rejected before any output: **21/21**.
 
+T20b enabled every PCM decoder and encoder it compares. Rebuilt that way,
+locally on Windows with MSYS2 UCRT64 clang 23.1.4, the comparison gave the
+same counts everywhere except FFmpeg's recorded verdicts: it now accepts
+27/40 rejected WAV fixtures (`fmt_size_14`, `fmt_float32` and `fmt_bits24`
+gained a decoder) and 8/20 rejected AU fixtures (`au_encoding_mulaw`). Those
+verdicts are recorded, not checked; every check still passed. The T20a and
+T20b vector generators reproduced their committed files.
+
 ### Accepted WAV fixtures
 
 FFmpeg decodes the same samples as the contract for every accepted fixture, and
@@ -247,18 +266,18 @@ verdict, recorded for reference:
 | `riff_size_too_small` | `InvalidRiff` (2) | accepts: 8000 Hz, 4 samples |
 | `not_wave_form` | `InvalidWave` (2) | rejects: Invalid data found when processing input |
 | `no_chunks` | `InvalidWave` (2) | rejects: Invalid data found when processing input |
-| `fmt_size_14` | `InvalidFormat` (2) | rejects: no decoder for pcm_u8 in this build |
+| `fmt_size_14` | `InvalidFormat` (2) | accepts: 8000 Hz, 8 samples |
 | `fmt_truncated` | `Truncated` (2) | rejects: Invalid data found when processing input |
 | `fmt20_cbsize2` | `UnsupportedFormat` (3) | accepts: 8000 Hz, 4 samples |
 | `fmt_extensible` | `UnsupportedFormat` (3) | accepts: mono, 8000 Hz, 4 samples |
-| `fmt_float32` | `UnsupportedFormat` (3) | rejects: no decoder for pcm_f32le in this build |
-| `fmt_bits24` | `UnsupportedFormat` (3) | rejects: no decoder for pcm_s24le in this build |
+| `fmt_float32` | `UnsupportedFormat` (3) | accepts: 8000 Hz, 2 samples |
+| `fmt_bits24` | `UnsupportedFormat` (3) | accepts: 8000 Hz, 2 samples |
 | `fmt_channels3` | `UnsupportedFormat` (3) | accepts: 3 channels, 8000 Hz, 6 samples |
 | `fmt_channels0` | `InvalidFormat` (2) | rejects: [pcm_s16le] Decoder requires channel layout to be set |
 | `fmt_rate0` | `InvalidFormat` (2) | rejects: [wav] Invalid sample rate: 0 |
 | `fmt_rate_over_limit` | `LimitExceeded` (5) | accepts: 192001 Hz, 4 samples |
 | `fmt_block_align_mismatch` | `InvalidFormat` (2) | accepts: 8000 Hz, 8 samples |
-| `fmt_unsupported_before_invalid` | `UnsupportedFormat` (3) | rejects: no decoder for pcm_f32le in this build |
+| `fmt_unsupported_before_invalid` | `UnsupportedFormat` (3) | rejects: [pcm_f32le] Decoder requires channel layout to be set |
 | `data_before_fmt` | `InvalidWave` (2) | accepts: 8000 Hz, 4 samples |
 | `missing_data` | `InvalidWave` (2) | rejects: [wav] no 'data' tag found |
 | `duplicate_fmt` | `InvalidWave` (2) | accepts: 8000 Hz, 4 samples |
@@ -281,10 +300,10 @@ intentional differences recorded in the
 [fixture decisions](../fixtures/README.md#decisions) and the
 [first WAV contract](../../../port.md#first-wav-contract): FFmpeg ignores
 `riff_size`, stops at end of input, accepts more `fmt ` variants and ordering
-mistakes, and has no rate or chunk limits. Four rejections (`fmt_size_14`,
-`fmt_float32`, `fmt_bits24`, `fmt_unsupported_before_invalid`) come from this
-minimal build lacking those decoders (the full message is "Decoding requested,
-but no decoder found for: …"); a fuller FFmpeg build would decode them.
+mistakes, and has no rate or chunk limits. Until T20b enabled every PCM
+decoder, `fmt_size_14`, `fmt_float32` and `fmt_bits24` failed only for a missing
+decoder; FFmpeg now decodes them, and `fmt_unsupported_before_invalid` fails
+because its header declares no channels.
 
 ### AU fixtures
 
@@ -310,7 +329,7 @@ verdict, recorded for reference:
 | `au_data_not_block_aligned` | `InvalidFormat` (2) | accepts: 8000 Hz, 2 samples | au |
 | `au_truncated_data` | `Truncated` (2) | accepts: 8000 Hz, 5 samples | au |
 | `au_truncated_mid_sample` | `Truncated` (2) | accepts: 8000 Hz, 2 samples | au |
-| `au_encoding_mulaw` | `UnsupportedFormat` (3) | rejects: no decoder for pcm_mulaw in this build | au |
+| `au_encoding_mulaw` | `UnsupportedFormat` (3) | accepts: 8000 Hz, 4 samples | au |
 | `au_encoding_g726` | `UnsupportedFormat` (3) | rejects: no decoder for adpcm_g726le in this build | au |
 | `au_encoding_unknown` | `UnsupportedFormat` (3) | rejects: Not yet implemented in FFmpeg, patches welcome | not detected |
 | `au_rate_zero` | `InvalidFormat` (2) | rejects: [au] Invalid sample rate: 0 | not detected |

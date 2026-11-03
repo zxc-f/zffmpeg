@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Original file for this project; not translated from FFmpeg source.
-// libavcodec/pcm.c (pcm_s16le/pcm_s16be) at the pinned reference revision
-// describes the corresponding C behavior; see port.md.
-//! Signed 16-bit PCM sample conversion between wire bytes and `i16` samples.
+// libavcodec/pcm.c at the pinned reference revision describes the
+// corresponding C behavior; see port.md. A-law and mu-law use g711.zig.
+//! PCM codecs (TODO.md T20b): u8, s8, s16/s24/s32/s64 and f32/f64 in both
+//! byte orders, A-law and mu-law, decoded into and encoded from the packed
+//! sample storage of core/samples.zig, as FFmpeg's decoders store them.
 //!
-//! The kernels are scalar loops over caller-provided slices: no allocation, no
-//! I/O and no stream state. Byte order is a `comptime` parameter, so each order
-//! is its own specialization; sample counts stay runtime values.
+//! The kernels are scalar loops over caller-provided memory: no allocation, no
+//! I/O and no stream state. Each codec is a `comptime` specialization of one
+//! per-sample conversion; sample counts stay runtime values. `decodeS16` and
+//! `encodeS16` are the same conversion over `i16` slices.
 //!
 //! Ownership: the caller owns every slice. A returned slice is a prefix of the
 //! caller's output and stays valid as long as that buffer does. Input and output
@@ -19,7 +22,10 @@
 //! never allocate.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const audio = @import("../core/audio.zig");
+const sample_buffers = @import("../core/samples.zig");
+const g711 = @import("g711.zig");
 const time = @import("../core/time.zig");
 const stage = @import("../core/stage.zig");
 const Packet = @import("../core/packet.zig").Packet;
@@ -49,8 +55,9 @@ pub fn decodeS16(
     if (output.len < count) return error.OutputTooSmall;
     std.debug.assert(disjoint(bytes, std.mem.sliceAsBytes(output)));
 
+    const codec: Codec = if (endian == .little) .s16le else .s16be;
     for (output[0..count], 0..) |*sample, i| {
-        sample.* = std.mem.readInt(i16, bytes[i * 2 ..][0..2], endian);
+        sample.* = decodeSample(codec, bytes[i * 2 ..][0..2]);
     }
     return output[0..count];
 }
@@ -68,10 +75,176 @@ pub fn encodeS16(
     if (output.len < byte_count) return error.OutputTooSmall;
     std.debug.assert(disjoint(std.mem.sliceAsBytes(samples), output));
 
+    const codec: Codec = if (endian == .little) .s16le else .s16be;
     for (samples, 0..) |sample, i| {
-        std.mem.writeInt(i16, output[i * 2 ..][0..2], sample, endian);
+        output[i * 2 ..][0..2].* = encodeSample(codec, sample);
     }
     return output[0..byte_count];
+}
+
+/// A PCM encoding: codec identity, separate from the storage its samples
+/// decode to and from the containers that carry it.
+pub const Codec = enum {
+    u8,
+    s8,
+    s16le,
+    s16be,
+    s24le,
+    s24be,
+    s32le,
+    s32be,
+    s64le,
+    s64be,
+    f32le,
+    f32be,
+    f64le,
+    f64be,
+    alaw,
+    mulaw,
+
+    /// FFmpeg's codec name, such as `pcm_s16le`.
+    pub fn name(codec: Codec) []const u8 {
+        return switch (codec) {
+            inline else => |c| "pcm_" ++ @tagName(c),
+        };
+    }
+
+    /// The packed sample format FFmpeg's decoder gives: s8 is stored offset
+    /// as u8, s24 shifted into the top of s32, A-law and mu-law as s16.
+    pub fn storage(codec: Codec) audio.SampleFormat {
+        return switch (codec) {
+            .u8, .s8 => .u8,
+            .s16le, .s16be, .alaw, .mulaw => .s16,
+            .s24le, .s24be, .s32le, .s32be => .s32,
+            .s64le, .s64be => .s64,
+            .f32le, .f32be => .flt,
+            .f64le, .f64be => .dbl,
+        };
+    }
+
+    /// Bytes per encoded sample.
+    pub fn bytesPerSample(codec: Codec) u8 {
+        return switch (codec) {
+            .u8, .s8, .alaw, .mulaw => 1,
+            .s16le, .s16be => 2,
+            .s24le, .s24be => 3,
+            .s32le, .s32be, .f32le, .f32be => 4,
+            .s64le, .s64be, .f64le, .f64be => 8,
+        };
+    }
+};
+
+/// The integer that holds one stored sample of `codec`. Floats are kept as
+/// their bit patterns, so every value, NaN payloads included, round-trips.
+fn Stored(comptime codec: Codec) type {
+    return switch (codec.storage()) {
+        .u8 => u8,
+        .s16 => i16,
+        .s32 => i32,
+        .s64 => i64,
+        .flt => u32,
+        .dbl => u64,
+        .u8p, .s16p, .s32p, .s64p, .fltp, .dblp => unreachable, // storage() is packed
+    };
+}
+
+/// Decodes one sample: the single conversion every kernel here uses.
+fn decodeSample(comptime codec: Codec, bytes: *const [codec.bytesPerSample()]u8) Stored(codec) {
+    return switch (codec) {
+        .u8 => bytes[0],
+        .s8 => bytes[0] ^ 0x80,
+        .s16le, .s32le, .s64le, .f32le, .f64le => std.mem.readInt(Stored(codec), bytes, .little),
+        .s16be, .s32be, .s64be, .f32be, .f64be => std.mem.readInt(Stored(codec), bytes, .big),
+        .s24le, .s24be => blk: {
+            const raw: u32 = std.mem.readInt(u24, bytes, if (codec == .s24le) .little else .big);
+            break :blk @bitCast(raw << 8);
+        },
+        .alaw => g711.decodeAlaw(bytes[0]),
+        .mulaw => g711.decodeMulaw(bytes[0]),
+    };
+}
+
+/// Encodes one sample, the inverse of `decodeSample` (s24 drops the low 8
+/// bits; A-law and mu-law quantize).
+fn encodeSample(comptime codec: Codec, value: Stored(codec)) [codec.bytesPerSample()]u8 {
+    var bytes: [codec.bytesPerSample()]u8 = undefined;
+    switch (codec) {
+        .u8 => bytes[0] = value,
+        .s8 => bytes[0] = value ^ 0x80,
+        .s16le, .s32le, .s64le, .f32le, .f64le => std.mem.writeInt(Stored(codec), &bytes, value, .little),
+        .s16be, .s32be, .s64be, .f32be, .f64be => std.mem.writeInt(Stored(codec), &bytes, value, .big),
+        .s24le, .s24be => {
+            const bits: u32 = @bitCast(value);
+            std.mem.writeInt(u24, &bytes, @truncate(bits >> 8), if (codec == .s24le) .little else .big);
+        },
+        .alaw => bytes[0] = g711.encodeAlaw(value),
+        .mulaw => bytes[0] = g711.encodeMulaw(value),
+    }
+    return bytes;
+}
+
+/// Stored samples are in the target's own byte order, as FFmpeg keeps them.
+const native_endian = builtin.cpu.arch.endian();
+
+pub const CodecError = error{
+    /// The buffer's sample format is not the codec's storage.
+    FormatMismatch,
+    /// The bytes are not whole frames: one encoded sample per channel.
+    IncompleteFrame,
+    /// The destination cannot hold every frame.
+    OutputTooSmall,
+};
+
+/// Decodes `bytes`, whole frames of interleaved encoded samples, into `out`
+/// from frame `offset` (at most `out.layout.samples`), and returns the number
+/// of frames decoded. `out` must be in `codec.storage()`. On failure nothing
+/// is written.
+pub fn decode(codec: Codec, bytes: []const u8, out: sample_buffers.Buffer, offset: u32) CodecError!u32 {
+    std.debug.assert(offset <= out.layout.samples);
+    if (out.layout.format != codec.storage()) return error.FormatMismatch;
+    const width: usize = codec.bytesPerSample();
+    const frame_bytes = width * out.layout.channels;
+    if (bytes.len % frame_bytes != 0) return error.IncompleteFrame;
+    const frames = bytes.len / frame_bytes;
+    if (frames > out.layout.samples - offset) return error.OutputTooSmall;
+    const dest = out.plane(0)[offset * out.layout.blockAlign() ..];
+    switch (codec) {
+        inline else => |c| {
+            const in_width = comptime c.bytesPerSample();
+            const out_width = @sizeOf(Stored(c));
+            for (0..bytes.len / in_width) |i| {
+                const value = decodeSample(c, bytes[i * in_width ..][0..in_width]);
+                std.mem.writeInt(Stored(c), dest[i * out_width ..][0..out_width], value, native_endian);
+            }
+        },
+    }
+    // frames <= out.layout.samples, a u32.
+    return @intCast(frames);
+}
+
+/// Encodes `frames` frames of `in` from frame `offset` into the start of
+/// `out` and returns the encoded prefix. `in` must be in `codec.storage()`
+/// and hold those frames. On failure nothing is written.
+pub fn encode(codec: Codec, in: sample_buffers.Buffer, offset: u32, frames: u32, out: []u8) CodecError![]u8 {
+    const start: u64 = offset;
+    std.debug.assert(start + frames <= in.layout.samples);
+    if (in.layout.format != codec.storage()) return error.FormatMismatch;
+    const frame_count: usize = frames;
+    const count = frame_count * in.layout.channels;
+    const out_len = count * codec.bytesPerSample();
+    if (out.len < out_len) return error.OutputTooSmall;
+    const source = in.plane(0)[offset * in.layout.blockAlign() ..];
+    switch (codec) {
+        inline else => |c| {
+            const in_width = @sizeOf(Stored(c));
+            const out_width = comptime c.bytesPerSample();
+            for (0..count) |i| {
+                const value = std.mem.readInt(Stored(c), source[i * in_width ..][0..in_width], native_endian);
+                out[i * out_width ..][0..out_width].* = encodeSample(c, value);
+            }
+        },
+    }
+    return out[0..out_len];
 }
 
 fn disjoint(a: []const u8, b: []const u8) bool {
@@ -405,4 +578,163 @@ test "kernels agree with the independently generated writer-output fixtures" {
             try std.testing.expectEqualSlices(u8, data, try encodeS16(.little, stream.samples, &encoded));
         }
     }
+}
+
+// zig/testing/vectors/pcm.txt holds SHA-256 digests of what the pinned
+// FFmpeg's PCM decoders and encoders produce (zig/testing/reference/
+// pcm_vectors.c) from the patterns `fillPattern` regenerates. Every line is
+// checked; the count makes a missing or truncated file fail.
+const pcm_vectors = @embedFile("../testing/vectors/pcm.txt");
+const pcm_vector_count = 32;
+
+/// The input patterns pcm_vectors.c defines, with `width` bytes per sample;
+/// returns the sample count.
+fn fillPattern(name: []const u8, width: usize, out: []u8) error{UnknownPattern}!usize {
+    if (std.mem.eql(u8, name, "all8")) {
+        for (out[0..256], 0..) |*byte, i| byte.* = @intCast(i);
+        return 256 / width;
+    }
+    if (std.mem.eql(u8, name, "all16")) {
+        for (0..65536) |k| std.mem.writeInt(u16, out[2 * k ..][0..2], @intCast(k), .little);
+        return 131072 / width;
+    }
+    if (std.mem.eql(u8, name, "lcg")) {
+        // A 64-bit LCG: the wrapping arithmetic is the generator's definition.
+        var x: u64 = 1;
+        for (out[0 .. 65536 * width]) |*byte| {
+            x = x *% 6364136223846793005 +% 1442695040888963407;
+            byte.* = @truncate(x >> 56);
+        }
+        return 65536;
+    }
+    return error.UnknownPattern;
+}
+
+fn codecFromName(text: []const u8) ?Codec {
+    if (!std.mem.startsWith(u8, text, "pcm_")) return null;
+    return std.meta.stringToEnum(Codec, text[4..]);
+}
+
+fn vectorField(fields: *std.mem.TokenIterator(u8, .scalar)) error{MalformedVector}![]const u8 {
+    return fields.next() orelse error.MalformedVector;
+}
+
+/// Copies samples of `size` bytes between little-endian and stored order.
+fn reorderLittle(bytes: []u8, size: usize) void {
+    if (native_endian == .little) return;
+    var i: usize = 0;
+    while (i < bytes.len) : (i += size) std.mem.reverse(u8, bytes[i..][0..size]);
+}
+
+test "every codec decodes and encodes exactly as FFmpeg's" {
+    const gpa = std.testing.allocator;
+    const pattern = try gpa.alloc(u8, 65536 * 8 + 131072);
+    defer gpa.free(pattern);
+    var lines = std.mem.tokenizeAny(u8, pcm_vectors, "\r\n");
+    var seen: usize = 0;
+    while (lines.next()) |line| {
+        if (line[0] == '#') continue;
+        var fields = std.mem.tokenizeScalar(u8, line[2..], ' ');
+        const codec = codecFromName(try vectorField(&fields)) orelse return error.MalformedVector;
+        const pattern_name = try vectorField(&fields);
+        const count = try std.fmt.parseInt(u32, try vectorField(&fields), 10);
+        try std.testing.expectEqualStrings(try vectorField(&fields), codec.storage().name());
+        const want = try vectorField(&fields);
+
+        const layout = try sample_buffers.Layout.init(codec.storage(), 1, count, .{ .line = 1 });
+        var owned = try sample_buffers.Buffer.alloc(gpa, layout);
+        defer owned.deinit();
+        const stored_size = codec.storage().bytesPerSample();
+        var digest: [32]u8 = undefined;
+        switch (line[0]) {
+            'D' => {
+                const width = codec.bytesPerSample();
+                try std.testing.expectEqual(count, try fillPattern(pattern_name, width, pattern));
+                try std.testing.expectEqual(count, try decode(codec, pattern[0 .. count * width], owned.buffer, 0));
+                reorderLittle(owned.buffer.bytes, stored_size);
+                std.crypto.hash.sha2.Sha256.hash(owned.buffer.bytes, &digest, .{});
+            },
+            'E' => {
+                try std.testing.expectEqual(count, try fillPattern(pattern_name, stored_size, pattern));
+                @memcpy(owned.buffer.bytes, pattern[0 .. count * stored_size]);
+                reorderLittle(owned.buffer.bytes, stored_size);
+                const out = try gpa.alloc(u8, count * codec.bytesPerSample());
+                defer gpa.free(out);
+                std.crypto.hash.sha2.Sha256.hash(try encode(codec, owned.buffer, 0, count, out), &digest, .{});
+            },
+            else => return error.MalformedVector,
+        }
+        const hex = std.fmt.bytesToHex(digest, .lower);
+        std.testing.expectEqualStrings(want, &hex) catch |err| {
+            std.debug.print("vector \"{s}\"\n", .{line});
+            return err;
+        };
+        seen += 1;
+    }
+    try std.testing.expectEqual(pcm_vector_count, seen);
+}
+
+test "codecs name themselves as FFmpeg does and store as its decoders do" {
+    try std.testing.expectEqualStrings("pcm_s24be", Codec.s24be.name());
+    try std.testing.expectEqualStrings("pcm_mulaw", Codec.mulaw.name());
+    try std.testing.expectEqual(audio.SampleFormat.u8, Codec.s8.storage());
+    try std.testing.expectEqual(audio.SampleFormat.s32, Codec.s24le.storage());
+    try std.testing.expectEqual(audio.SampleFormat.s16, Codec.alaw.storage());
+    try std.testing.expectEqual(3, Codec.s24be.bytesPerSample());
+    try std.testing.expectEqual(Codec.f64le, codecFromName("pcm_f64le").?);
+    try std.testing.expectEqual(null, codecFromName("pcm_vidc"));
+}
+
+test "short input, a wrong format and a small destination write nothing" {
+    const stereo = try sample_buffers.Layout.init(.s32, 2, 4, .{ .line = 1 });
+    var bytes: [32]u8 = @splat(0xee);
+    const buffer = try sample_buffers.Buffer.init(stereo, &bytes);
+    // One s24 sample is 3 bytes; a stereo frame 6.
+    try std.testing.expectError(error.IncompleteFrame, decode(.s24le, &.{ 1, 2, 3, 4, 5 }, buffer, 0));
+    try std.testing.expectError(error.IncompleteFrame, decode(.s24le, &.{ 1, 2, 3 }, buffer, 0));
+    try std.testing.expectError(error.FormatMismatch, decode(.s16le, &.{ 1, 2, 3, 4 }, buffer, 0));
+    const five_frames: [30]u8 = @splat(1);
+    try std.testing.expectError(error.OutputTooSmall, decode(.s24le, &five_frames, buffer, 0));
+    try std.testing.expectError(error.OutputTooSmall, decode(.s24le, five_frames[0..12], buffer, 3));
+    const untouched: [32]u8 = @splat(0xee);
+    try std.testing.expectEqualSlices(u8, &untouched, &bytes);
+    var small: [11]u8 = undefined;
+    try std.testing.expectError(error.OutputTooSmall, encode(.s24be, buffer, 0, 2, &small));
+    try std.testing.expectError(error.FormatMismatch, encode(.f32le, buffer, 0, 1, &small));
+}
+
+test "frames land at the requested offset, interleaved, from misaligned input" {
+    const stereo = try sample_buffers.Layout.init(.s32, 2, 3, .{ .line = 1 });
+    var bytes: [24]u8 = @splat(0);
+    const buffer = try sample_buffers.Buffer.init(stereo, &bytes);
+    // Start the input at an odd address: kernels read bytes, not aligned words.
+    var storage: [13]u8 = undefined;
+    const input = storage[1..13];
+    @memcpy(input, &[_]u8{ 0x01, 0x00, 0x00, 0x80, 0xff, 0xff, 0x7f, 0x02, 0x03, 0x04, 0x05, 0x06 });
+    const s24 = input[0..6]; // one stereo frame of s24le
+    try std.testing.expectEqual(1, try decode(.s24le, s24, buffer, 2));
+    const stored = buffer.plane(0)[16..24];
+    try std.testing.expectEqual(0x00000100, std.mem.readInt(i32, stored[0..4], native_endian));
+    // 0xffff80 shifted into the top: 0xffff8000.
+    try std.testing.expectEqual(-0x8000, std.mem.readInt(i32, stored[4..8], native_endian));
+    try std.testing.expectEqual(0, std.mem.readInt(i32, buffer.plane(0)[0..4], native_endian));
+    // And back, to a misaligned destination.
+    var out_storage: [7]u8 = undefined;
+    try std.testing.expectEqualSlices(u8, s24, try encode(.s24le, buffer, 2, 1, out_storage[1..7]));
+    // Two stereo frames of s32be, the second into frame 1.
+    try std.testing.expectEqual(1, try decode(.s32be, input[4..12], buffer, 1));
+    const left_bits: u32 = 0xffff7f02;
+    const left: i32 = @bitCast(left_bits);
+    try std.testing.expectEqual(left, std.mem.readInt(i32, buffer.plane(0)[8..12], native_endian));
+    try std.testing.expectEqual(0x03040506, std.mem.readInt(i32, buffer.plane(0)[12..16], native_endian));
+}
+
+test "s8 and u8 differ only by the offset of 128" {
+    const layout = try sample_buffers.Layout.init(.u8, 1, 3, .{ .line = 1 });
+    var bytes: [3]u8 = undefined;
+    const buffer = try sample_buffers.Buffer.init(layout, &bytes);
+    _ = try decode(.s8, &.{ 0x00, 0x7f, 0x80 }, buffer, 0);
+    try std.testing.expectEqualSlices(u8, &.{ 0x80, 0xff, 0x00 }, &bytes);
+    var out: [3]u8 = undefined;
+    try std.testing.expectEqualSlices(u8, &.{ 0x80, 0xff, 0x00 }, try encode(.u8, buffer, 0, 3, &out));
 }

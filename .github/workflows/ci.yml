@@ -123,6 +123,14 @@ jobs:
             .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o samplefmt-vectors
           ./samplefmt-vectors | diff -u zig/testing/vectors/samplefmt.txt -
 
+      # The committed T20b oracle must be what this build's PCM codecs give.
+      - name: Check the PCM codec vectors (T20b)
+        run: |
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/pcm_vectors.c \
+            .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libavutil.a \
+            -lm -pthread -o pcm-vectors
+          ./pcm-vectors | diff -u zig/testing/vectors/pcm.txt -
+
       - name: Build zffprobe, zffmpeg and the test tools
         run: zig build -Doptimize=ReleaseSafe install test-tools
 
