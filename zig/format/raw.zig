@@ -331,8 +331,7 @@ fn formatCodec(comptime format: fixtures.raw.Format) pcm.Codec {
 
 fn paramsOf(comptime given: ?fixtures.raw.Params) Params {
     const p = given orelse return .{};
-    const layout = comptime audio.ChannelLayout.fromChannelCount(p.channels) catch unreachable; // fixtures are mono or stereo
-    return .{ .sample_rate = p.sample_rate, .layout = layout };
+    return .{ .sample_rate = p.sample_rate, .layout = .default(p.channels) };
 }
 
 /// The parser error each fixture failure names. The manifest's `Failure` stays
@@ -348,6 +347,7 @@ fn expectedError(failure: fixtures.raw.Failure) Error {
 fn expectInfo(comptime stream: fixtures.Stream, info: Info) !void {
     try std.testing.expectEqual(codecOf(stream.codec), info.codec);
     try std.testing.expectEqual(stream.channels, info.format.channelCount());
+    try stream.expectLayout(info.format.layout);
     try std.testing.expectEqual(stream.sample_rate, info.format.sample_rate);
     try std.testing.expectEqual(codecOf(stream.codec).storage(), info.format.sample_format);
     try std.testing.expectEqual(stream.frameCount(), info.frame_count);
@@ -494,7 +494,7 @@ test "the writer reproduces every raw writer-output fixture, its frame count giv
         if (fixture.writer_output) {
             const stream = fixture.expected.accept;
             const codec = codecOf(stream.codec);
-            const format = try audio.Format.init(stream.sample_rate, stream.channels, codec.storage());
+            const format = try audio.Format.initLayout(stream.sample_rate, stream.channelLayout(), codec.storage());
             const bytes = fixtures.raw.bytes(fixture.name);
             inline for (.{ null, stream.frameCount() }) |frame_count| {
                 var buffer: [1024]u8 = undefined;
@@ -519,7 +519,7 @@ test "writeFrames encodes s16 samples as the writer's codec" {
             if (std.mem.eql(u8, f.name, name)) break f.expected.accept;
         } else unreachable;
         const codec = codecOf(stream.codec);
-        const format = try audio.Format.init(stream.sample_rate, stream.channels, .s16);
+        const format = try audio.Format.initLayout(stream.sample_rate, stream.channelLayout(), .s16);
         var buffer: [256]u8 = undefined;
         var out: std.Io.Writer = .fixed(&buffer);
         var writer = try Writer.begin(&out, codec, format, null, .{});

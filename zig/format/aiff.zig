@@ -319,10 +319,10 @@ pub const Parser = struct {
         const channels = std.mem.readInt(u16, fields[0..2], .big);
         const frames = std.mem.readInt(u32, fields[2..6], .big);
         const bits = std.mem.readInt(u16, fields[6..8], .big);
-        const layout = audio.ChannelLayout.fromChannelCount(channels) catch |err| switch (err) {
-            error.InvalidChannelCount => return error.InvalidFormat,
-            error.UnsupportedChannelCount => return error.UnsupportedFormat,
-        };
+        if (channels == 0) return error.InvalidFormat;
+        if (channels > 2) return error.UnsupportedFormat;
+        // Without `CHAN` FFmpeg leaves the layout unspecified.
+        const layout: audio.ChannelLayout = .{ .unspecified = channels };
         const rate = try sampleRate(fields[8..18], p.limits.max_sample_rate);
         var rest = size - 18;
         const codec = if (p.version == aifc_version1 and rest >= 4) codec: {
@@ -496,6 +496,8 @@ pub const Writer = struct {
         if (format.sample_format != codec.storage()) return error.UnsupportedFormat;
         if (format.sample_rate == 0) return error.InvalidFormat;
         if (format.sample_rate > options.max_sample_rate) return error.LimitExceeded;
+        // Mono and stereo only, until this container's T23b part.
+        if (format.channelCount() > 2) return error.UnsupportedFormat;
         const frames = std.math.cast(u32, frame_count) orelse return error.SizeOverflow;
         const sample_bytes: u32 = codec.bytesPerSample();
         const frame_bytes = sample_bytes * format.channelCount();
@@ -636,6 +638,7 @@ fn expectedError(failure: fixtures.aiff.Failure) Error {
 fn expectInfo(comptime stream: fixtures.Stream, info: Info) !void {
     try std.testing.expectEqual(codecOf(stream.codec), info.codec);
     try std.testing.expectEqual(stream.channels, info.format.channelCount());
+    try stream.expectLayout(info.format.layout);
     try std.testing.expectEqual(stream.sample_rate, info.format.sample_rate);
     try std.testing.expectEqual(codecOf(stream.codec).storage(), info.format.sample_format);
     try std.testing.expectEqual(stream.frameCount(), info.frame_count);
@@ -791,7 +794,7 @@ test "the writer reproduces every AIFF writer-output fixture byte for byte" {
         if (fixture.writer_output) {
             const stream = fixture.expected.accept;
             const codec = codecOf(stream.codec);
-            const format = try audio.Format.init(stream.sample_rate, stream.channels, codec.storage());
+            const format = try audio.Format.initLayout(stream.sample_rate, stream.channelLayout(), codec.storage());
             var encoded: [1024]u8 = undefined;
             const data = try encodeExpected(stream, &encoded);
             var buffer: [1024]u8 = undefined;
@@ -820,7 +823,7 @@ test "writeFrames encodes s16 samples as the writer's codec" {
             if (std.mem.eql(u8, f.name, name)) break f.expected.accept;
         } else unreachable;
         const codec = codecOf(stream.codec);
-        const format = try audio.Format.init(stream.sample_rate, stream.channels, .s16);
+        const format = try audio.Format.initLayout(stream.sample_rate, stream.channelLayout(), .s16);
         var buffer: [256]u8 = undefined;
         var out: std.Io.Writer = .fixed(&buffer);
         var writer = try Writer.begin(&out, codec, format, stream.frameCount(), .{});

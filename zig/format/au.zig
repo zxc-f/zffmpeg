@@ -176,11 +176,10 @@ pub const Parser = struct {
         if (rate > p.limits.max_sample_rate) return error.LimitExceeded;
         // A count that does not fit in u16 is far above the two supported channels.
         const channel_count = std.math.cast(u16, channels) orelse return error.UnsupportedFormat;
-        const layout = audio.ChannelLayout.fromChannelCount(channel_count) catch |err| switch (err) {
-            error.InvalidChannelCount => return error.InvalidFormat,
-            error.UnsupportedChannelCount => return error.UnsupportedFormat,
-        };
-        const format: audio.Format = .{ .sample_rate = rate, .layout = layout, .sample_format = codec.storage() };
+        if (channel_count == 0) return error.InvalidFormat;
+        if (channel_count > 2) return error.UnsupportedFormat;
+        // An AU header has no layout: FFmpeg leaves it unspecified.
+        const format: audio.Format = .{ .sample_rate = rate, .layout = .{ .unspecified = channel_count }, .sample_format = codec.storage() };
         // At most 8 bytes times 2 channels.
         const sample_bytes: u32 = codec.bytesPerSample();
         const frame_bytes = sample_bytes * channel_count;
@@ -360,6 +359,8 @@ pub const Writer = struct {
         if (format.sample_format != codec.storage()) return error.UnsupportedFormat;
         if (format.sample_rate == 0) return error.InvalidFormat;
         if (format.sample_rate > limits.max_sample_rate) return error.LimitExceeded;
+        // Mono and stereo only, until this container's T23b part.
+        if (format.channelCount() > 2) return error.UnsupportedFormat;
         const sample_bytes: u32 = codec.bytesPerSample();
         const frame_bytes = sample_bytes * format.channelCount();
         const data_bytes = std.math.mul(u64, frame_count, frame_bytes) catch return error.SizeOverflow;
@@ -449,6 +450,7 @@ fn expectedError(failure: fixtures.au.Failure) Error {
 fn expectStream(comptime stream: fixtures.Stream, decoded: Decoded) !void {
     try std.testing.expectEqual(codecOf(stream.codec), decoded.info.codec);
     try std.testing.expectEqual(stream.channels, decoded.info.format.channelCount());
+    try stream.expectLayout(decoded.info.format.layout);
     try std.testing.expectEqual(stream.sample_rate, decoded.info.format.sample_rate);
     try std.testing.expectEqual(codecOf(stream.codec).storage(), decoded.info.format.sample_format);
     // Unknown-length data has no count; the samples below still fix the length.
@@ -500,6 +502,7 @@ test "probing validates without decoding and agrees with decoding" {
                     const info = try result;
                     try std.testing.expectEqual(codecOf(stream.codec), info.codec);
                     try std.testing.expectEqual(stream.channels, info.format.channelCount());
+                    try stream.expectLayout(info.format.layout);
                     try std.testing.expectEqual(stream.sample_rate, info.format.sample_rate);
                     if (info.frame_count) |count| try std.testing.expectEqual(stream.frameCount(), count);
                 },
@@ -642,7 +645,7 @@ test "the writer reproduces every AU writer-output fixture byte for byte" {
         if (fixture.writer_output) {
             const stream = fixture.expected.accept;
             const codec = codecOf(stream.codec);
-            const format = try audio.Format.init(stream.sample_rate, stream.channels, codec.storage());
+            const format = try audio.Format.initLayout(stream.sample_rate, stream.channelLayout(), codec.storage());
             var encoded: [1024]u8 = undefined;
             const data = try encodeExpected(stream, &encoded);
             var buffer: [1024]u8 = undefined;
@@ -670,7 +673,7 @@ test "writeFrames encodes s16 samples as the writer's codec" {
             if (std.mem.eql(u8, f.name, name)) break f.expected.accept;
         } else unreachable;
         const codec = codecOf(stream.codec);
-        const format = try audio.Format.init(stream.sample_rate, stream.channels, .s16);
+        const format = try audio.Format.initLayout(stream.sample_rate, stream.channelLayout(), .s16);
         var buffer: [256]u8 = undefined;
         var out: std.Io.Writer = .fixed(&buffer);
         var writer = try Writer.begin(&out, codec, format, stream.frameCount(), .{});

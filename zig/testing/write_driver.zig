@@ -6,7 +6,7 @@
 //! fixtures the writer is tested to reproduce.
 //!
 //!     write-driver <format> <codec> <sample_rate> <channels> <input.raw> <output>
-//!                  [rf64] [bext] [tag=<key>=<value>]...
+//!                  [rf64] [bext] [layout=<layout>] [tag=<key>=<value>]...
 //!
 //! `format` is a muxer's FFmpeg name (`wav`, `w64`, `au`, `aiff` or a raw PCM
 //! format such as `s16le`, T22c), `codec` an FFmpeg PCM codec name such as
@@ -16,7 +16,9 @@
 //! Wave64. The options after the output, in any order: `rf64` makes the WAV
 //! writer emit RF64 even for a small stream (`rf64 = .always`, T21b); each
 //! `tag=` adds a tag under FFmpeg's names, the key up to the first `=`, and
-//! `bext` sets the writer's `bext` option (T21c). Exit status: 0 on success,
+//! `bext` sets the writer's `bext` option (T21c); `layout=` gives the
+//! channel layout as ffprobe prints it, `unknown` for an unspecified one
+//! (T23b), instead of FFmpeg's default for the channel count. Exit status: 0 on success,
 //! 1 for usage errors, 2 for any other failure, with one diagnostic line on
 //! stderr.
 //! zig/testing/reference/compare.py runs it. It is a test tool, not a product:
@@ -26,7 +28,7 @@ const std = @import("std");
 const av = @import("av");
 
 const usage = "usage: write-driver <format> <codec> <sample_rate> <channels> <input.raw> <output>" ++
-    " [rf64] [bext] [tag=<key>=<value>]...\n";
+    " [rf64] [bext] [layout=<layout>] [tag=<key>=<value>]...\n";
 
 /// Inputs are fixture-sized; the bound keeps a wrong argument from reading a
 /// large file into memory.
@@ -57,9 +59,12 @@ fn run(init: std.process.Init) Status {
     var tags: av.metadata.Dictionary = .empty;
     defer tags.deinit(gpa);
     var options: av.wav.WriteOptions = .{ .tags = &tags };
+    var layout_text: ?[]const u8 = null;
     for (args[7..]) |arg| {
         const option: []const u8 = arg;
-        if (std.mem.eql(u8, option, "rf64")) {
+        if (std.mem.startsWith(u8, option, "layout=")) {
+            layout_text = option["layout=".len..];
+        } else if (std.mem.eql(u8, option, "rf64")) {
             options.rf64 = .always;
         } else if (std.mem.eql(u8, option, "bext")) {
             options.bext = true;
@@ -74,7 +79,7 @@ fn run(init: std.process.Init) Status {
             return usageError(io);
         }
     }
-    write(io, gpa, container, codec, options, args[3], args[4], args[5], args[6]) catch |err| {
+    write(io, gpa, container, codec, options, args[3], args[4], layout_text, args[5], args[6]) catch |err| {
         printError(io, "write-driver: {t}\n", .{err});
         return .failure;
     };
@@ -99,12 +104,18 @@ fn write(
     wav_options: av.wav.WriteOptions,
     rate_text: []const u8,
     channels_text: []const u8,
+    layout_text: ?[]const u8,
     input_path: []const u8,
     output_path: []const u8,
 ) !void {
     const sample_rate = try std.fmt.parseInt(u32, rate_text, 10);
     const channels = try std.fmt.parseInt(u16, channels_text, 10);
-    const format = try av.audio.Format.init(sample_rate, channels, codec.storage());
+    const channel_layout: av.audio.ChannelLayout = if (layout_text) |text|
+        if (std.mem.eql(u8, text, "unknown")) .{ .unspecified = channels } else try av.channel_layout.Layout.parse(text)
+    else
+        .default(channels);
+    if (channel_layout.channelCount() != channels) return error.LayoutMismatch;
+    const format = try av.audio.Format.initLayout(sample_rate, channel_layout, codec.storage());
 
     const cwd = std.Io.Dir.cwd();
     const raw = try cwd.readFileAlloc(io, input_path, gpa, .limited(max_input_bytes));

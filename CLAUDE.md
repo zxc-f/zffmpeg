@@ -30,7 +30,7 @@ conversion, T23a), `convert` (the synchronous T13a conversion and
 stream-copy pipeline) and `file` (file and pipe adapters). Two tools sit on it:
 `zffprobe` probes WAV, Wave64, AU, AIFF, CAF and raw PCM, tags included, and `zffmpeg` (T13b)
 converts and stream-copies between them (CAF as an input), carrying tags,
-with `-c:a` and FFmpeg's dither options. Tests cover 121 WAV,
+with `-c:a` and FFmpeg's dither options. Tests cover 129 WAV,
 38 AU, 44 AIFF, 20 raw PCM and 47 CAF fixtures, process runs of both tools, and a CI comparison against a
 pinned FFmpeg build that also reads every `zffmpeg` output. Verification is
 Linux-only during development; Windows and ARM wait for T62–T63. T13, T14a

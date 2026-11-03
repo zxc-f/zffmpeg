@@ -1787,26 +1787,35 @@ names, not as an empty framework.
     State: implementing
     Supported behavior and explicit exclusions: part 1, the layout library:
       FFmpeg's channels, native, custom and unspecified layouts, the named
-      layouts, describe, from_string, default and compare. Excluded:
-      ambisonics; custom layouts past 64 channels.
+      layouts, describe, from_string, default and compare. Part 2: layouts in
+      `audio.Format`; WAV, RF64 and Wave64 with 1 to 64 channels and
+      FFmpeg's mask rules both ways; FFmpeg's layout as zffprobe's
+      channel_layout (`unknown` when unspecified); zffmpeg's command-line
+      layout guess; multichannel dither. Excluded: ambisonics; custom layouts
+      past 64 channels; more than 64 channels.
     Needs (verified) / lands with / verified after: T20a.
     Contract and source provenance: port.md "Channel layouts"; notes.md
       "Channel layouts"; channel_layout.c and .h, opt.c, avstring.c.
     Required fixtures / optional corpus: 662 vectors of the pinned
-      libavutil (layout_vectors.c); no optional corpus.
+      libavutil (layout_vectors.c); 129 WAV fixtures (8 new, 3 formerly
+      rejected now accepted), every one recording ffprobe's layout; no
+      optional corpus.
     Ownership, state transitions and limits: layouts are values; no
       allocation.
     Comparison rule and intentional differences: exact; ambisonic text is
-      UnsupportedLayout, custom maps past 64 channels LimitExceeded.
-    Implementation files and test entry points: core/channel_layout.zig.
-    Evidence commit / Linux CI run / reference report: pending.
-    Required cases: part 1 vectors pass; the container parts are missing.
+      UnsupportedLayout, custom maps past 64 channels LimitExceeded, more
+      than 64 WAV channels LimitExceeded; CAF `chan` unread until its part.
+    Implementation files and test entry points: core/channel_layout.zig,
+      core/audio.zig, format/wav.zig, format/convert.zig, cli/probe.zig,
+      generate.py, compare.py.
+    Evidence commit / Linux CI run / reference report: part 1 `1f4f41c`;
+      part 2 local Windows runs; CI pending.
+    Required cases: parts 1 and 2 pass; AU, AIFF, CAF and raw are missing.
     Optional cases: none
     Fuzz seeds, budget and result: none yet.
-    Remaining work or blocker / next action: part 2, `audio.Format` with a
-      layout and multichannel WAV (plain and extensible masks), then AU,
-      AIFF, CAF `chan` and raw `-ch_layout`, zffprobe's layout strings and
-      fixtures.
+    Remaining work or blocker / next action: part 3, AU with N channels;
+      then AIFF `CHAN` and CAF `chan` (FFmpeg's mov_chan tables), and raw
+      `-ch_layout` with any layout.
     ```
   - [ ] **T23c — Rematrixing.** Needs T23a and T23b. The default upmix and
     downmix matrices with center and surround mix levels and normalization.

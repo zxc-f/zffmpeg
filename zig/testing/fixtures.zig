@@ -13,6 +13,7 @@
 //! fixtures/au/README.md and fixtures/aiff/README.md.
 
 const std = @import("std");
+const channel_layout = @import("../core/channel_layout.zig");
 
 /// Errors of the first WAV contract (port.md), named exactly as the parser's
 /// errors. This enum stays independent of the parser; the WAV tests map each
@@ -81,11 +82,34 @@ pub const Samples = union(enum) {
 pub const Stream = struct {
     codec: Codec,
     channels: u16,
+    /// The channel layout as ffprobe prints it (T23b): FFmpeg's
+    /// description, or `unknown` when the container leaves it unspecified.
+    layout: []const u8,
     sample_rate: u32,
     samples: Samples,
 
     pub fn frameCount(stream: Stream) usize {
         return stream.samples.len() / stream.channels;
+    }
+
+    /// The stream's layout as a value: unspecified for `unknown`, else what
+    /// FFmpeg parses its description as.
+    pub fn channelLayout(stream: Stream) channel_layout.Layout {
+        if (std.mem.eql(u8, stream.layout, "unknown")) return .{ .unspecified = stream.channels };
+        // generate.py writes FFmpeg's descriptions, which FFmpeg parses back.
+        return channel_layout.Layout.parse(stream.layout) catch unreachable;
+    }
+
+    /// Checks that `layout` is the stream's, as ffprobe would print it.
+    pub fn expectLayout(stream: Stream, layout: channel_layout.Layout) !void {
+        var buffer: [512]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buffer);
+        switch (layout) {
+            .unspecified => try w.writeAll("unknown"),
+            .native, .custom => try layout.describe(&w),
+        }
+        try std.testing.expectEqualStrings(stream.layout, w.buffered());
+        try std.testing.expectEqual(stream.channels, layout.channelCount());
     }
 };
 
@@ -386,8 +410,8 @@ fn expectConsistent(comptime Contract: type) void {
 fn expectValidResult(comptime name: []const u8, comptime result: anytype) void {
     switch (result) {
         .accept => |stream| {
-            if (stream.channels != 1 and stream.channels != 2) {
-                @compileError("accepted fixtures are mono or stereo: " ++ name);
+            if (stream.channels == 0) {
+                @compileError("accepted fixtures have channels: " ++ name);
             }
             if (stream.samples.len() % stream.channels != 0) {
                 @compileError("samples do not fill whole frames: " ++ name);

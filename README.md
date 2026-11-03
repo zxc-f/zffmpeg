@@ -15,7 +15,7 @@ tags as FFmpeg does. Codec and format registries name everything as FFmpeg
 does. The `zffprobe` tool detects WAV, Wave64, AU, AIFF or CAF from the content
 with FFmpeg's scored probes, and raw PCM from `-f` or a raw file extension,
 validates the file and reports its stream and tags. Both are checked against
-121 WAV, 38 AU, 44 AIFF, 20 raw PCM and 47 CAF fixtures and against a pinned
+129 WAV, 38 AU, 44 AIFF, 20 raw PCM and 47 CAF fixtures and against a pinned
 FFmpeg build in CI (Linux). The `zffmpeg` tool converts and stream-copies
 between WAV, Wave64, AU, AIFF and raw PCM, and from CAF, carrying tags as FFmpeg does, through the
 library's synchronous pipeline (T13), which runs on packets, frames and
@@ -50,7 +50,7 @@ the [unplanned features](TODO.md#not-planned).
   [zig/README.md](zig/README.md) documents commands, version policy and layout.
 - [zig/root.zig](zig/root.zig): root of the `av` library module.
 - [zig/testing/fixtures/README.md](zig/testing/fixtures/README.md): the WAV fixture
-  contract (121 fixtures, expected results, decisions, error precedence).
+  contract (129 fixtures, expected results, decisions, error precedence).
 - [zig/testing/fixtures/au/README.md](zig/testing/fixtures/au/README.md): the AU
   fixture contract (38 fixtures, parser and detection expectations kept separate).
 - [zig/testing/fixtures/aiff/README.md](zig/testing/fixtures/aiff/README.md): the

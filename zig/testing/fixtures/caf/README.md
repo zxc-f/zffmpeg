@@ -104,26 +104,26 @@ were used.
 <!-- BEGIN GENERATED FIXTURE TABLE: edit generate.py, then run it -->
 | Fixture | Group | Bytes | Expected | Rule | SHA-256 |
 | --- | --- | ---: | --- | --- | --- |
-| `caf_s16be_mono_8k` | accepted | 84 | accept: mono, 8000 Hz, 8 frames | `lpcm`, big-endian 16-bit mono: the encoding afconvert writes by default. | `ec73b222a3935661c4c88bc08f61e87d9bbb2529dea98a875ef03fc601a6ff5c` |
-| `caf_s16le_stereo_44k1` | accepted | 84 | accept: stereo, 44100 Hz, 4 frames | `lpcm` with the little-endian flag, stereo at 44.1 kHz. | `680a66dee23dd00865292392a7a2cc6165374c5075daa5bb7238b1cec98643b8` |
-| `caf_s8_mono` | accepted | 76 | accept: mono, 8000 Hz, 8 frames, `pcm_s8` | 8-bit `lpcm` is signed (FFmpeg passes the signed flag); stored as u8, offset by 128. | `0de54dae110b6d93457dae696b3ac76367fd23ce85ccbe9584078904c20fdb9c` |
-| `caf_s24le_stereo_48k` | accepted | 92 | accept: stereo, 48000 Hz, 4 frames, `pcm_s24le` | 24-bit little-endian stereo at 48 kHz; stored as s32. | `a8e89e3a08f23642975c5bdeba48e6658e257a72fa94ad7e8c4176591cfff057` |
-| `caf_s24be_mono` | accepted | 92 | accept: mono, 8000 Hz, 8 frames, `pcm_s24be` | 24-bit big-endian. | `d3528e4892f96b9f523013d52a4049b10610b2ad9c316ddf88e77608c3935766` |
-| `caf_s32be_mono` | accepted | 100 | accept: mono, 8000 Hz, 8 frames, `pcm_s32be` | 32-bit big-endian. | `a768068b9f724eb61ab9921b0c119c2e8442229ac1c26420d0d22080fd7554c1` |
-| `caf_s32le_mono` | accepted | 100 | accept: mono, 8000 Hz, 8 frames, `pcm_s32le` | 32-bit little-endian. | `27b6f772bed8e1fdda89c923217dd4142bae3543cf4711ffb43c50f81c91c9d9` |
-| `caf_s64be_mono` | accepted | 132 | accept: mono, 8000 Hz, 8 frames, `pcm_s64be` | 64-bit big-endian integers. | `7e273d84b79beff9d796be8018432187340c5884be295e02d1c0c39ff17ab595` |
-| `caf_s64le_mono` | accepted | 132 | accept: mono, 8000 Hz, 8 frames, `pcm_s64le` | 64-bit little-endian integers. | `1790e32d65b1d9b37d1e96768152b21fc35a27c06ec301cf8bbedbbd102ef5cd` |
-| `caf_f32be_mono` | accepted | 100 | accept: mono, 8000 Hz, 8 frames, `pcm_f32be` | 32-bit float (`lpcm` with the float flag); every bit kept. | `5d288efb6dc6441edee0e113ab62fe6dd07c493dea944e5076aac34fa51db9e2` |
-| `caf_f32le_mono` | accepted | 100 | accept: mono, 8000 Hz, 8 frames, `pcm_f32le` | 32-bit float, little-endian. | `6c4ceb1e7519a492b53fa77a80e899d0cf57f4de9b67ab0482e3f0f4e7d35182` |
-| `caf_f64be_stereo_96k` | accepted | 132 | accept: stereo, 96000 Hz, 4 frames, `pcm_f64be` | 64-bit float stereo at 96 kHz. | `0b221fc593bead62195755065e77bf91e7a0acf325b0236edb40ea907a107a99` |
-| `caf_f64le_mono` | accepted | 132 | accept: mono, 8000 Hz, 8 frames, `pcm_f64le` | 64-bit float, little-endian. | `5d34d7cf2e0bd3bc78a9193054a4d45850dfeb7d674655c864fcd2c311d95fab` |
-| `caf_alaw_mono_8k` | accepted | 76 | accept: mono, 8000 Hz, 8 frames, `pcm_alaw` | Format ID `alaw`; decodes to s16. | `f4cf704ca46dd6b13b7199adeabddbf721278ae2df4c329fd724b99898953f8e` |
-| `caf_ulaw_mono_8k` | accepted | 76 | accept: mono, 8000 Hz, 8 frames, `pcm_mulaw` | Format ID `ulaw`; decodes to s16. | `10e9310a847fa4521267fae8c351ff7ff837540cad112e7379dc57e5c08c1aea` |
-| `caf_empty_data` | accepted | 68 | accept: mono, 8000 Hz, 0 frames | A `data` chunk of 4 bytes, its edit count only: 0 frames. | `e9ae4517e0b5818fd44002e96dff92a3476ce9ffdcd30b91179a5021410ed810` |
-| `caf_chunks_around_data` | accepted | 167 | accept: mono, 8000 Hz, 4 frames | `free`, `chan` (the mono layout tag), `info` and `kuki` before `data` and `free` after it are skipped. | `e14afe6c5a78f6e765603e684c1df35edb1231b551f1e9f38969220b4444f090` |
-| `caf_rate_fraction` | accepted | 76 | accept: mono, 8000 Hz, 4 frames | A rate of 8000.75 Hz is truncated to 8000, as FFmpeg's int conversion does. | `e2e5fb2eaf15f3843eb7b67d80f5389499888574123dc679b1bca12151ea3316` |
-| `caf_edit_count` | accepted | 76 | accept: mono, 8000 Hz, 4 frames | A nonzero edit count is skipped. | `e49571e5722dc411f0eda5ad59714f044df0570272440e8730f0f931719260bc` |
-| `caf_data_size_unknown` | size | 76 | reject: `UnsupportedStreamingSize`; with `unknown_length`, accept: mono, 8000 Hz, 4 frames | `data` size -1, as a writer that could not seek back leaves it: with `unknown_length` the data is the rest of the input. | `da3a4066c511124b113e0c92b044f74e12177113afd8a60c1d6d1edc7303cd39` |
+| `caf_s16be_mono_8k` | accepted | 84 | accept: 1 channel, 8000 Hz, 8 frames | `lpcm`, big-endian 16-bit mono: the encoding afconvert writes by default. | `ec73b222a3935661c4c88bc08f61e87d9bbb2529dea98a875ef03fc601a6ff5c` |
+| `caf_s16le_stereo_44k1` | accepted | 84 | accept: 2 channels, 44100 Hz, 4 frames | `lpcm` with the little-endian flag, stereo at 44.1 kHz. | `680a66dee23dd00865292392a7a2cc6165374c5075daa5bb7238b1cec98643b8` |
+| `caf_s8_mono` | accepted | 76 | accept: 1 channel, 8000 Hz, 8 frames, `pcm_s8` | 8-bit `lpcm` is signed (FFmpeg passes the signed flag); stored as u8, offset by 128. | `0de54dae110b6d93457dae696b3ac76367fd23ce85ccbe9584078904c20fdb9c` |
+| `caf_s24le_stereo_48k` | accepted | 92 | accept: 2 channels, 48000 Hz, 4 frames, `pcm_s24le` | 24-bit little-endian stereo at 48 kHz; stored as s32. | `a8e89e3a08f23642975c5bdeba48e6658e257a72fa94ad7e8c4176591cfff057` |
+| `caf_s24be_mono` | accepted | 92 | accept: 1 channel, 8000 Hz, 8 frames, `pcm_s24be` | 24-bit big-endian. | `d3528e4892f96b9f523013d52a4049b10610b2ad9c316ddf88e77608c3935766` |
+| `caf_s32be_mono` | accepted | 100 | accept: 1 channel, 8000 Hz, 8 frames, `pcm_s32be` | 32-bit big-endian. | `a768068b9f724eb61ab9921b0c119c2e8442229ac1c26420d0d22080fd7554c1` |
+| `caf_s32le_mono` | accepted | 100 | accept: 1 channel, 8000 Hz, 8 frames, `pcm_s32le` | 32-bit little-endian. | `27b6f772bed8e1fdda89c923217dd4142bae3543cf4711ffb43c50f81c91c9d9` |
+| `caf_s64be_mono` | accepted | 132 | accept: 1 channel, 8000 Hz, 8 frames, `pcm_s64be` | 64-bit big-endian integers. | `7e273d84b79beff9d796be8018432187340c5884be295e02d1c0c39ff17ab595` |
+| `caf_s64le_mono` | accepted | 132 | accept: 1 channel, 8000 Hz, 8 frames, `pcm_s64le` | 64-bit little-endian integers. | `1790e32d65b1d9b37d1e96768152b21fc35a27c06ec301cf8bbedbbd102ef5cd` |
+| `caf_f32be_mono` | accepted | 100 | accept: 1 channel, 8000 Hz, 8 frames, `pcm_f32be` | 32-bit float (`lpcm` with the float flag); every bit kept. | `5d288efb6dc6441edee0e113ab62fe6dd07c493dea944e5076aac34fa51db9e2` |
+| `caf_f32le_mono` | accepted | 100 | accept: 1 channel, 8000 Hz, 8 frames, `pcm_f32le` | 32-bit float, little-endian. | `6c4ceb1e7519a492b53fa77a80e899d0cf57f4de9b67ab0482e3f0f4e7d35182` |
+| `caf_f64be_stereo_96k` | accepted | 132 | accept: 2 channels, 96000 Hz, 4 frames, `pcm_f64be` | 64-bit float stereo at 96 kHz. | `0b221fc593bead62195755065e77bf91e7a0acf325b0236edb40ea907a107a99` |
+| `caf_f64le_mono` | accepted | 132 | accept: 1 channel, 8000 Hz, 8 frames, `pcm_f64le` | 64-bit float, little-endian. | `5d34d7cf2e0bd3bc78a9193054a4d45850dfeb7d674655c864fcd2c311d95fab` |
+| `caf_alaw_mono_8k` | accepted | 76 | accept: 1 channel, 8000 Hz, 8 frames, `pcm_alaw` | Format ID `alaw`; decodes to s16. | `f4cf704ca46dd6b13b7199adeabddbf721278ae2df4c329fd724b99898953f8e` |
+| `caf_ulaw_mono_8k` | accepted | 76 | accept: 1 channel, 8000 Hz, 8 frames, `pcm_mulaw` | Format ID `ulaw`; decodes to s16. | `10e9310a847fa4521267fae8c351ff7ff837540cad112e7379dc57e5c08c1aea` |
+| `caf_empty_data` | accepted | 68 | accept: 1 channel, 8000 Hz, 0 frames | A `data` chunk of 4 bytes, its edit count only: 0 frames. | `e9ae4517e0b5818fd44002e96dff92a3476ce9ffdcd30b91179a5021410ed810` |
+| `caf_chunks_around_data` | accepted | 167 | accept: 1 channel, 8000 Hz, 4 frames | `free`, `chan` (the mono layout tag), `info` and `kuki` before `data` and `free` after it are skipped. | `e14afe6c5a78f6e765603e684c1df35edb1231b551f1e9f38969220b4444f090` |
+| `caf_rate_fraction` | accepted | 76 | accept: 1 channel, 8000 Hz, 4 frames | A rate of 8000.75 Hz is truncated to 8000, as FFmpeg's int conversion does. | `e2e5fb2eaf15f3843eb7b67d80f5389499888574123dc679b1bca12151ea3316` |
+| `caf_edit_count` | accepted | 76 | accept: 1 channel, 8000 Hz, 4 frames | A nonzero edit count is skipped. | `e49571e5722dc411f0eda5ad59714f044df0570272440e8730f0f931719260bc` |
+| `caf_data_size_unknown` | size | 76 | reject: `UnsupportedStreamingSize`; with `unknown_length`, accept: 1 channel, 8000 Hz, 4 frames | `data` size -1, as a writer that could not seek back leaves it: with `unknown_length` the data is the rest of the input. | `da3a4066c511124b113e0c92b044f74e12177113afd8a60c1d6d1edc7303cd39` |
 | `caf_unknown_size_partial_frame` | size | 74 | reject: `UnsupportedStreamingSize`; with `unknown_length`, reject: `Truncated` | Size -1, stereo, ending after 1.5 frames. | `992a3901599298e6a4c7cb671dec96518cd320d55b5793c0465098b235630289` |
 | `caf_empty_input` | header | 0 | reject: `Truncated`; not detected (probing picks no format) | No bytes at all. | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
 | `caf_bad_magic` | header | 76 | reject: `InvalidCaf`; not detected (probing picks no format) | Magic `cafe`. | `61b774a00e7dca7d6e83a97ebc4e0784f5bf9e0ad2f1027e16bb2b060fbd950b` |

@@ -228,7 +228,7 @@ pub const Converter = struct {
     /// `storage` bounds the frame size: its samples, converted, must fit in
     /// `storage.len` bytes.
     pub fn init(in_format: audio.Format, out_format: audio.Format, storage: []u8) Converter {
-        std.debug.assert(in_format.sample_rate == out_format.sample_rate and in_format.layout == out_format.layout);
+        std.debug.assert(in_format.sample_rate == out_format.sample_rate and in_format.layout.eql(&out_format.layout));
         return .{ .in_format = in_format, .out_format = out_format, .storage = storage };
     }
 
@@ -236,7 +236,7 @@ pub const Converter = struct {
     /// `Dither.init`; `scratch` must hold `dither.scratchLen` bytes for the
     /// largest frame, which also bounds the frame size.
     pub fn initDithered(in_format: audio.Format, out_format: audio.Format, storage: []u8, dither: Dither, scratch: []u8) Converter {
-        std.debug.assert(std.meta.eql(dither.in_format, in_format) and dither.out_format == out_format.sample_format);
+        std.debug.assert(dither.in_format.eql(in_format) and dither.out_format == out_format.sample_format);
         var c: Converter = .init(in_format, out_format, storage);
         c.dither = dither;
         c.scratch = scratch;
@@ -246,7 +246,7 @@ pub const Converter = struct {
     pub fn send(c: *Converter, frame: Frame) Error!stage.Send {
         if (c.state != .accepting) return error.InputAfterEnd;
         if (c.pending != null) return .full;
-        if (!std.meta.eql(frame.format, c.in_format)) return error.FormatMismatch;
+        if (!frame.format.eql(c.in_format)) return error.FormatMismatch;
         const frames = frame.frameCount();
         const out_len = frames * c.out_format.bytesPerFrame();
         if (out_len > c.storage.len) return error.OutputTooSmall;

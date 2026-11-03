@@ -351,7 +351,7 @@ test "raw fixtures are found by no content probe, by their extension, and read w
         }
         const params: ?raw.Params = if (fixture.params) |p| .{
             .sample_rate = p.sample_rate,
-            .layout = comptime audio.ChannelLayout.fromChannelCount(p.channels) catch unreachable, // mono or stereo
+            .layout = .default(p.channels),
         } else null;
         var forced: std.Io.Reader = .fixed(bytes);
         const got = probeWith(&forced, .{}, .{ .source = .{ .format = container, .raw = params } });
@@ -429,7 +429,7 @@ test "a raw input takes FFmpeg's defaults, the given parameters, and its length"
     const probed = try probeWith(&defaults, .{}, .{ .source = .{ .file_name = "take.al" } });
     try std.testing.expectEqual(Container.alaw, probed.container);
     try std.testing.expectEqual(44100, probed.format.sample_rate);
-    try std.testing.expectEqual(.mono, probed.format.layout);
+    try std.testing.expectEqual(audio.ChannelLayout.mono, probed.format.layout);
     try std.testing.expectEqual(4, probed.frame_count);
     var stereo: std.Io.Reader = .fixed(&bytes);
     const params: raw.Params = .{ .sample_rate = 8000, .layout = .stereo };

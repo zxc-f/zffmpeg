@@ -128,8 +128,11 @@ pub const Summary = struct {
     /// The input codec when copying; when transcoding, the requested encoder
     /// or the output container's default codec.
     output_codec: pcm.Codec,
-    /// The input's format; the output's has the same rate and layout, its
-    /// sample format the output codec's storage (`outputFormat`).
+    /// The input's format, with the layout FFmpeg's command line gives it
+    /// (`audio.guessLayout`: an unspecified one becomes the default for its
+    /// channel count, as for a plain WAV); the output's has the same rate
+    /// and layout, its sample format the output codec's storage
+    /// (`outputFormat`).
     format: audio.Format,
     /// Sample frames in the input and the output. The duration is this many
     /// units of `format.timeBase()`, exactly, in both. Null until `run` for an
@@ -216,7 +219,11 @@ pub const Conversion = struct {
                         // output without a muxer fails the request check below.
                         .transcode => request.codec orelse request.output.s16Codec() orelse info.codec,
                     },
-                    .format = info.format,
+                    .format = guessed: {
+                        var format = info.format;
+                        format.layout = audio.guessLayout(format.layout);
+                        break :guessed format;
+                    },
                     .frame_count = frame_count,
                 };
             },
@@ -732,6 +739,14 @@ fn expectEveryCell(input: Container, detected: bool, source: detect.Source, byte
             try std.testing.expectEqual(0, out.buffered().len);
             continue;
         }
+        // The AU and AIFF writers take mono and stereo only, until their T23b
+        // parts.
+        const family = request.output.family();
+        if (stream.channels > 2 and (family == .au or family == .aiff)) {
+            try std.testing.expectError(error.UnsupportedFormat, result);
+            try std.testing.expectEqual(0, out.buffered().len);
+            continue;
+        }
         const summary = try result;
         const frame_count = stream.frameCount();
         try std.testing.expectEqual(input, summary.input);
@@ -754,8 +769,11 @@ fn expectEveryCell(input: Container, detected: bool, source: detect.Source, byte
         const want = convertedStored(expected, summary.format, summary.outputFormat(), frame_count, &converted_buffer);
         try std.testing.expectEqualSlices(u8, want, try rawOf(request.output, written, &raw_buffer, summary.outputFormat()));
 
-        // A canonical input converts to itself, byte for byte.
-        if (writer_output and request.output == input and summary.output_codec == summary.input_codec) {
+        // A canonical input converts to itself, byte for byte, unless FFmpeg's
+        // layout guess changed its layout (six unspecified channels become
+        // 5.1, which WAV writes as an extensible mask).
+        const same_layout = stream.channelLayout().eql(&summary.format.layout) and std.meta.activeTag(stream.channelLayout()) == std.meta.activeTag(summary.format.layout);
+        if (writer_output and same_layout and request.output == input and summary.output_codec == summary.input_codec) {
             try std.testing.expectEqualSlices(u8, bytes, written);
         }
     }
@@ -799,8 +817,7 @@ test "every accepted fixture gives its samples in every supported cell, and copy
         if (fixture.expected == .accept) {
             const stream = fixture.expected.accept;
             const bytes = fixtures.raw.bytes(fixture.name);
-            const layout = comptime audio.ChannelLayout.fromChannelCount(stream.channels) catch unreachable; // mono or stereo
-            const source: detect.Source = .{ .raw = .{ .sample_rate = stream.sample_rate, .layout = layout }, .length = bytes.len };
+            const source: detect.Source = .{ .raw = .{ .sample_rate = stream.sample_rate, .layout = .default(stream.channels) }, .length = bytes.len };
             const container = @field(Container, @tagName(fixture.format));
             expectEveryCell(container, false, source, bytes, stream, fixture.writer_output) catch |err| {
                 std.debug.print("fixture {s}\n", .{fixture.name});
@@ -1220,7 +1237,10 @@ test "a long stream converts with fixed memory and exact frame counts" {
         var parser: au.Parser = .init(&reader.interface, .{});
         const info = try parser.readHeader();
         try std.testing.expectEqual(frame_count, info.frame_count);
-        try std.testing.expectEqual(stereo, info.format);
+        // AU has no layout field: FFmpeg's reading leaves it unspecified.
+        var unspecified = stereo;
+        unspecified.layout = .{ .unspecified = 2 };
+        try std.testing.expectEqual(unspecified, info.format);
         var samples: [1000]i16 = undefined;
         var seen: u64 = 0;
         while (true) {

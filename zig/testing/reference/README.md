@@ -217,9 +217,14 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   back with the stream's; transcoding into A-law is lossy, so that output must
   equal FFmpeg's own conversion byte for byte instead (T22c). Since T22b, the AU and AIFF
   outputs of every untagged writer-output input must also equal FFmpeg's own
-  `ffmpeg -bitexact` conversion byte for byte.
-- **Dither (T23a).** Seven generated inputs of 200000 frames (f32 WAV, s24
-  AIFF, s32 AU, f64 Wave64, raw f32be, s32 CAF written by hand, s16 WAV), so
+  `ffmpeg -bitexact` conversion byte for byte. Since T23b each output's
+  `channel_layout` must be the input's after FFmpeg's command-line guess (an
+  unspecified layout takes the default for its channel count), as far as the
+  output container records it (a WAV mask, else `unknown`); AU and AIFF
+  refuse more than two channels until their parts.
+- **Dither (T23a).** Eight generated inputs of 200000 frames (f32 WAV, s24
+  AIFF, s32 AU, f64 Wave64, raw f32be, s32 CAF written by hand, s16 WAV, and
+  since T23b a six-channel f32 WAV, which FFmpeg writes as 5.1), so
   the noise buffer restarts and each demuxer's packet size matters, are
   converted by FFmpeg and `zffmpeg` with every `-dither_method`, plus three
   `-dither_scale` values, to `pcm_s16le`, `pcm_u8`, `pcm_s24le` and
@@ -286,6 +291,25 @@ build include the WAV muxer. Its first run, locally on Windows at commit
   unsupported cells (copy across containers, transcoding samples not stored as
   s16) rejected before any output: **54/54**.
 - Fixtures whose pipe result equals the file result: **105/105**.
+
+T23b part 2 carried channel layouts into the streams, widened WAV to 64
+channels and made both sides report FFmpeg's layout, with no reference
+configuration change. The run, locally on Windows with ReleaseSafe tools and
+MSYS2 UCRT64 clang 23.1.4, reported no failures:
+
+- Accepted WAV fixtures matching FFmpeg and zffprobe: **58/58**, the
+  `channel_layout` equal on every one (`unknown` for plain headers, `5.1`,
+  `7.1`, `4.0`, `3 channels (FL+FR+USR20)` from masks); rejected: **71/71**.
+- AU **16/16** and **22/22**, AIFF **21/21** and **23/23**, CAF **19/19** and
+  **28/28** (one recorded difference: `caf_chunks_around_data`'s `chan`),
+  raw **16/16** and **4/4**, with no layout difference left elsewhere.
+- Detection and pipes: **278/278**; Zig-written files: **63/63**;
+  FFmpeg-written Wave64: **15/15**.
+- zffmpeg outputs FFmpeg reads as expected, equal through pipes:
+  **1278/1278**, each with the layout of FFmpeg's guess; unsupported cells:
+  **542/542** (multichannel into AU and AIFF among them, until their parts).
+- Dithered conversions equal to FFmpeg's: **416/416**, six-channel 5.1
+  included.
 
 T23a added sample format conversion and dither, with no reference
 configuration change. The run, locally on Windows at commit `877dc97` with
@@ -450,9 +474,8 @@ FFmpeg decodes the same samples as the contract for every accepted fixture, and
 
 | Field | FFmpeg | Contract | Reason |
 | --- | --- | --- | --- |
-| `channel_layout`, every accepted WAV fixture | `unknown` | `mono` or `stereo` | A plain tag-1 `fmt ` has no channel mask, so FFmpeg's demuxer leaves the channel order unspecified and `ffprobe` prints `unknown`. The contract reports the default layout for one or two channels. FFmpeg does report `mono` for `fmt_extensible`, whose header carries a mask. |
+| `channel_layout`, `caf_chunks_around_data` only | `mono` | `unknown` | FFmpeg reads the `chan` layout tag, which the port reads in CAF's T23b part. Until T23b part 2 every plain WAV, AU, AIFF and CAF fixture differed here (FFmpeg `unknown`, the contract `mono` or `stereo`); now both report FFmpeg's layout. |
 | `duration_ts`, `empty_data` and zffmpeg's WAV output of an empty stream | `N/A` | `0` | FFmpeg reads a `data` size of 0 as unknown length and sets no duration; it still decodes zero samples. The contract treats 0 as an empty stream. |
-| `channel_layout`, every accepted AU fixture | `unknown` | `mono` or `stereo` | An AU header has no channel layout. |
 | Decoded samples, `au_trailing_bytes_after_data` only | 6 samples | 4 samples | FFmpeg's AU demuxer reads to the end of input and decodes the bytes after the declared data; the contract never reads them. |
 | Content detection, `au_empty_data` only | not detected | detected | FFmpeg's `au_probe` needs every header field nonzero, including the data size; with `-f au` it reads the file as expected. Our detection checks only the `.snd` magic. |
 | `duration_ts`, Wave64 files with pad bytes or chunks after the data | the bytes from the data start to the end of the file, in frames, rounded | the frame count | FFmpeg's Wave64 demuxer sets no duration from the `data` size, so libavformat estimates one from the bit rate; the decoded samples still match. `compare.py` computes the estimate and accepts exactly that value. |

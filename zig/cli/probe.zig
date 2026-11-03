@@ -147,17 +147,19 @@ fn writeStream(out: *std.Io.Writer, info: av.detect.Probed) std.Io.Writer.Error!
         \\codec={s}
         \\sample_fmt={s}
         \\channels={d}
-        \\channel_layout={s}
-        \\sample_rate={d}
-        \\
+        \\channel_layout=
     , .{
         info.container.name(),
         info.codec.name(),
         format.sample_format.name(),
         format.channelCount(),
-        format.layout.name(),
-        format.sample_rate,
     });
+    // As ffprobe: `unknown` for an unspecified layout, else FFmpeg's description.
+    switch (format.layout) {
+        .unspecified => try out.writeAll("unknown"),
+        .native, .custom => try format.layout.describe(out),
+    }
+    try out.print("\nsample_rate={d}\n", .{format.sample_rate});
     if (info.frame_count) |frames| {
         try out.print("nb_samples={d}\nduration_num={d}\nduration_den={d}\n", .{ frames, frames, format.sample_rate });
     } else {

@@ -2,49 +2,31 @@
 // Original file for this project; not translated from FFmpeg source.
 // Layout and sample-format names follow libavutil/channel_layout.h and
 // samplefmt.c at the pinned reference revision; see port.md.
-//! Audio stream descriptions: sample rate, channel layout and order, sample
-//! format (storage, T20a), and borrowed interleaved samples.
+//! Audio stream descriptions: sample rate, channel layout (FFmpeg's
+//! `AVChannelLayout`, core/channel_layout.zig, T23b), sample format
+//! (storage, T20a), and borrowed interleaved samples.
 //!
-//! Layouts are only mono and stereo so far (T23b). Policy limits such as the
-//! WAV parser's 192 kHz cap belong to the parser, not to these types.
+//! Policy limits such as the parsers' 192 kHz and channel caps belong to the
+//! parsers, not to these types.
 
 const std = @import("std");
 const time = @import("time.zig");
 
-pub const ChannelLayout = enum {
-    /// One channel: front center (FFmpeg `mono`).
-    mono,
-    /// Two channels, interleaved front left then front right (FFmpeg `stereo`).
-    stereo,
+/// FFmpeg's channel layouts: native (a speaker mask), custom or unspecified.
+pub const ChannelLayout = @import("channel_layout.zig").Layout;
 
-    pub const Error = error{
-        /// Zero channels.
-        InvalidChannelCount,
-        /// More channels than the supported layouts have.
-        UnsupportedChannelCount,
+/// The layout FFmpeg's command line gives a stream whose layout is
+/// unspecified (`guess_input_channel_layout`): the default for its channel
+/// count when that is native, else unchanged.
+pub fn guessLayout(layout: ChannelLayout) ChannelLayout {
+    return switch (layout) {
+        .unspecified => |count| switch (ChannelLayout.default(count)) {
+            .native => |mask| .{ .native = mask },
+            .unspecified, .custom => layout,
+        },
+        .native, .custom => layout,
     };
-
-    pub fn fromChannelCount(count: u16) Error!ChannelLayout {
-        return switch (count) {
-            0 => error.InvalidChannelCount,
-            1 => .mono,
-            2 => .stereo,
-            else => error.UnsupportedChannelCount,
-        };
-    }
-
-    pub fn channelCount(layout: ChannelLayout) u16 {
-        return switch (layout) {
-            .mono => 1,
-            .stereo => 2,
-        };
-    }
-
-    /// FFmpeg's canonical layout name, as used in probe output.
-    pub fn name(layout: ChannelLayout) []const u8 {
-        return @tagName(layout);
-    }
-};
+}
 
 /// How decoded samples are stored (TODO.md T20a): a sample type, packed
 /// (channels interleaved in one plane) or planar (one plane per channel). This
@@ -127,29 +109,49 @@ pub const SampleFormat = enum {
     }
 };
 
-/// A validated description of an audio stream. Build it with `init`.
+/// A validated description of an audio stream. Build it with `init` or
+/// `initLayout`.
 pub const Format = struct {
     /// Frames per second; never zero.
     sample_rate: u32,
+    /// At least one channel, and at most 65535: every count a container
+    /// header can hold.
     layout: ChannelLayout,
     sample_format: SampleFormat,
 
-    pub const Error = ChannelLayout.Error || error{
+    pub const Error = error{
         /// A sample rate of zero.
         InvalidSampleRate,
+        /// No channels.
+        InvalidChannelCount,
+        /// More than 65535 channels.
+        UnsupportedChannelCount,
     };
 
+    /// A format with FFmpeg's default layout for `channel_count`
+    /// (`av_channel_layout_default`): mono, stereo, 2.1, 4.0, ... where one
+    /// is named, else that many unspecified channels.
     pub fn init(sample_rate: u32, channel_count: u16, sample_format: SampleFormat) Error!Format {
+        return initLayout(sample_rate, .default(channel_count), sample_format);
+    }
+
+    pub fn initLayout(sample_rate: u32, layout: ChannelLayout, sample_format: SampleFormat) Error!Format {
         if (sample_rate == 0) return error.InvalidSampleRate;
-        return .{
-            .sample_rate = sample_rate,
-            .layout = try ChannelLayout.fromChannelCount(channel_count),
-            .sample_format = sample_format,
-        };
+        const count = layout.channelCount();
+        if (count == 0) return error.InvalidChannelCount;
+        if (count > std.math.maxInt(u16)) return error.UnsupportedChannelCount;
+        return .{ .sample_rate = sample_rate, .layout = layout, .sample_format = sample_format };
     }
 
     pub fn channelCount(format: Format) u16 {
-        return format.layout.channelCount();
+        // `initLayout` bounds the count.
+        return @intCast(format.layout.channelCount());
+    }
+
+    /// The same stream description: rate, sample format, and the same
+    /// layout as FFmpeg compares them (labels aside).
+    pub fn eql(a: Format, b: Format) bool {
+        return a.sample_rate == b.sample_rate and a.sample_format == b.sample_format and a.layout.eql(&b.layout);
     }
 
     /// Bytes in one interleaved frame: one sample per channel.
@@ -201,21 +203,23 @@ pub const S16Frames = struct {
     }
 };
 
-test "channel counts map to the supported layouts" {
-    try std.testing.expectError(error.InvalidChannelCount, ChannelLayout.fromChannelCount(0));
-    try std.testing.expectEqual(.mono, try ChannelLayout.fromChannelCount(1));
-    try std.testing.expectEqual(.stereo, try ChannelLayout.fromChannelCount(2));
-    try std.testing.expectError(error.UnsupportedChannelCount, ChannelLayout.fromChannelCount(3));
-    try std.testing.expectError(error.UnsupportedChannelCount, ChannelLayout.fromChannelCount(std.math.maxInt(u16)));
-    try std.testing.expectEqualStrings("mono", ChannelLayout.mono.name());
-    try std.testing.expectEqualStrings("stereo", ChannelLayout.stereo.name());
+test "channel counts take FFmpeg's default layouts, and the guess keeps known ones" {
+    try std.testing.expectEqual(ChannelLayout.mono, (try Format.init(8000, 1, .s16)).layout);
+    try std.testing.expectEqual(ChannelLayout.stereo, (try Format.init(8000, 2, .s16)).layout);
+    try std.testing.expectEqual(ChannelLayout{ .unspecified = 9 }, (try Format.init(8000, 9, .s16)).layout);
+    try std.testing.expectEqual(ChannelLayout.default(6), guessLayout(.{ .unspecified = 6 }));
+    try std.testing.expectEqual(ChannelLayout{ .unspecified = 9 }, guessLayout(.{ .unspecified = 9 }));
+    const side: ChannelLayout = .{ .native = 0x60f };
+    try std.testing.expectEqual(side, guessLayout(side));
     try std.testing.expectEqualStrings("s16", SampleFormat.s16.name());
 }
 
 test "formats reject a zero sample rate and bad channel counts" {
     try std.testing.expectError(error.InvalidSampleRate, Format.init(0, 2, .s16));
     try std.testing.expectError(error.InvalidChannelCount, Format.init(44100, 0, .s16));
-    try std.testing.expectError(error.UnsupportedChannelCount, Format.init(44100, 3, .s16));
+    try std.testing.expectError(error.InvalidChannelCount, Format.initLayout(44100, .{ .unspecified = 0 }, .s16));
+    try std.testing.expectError(error.UnsupportedChannelCount, Format.initLayout(44100, .{ .unspecified = 65536 }, .s16));
+    try std.testing.expectEqual(65535, (try Format.init(44100, 65535, .s16)).channelCount());
     // No rate cap here: the WAV parser applies its own policy limit.
     const fastest = try Format.init(std.math.maxInt(u32), 1, .s16);
     try std.testing.expectEqual(std.math.maxInt(u32), fastest.sample_rate);

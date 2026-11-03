@@ -171,10 +171,10 @@ pub const Parser = struct {
         const codec = codecFor(desc[8..12], flags, bits) orelse return error.UnsupportedFormat;
         // A count that does not fit in u16 is far above the two supported channels.
         const channel_count = std.math.cast(u16, channels) orelse return error.UnsupportedFormat;
-        const layout = audio.ChannelLayout.fromChannelCount(channel_count) catch |err| switch (err) {
-            error.InvalidChannelCount => return error.InvalidFormat,
-            error.UnsupportedChannelCount => return error.UnsupportedFormat,
-        };
+        if (channel_count == 0) return error.InvalidFormat;
+        if (channel_count > 2) return error.UnsupportedFormat;
+        // Without `chan` FFmpeg leaves the layout unspecified.
+        const layout: audio.ChannelLayout = .{ .unspecified = channel_count };
         // At most 8 bytes times 2 channels.
         const sample_bytes: u32 = codec.bytesPerSample();
         const frame_bytes = sample_bytes * channel_count;
@@ -387,6 +387,7 @@ fn expectedError(failure: fixtures.caf.Failure) Error {
 fn expectInfo(comptime stream: fixtures.Stream, info: Info) !void {
     try std.testing.expectEqual(codecOf(stream.codec), info.codec);
     try std.testing.expectEqual(stream.channels, info.format.channelCount());
+    try stream.expectLayout(info.format.layout);
     try std.testing.expectEqual(stream.sample_rate, info.format.sample_rate);
     try std.testing.expectEqual(codecOf(stream.codec).storage(), info.format.sample_format);
     // Unknown-length data has no count; the samples still fix the length.

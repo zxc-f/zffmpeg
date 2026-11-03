@@ -389,7 +389,7 @@ pub const Encoder = struct {
     pub fn send(e: *Encoder, frame: Frame) Error!stage.Send {
         if (e.state != .accepting) return error.InputAfterEnd;
         if (e.pending != null) return .full;
-        if (!std.meta.eql(frame.format, e.format)) return error.FormatMismatch;
+        if (!frame.format.eql(e.format)) return error.FormatMismatch;
         const frames = frame.frameCount();
         const width: usize = e.codec.bytesPerSample();
         const out_len = frames * e.format.channelCount() * width;
@@ -629,6 +629,10 @@ test "every 16-bit value round-trips in both byte orders" {
     }
 }
 
+fn plainLayout(comptime layout: []const u8) bool {
+    return std.mem.eql(u8, layout, "unknown") or std.mem.eql(u8, layout, "mono") or std.mem.eql(u8, layout, "stereo");
+}
+
 test "kernels agree with the independently generated writer-output fixtures" {
     const fixtures = @import("../testing/fixtures.zig");
     // Canonical files: RIFF header (12), 16-byte `fmt ` chunk (24), `data` header (8).
@@ -636,8 +640,9 @@ test "kernels agree with the independently generated writer-output fixtures" {
     const max_samples = 64;
     inline for (fixtures.all) |fixture| {
         // 16-bit PCM up to 48 kHz has the plain 44-byte header.
+        // A named layout other than mono and stereo makes the header extensible.
         const plain = comptime fixture.plainWriterOutput() and fixture.expected.accept.codec == .pcm_s16le and
-            fixture.expected.accept.sample_rate <= 48000;
+            fixture.expected.accept.sample_rate <= 48000 and plainLayout(fixture.expected.accept.layout);
         if (plain) {
             const stream = fixture.expected.accept;
             comptime std.debug.assert(stream.samples.s16.len <= max_samples);

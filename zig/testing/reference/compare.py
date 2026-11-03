@@ -86,11 +86,9 @@ NOT_IMPLEMENTED = {}
 
 # Understood differences in FFmpeg's metadata for accepted fixtures, matched on
 # the exact value; see zig/testing/reference/README.md. Anything else fails.
-KNOWN_FIELD_DIFFERENCES = {
-    # A plain tag-1 header has no channel mask: FFmpeg leaves the order
-    # unspecified, while the contract reports the default layout.
-    ("channel_layout", "unknown"): "no channel mask in a plain WAV header",
-}
+# Since T23b the contracts report FFmpeg's layouts (`unknown` when the header
+# has none), so the channel layout is no longer a known difference.
+KNOWN_FIELD_DIFFERENCES = {}
 KNOWN_FIXTURE_DIFFERENCES = {
     # FFmpeg reads a data size of 0 as unknown length and reports no duration.
     ("empty_data", "duration_ts", "N/A"): "FFmpeg reads data size 0 as unknown length",
@@ -101,6 +99,8 @@ KNOWN_FIXTURE_DIFFERENCES = {
     # FFmpeg estimates a CAF duration from the bit rate over the bytes after the
     # data start, so the 12-byte trailing ree chunk counts as 6 frames.
     ("caf_chunks_around_data", "duration_ts", "10"): "FFmpeg estimates the duration from the bytes after the data start",
+    # FFmpeg reads the `chan` layout tag; the port reads `chan` in CAF's T23b part.
+    ("caf_chunks_around_data", "channel_layout", "mono"): "`chan` is read in CAF's T23b part",
 }
 
 # Fixtures the `unknown_length` option accepts but FFmpeg cannot open: its
@@ -118,26 +118,17 @@ KNOWN_TAG_CARRY_DIFFERENCES = {
     "info_after_data": "the tags follow `data`, which FFmpeg reads first from a seekable file",
 }
 
-# The same field difference for AU, whose header has no layout field either.
-KNOWN_AU_FIELD_DIFFERENCES = {
-    ("channel_layout", "unknown"): "an AU header has no channel layout",
-}
+KNOWN_AU_FIELD_DIFFERENCES = {}
 # Accepted AU fixtures whose FFmpeg decode continues past the expected samples:
 # its output must start with them.
 KNOWN_AU_DECODE_DIFFERENCES = {
     "au_trailing_bytes_after_data": "FFmpeg decodes the bytes after the declared data",
 }
-# AIFF has no layout either without a `CHAN` chunk, which mono and stereo omit.
-KNOWN_AIFF_FIELD_DIFFERENCES = {
-    ("channel_layout", "unknown"): "an AIFF header has no channel layout without `CHAN`",
-}
+KNOWN_AIFF_FIELD_DIFFERENCES = {}
 
 # The contracts read by forcing a demuxer: (fixture directory and FFmpeg
 # format, title, fixtures, field differences, decode differences).
-# CAF has no layout either without a `chan` chunk, which the fixtures omit.
-KNOWN_CAF_FIELD_DIFFERENCES = {
-    ("channel_layout", "unknown"): "a CAF header has no channel layout without `chan`",
-}
+KNOWN_CAF_FIELD_DIFFERENCES = {}
 
 FORCED_CONTRACTS = [
     ("au", "AU", generate.build_au_fixtures, KNOWN_AU_FIELD_DIFFERENCES, KNOWN_AU_DECODE_DIFFERENCES),
@@ -193,12 +184,59 @@ RAW_EXTENSIONS = {"u8": "ub", "s8": "sb", "alaw": "al", "mulaw": "ul",
                   ("s16le" if sys.byteorder == "little" else "s16be"): "sw"}
 
 
+def layout_text(stream):
+    """A stream's layout for the report: ffprobe's name, or its channel count."""
+    channels = stream.channels
+    count = f"{channels} channel{'s' if channels != 1 else ''}"
+    return count if stream.layout == "unknown" else stream.layout
+
+
+def layout_mask(layout):
+    """The mask of a native layout's description (`generate.describe_mask`),
+    or None for `unknown`."""
+    for name, mask in generate.NAMED_LAYOUTS:
+        if name == layout:
+            return mask
+    match = re.fullmatch(r"\d+ channels \((.*)\)", layout)
+    if not match:
+        return None
+    by_name = {name: bit for bit, name in generate.CHANNEL_NAMES.items()}
+    return sum(1 << (by_name[name] if name in by_name else int(name[3:])) for name in match.group(1).split("+"))
+
+
+def guessed_layout(layout, channels):
+    """FFmpeg's command line (`guess_input_channel_layout`): an unspecified
+    layout becomes the default for its channel count when one is named."""
+    if layout != "unknown":
+        return layout
+    mask = generate.default_mask(channels)
+    return "unknown" if mask is None else generate.describe_mask(mask)
+
+
+def written_layout(container, codec, rate, layout, channels):
+    """What ffprobe reads back from a file a muxer wrote with `layout`: WAV
+    and Wave64 keep a native layout's mask in an extensible header (riffenc.c,
+    `generate.canonical_wav`), AU and AIFF (in stereo at most) keep none, and
+    raw PCM is read with the layout of its channel count."""
+    if container in generate.RAW_FORMATS:
+        return LAYOUT.get(channels, "unknown")
+    if container not in ("wav", "w64"):
+        return "unknown"
+    tag, bits, _ = generate.WAV_CODECS[codec]
+    mask = layout_mask(layout)
+    named_order = mask is not None and mask not in generate.CHANNEL_MASK.values()
+    extensible = named_order or rate > generate.WRITER_MAX_PLAIN_RATE or (bits > 16 and tag != 3)
+    if extensible and mask is not None and mask < generate.WRITER_MAX_MASK:
+        return generate.describe_mask(mask)
+    return "unknown"
+
+
 def raw_input_args(fmt, params):
     """FFmpeg's (and the tools') input options for raw PCM: the format, then
     the parameters unless the defaults apply."""
     options = ["-f", fmt]
     if params is not None:
-        options += ["-sample_rate", str(params[0]), "-ch_layout", LAYOUT[params[1]]]
+        options += ["-sample_rate", str(params[0]), "-ch_layout", LAYOUT.get(params[1], f"{params[1]}C")]
     return options
 
 
@@ -378,7 +416,7 @@ def compare_accepted(fixture, args, path):
         "codec_name": stream.codec,
         "sample_fmt": stream.storage,
         "channels": str(channels),
-        "channel_layout": LAYOUT[channels],
+        "channel_layout": stream.layout,
         "sample_rate": str(rate),
         "time_base": f"1/{rate}",
         "duration_ts": str(frames),
@@ -416,7 +454,7 @@ def compare_accepted(fixture, args, path):
         "codec": stream.codec,
         "sample_fmt": stream.storage,
         "channels": str(channels),
-        "channel_layout": LAYOUT[channels],
+        "channel_layout": stream.layout,
         "sample_rate": str(rate),
         "nb_samples": str(frames),
         "duration_num": str(frames),
@@ -440,7 +478,7 @@ def compare_accepted(fixture, args, path):
     if notes:
         verdict += "; " + "; ".join(notes)
     encoding = "" if stream.codec == "pcm_s16le" else f", `{stream.codec}`"
-    return problems, f"{LAYOUT[channels]}, {rate} Hz, {frames} frames{encoding}", "exit 0, report matches", verdict
+    return problems, f"{layout_text(stream)}, {rate} Hz, {frames} frames{encoding}", "exit 0, report matches", verdict
 
 
 def check_rejection(binary, path, error, input_args=()):
@@ -476,13 +514,13 @@ def ffmpeg_verdict(args, path):
     return f"rejects: {reason}"
 
 
-def expected_stream(format_name, codec_name, channels, rate, frames, storage="s16"):
+def expected_stream(format_name, codec_name, channels, rate, frames, storage, layout):
     return {
         "format_name": format_name,
         "codec_name": codec_name,
         "sample_fmt": storage,
         "channels": str(channels),
-        "channel_layout": LAYOUT[channels],
+        "channel_layout": layout,
         "sample_rate": str(rate),
         "time_base": f"1/{rate}",
         "duration_ts": str(frames),
@@ -526,13 +564,13 @@ def check_stream(args, fixture_name, path, expected, stream, input_format=None, 
     return problems, notes
 
 
-def zffprobe_report(container, codec, channels, rate, frames, storage="s16"):
+def zffprobe_report(container, codec, channels, rate, frames, storage, layout):
     return {
         "format": container,
         "codec": codec,
         "sample_fmt": storage,
         "channels": str(channels),
-        "channel_layout": LAYOUT[channels],
+        "channel_layout": layout,
         "sample_rate": str(rate),
         "nb_samples": str(frames),
         "duration_num": str(frames),
@@ -551,7 +589,7 @@ def check_zffprobe_forced(container, fixture, args, path):
         code, fields, err = zffprobe(args.zffprobe, path, input_args)
         channels, rate, samples = fixture.accept
         want = zffprobe_report(container, fixture.accept.codec, channels, rate, len(samples) // channels,
-                               fixture.accept.storage)
+                               fixture.accept.storage, fixture.accept.layout)
         if code != 0 or fields != want:
             problems.append(f"zffprobe exited {code} with {fields or first_line(err)}")
         return problems, f"{prefix}exit 0, report matches"
@@ -562,7 +600,8 @@ def check_zffprobe_forced(container, fixture, args, path):
 def compare_forced_accepted(container, field_differences, decode_differences, fixture, args, path):
     channels, rate, samples = fixture.accept
     frames = len(samples) // channels
-    expected = expected_stream(container, fixture.accept.codec, channels, rate, frames, fixture.accept.storage)
+    expected = expected_stream(container, fixture.accept.codec, channels, rate, frames, fixture.accept.storage,
+                               fixture.accept.layout)
     problems, notes = check_stream(args, fixture.name, path, expected, fixture.accept, container,
                                    decode_differences.get(fixture.name), field_differences)
 
@@ -572,7 +611,7 @@ def compare_forced_accepted(container, field_differences, decode_differences, fi
     verdict = "same samples and stream" if not problems else "differs"
     if notes:
         verdict += "; " + "; ".join(notes)
-    return problems, f"{LAYOUT[channels]}, {rate} Hz, {frames_text(frames)}", verdict, detection
+    return problems, f"{layout_text(fixture.accept)}, {rate} Hz, {frames_text(frames)}", verdict, detection
 
 
 def compare_forced_rejected(container, fixture, args, path):
@@ -698,18 +737,20 @@ def compare_raw(args, lines, failures):
                 stream = fixture.accept
                 channels, rate, samples = stream
                 frames = len(samples) // channels
-                expected = expected_stream(fixture.format, stream.codec, channels, rate, frames, stream.storage)
+                expected = expected_stream(fixture.format, stream.codec, channels, rate, frames, stream.storage,
+                                           stream.layout)
                 stream_problems, notes = check_stream(args, fixture.name, path, expected, stream, input_args)
                 problems += stream_problems
                 code, fields, err = zffprobe(args.zffprobe, path, input_args)
-                want = zffprobe_report(fixture.format, stream.codec, channels, rate, frames, stream.storage)
+                want = zffprobe_report(fixture.format, stream.codec, channels, rate, frames, stream.storage,
+                                       stream.layout)
                 if code != 0 or fields != want:
                     problems.append(f"zffprobe exited {code} with {fields or first_line(err)}")
                 ours = "exit 0, report matches"
                 theirs = "same samples and stream" if not stream_problems else "differs"
                 if notes:
                     theirs += "; " + "; ".join(notes)
-                expected_text = f"{LAYOUT[channels]}, {rate} Hz, {frames_text(frames)}"
+                expected_text = f"{layout_text(stream)}, {rate} Hz, {frames_text(frames)}"
                 extension = RAW_EXTENSIONS.get(fixture.format)
                 if extension is not None:
                     named_total += 1
@@ -793,7 +834,8 @@ def compare_writer(args, lines, failures):
             options = ["rf64"] if fixture.writer_header == "rf64" else []
             options += ["bext"] if fixture.writer_bext else []
             options += [f"tag={key.decode()}={value.decode()}" for key, value in (fixture.writer_tags or fixture.tags)]
-            process = run(args.writer, container, stream.codec, rate, channels, raw, out, *options)
+            process = run(args.writer, container, stream.codec, rate, channels, raw, out, *options,
+                          f"layout={stream.layout}")
             problems, notes = [], []
             if process.returncode != 0:
                 problems.append(f"write-driver exited {process.returncode}: {first_line(text(process.stderr))}")
@@ -803,7 +845,8 @@ def compare_writer(args, lines, failures):
                 output = f"{len(written)} bytes, " + ("equal to the fixture" if written == fixture.data else "differs")
                 if written != fixture.data:
                     problems.append("output differs from the writer-output fixture")
-                expected = expected_stream(container, stream.codec, channels, rate, frames, stream.storage)
+                expected = expected_stream(container, stream.codec, channels, rate, frames, stream.storage,
+                                           written_layout(container, stream.codec, rate, stream.layout, channels))
                 if container in generate.RAW_FORMATS:
                     stream_problems, notes = check_stream(args, fixture.name, out, expected, stream,
                                                           raw_input_args(container, fixture.params))
@@ -833,7 +876,7 @@ def compare_writer(args, lines, failures):
             if notes:
                 verdict += "; " + "; ".join(notes)
             result = "pass" if not problems else "**FAIL**: " + "; ".join(problems)
-            label = f"{container.upper()} `{stream.codec}` {LAYOUT[channels]}, {rate} Hz, {frames_text(frames)} (`{fixture.name}`)"
+            label = f"{container.upper()} `{stream.codec}` {layout_text(stream)}, {rate} Hz, {frames_text(frames)} (`{fixture.name}`)"
             lines.append(f"| {label} | {output} | {verdict} | {result} |")
             passed += not problems
             failures.extend(f"writer {fixture.name}: {problem}" for problem in problems)
@@ -892,9 +935,13 @@ def compare_zffmpeg(args, lines, failures):
                 output_codec = stream.codec if copy else S16_CODEC[output]
                 # Since T23a any storage transcodes to the output's default codec.
                 supported = stream.codec in carried[output] if copy else True
-                if not supported:
+                # The AU and AIFF writers take mono and stereo only, until their
+                # T23b parts.
+                over_channels = supported and channels > 2 and output in ("au", "aiff")
+                if not supported or over_channels:
                     rejected_total += 1
-                    if code == 3 and b"UnsupportedOperation" in err and not out.exists():
+                    error = b"UnsupportedFormat" if over_channels else b"UnsupportedOperation"
+                    if code == 3 and error in err and not out.exists():
                         rejected_ok += 1
                     else:
                         failures.append(f"zffmpeg {fixture.name} {cell}: exited {code} "
@@ -914,7 +961,10 @@ def compare_zffmpeg(args, lines, failures):
                     if pipe_code != 0 or pipe_out != written:
                         problems.append(f"through pipes zffmpeg exited {pipe_code} with different output")
                     codec = output_codec
-                    expected = expected_stream(output, codec, channels, rate, frames, stream.storage)
+                    # FFmpeg's command line guesses an unspecified layout, for copy
+                    # too, and the output keeps what its muxer can store (T23b).
+                    out_layout = written_layout(output, codec, rate, guessed_layout(stream.layout, channels), channels)
+                    expected = expected_stream(output, codec, channels, rate, frames, stream.storage, out_layout)
                     differences = dict(FIELD_DIFFERENCES.get(output, KNOWN_FIELD_DIFFERENCES))
                     # FFmpeg reads raw output with the stream's parameters.
                     output_args = (raw_input_args(output, (rate, channels)) if output in generate.RAW_FORMATS
@@ -943,7 +993,8 @@ def compare_zffmpeg(args, lines, failures):
                         z_code, z_fields, _ = zffprobe(args.zffprobe, out)
                         if probe_code == 0:
                             problems.append("FFmpeg now reads an empty Wave64 `data` chunk")
-                        if z_code != 0 or z_fields != zffprobe_report("w64", codec, channels, rate, 0, stream.storage):
+                        if z_code != 0 or z_fields != zffprobe_report("w64", codec, channels, rate, 0, stream.storage,
+                                                                      out_layout):
                             problems.append(f"zffprobe exited {z_code} with {z_fields}")
                         empty_w64 = True
                     else:
@@ -1039,6 +1090,8 @@ DITHER_INPUTS = [
     ("f32be-raw", "f32be", None, 37800, 2),
     ("s32be-caf", "caf", "pcm_s32be", 46000, 1),
     ("s16-wav", "wav", "pcm_s16le", 44100, 2),
+    # Six channels (T23b): FFmpeg guesses 5.1 for the raw input and writes it.
+    ("f32-wav-6ch", "wav", "pcm_f32le", 48000, 6),
 ]
 DITHER_FRAMES = 200000
 DITHER_METHODS = ("rectangular", "triangular", "triangular_hp", "lipshitz", "f_weighted", "modified_e_weighted",
@@ -1191,13 +1244,25 @@ def compare_ffmpeg_w64(args, lines, failures):
                 problems.append(f"ffmpeg exited {process.returncode}: {first_line(text(process.stderr))}")
             else:
                 code, fields, err = zffprobe(args.zffprobe, out)
-                want = zffprobe_report("w64", stream.codec, channels, rate, frames, stream.storage)
+                # FFmpeg's copy carries its guessed layout into the Wave64 header.
+                guessed = guessed_layout(stream.layout, channels)
+                want = zffprobe_report("w64", stream.codec, channels, rate, frames, stream.storage,
+                                       written_layout("w64", stream.codec, rate, guessed, channels))
                 probe_text = "report matches" if code == 0 and fields == want else f"exit {code}"
                 if code != 0 or fields != want:
                     problems.append(f"zffprobe exited {code} with {fields or first_line(err)}")
                 code, copied, err = zffprobe_raw(args.zffmpeg, "-i", out, "-c", "copy", "-f", "wav", "-")
-                copy_text = "equal to the fixture" if code == 0 and copied == fixture.data else f"exit {code}"
-                if code != 0 or copied != fixture.data:
+                # Copied back with the guessed layout: the fixture itself unless
+                # the guess names a layout WAV writes as a mask (six plain
+                # channels become 5.1).
+                expected_copy = fixture.data
+                if guessed != stream.layout:
+                    _, bits, _ = generate.WAV_CODECS[stream.codec]
+                    payload = fixture.data[len(fixture.data) - frames * channels * bits // 8:]
+                    expected_copy = generate.canonical_wav(stream.codec, channels, rate, payload, mask=layout_mask(guessed))
+                copy_text = "equal to the fixture" if code == 0 and copied == fixture.data else (
+                    "the fixture with the guessed layout" if code == 0 and copied == expected_copy else f"exit {code}")
+                if code != 0 or copied != expected_copy:
                     problems.append(f"zffmpeg copy exited {code} ({first_line(text(err)) or 'different bytes'})")
             passed += not problems
             result = "pass" if not problems else "**FAIL**: " + "; ".join(problems)
@@ -1302,12 +1367,12 @@ def compare_unknown_length(args, lines, failures):
             problems = [] if theirs.startswith("rejects") else [f"FFmpeg now {theirs}"]
             accepted_ok += not problems
             result = "pass" if not problems else "**FAIL**: " + "; ".join(problems)
-            lines.append(f"| `{fixture.name}` | {LAYOUT[channels]}, {rate} Hz, {frames_text(frames)} "
+            lines.append(f"| `{fixture.name}` | {layout_text(stream)}, {rate} Hz, {frames_text(frames)} "
                          f"| {theirs} ({reason}) | {result} |")
             failures.extend(f"{fixture.name} (unknown_length): {problem}" for problem in problems)
             continue
         container = forced_dir or wav_container(fixture)
-        expected = expected_stream(container, stream.codec, channels, rate, frames, stream.storage)
+        expected = expected_stream(container, stream.codec, channels, rate, frames, stream.storage, stream.layout)
         del expected["duration_ts"]
         differences = {"au": KNOWN_AU_FIELD_DIFFERENCES, "caf": KNOWN_CAF_FIELD_DIFFERENCES}.get(
             directory, KNOWN_FIELD_DIFFERENCES)
@@ -1318,7 +1383,7 @@ def compare_unknown_length(args, lines, failures):
         if notes:
             theirs += "; " + "; ".join(notes)
         result = "pass" if not problems else "**FAIL**: " + "; ".join(problems)
-        lines.append(f"| `{fixture.name}` | {LAYOUT[channels]}, {rate} Hz, {frames_text(frames)} | {theirs} | {result} |")
+        lines.append(f"| `{fixture.name}` | {layout_text(stream)}, {rate} Hz, {frames_text(frames)} | {theirs} | {result} |")
         failures.extend(f"{fixture.name} (unknown_length): {problem}" for problem in problems)
     lines += ["", f"Fixtures the option accepts that FFmpeg decodes the same, or rejects as recorded: "
                   f"{accepted_ok}/{len(accepted)}."]

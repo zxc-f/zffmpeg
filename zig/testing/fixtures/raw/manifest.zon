@@ -4,7 +4,7 @@
     .{
         .name = "raw_u8_mono_8k",
         .sha256 = "e71a7556739eeec114046093e9decc09939640c99429914e6f3042f209164b9c",
-        .expected = .{ .accept = .{ .codec = .pcm_u8, .channels = 1, .sample_rate = 8000, .samples = .{ .u8 = .{ 0, 128, 255, 127, 1, 129, 64, 192 } } } },
+        .expected = .{ .accept = .{ .codec = .pcm_u8, .channels = 1, .layout = "mono", .sample_rate = 8000, .samples = .{ .u8 = .{ 0, 128, 255, 127, 1, 129, 64, 192 } } } },
         .detected = null,
         .format = .u8,
         .params = .{ .sample_rate = 8000, .channels = 1 },
@@ -13,7 +13,7 @@
     .{
         .name = "raw_s8_mono_8k",
         .sha256 = "0fa7afacef359bb58487bd71c3553f783214c866cec2c29a20118162bf056609",
-        .expected = .{ .accept = .{ .codec = .pcm_s8, .channels = 1, .sample_rate = 8000, .samples = .{ .u8 = .{ 128, 255, 0, 127, 129, 1, 192, 64 } } } },
+        .expected = .{ .accept = .{ .codec = .pcm_s8, .channels = 1, .layout = "mono", .sample_rate = 8000, .samples = .{ .u8 = .{ 128, 255, 0, 127, 129, 1, 192, 64 } } } },
         .detected = null,
         .format = .s8,
         .params = .{ .sample_rate = 8000, .channels = 1 },
@@ -22,7 +22,7 @@
     .{
         .name = "raw_s16le_mono_8k",
         .sha256 = "3a941550a1fc894651222384b4eb90f75cc14babfa16bce333ca6a29c03f4604",
-        .expected = .{ .accept = .{ .codec = .pcm_s16le, .channels = 1, .sample_rate = 8000, .samples = .{ .s16 = .{ 0, 1, -1, 32767, -32768, 12345, -12345, 256 } } } },
+        .expected = .{ .accept = .{ .codec = .pcm_s16le, .channels = 1, .layout = "mono", .sample_rate = 8000, .samples = .{ .s16 = .{ 0, 1, -1, 32767, -32768, 12345, -12345, 256 } } } },
         .detected = null,
         .format = .s16le,
         .params = .{ .sample_rate = 8000, .channels = 1 },
@@ -31,7 +31,7 @@
     .{
         .name = "raw_s16be_stereo_44k1",
         .sha256 = "0a404dc9a109bbd6a83de84b7ed47e50ab05ad48ba506c8cf8f3850b36af536b",
-        .expected = .{ .accept = .{ .codec = .pcm_s16be, .channels = 2, .sample_rate = 44100, .samples = .{ .s16 = .{ 0, 0, 32767, -32768, -1, 1, 1000, -1000 } } } },
+        .expected = .{ .accept = .{ .codec = .pcm_s16be, .channels = 2, .layout = "stereo", .sample_rate = 44100, .samples = .{ .s16 = .{ 0, 0, 32767, -32768, -1, 1, 1000, -1000 } } } },
         .detected = null,
         .format = .s16be,
         .params = .{ .sample_rate = 44100, .channels = 2 },
@@ -40,7 +40,7 @@
     .{
         .name = "raw_s24le_stereo_48k",
         .sha256 = "e0f45e4de461b35a561b278f572de909f9a34e2c791942d901d3681d57d8dd21",
-        .expected = .{ .accept = .{ .codec = .pcm_s24le, .channels = 2, .sample_rate = 48000, .samples = .{ .s32 = .{ 0, 256, -256, 2147483392, -2147483648, 31604736, -167506176, 65536 } } } },
+        .expected = .{ .accept = .{ .codec = .pcm_s24le, .channels = 2, .layout = "stereo", .sample_rate = 48000, .samples = .{ .s32 = .{ 0, 256, -256, 2147483392, -2147483648, 31604736, -167506176, 65536 } } } },
         .detected = null,
         .format = .s24le,
         .params = .{ .sample_rate = 48000, .channels = 2 },
@@ -49,7 +49,7 @@
     .{
         .name = "raw_s24be_mono_8k",
         .sha256 = "284db09ce05846f167697c0ac2e1f5bb5eb052df36c53e2ba52172de82f54b2e",
-        .expected = .{ .accept = .{ .codec = .pcm_s24be, .channels = 1, .sample_rate = 8000, .samples = .{ .s32 = .{ 0, 256, -256, 2147483392, -2147483648, 31604736, -167506176, 65536 } } } },
+        .expected = .{ .accept = .{ .codec = .pcm_s24be, .channels = 1, .layout = "mono", .sample_rate = 8000, .samples = .{ .s32 = .{ 0, 256, -256, 2147483392, -2147483648, 31604736, -167506176, 65536 } } } },
         .detected = null,
         .format = .s24be,
         .params = .{ .sample_rate = 8000, .channels = 1 },
@@ -58,7 +58,7 @@
     .{
         .name = "raw_s32le_mono_8k",
         .sha256 = "d310af6d45e7eb9f888164617bd2ecb1f8f0c41a5d4a59af6d77f8e7e8282901",
-        .expected = .{ .accept = .{ .codec = .pcm_s32le, .channels = 1, .sample_rate = 8000, .samples = .{ .s32 = .{ 0, 1, -1, 2147483647, -2147483648, 123456789, -987654321, 65536 } } } },
+        .expected = .{ .accept = .{ .codec = .pcm_s32le, .channels = 1, .layout = "mono", .sample_rate = 8000, .samples = .{ .s32 = .{ 0, 1, -1, 2147483647, -2147483648, 123456789, -987654321, 65536 } } } },
         .detected = null,
         .format = .s32le,
         .params = .{ .sample_rate = 8000, .channels = 1 },
@@ -67,7 +67,7 @@
     .{
         .name = "raw_s32be_stereo_8k",
         .sha256 = "cf6750e78e26e4238ffaa0375624d302aa01dff3a1114fb86e3d74223daaf3fc",
-        .expected = .{ .accept = .{ .codec = .pcm_s32be, .channels = 2, .sample_rate = 8000, .samples = .{ .s32 = .{ 0, 1, -1, 2147483647, -2147483648, 123456789, -987654321, 65536 } } } },
+        .expected = .{ .accept = .{ .codec = .pcm_s32be, .channels = 2, .layout = "stereo", .sample_rate = 8000, .samples = .{ .s32 = .{ 0, 1, -1, 2147483647, -2147483648, 123456789, -987654321, 65536 } } } },
         .detected = null,
         .format = .s32be,
         .params = .{ .sample_rate = 8000, .channels = 2 },
@@ -76,7 +76,7 @@
     .{
         .name = "raw_f32le_mono_8k",
         .sha256 = "ba8f6484dfea46af5247bcea862ddee3a782f577232807ac19c8fc7a9048fb53",
-        .expected = .{ .accept = .{ .codec = .pcm_f32le, .channels = 1, .sample_rate = 8000, .samples = .{ .flt = .{ 0x0, 0x80000000, 0x3f800000, 0xbf800000, 0x3f000000, 0x7f800000, 0x1, 0x7fc00001 } } } },
+        .expected = .{ .accept = .{ .codec = .pcm_f32le, .channels = 1, .layout = "mono", .sample_rate = 8000, .samples = .{ .flt = .{ 0x0, 0x80000000, 0x3f800000, 0xbf800000, 0x3f000000, 0x7f800000, 0x1, 0x7fc00001 } } } },
         .detected = null,
         .format = .f32le,
         .params = .{ .sample_rate = 8000, .channels = 1 },
@@ -85,7 +85,7 @@
     .{
         .name = "raw_f32be_mono_8k",
         .sha256 = "f366f3cb0a5a07f2e080bd38eb2768196fdd39585ff581ea269eb7e1cced744a",
-        .expected = .{ .accept = .{ .codec = .pcm_f32be, .channels = 1, .sample_rate = 8000, .samples = .{ .flt = .{ 0x0, 0x80000000, 0x3f800000, 0xbf800000, 0x3f000000, 0x7f800000, 0x1, 0x7fc00001 } } } },
+        .expected = .{ .accept = .{ .codec = .pcm_f32be, .channels = 1, .layout = "mono", .sample_rate = 8000, .samples = .{ .flt = .{ 0x0, 0x80000000, 0x3f800000, 0xbf800000, 0x3f000000, 0x7f800000, 0x1, 0x7fc00001 } } } },
         .detected = null,
         .format = .f32be,
         .params = .{ .sample_rate = 8000, .channels = 1 },
@@ -94,7 +94,7 @@
     .{
         .name = "raw_f64le_stereo_96k",
         .sha256 = "5a7f2149a0dad66797901bd264646091bc3032c14f0774d99bb29c2e1c1f3737",
-        .expected = .{ .accept = .{ .codec = .pcm_f64le, .channels = 2, .sample_rate = 96000, .samples = .{ .dbl = .{ 0x0, 0x8000000000000000, 0x3ff0000000000000, 0xbff0000000000000, 0x7ff0000000000000, 0x1, 0x7ff8000000000001, 0x3fe0000000000000 } } } },
+        .expected = .{ .accept = .{ .codec = .pcm_f64le, .channels = 2, .layout = "stereo", .sample_rate = 96000, .samples = .{ .dbl = .{ 0x0, 0x8000000000000000, 0x3ff0000000000000, 0xbff0000000000000, 0x7ff0000000000000, 0x1, 0x7ff8000000000001, 0x3fe0000000000000 } } } },
         .detected = null,
         .format = .f64le,
         .params = .{ .sample_rate = 96000, .channels = 2 },
@@ -103,7 +103,7 @@
     .{
         .name = "raw_f64be_mono_8k",
         .sha256 = "43715f11538183067df19a027be950e6f8b18627bc0e1dbe8cf1d7e11b281c30",
-        .expected = .{ .accept = .{ .codec = .pcm_f64be, .channels = 1, .sample_rate = 8000, .samples = .{ .dbl = .{ 0x0, 0x8000000000000000, 0x3ff0000000000000, 0xbff0000000000000, 0x7ff0000000000000, 0x1, 0x7ff8000000000001, 0x3fe0000000000000 } } } },
+        .expected = .{ .accept = .{ .codec = .pcm_f64be, .channels = 1, .layout = "mono", .sample_rate = 8000, .samples = .{ .dbl = .{ 0x0, 0x8000000000000000, 0x3ff0000000000000, 0xbff0000000000000, 0x7ff0000000000000, 0x1, 0x7ff8000000000001, 0x3fe0000000000000 } } } },
         .detected = null,
         .format = .f64be,
         .params = .{ .sample_rate = 8000, .channels = 1 },
@@ -112,7 +112,7 @@
     .{
         .name = "raw_alaw_mono_8k",
         .sha256 = "24d606b419562a23716c68da9a6e6b07d7c57abf261da4db5ffde5106393b178",
-        .expected = .{ .accept = .{ .codec = .pcm_alaw, .channels = 1, .sample_rate = 8000, .samples = .{ .s16 = .{ 8, -8, 32256, -32256, -5504, 5504, -848, 848 } } } },
+        .expected = .{ .accept = .{ .codec = .pcm_alaw, .channels = 1, .layout = "mono", .sample_rate = 8000, .samples = .{ .s16 = .{ 8, -8, 32256, -32256, -5504, 5504, -848, 848 } } } },
         .detected = null,
         .format = .alaw,
         .params = .{ .sample_rate = 8000, .channels = 1 },
@@ -121,7 +121,7 @@
     .{
         .name = "raw_mulaw_mono_8k",
         .sha256 = "643fb89f0ee9fd1fc2e9cdad6d462c668b6e69b9e173d0af9ceb818f014b7a01",
-        .expected = .{ .accept = .{ .codec = .pcm_mulaw, .channels = 1, .sample_rate = 8000, .samples = .{ .s16 = .{ 0, -120, 32124, -32124, -31100, 31100, 8, -8 } } } },
+        .expected = .{ .accept = .{ .codec = .pcm_mulaw, .channels = 1, .layout = "mono", .sample_rate = 8000, .samples = .{ .s16 = .{ 0, -120, 32124, -32124, -31100, 31100, 8, -8 } } } },
         .detected = null,
         .format = .mulaw,
         .params = .{ .sample_rate = 8000, .channels = 1 },
@@ -130,7 +130,7 @@
     .{
         .name = "raw_s16le_defaults",
         .sha256 = "3a941550a1fc894651222384b4eb90f75cc14babfa16bce333ca6a29c03f4604",
-        .expected = .{ .accept = .{ .codec = .pcm_s16le, .channels = 1, .sample_rate = 44100, .samples = .{ .s16 = .{ 0, 1, -1, 32767, -32768, 12345, -12345, 256 } } } },
+        .expected = .{ .accept = .{ .codec = .pcm_s16le, .channels = 1, .layout = "mono", .sample_rate = 44100, .samples = .{ .s16 = .{ 0, 1, -1, 32767, -32768, 12345, -12345, 256 } } } },
         .detected = null,
         .format = .s16le,
         .params = null,
@@ -138,7 +138,7 @@
     .{
         .name = "raw_empty",
         .sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        .expected = .{ .accept = .{ .codec = .pcm_s16le, .channels = 1, .sample_rate = 8000, .samples = .{ .s16 = .{} } } },
+        .expected = .{ .accept = .{ .codec = .pcm_s16le, .channels = 1, .layout = "mono", .sample_rate = 8000, .samples = .{ .s16 = .{} } } },
         .detected = null,
         .format = .s16le,
         .params = .{ .sample_rate = 8000, .channels = 1 },

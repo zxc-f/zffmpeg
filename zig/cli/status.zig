@@ -71,8 +71,10 @@ pub const RawParams = union(enum) {
 
 /// Parses `-sample_rate` (or zffmpeg's `-ar`), `-ch_layout` and zffmpeg's
 /// `-ac`, as given; null for each one absent. A rate that is not a decimal
-/// number is a usage error; a layout other than mono or stereo, as a name or
-/// a channel count, is unsupported (T23b).
+/// number, or a layout FFmpeg cannot parse, is a usage error; a layout of
+/// more than two channels (as text or a count) or an ambisonic one is
+/// unsupported, until raw PCM widens (T23b); `-ac` gives FFmpeg's default
+/// layout for the count.
 pub fn rawParams(io: std.Io, tool: []const u8, rate_text: ?[]const u8, layout_text: ?[]const u8, channels_text: ?[]const u8) RawParams {
     if (rate_text == null and layout_text == null and channels_text == null) return .{ .ok = null };
     var params: av.raw.Params = .{};
@@ -83,20 +85,31 @@ pub fn rawParams(io: std.Io, tool: []const u8, rate_text: ?[]const u8, layout_te
         };
     }
     if (layout_text) |text| {
-        params.layout = std.meta.stringToEnum(av.audio.ChannelLayout, text) orelse {
+        params.layout = av.channel_layout.Layout.parse(text) catch |err| switch (err) {
+            error.InvalidLayout => {
+                printError(io, "{s}: {s}: invalid channel layout\n", .{ tool, text });
+                return .{ .failed = .usage };
+            },
+            error.UnsupportedLayout, error.LimitExceeded => {
+                printError(io, "{s}: {s}: unsupported channel layout\n", .{ tool, text });
+                return .{ .failed = .unsupported };
+            },
+        };
+        if (params.layout.channelCount() > 2) {
             printError(io, "{s}: {s}: unsupported channel layout\n", .{ tool, text });
             return .{ .failed = .unsupported };
-        };
+        }
     }
     if (channels_text) |text| {
         const count = std.fmt.parseInt(u16, text, 10) catch {
             printError(io, "{s}: {s}: invalid channel count\n", .{ tool, text });
             return .{ .failed = .usage };
         };
-        params.layout = av.audio.ChannelLayout.fromChannelCount(count) catch {
+        if (count == 0 or count > 2) {
             printError(io, "{s}: {s}: unsupported channel count\n", .{ tool, text });
             return .{ .failed = .unsupported };
-        };
+        }
+        params.layout = .default(count);
     }
     return .{ .ok = params };
 }

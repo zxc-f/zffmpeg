@@ -207,8 +207,9 @@ const filters = [_]Filter{
 
 /// `MAX_NS_TAPS`.
 const max_taps = 20;
-/// The most channels the port handles (mono and stereo).
-const max_channels = 2;
+/// The most channels a dither handles: libswresample's `SWR_CH_MAX`, the
+/// parsers' default limit.
+pub const max_channels = 64;
 
 comptime {
     for (filters) |f| {

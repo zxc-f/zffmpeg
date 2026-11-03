@@ -315,7 +315,7 @@ test "writer adapters produce the writer-output fixtures" {
     inline for (fixtures.all) |fixture| {
         if (comptime fixture.plainWriterOutput() and fixture.expected.accept.codec == .pcm_s16le) {
             const stream = fixture.expected.accept;
-            const format = try audio.Format.init(stream.sample_rate, stream.channels, .s16);
+            const format = try audio.Format.initLayout(stream.sample_rate, stream.channelLayout(), .s16);
             try writePath(io, tmp.dir, fixture.name ++ ".wav", &buffer, format, stream.samples.s16, .{});
             var content: [256]u8 = undefined;
             const written = try tmp.dir.readFile(io, fixture.name ++ ".wav", &content);
@@ -371,7 +371,7 @@ test "the AU writer reproduces its fixtures through every writer buffer size" {
         // The s16be ones: writeFrames takes s16 samples.
         if (fixture.writer_output and comptime fixture.expected.accept.codec == .pcm_s16be) {
             const stream = fixture.expected.accept;
-            const format = try audio.Format.init(stream.sample_rate, stream.channels, .s16);
+            const format = try audio.Format.initLayout(stream.sample_rate, stream.channelLayout(), .s16);
             const path = fixture.name ++ ".au";
             for ([_]usize{ 0, 1, 64 }) |capacity| {
                 {

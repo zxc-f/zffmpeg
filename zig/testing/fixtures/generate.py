@@ -150,6 +150,87 @@ WAV_CODECS = {
 SUBFORMAT_BASE = bytes.fromhex("00001000800000aa00389b71")
 CHANNEL_MASK = {1: 0x4, 2: 0x3}  # front center; front left | front right
 WRITER_MAX_PLAIN_RATE = 48_000  # riffenc.c: WAVE_FORMAT_EXTENSIBLE above this
+WRITER_MAX_MASK = 0x40000  # riffenc.c: a mask with a later position is written as 0
+MAX_CHANNELS = 64  # the parsers' default limit (T23b)
+
+# Channel layouts (T23b), restated from libavutil/channel_layout.h and .c:
+# each speaker position's short name by its bit, and the named layouts in
+# FFmpeg's order. ffprobe prints a stream's layout with these, or `unknown`.
+CHANNEL_NAMES = {
+    0: "FL", 1: "FR", 2: "FC", 3: "LFE", 4: "BL", 5: "BR", 6: "FLC", 7: "FRC", 8: "BC", 9: "SL", 10: "SR",
+    11: "TC", 12: "TFL", 13: "TFC", 14: "TFR", 15: "TBL", 16: "TBC", 17: "TBR", 29: "DL", 30: "DR", 31: "WL",
+    32: "WR", 33: "SDL", 34: "SDR", 35: "LFE2", 36: "TSL", 37: "TSR", 38: "BFC", 39: "BFL", 40: "BFR",
+    41: "SSL", 42: "SSR", 43: "TTL", 44: "TTR", 61: "BIL", 62: "BIR",
+}
+
+
+def channel_bits(*names):
+    by_name = {name: bit for bit, name in CHANNEL_NAMES.items()}
+    return sum(1 << by_name[name] for name in names)
+
+
+NAMED_LAYOUTS = [
+    ("mono", channel_bits("FC")),
+    ("stereo", channel_bits("FL", "FR")),
+    ("2.1", channel_bits("FL", "FR", "LFE")),
+    ("3.0", channel_bits("FL", "FR", "FC")),
+    ("3.0(back)", channel_bits("FL", "FR", "BC")),
+    ("4.0", channel_bits("FL", "FR", "FC", "BC")),
+    ("quad", channel_bits("FL", "FR", "BL", "BR")),
+    ("quad(side)", channel_bits("FL", "FR", "SL", "SR")),
+    ("3.1", channel_bits("FL", "FR", "FC", "LFE")),
+    ("5.0", channel_bits("FL", "FR", "FC", "BL", "BR")),
+    ("5.0(side)", channel_bits("FL", "FR", "FC", "SL", "SR")),
+    ("4.1", channel_bits("FL", "FR", "FC", "LFE", "BC")),
+    ("5.1", channel_bits("FL", "FR", "FC", "LFE", "BL", "BR")),
+    ("5.1(side)", channel_bits("FL", "FR", "FC", "LFE", "SL", "SR")),
+    ("6.0", channel_bits("FL", "FR", "FC", "BC", "SL", "SR")),
+    ("6.0(front)", channel_bits("FL", "FR", "FLC", "FRC", "SL", "SR")),
+    ("3.1.2", channel_bits("FL", "FR", "FC", "LFE", "TFL", "TFR")),
+    ("hexagonal", channel_bits("FL", "FR", "FC", "BL", "BR", "BC")),
+    ("6.1", channel_bits("FL", "FR", "FC", "LFE", "BC", "SL", "SR")),
+    ("6.1(back)", channel_bits("FL", "FR", "FC", "LFE", "BL", "BR", "BC")),
+    ("6.1(front)", channel_bits("FL", "FR", "LFE", "FLC", "FRC", "SL", "SR")),
+    ("7.0", channel_bits("FL", "FR", "FC", "BL", "BR", "SL", "SR")),
+    ("7.0(front)", channel_bits("FL", "FR", "FC", "FLC", "FRC", "SL", "SR")),
+    ("7.1", channel_bits("FL", "FR", "FC", "LFE", "BL", "BR", "SL", "SR")),
+    ("7.1(wide)", channel_bits("FL", "FR", "FC", "LFE", "BL", "BR", "FLC", "FRC")),
+    ("7.1(wide-side)", channel_bits("FL", "FR", "FC", "LFE", "FLC", "FRC", "SL", "SR")),
+    ("5.1.2", channel_bits("FL", "FR", "FC", "LFE", "SL", "SR", "TFL", "TFR")),
+    ("5.1.2(back)", channel_bits("FL", "FR", "FC", "LFE", "BL", "BR", "TFL", "TFR")),
+    ("octagonal", channel_bits("FL", "FR", "FC", "BL", "BC", "BR", "SL", "SR")),
+    ("cube", channel_bits("FL", "FR", "BL", "BR", "TFL", "TFR", "TBL", "TBR")),
+    ("5.1.4", channel_bits("FL", "FR", "FC", "LFE", "SL", "SR", "TFL", "TFR", "TBL", "TBR")),
+    ("5.1.6", channel_bits("FL", "FR", "FC", "LFE", "SL", "SR", "TFL", "TFR", "TBL", "TBR", "TFC", "TC")),
+    ("7.1.2", channel_bits("FL", "FR", "FC", "LFE", "BL", "BR", "SL", "SR", "TFL", "TFR")),
+    ("7.1.4", channel_bits("FL", "FR", "FC", "LFE", "BL", "BR", "SL", "SR", "TFL", "TFR", "TBL", "TBR")),
+    ("7.1.6", channel_bits("FL", "FR", "FC", "LFE", "BL", "BR", "SL", "SR", "TFL", "TFR", "TBL", "TBR", "TFC", "TC")),
+    ("7.2.3", channel_bits("FL", "FR", "FC", "LFE", "BL", "BR", "SL", "SR", "TFL", "TFR", "TBC", "LFE2")),
+    ("9.1.4", channel_bits("FL", "FR", "FC", "LFE", "BL", "BR", "SL", "SR", "TFL", "TFR", "TBL", "TBR",
+                           "FLC", "FRC")),
+    ("9.1.6", channel_bits("FL", "FR", "FC", "LFE", "BL", "BR", "SL", "SR", "TFL", "TFR", "TBL", "TBR",
+                           "FLC", "FRC", "TSL", "TSR")),
+    ("hexadecagonal", channel_bits("FL", "FR", "FC", "BL", "BC", "BR", "SL", "SR", "WL", "WR", "TBL", "TBR",
+                                   "TBC", "TFC", "TFL", "TFR")),
+    ("binaural", channel_bits("BIL", "BIR")),
+    ("downmix", channel_bits("DL", "DR")),
+    ("22.2", channel_bits("FL", "FR", "FC", "LFE", "BL", "BR", "SL", "SR", "TFL", "TFR", "TBL", "TBR",
+                          "FLC", "FRC", "TSL", "TSR", "BC", "LFE2", "TFC", "TC", "TBC", "BFC", "BFL", "BFR")),
+]
+
+
+def describe_mask(mask):
+    """FFmpeg's description of a native layout: its name, else its channels."""
+    for name, named in NAMED_LAYOUTS:
+        if named == mask:
+            return name
+    channels = [CHANNEL_NAMES.get(bit, f"USR{bit}") for bit in range(64) if mask >> bit & 1]
+    return f"{len(channels)} channels ({'+'.join(channels)})"
+
+
+def default_mask(channels):
+    """`av_channel_layout_default`: the first named layout with `channels`, or None."""
+    return next((mask for _, mask in NAMED_LAYOUTS if bin(mask).count("1") == channels), None)
 
 
 def alaw_to_linear(code):
@@ -218,14 +299,21 @@ def storage_bytes(stream):
     return b"".join(struct.pack(fmt, s) for s in stream.stored)
 
 
-def canonical_wav(codec, channels, rate, data):
-    """The writer's output for one known-length stream: the header riffenc.c
-    chooses (WAVE_FORMAT_EXTENSIBLE above 48 kHz, or above 16 bits unless
-    float), a `fact` chunk for every encoding but tag 1, then `data`."""
+def canonical_wav(codec, channels, rate, data, mask="default"):
+    """The writer's output for one known-length stream with a native layout of
+    `mask` (by default mono's or stereo's; None for an unspecified layout):
+    the header riffenc.c chooses (WAVE_FORMAT_EXTENSIBLE for a native layout
+    other than mono and stereo, above 48 kHz, or above 16 bits unless float,
+    with the mask when its positions are WAVE's first 18), a `fact` chunk for
+    every encoding but tag 1, then `data`."""
     tag, bits, _ = WAV_CODECS[codec]
+    if mask == "default":
+        mask = CHANNEL_MASK.get(channels)
     frames = len(data) // (channels * bits // 8)
-    if rate > WRITER_MAX_PLAIN_RATE or (bits > 16 and tag != 3):
-        extension = u16(bits) + u32(CHANNEL_MASK[channels]) + u32(tag) + SUBFORMAT_BASE
+    named_order = mask is not None and mask not in CHANNEL_MASK.values()
+    if named_order or rate > WRITER_MAX_PLAIN_RATE or (bits > 16 and tag != 3):
+        written = mask if mask is not None and mask < WRITER_MAX_MASK else 0
+        extension = u16(bits) + u32(written) + u32(tag) + SUBFORMAT_BASE
         fmt = fmt_body(channels, rate, bits, tag=0xFFFE, cb_size=22, extra=extension)
     elif tag == 1:
         fmt = fmt_body(channels, rate, bits, tag=1)
@@ -290,11 +378,11 @@ def w64(*chunks, size=None, size_delta=0, riff_guid=W64_RIFF_GUID, wave_guid=Non
     return riff_guid + struct.pack("<Q", declared) + (wave_guid or w64_guid(b"wave")) + rest
 
 
-def canonical_w64(codec, channels, rate, data):
+def canonical_w64(codec, channels, rate, data, mask="default"):
     """The writer's Wave64 output: the same `fmt ` as `canonical_wav`, a `fact`
     chunk with a 64-bit count for every encoding but tag 1, then `data`, with
     sizes that do not count the padding."""
-    plain = canonical_wav(codec, channels, rate, data)
+    plain = canonical_wav(codec, channels, rate, data, mask)
     tag, bits, _ = WAV_CODECS[codec]
     frames = len(data) // (channels * bits // 8)
     fmt_len = int.from_bytes(plain[16:20], "little")
@@ -358,9 +446,54 @@ class Stream:
     rate: int
     storage: str
     stored: list  # decoded samples as stored: integers; floats as IEEE bit patterns
+    # The channel layout ffprobe prints (T23b): FFmpeg's description, or
+    # `unknown` when the container leaves it unspecified. Set by each
+    # builder's `with_layouts`.
+    layout: str = None
 
     def __iter__(self):
         return iter((self.channels, self.rate, self.stored))
+
+
+def wav_fmt(data):
+    """The `fmt ` body of a RIFF, RF64 or Wave64 file, or None."""
+    if data[:16] == W64_RIFF_GUID:
+        pos = W64_HEADER_LEN
+        while pos + 24 <= len(data):
+            size = struct.unpack("<Q", data[pos + 16:pos + 24])[0]
+            if data[pos:pos + 16] == w64_guid(b"fmt "):
+                return data[pos + 24:pos + size]
+            pos += size + (-size % 8)
+        return None
+    pos = 12
+    while pos + 8 <= len(data):
+        size = struct.unpack("<I", data[pos + 4:pos + 8])[0]
+        if data[pos:pos + 4] == b"fmt ":
+            return data[pos + 8:pos + 8 + size]
+        pos += 8 + size + (size & 1)
+    return None
+
+
+def wav_layout(data, stream):
+    """The layout FFmpeg reads from a WAV `fmt ` (riffdec.c): an extensible
+    mask naming exactly the channels, else unspecified."""
+    body = wav_fmt(data)
+    tag, channels = struct.unpack("<HH", body[:4])
+    if tag == 0xFFFE and len(body) >= 40:
+        mask = struct.unpack("<I", body[20:24])[0]
+        if mask and bin(mask).count("1") == channels:
+            return describe_mask(mask)
+    return "unknown"
+
+
+def with_layouts(fixtures, layout_of):
+    """Gives every accepted stream of `fixtures` its layout, `layout_of(data,
+    stream)` unless set."""
+    for f in fixtures:
+        for stream in (f.accept, f.unknown_accept):
+            if stream is not None and stream.layout is None:
+                stream.layout = layout_of(f.data, stream)
+    return fixtures
 
 
 @dataclasses.dataclass
@@ -514,7 +647,7 @@ def build_fixtures():
         fx.append(accepted_encoded(name, "encodings", rule, canonical_wav(codec, channels, rate, payload),
                                    codec, channels, rate, payload, writer_output=True))
     fx.append(accepted_encoded("extensible_mask_zero", "encodings",
-                               "Extensible with channel mask 0 (unspecified): the default layout applies.",
+                               "Extensible with channel mask 0: FFmpeg leaves the layout unspecified.",
                                riff(chunk(b"fmt ", extensible_fmt(mask=0)), data_chunk(MONO[:4])),
                                "pcm_s16le", 1, 8000, pcm(MONO[:4])))
     fx.append(accepted_encoded("extensible_valid_bits_zero", "encodings",
@@ -663,6 +796,13 @@ def build_fixtures():
         fx.append(accepted_encoded(name, "w64", rule, canonical_w64(codec, channels, 8000, payload),
                                    codec, channels, 8000, payload, writer_output=True))
         fx[-1].writer_header = "w64"
+    w64_quad = pcm(MONO)
+    fx.append(accepted_encoded("w64_4point0", "w64",
+                               "Four channels with the 4.0 mask (FL, FR, FC, BC): the extensible `fmt ` a named "
+                               "layout other than mono and stereo gets (T23b).",
+                               canonical_w64("pcm_s16le", 4, 8000, w64_quad, mask=channel_bits("FL", "FR", "FC", "BC")),
+                               "pcm_s16le", 4, 8000, w64_quad, writer_output=True))
+    fx[-1].writer_header = "w64"
     w64_fmt = w64_chunk(w64_guid(b"fmt "), fmt_body())
     w64_data = w64_chunk(w64_guid(b"data"), pcm(MONO[:4]))
     fx.append(accepted_encoded("w64_ffmpeg_padded_sizes", "w64",
@@ -784,14 +924,54 @@ def build_fixtures():
                        "24-bit samples declaring 20 valid bits: only all bits valid. FFmpeg reads them as s24.",
                        riff(chunk(b"fmt ", extensible_fmt(channels=2, bits=24, valid=20)), chunk(b"data", bytes(12))),
                        "UnsupportedFormat"))
-    fx.append(rejected("extensible_mask_mismatch", "extensible",
-                       "Stereo with the mono channel mask (front center): layouts beyond mono and stereo wait for T23b.",
-                       riff(chunk(b"fmt ", extensible_fmt(channels=2, mask=0x4)), data_chunk(STEREO)),
-                       "UnsupportedFormat"))
+    fx.append(accepted_encoded("extensible_mask_mismatch", "extensible",
+                               "Stereo with the mono channel mask (front center): FFmpeg ignores a mask that does "
+                               "not name exactly the channels, so the layout is unspecified (rejected before T23b).",
+                               riff(chunk(b"fmt ", extensible_fmt(channels=2, mask=0x4)), data_chunk(STEREO)),
+                               "pcm_s16le", 2, 8000, pcm(STEREO)))
     fx.append(rejected("extensible_truncated", "extensible", "Input ends inside the 40-byte extensible `fmt `.",
                        riff(chunk(b"fmt ", extensible_fmt()), data_chunk(MONO[:4]))[:50], "Truncated"))
-    fx.append(rejected("fmt_channels3", "fmt", "Three channels.",
-                       riff(fmt_chunk(channels=3), data_chunk(MONO[:6])), "UnsupportedFormat"))
+    fx.append(accepted_encoded("fmt_channels3", "fmt",
+                               "Three channels in a plain header: the layout is unspecified (rejected before T23b).",
+                               riff(fmt_chunk(channels=3), data_chunk(MONO[:6])), "pcm_s16le", 3, 8000,
+                               pcm(MONO[:6])))
+    # Channel layouts (T23b): FFmpeg's layout is the extensible mask when it
+    # names exactly the channels, else unspecified; the writer emits the mask
+    # of a native layout as riffenc.c does.
+    six = pcm(MONO + MONO[:4])
+    fx.append(accepted_encoded("extensible_5point1", "layouts",
+                               "Six channels with the 5.1 mask (FL, FR, FC, LFE, BL, BR): a named layout other "
+                               "than mono and stereo makes the writer use WAVE_FORMAT_EXTENSIBLE even at 16 bits.",
+                               canonical_wav("pcm_s16le", 6, 8000, six, mask=channel_bits("FL", "FR", "FC", "LFE", "BL", "BR")),
+                               "pcm_s16le", 6, 8000, six, writer_output=True))
+    eight = bytes(range(1, 25))
+    fx.append(accepted_encoded("extensible_7point1_s24", "layouts",
+                               "Eight 24-bit channels with the 7.1 mask (5.1(side) and BL, BR).",
+                               canonical_wav("pcm_s24le", 8, 8000, eight,
+                                             mask=channel_bits("FL", "FR", "FC", "LFE", "BL", "BR", "SL", "SR")),
+                               "pcm_s24le", 8, 8000, eight, writer_output=True))
+    fx.append(accepted_encoded("fmt_channels6", "layouts",
+                               "Six channels in a plain header: unspecified, written back the same way.",
+                               canonical_wav("pcm_s16le", 6, 8000, six, mask=None),
+                               "pcm_s16le", 6, 8000, six, writer_output=True))
+    fx.append(accepted_encoded("extensible_mask_high", "layouts",
+                               "Three channels whose mask has FL, FR and position 20, which WAVE does not define: "
+                               "native all the same, described by its positions.",
+                               riff(chunk(b"fmt ", extensible_fmt(channels=3, mask=0x100003)), data_chunk(MONO[:6])),
+                               "pcm_s16le", 3, 8000, pcm(MONO[:6])))
+    fx.append(accepted_encoded("extensible_mask_extra", "layouts",
+                               "Stereo with a three-channel mask: unspecified.",
+                               riff(chunk(b"fmt ", extensible_fmt(channels=2, mask=0x7)), data_chunk(STEREO)),
+                               "pcm_s16le", 2, 8000, pcm(STEREO)))
+    wide = pcm([i - 32 for i in range(MAX_CHANNELS)])
+    fx.append(accepted_encoded("fmt_channels64", "layouts",
+                               f"{MAX_CHANNELS} channels, the default limit, in a plain header: one frame.",
+                               riff(fmt_chunk(channels=MAX_CHANNELS), chunk(b"data", wide)),
+                               "pcm_s16le", MAX_CHANNELS, 8000, wide))
+    fx.append(rejected("fmt_channels65", "layouts",
+                       f"{MAX_CHANNELS + 1} channels, above the default limit (FFmpeg reads them).",
+                       riff(fmt_chunk(channels=MAX_CHANNELS + 1), chunk(b"data", bytes(2 * (MAX_CHANNELS + 1)))),
+                       "LimitExceeded"))
     fx.append(rejected("fmt_channels0", "fmt", "Zero channels.",
                        riff(fmt_chunk(channels=0), data_chunk([])), "InvalidFormat"))
     fx.append(rejected("fmt_rate0", "fmt", "Zero sample rate.",
@@ -901,7 +1081,7 @@ def build_fixtures():
 
     names = [f.name for f in fx]
     assert len(names) == len(set(names)), "duplicate fixture names"
-    return fx
+    return with_layouts(fx, wav_layout)
 
 
 def large_skip_vector():
@@ -1094,7 +1274,7 @@ def build_au_fixtures():
 
     names = [f.name for f in fx]
     assert len(names) == len(set(names)), "duplicate AU fixture names"
-    return fx
+    return with_layouts(fx, lambda data, stream: "unknown")
 
 
 # --- AIFF fixtures (T22b) ----------------------------------------------------
@@ -1296,7 +1476,7 @@ def build_aiff_fixtures():
 
     names = [f.name for f in fx]
     assert len(names) == len(set(names)), "duplicate AIFF fixture names"
-    return fx
+    return with_layouts(fx, lambda data, stream: "unknown")
 
 
 # --- raw PCM fixtures (T22c) -------------------------------------------------
@@ -1385,7 +1565,7 @@ def build_raw_fixtures():
 
     names = [f.name for f in fx]
     assert len(names) == len(set(names)), "duplicate raw fixture names"
-    return fx
+    return with_layouts(fx, lambda data, stream: describe_mask(CHANNEL_MASK[stream.channels]))
 
 
 # --- CAF fixtures (T22d) -----------------------------------------------------
@@ -1577,7 +1757,7 @@ def build_caf_fixtures():
 
     names = [f.name for f in fx]
     assert len(names) == len(set(names)), "duplicate CAF fixture names"
-    return fx
+    return with_layouts(fx, lambda data, stream: "unknown")
 
 
 # --- outputs ---------------------------------------------------------------
@@ -1600,6 +1780,7 @@ def render_expected(accept, reject):
     text = (lambda v: f"0x{v:x}") if accept.storage in ("flt", "dbl") else str
     sample_list = "{}" if not accept.stored else "{ " + ", ".join(text(v) for v in accept.stored) + " }"
     return (f".{{ .accept = .{{ .codec = .{accept.codec}, .channels = {accept.channels}, "
+            f".layout = {zig_string(accept.layout.encode())}, "
             f".sample_rate = {accept.rate}, .samples = .{{ .{accept.storage} = .{sample_list} }} }} }}")
 
 
@@ -1676,7 +1857,8 @@ def describe_result(accept, reject):
     if accept is None:
         return f"reject: `{reject}`"
     channels, rate, samples = accept
-    layout = {1: "mono", 2: "stereo"}[channels]
+    count = f"{channels} channel{'s' if channels != 1 else ''}"
+    layout = count if accept.layout == "unknown" else f"{accept.layout} ({count})"
     frames = len(samples) // channels
     text = f"accept: {layout}, {rate} Hz, {frames} frame{'s' if frames != 1 else ''}"
     if accept.codec not in ("pcm_s16le", "pcm_s16be"):

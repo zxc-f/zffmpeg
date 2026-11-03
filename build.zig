@@ -57,7 +57,7 @@ const mono_8k_report =
     \\codec=pcm_s16le
     \\sample_fmt=s16
     \\channels=1
-    \\channel_layout=mono
+    \\channel_layout=unknown
     \\sample_rate=8000
     \\nb_samples=8
     \\duration_num=8
@@ -70,7 +70,7 @@ const stereo_44k1_report =
     \\codec=pcm_s16le
     \\sample_fmt=s16
     \\channels=2
-    \\channel_layout=stereo
+    \\channel_layout=unknown
     \\sample_rate=44100
     \\nb_samples=4
     \\duration_num=4
@@ -83,7 +83,7 @@ const empty_data_report =
     \\codec=pcm_s16le
     \\sample_fmt=s16
     \\channels=1
-    \\channel_layout=mono
+    \\channel_layout=unknown
     \\sample_rate=8000
     \\nb_samples=0
     \\duration_num=0
@@ -96,7 +96,7 @@ const au_mono_8k_report =
     \\codec=pcm_s16be
     \\sample_fmt=s16
     \\channels=1
-    \\channel_layout=mono
+    \\channel_layout=unknown
     \\sample_rate=8000
     \\nb_samples=8
     \\duration_num=8
@@ -109,7 +109,7 @@ const au_stereo_44k1_report =
     \\codec=pcm_s16be
     \\sample_fmt=s16
     \\channels=2
-    \\channel_layout=stereo
+    \\channel_layout=unknown
     \\sample_rate=44100
     \\nb_samples=4
     \\duration_num=4
@@ -122,7 +122,7 @@ const au_empty_data_report =
     \\codec=pcm_s16be
     \\sample_fmt=s16
     \\channels=1
-    \\channel_layout=mono
+    \\channel_layout=unknown
     \\sample_rate=8000
     \\nb_samples=0
     \\duration_num=0
@@ -135,7 +135,7 @@ const aiff_mono_8k_report =
     \\codec=pcm_s16be
     \\sample_fmt=s16
     \\channels=1
-    \\channel_layout=mono
+    \\channel_layout=unknown
     \\sample_rate=8000
     \\nb_samples=8
     \\duration_num=8
@@ -148,7 +148,7 @@ const aifc_fl32_report =
     \\codec=pcm_f32be
     \\sample_fmt=flt
     \\channels=1
-    \\channel_layout=mono
+    \\channel_layout=unknown
     \\sample_rate=8000
     \\nb_samples=8
     \\duration_num=8
@@ -161,7 +161,7 @@ const caf_s16be_report =
     \\codec=pcm_s16be
     \\sample_fmt=s16
     \\channels=1
-    \\channel_layout=mono
+    \\channel_layout=unknown
     \\sample_rate=8000
     \\nb_samples=8
     \\duration_num=8
@@ -174,7 +174,7 @@ const caf_s64le_report =
     \\codec=pcm_s64le
     \\sample_fmt=s64
     \\channels=1
-    \\channel_layout=mono
+    \\channel_layout=unknown
     \\sample_rate=8000
     \\nb_samples=8
     \\duration_num=8
@@ -226,7 +226,7 @@ const f32_report =
     \\codec=pcm_f32le
     \\sample_fmt=flt
     \\channels=1
-    \\channel_layout=mono
+    \\channel_layout=unknown
     \\sample_rate=8000
     \\nb_samples=8
     \\duration_num=8
@@ -239,7 +239,7 @@ const alaw_report =
     \\codec=pcm_alaw
     \\sample_fmt=s16
     \\channels=1
-    \\channel_layout=mono
+    \\channel_layout=unknown
     \\sample_rate=8000
     \\nb_samples=8
     \\duration_num=8
@@ -252,7 +252,7 @@ const w64_mono_8k_report =
     \\codec=pcm_s16le
     \\sample_fmt=s16
     \\channels=1
-    \\channel_layout=mono
+    \\channel_layout=unknown
     \\sample_rate=8000
     \\nb_samples=8
     \\duration_num=8
@@ -266,7 +266,7 @@ const bext_tags_report =
     \\codec=pcm_s16le
     \\sample_fmt=s16
     \\channels=1
-    \\channel_layout=mono
+    \\channel_layout=unknown
     \\sample_rate=8000
     \\nb_samples=4
     \\duration_num=4
@@ -288,7 +288,7 @@ const info_values_report =
     \\codec=pcm_s16le
     \\sample_fmt=s16
     \\channels=1
-    \\channel_layout=mono
+    \\channel_layout=unknown
     \\sample_rate=8000
     \\nb_samples=4
     \\duration_num=4
@@ -307,7 +307,7 @@ const w64_alaw_report =
     \\codec=pcm_alaw
     \\sample_fmt=s16
     \\channels=1
-    \\channel_layout=mono
+    \\channel_layout=unknown
     \\sample_rate=8000
     \\nb_samples=8
     \\duration_num=8
@@ -318,6 +318,33 @@ const w64_alaw_report =
 /// T09: valid, empty, malformed, unsupported, I/O, resource-limit and usage
 /// cases, each checking stdout, stderr and the exit status. T12c adds the same
 /// for AU, including a pipe, and a non-AU magic that detection sends to WAV.
+// T23b: the layout as ffprobe prints it, from an extensible mask.
+const five_one_report =
+    \\format=wav
+    \\codec=pcm_s16le
+    \\sample_fmt=s16
+    \\channels=6
+    \\channel_layout=5.1
+    \\sample_rate=8000
+    \\nb_samples=2
+    \\duration_num=2
+    \\duration_den=8000
+    \\
+;
+
+const mask_high_report =
+    \\format=wav
+    \\codec=pcm_s16le
+    \\sample_fmt=s16
+    \\channels=3
+    \\channel_layout=3 channels (FL+FR+USR20)
+    \\sample_rate=8000
+    \\nb_samples=2
+    \\duration_num=2
+    \\duration_den=8000
+    \\
+;
+
 const probe_cases = [_]ProbeCase{
     .{ .name = "valid mono file", .fixture = "mono_8k", .exit_code = 0, .stdout = mono_8k_report, .stderr = "" },
     .{ .name = "valid stereo from a pipe", .args = &.{"-"}, .stdin_fixture = "stereo_44k1", .exit_code = 0, .stdout = stereo_44k1_report, .stderr = "" },
@@ -332,6 +359,9 @@ const probe_cases = [_]ProbeCase{
     .{ .name = "unsupported container", .fixture = "rifx_big_endian", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
     .{ .name = "unknown size", .fixture = "riff_size_unknown", .exit_code = 3, .stderr_contains = ": UnsupportedStreamingSize\n" },
     .{ .name = "chunk limit", .fixture = "chunks_over_limit", .exit_code = 5, .stderr_contains = ": LimitExceeded\n" },
+    .{ .name = "a 5.1 layout", .fixture = "extensible_5point1", .exit_code = 0, .stdout = five_one_report, .stderr = "" },
+    .{ .name = "a mask past WAVE's positions", .fixture = "extensible_mask_high", .exit_code = 0, .stdout = mask_high_report, .stderr = "" },
+    .{ .name = "channel limit", .fixture = "fmt_channels65", .exit_code = 5, .stderr_contains = ": LimitExceeded\n" },
     .{ .name = "missing file", .args = &.{"no-such-file.wav"}, .exit_code = 4, .stderr = "zffprobe: no-such-file.wav: FileNotFound\n" },
     .{ .name = "directory", .args = &.{"zig"}, .exit_code = 4, .stderr = "zffprobe: zig: IsDir\n" },
     .{ .name = "no arguments", .exit_code = 1, .stderr = usage_line },
@@ -429,6 +459,7 @@ const wav_empty_data = @embedFile("zig/testing/fixtures/wav/empty_data.wav");
 // Above 48 kHz the writer emits WAVE_FORMAT_EXTENSIBLE, as FFmpeg's does.
 const wav_mono_192k = @embedFile("zig/testing/fixtures/wav/s16_mono_192k_extensible.wav");
 const wav_s24_stereo = @embedFile("zig/testing/fixtures/wav/s24_stereo_48k_extensible.wav");
+const wav_5point1 = @embedFile("zig/testing/fixtures/wav/extensible_5point1.wav");
 const au_mono_8k = @embedFile("zig/testing/fixtures/au/au_mono_8k.au");
 const au_stereo_44k1 = @embedFile("zig/testing/fixtures/au/au_stereo_44k1.au");
 const au_empty_data = @embedFile("zig/testing/fixtures/au/au_empty_data.au");
@@ -507,6 +538,11 @@ const convert_cases = [_]ConvertCase{
     // T23a: -c:a picks the encoder; the samples convert to its storage.
     .{ .name = "24-bit WAV transcoded to 24 bits", .args = &.{"-i"}, .input = "s24_stereo_48k_extensible", .tail = &.{ "-c:a", "pcm_s24le", "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_s24_stereo, .stderr = "" },
     .{ .name = "an encoder the output does not carry", .args = &.{"-i"}, .input = "mono_8k", .tail = &.{ "-c:a", "pcm_s16le", "-f", "au", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
+    // T23b: FFmpeg's command line gives six unspecified channels the 5.1
+    // layout, copied or transcoded, which WAV writes as an extensible mask.
+    .{ .name = "six plain channels become 5.1", .args = &.{"-i"}, .input = "fmt_channels6", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_5point1, .stderr = "" },
+    .{ .name = "six plain channels copied as 5.1", .args = &.{"-i"}, .input = "fmt_channels6", .tail = &.{ "-c", "copy", "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_5point1, .stderr = "" },
+    .{ .name = "a 5.1 WAV copied unchanged", .args = &.{"-i"}, .input = "extensible_5point1", .tail = &.{ "-c", "copy", "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_5point1, .stderr = "" },
     // T23a: libswresample's dither options, for the output only. FFmpeg
     // dithers only when the sample format changes, and ignores them for copy.
     .{ .name = "dither options before -i", .args = &.{ "-dither_method", "triangular", "-i", "a.wav", "b.wav" }, .exit_code = 1, .stderr_contains = "put this after -i <input>: -dither_method\n" },

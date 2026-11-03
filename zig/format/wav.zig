@@ -52,6 +52,8 @@ pub const Error = error{
 /// `error.LimitExceeded`, and the unknown-length opt-in.
 pub const Limits = struct {
     max_sample_rate: u32 = 192_000,
+    /// libswresample's `SWR_CH_MAX`: more channels than FFmpeg converts.
+    max_channels: u16 = max_channels,
     /// Counts every chunk header inside the RIFF extent, `fmt ` and `data` included.
     max_chunks: u32 = 4096,
     /// Bytes of tag chunks (`LIST`/`INFO` and `bext` bodies) read into memory
@@ -151,11 +153,25 @@ pub fn carries(codec: pcm.Codec) bool {
     return tagFor(codec) != null;
 }
 
-/// The WAVE_FORMAT_EXTENSIBLE speaker mask of a layout.
-fn channelMask(layout: audio.ChannelLayout) u32 {
+/// The default channel limit of the parser and the writer.
+pub const max_channels = 64;
+
+/// The layout FFmpeg reads from a `fmt ` (`ff_get_wav_header`): an
+/// extensible mask naming exactly `channels` channels, else unspecified.
+fn layoutFor(mask: ?u32, channels: u16) audio.ChannelLayout {
+    if (mask) |m| {
+        if (m != 0 and @popCount(m) == channels) return .{ .native = m };
+    }
+    return .{ .unspecified = channels };
+}
+
+/// The WAVE_FORMAT_EXTENSIBLE speaker mask FFmpeg writes
+/// (`ff_put_wav_header`): a native layout's mask when it uses only the
+/// first 18 positions, the ones WAVE defines, else 0.
+fn extensibleMask(layout: audio.ChannelLayout) u32 {
     return switch (layout) {
-        .mono => 0x4, // front center
-        .stereo => 0x3, // front left | front right
+        .native => |mask| std.math.cast(u18, mask) orelse 0,
+        .unspecified, .custom => 0,
     };
 }
 
@@ -501,16 +517,12 @@ pub const Parser = struct {
         }
         const codec = codecFor(sub_tag, bits) orelse return error.UnsupportedFormat;
         if (valid_bits != 0 and valid_bits != bits) return error.UnsupportedFormat;
-        const layout = audio.ChannelLayout.fromChannelCount(channels) catch |err| switch (err) {
-            error.InvalidChannelCount => return error.InvalidFormat,
-            error.UnsupportedChannelCount => return error.UnsupportedFormat,
-        };
-        if (mask) |m| {
-            if (m != 0 and m != channelMask(layout)) return error.UnsupportedFormat;
-        }
+        if (channels == 0) return error.InvalidFormat;
+        if (channels > p.limits.max_channels) return error.LimitExceeded;
+        const layout = layoutFor(mask, channels);
         if (rate == 0) return error.InvalidFormat;
         if (rate > p.limits.max_sample_rate) return error.LimitExceeded;
-        // At most 8 bytes times 2 channels.
+        // At most 8 bytes times 65535 channels: no overflow.
         const sample_bytes: u32 = codec.bytesPerSample();
         const frame_bytes = sample_bytes * channels;
         if (block_align != frame_bytes) return error.InvalidFormat;
@@ -1072,6 +1084,7 @@ pub const Rf64 = enum {
 
 pub const WriteOptions = struct {
     max_sample_rate: u32 = 192_000,
+    max_channels: u16 = max_channels,
     /// RIFF only: Wave64 sizes are always 64 bits.
     rf64: Rf64 = .auto,
     variant: Variant = .wav,
@@ -1114,7 +1127,7 @@ const Header = struct {
 /// The bytes before the samples, without tags, as the writer emits them for
 /// `codec` and `format` in `form`.
 pub fn headerLen(codec: pcm.Codec, format: audio.Format, form: HeaderForm) usize {
-    const fmt_len = fmtLen(codec, format.sample_rate);
+    const fmt_len = fmtLen(codec, format);
     const fact = tagFor(codec) != tag_pcm;
     return switch (form) {
         .riff, .rf64 => {
@@ -1132,17 +1145,21 @@ pub fn headerLen(codec: pcm.Codec, format: audio.Format, form: HeaderForm) usize
 
 /// Bytes of the `fmt ` body the writer emits: 16 for tag 1, 18 for the other
 /// tags, 40 for WAVE_FORMAT_EXTENSIBLE.
-fn fmtLen(codec: pcm.Codec, sample_rate: u32) usize {
-    if (useExtensible(codec, sample_rate)) return 40;
+fn fmtLen(codec: pcm.Codec, format: audio.Format) usize {
+    if (useExtensible(codec, format)) return 40;
     return if (tagFor(codec) == tag_pcm) 16 else 18;
 }
 
-/// `riffenc.c`'s choice for mono and stereo: extensible above 48 kHz, or
-/// above 16 bits unless the samples are float.
-fn useExtensible(codec: pcm.Codec, sample_rate: u32) bool {
+/// `riffenc.c`'s choice: extensible for a native layout other than mono
+/// and stereo, above 48 kHz, or above 16 bits unless the samples are float.
+fn useExtensible(codec: pcm.Codec, format: audio.Format) bool {
     const sample_bytes: u32 = codec.bytesPerSample();
     const bits = sample_bytes * 8;
-    return sample_rate > max_plain_rate or (bits > 16 and tagFor(codec) != tag_float);
+    const named_order = switch (format.layout) {
+        .native => |mask| mask != audio.ChannelLayout.mono.native and mask != audio.ChannelLayout.stereo.native,
+        .unspecified, .custom => false,
+    };
+    return named_order or format.sample_rate > max_plain_rate or (bits > 16 and tagFor(codec) != tag_float);
 }
 
 /// Writes one known-length WAV or Wave64 stream to a borrowed writer: the
@@ -1182,10 +1199,11 @@ pub const Writer = struct {
         if (format.sample_format != codec.storage()) return error.UnsupportedFormat;
         if (format.sample_rate == 0) return error.InvalidFormat;
         if (format.sample_rate > options.max_sample_rate) return error.LimitExceeded;
+        if (format.channelCount() > options.max_channels) return error.LimitExceeded;
         const sample_bytes: u16 = codec.bytesPerSample();
         const bits = sample_bytes * 8;
-        // At most 8 bytes times 2 channels.
-        const block_align = sample_bytes * format.channelCount();
+        // `block_align` is a 16-bit field.
+        const block_align = std.math.mul(u16, sample_bytes, format.channelCount()) catch return error.UnsupportedFormat;
         const byte_rate = std.math.mul(u32, format.sample_rate, block_align) catch return error.SizeOverflow;
         const data_bytes = std.math.mul(u64, frame_count, block_align) catch return error.SizeOverflow;
         const max32 = std.math.maxInt(u32);
@@ -1210,7 +1228,7 @@ pub const Writer = struct {
             },
         };
         const header_len = headerLen(codec, format, form);
-        const fmt_len = fmtLen(codec, format.sample_rate);
+        const fmt_len = fmtLen(codec, format);
 
         // The `fmt ` body, shared by both layouts.
         var fmt_bytes: [40]u8 = undefined;
@@ -1225,7 +1243,7 @@ pub const Writer = struct {
         if (extensible) {
             writeLittle(&f, u16, 22);
             writeLittle(&f, u16, bits);
-            writeLittle(&f, u32, channelMask(format.layout));
+            writeLittle(&f, u32, extensibleMask(format.layout));
             writeLittle(&f, u32, tag);
             f.writeAll(&subformat_base) catch unreachable;
         } else if (tag != tag_pcm) {
@@ -1369,6 +1387,7 @@ fn decodeAll(reader: *std.Io.Reader, limits: Limits, storage: []u8) DecodeError!
 fn expectStream(comptime stream: fixtures.Stream, decoded: Decoded) !void {
     try std.testing.expectEqual(codecOf(stream.codec), decoded.info.codec);
     try std.testing.expectEqual(stream.channels, decoded.info.format.channelCount());
+    try stream.expectLayout(decoded.info.format.layout);
     try std.testing.expectEqual(stream.sample_rate, decoded.info.format.sample_rate);
     try std.testing.expectEqual(codecOf(stream.codec).storage(), decoded.info.format.sample_format);
     // Unknown-length data has no count; the samples below still fix the length.
@@ -1434,6 +1453,7 @@ test "probing validates without decoding and agrees with decoding" {
                     const info = try result;
                     try std.testing.expectEqual(codecOf(stream.codec), info.codec);
                     try std.testing.expectEqual(stream.channels, info.format.channelCount());
+                    try stream.expectLayout(info.format.layout);
                     try std.testing.expectEqual(stream.sample_rate, info.format.sample_rate);
                     if (info.frame_count) |count| try std.testing.expectEqual(stream.frameCount(), count);
                 },
@@ -1733,7 +1753,7 @@ test "the writer reproduces every writer-output fixture byte for byte" {
         if (fixture.writer_output) {
             const stream = fixture.expected.accept;
             const codec = codecOf(stream.codec);
-            const format = try audio.Format.init(stream.sample_rate, stream.channels, codec.storage());
+            const format = try audio.Format.initLayout(stream.sample_rate, stream.channelLayout(), codec.storage());
             var encoded: [1024]u8 = undefined;
             const data = try encodeExpected(stream, &encoded);
             var buffer: [1024]u8 = undefined;
@@ -1781,7 +1801,7 @@ test "writeFrames encodes s16 samples as the writer's codec" {
             if (std.mem.eql(u8, f.name, name)) break f.expected.accept;
         } else unreachable;
         const codec = codecOf(stream.codec);
-        const format = try audio.Format.init(stream.sample_rate, stream.channels, .s16);
+        const format = try audio.Format.initLayout(stream.sample_rate, stream.channelLayout(), .s16);
         var buffer: [256]u8 = undefined;
         var out: std.Io.Writer = .fixed(&buffer);
         var writer = try Writer.begin(&out, codec, format, stream.frameCount(), .{});
