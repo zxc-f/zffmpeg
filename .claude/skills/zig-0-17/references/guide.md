@@ -393,6 +393,15 @@ end a process without unwinding. Returning an error from `main` is not a
 documented exit code: `std/start.zig` logs it and exits with status 1. See
 "Typed outcomes, numeric encoding at the boundary" below.
 
+A child's `cwd` changes how relative paths in its `argv` resolve, including
+`argv[0]`: resolve the executable first (`Dir.realPathFileAlloc`). Passing
+`.{ .file = f }` as a stdio stream differs by platform: POSIX duplicates the
+descriptor with its access mode, while Windows reopens the file with the
+access that stream needs. A write-only file as stdin therefore fails to read
+only on POSIX. A pipe whose read end the parent closes makes the child's
+writes fail on every platform; on POSIX the default SIGPIPE ends the child
+first, because Zig programs do not ignore it.
+
 `std.time.timestamp()` and `std.time.Timer` are not media clocks. PCM duration
 is an integer sample count and a sample rate. `Io` has clocks for timeouts.
 This port does not need them for WAV.
@@ -790,6 +799,12 @@ var list: std.ArrayList(u8) = .empty;
 noise when the destination has it. Repeating it is useful when the
 destination is `anytype` or the literal would be ambiguous.
 
+A decl literal needs the result type to reach it. `try` forwards it, so
+`var c: Conversion = try .init(...)` compiles; `catch` does not, so
+`var c: Conversion = .init(...) catch |err| ...` fails with "type
+'@EnumLiteral()' not a function". Name the type there:
+`var c = Conversion.init(...) catch |err| ...`.
+
 Enum literals do not need the type at the use site when the parameter has it:
 `takeInt(u16, .little)`, not `takeInt(u16, std.lang.Endian.little)`, and not
 `takeInt(u16, @as(std.lang.Endian, .little))`.
@@ -881,6 +896,12 @@ b.installArtifact(exe);
 of `.name` the way 0.11 examples wrote it. `createModule` creates a module
 private to this build script. `addModule` publishes a module to dependents.
 `addImport` wires one module to another.
+
+A source file belongs to exactly one module. A test tool rooted in
+`zig/testing/` cannot also `@import("fixtures.zig")` when the `av` module
+already imports that file ("file exists in modules 'root' and 'av'"). Use
+what `av` exports, or pass a directory with `addDirectoryArg` and read the
+files at run time, as `zig/testing/zffmpeg_cases.zig` does.
 
 Tests do not run unless a run step depends on them:
 

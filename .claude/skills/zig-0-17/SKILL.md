@@ -14,7 +14,7 @@ every Zig change starts from the pinned toolchain's rules instead.
 ## Workflow
 
 1. **Read before writing.** For a new file, or the first Zig change in a
-   session, read [references/guide.md](references/guide.md) in full (about 980
+   session, read [references/guide.md](references/guide.md) in full (about 1000
    lines). For a later small edit in the same session, re-read the sections the
    change touches, using the map below.
 2. **Apply the project rules.** [CLAUDE.md](../../../CLAUDE.md) wins where it

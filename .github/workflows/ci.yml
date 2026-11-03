@@ -116,7 +116,7 @@ jobs:
           echo "fixtures $(cat zig/testing/fixtures/wav/*.wav | sha256sum)"
           echo "au fixtures $(cat zig/testing/fixtures/au/*.au | sha256sum)"
 
-      - name: Build zffprobe and the test tools
+      - name: Build zffprobe, zffmpeg and the test tools
         run: zig build -Doptimize=ReleaseSafe install test-tools
 
       - name: Compare with the reference (T10)
@@ -126,5 +126,6 @@ jobs:
             --ffprobe .references/ffmpeg-install/bin/ffprobe \
             --zffprobe zig-out/bin/zffprobe \
             --writer zig-out/bin/write-driver \
+            --zffmpeg zig-out/bin/zffmpeg \
             --report reference-report.md
           cat reference-report.md >> "$GITHUB_STEP_SUMMARY"

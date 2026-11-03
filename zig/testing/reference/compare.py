@@ -17,13 +17,17 @@ Zig-written files: the write driver writes every writer-output stream, which
 must equal its fixture byte for byte and decode in FFmpeg to the expected
 samples.
 
+zffmpeg (T13b): every accepted fixture is converted in every supported cell of
+the operation matrix, and FFmpeg must read each actual output with the expected
+samples and stream; copy across codecs must fail without creating output.
+
 Checks whose Zig code has not landed yet are listed as not implemented, never
 counted as passes or skips. Expectations come from generate.py, the same
 independent source as the committed fixtures.
 
     python3 zig/testing/reference/compare.py --ffmpeg BIN --ffprobe BIN \\
         --zffprobe zig-out/bin/zffprobe --writer zig-out/bin/write-driver \\
-        [--report report.md]
+        --zffmpeg zig-out/bin/zffmpeg [--report report.md]
 """
 
 import argparse
@@ -452,6 +456,81 @@ def compare_writer(args, lines, failures):
     lines += ["", f"Zig-written files FFmpeg reads as expected: {passed}/{len(streams)}."]
 
 
+def compare_zffmpeg(args, lines, failures):
+    """zffmpeg's actual output for every accepted fixture, read by FFmpeg (T13b).
+
+    Each supported cell (transcode to WAV and to AU, copy within one codec)
+    writes a file that FFmpeg must probe and decode to the fixture's samples and
+    stream; the same command through standard input and output must give the
+    same bytes. Copy across codecs must fail before creating any output.
+    """
+    lines += [
+        "",
+        "## zffmpeg output read by FFmpeg",
+        "",
+        "| Input | Cell | Output | FFmpeg | Result |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    inputs = [("wav", FIXTURES / "wav" / f"{f.name}.wav", f) for f in generate.build_fixtures() if f.accept]
+    inputs += [("au", FIXTURES / "au" / f"{f.name}.au", f) for f in generate.build_au_fixtures() if f.accept]
+    read_ok = read_total = rejected_ok = rejected_total = 0
+    with tempfile.TemporaryDirectory() as tmp:
+        work = pathlib.Path(tmp)
+        for container, path, fixture in inputs:
+            channels, rate, samples = fixture.accept
+            frames = len(samples) // channels
+            for output, copy in (("wav", False), ("au", False), (container, True)):
+                cell = f"{'copy' if copy else 'transcode'} to {output.upper()}"
+                options = (["-c", "copy"] if copy else []) + ["-f", output]
+                out = work / f"{fixture.name}-{'copy' if copy else 'transcode'}.{output}"
+                code, _, err = zffprobe_raw(args.zffmpeg, "-i", path, *options, out)
+                problems, notes = [], []
+                if code != 0:
+                    problems.append(f"zffmpeg exited {code}: {first_line(text(err))}")
+                    summary = "not written"
+                else:
+                    written = out.read_bytes()
+                    summary = f"{len(written)} bytes"
+                    pipe_code, pipe_out, _ = zffprobe_raw(args.zffmpeg, "-i", "-", *options, "-", data=path.read_bytes())
+                    if pipe_code != 0 or pipe_out != written:
+                        problems.append(f"through pipes zffmpeg exited {pipe_code} with different output")
+                    codec = "pcm_s16le" if output == "wav" else "pcm_s16be"
+                    expected = expected_stream(output, codec, channels, rate, frames)
+                    differences = dict(KNOWN_FIELD_DIFFERENCES if output == "wav" else KNOWN_AU_FIELD_DIFFERENCES)
+                    if output == "wav" and frames == 0:
+                        differences[("duration_ts", "N/A")] = "FFmpeg reads data size 0 as unknown length"
+                    # Forced for AU, because FFmpeg's probe does not detect an empty AU file.
+                    stream_problems, notes = check_stream(args, f"zffmpeg {fixture.name}", out, expected, samples,
+                                                          "au" if output == "au" else None,
+                                                          field_differences=differences)
+                    problems += stream_problems
+                read_total += 1
+                read_ok += not problems
+                verdict = "same samples and stream" if not problems else "differs"
+                if notes:
+                    verdict += "; " + "; ".join(notes)
+                result = "pass" if not problems else "**FAIL**: " + "; ".join(problems)
+                lines.append(f"| `{fixture.name}` | {cell} | {summary} | {verdict} | {result} |")
+                failures.extend(f"zffmpeg {fixture.name} {cell}: {problem}" for problem in problems)
+
+            # Copy into the other container needs byte swapping: rejected
+            # during preflight, so no output file is created.
+            other = "au" if container == "wav" else "wav"
+            out = work / f"{fixture.name}-rejected.{other}"
+            code, _, err = zffprobe_raw(args.zffmpeg, "-i", path, "-c", "copy", "-f", other, out)
+            rejected_total += 1
+            if code == 3 and b"UnsupportedOperation" in err and not out.exists():
+                rejected_ok += 1
+            else:
+                failures.append(f"zffmpeg {fixture.name} copy to {other.upper()}: exited {code} "
+                                f"({first_line(text(err)) or 'no error'}), output {'created' if out.exists() else 'absent'}")
+    lines += [
+        "",
+        f"zffmpeg outputs FFmpeg reads as expected, equal through pipes: {read_ok}/{read_total}.",
+        f"Copies across codecs rejected before any output: {rejected_ok}/{rejected_total}.",
+    ]
+
+
 def compare_pipes(args, lines, failures):
     """zffprobe through a pipe must match zffprobe on the file (T12c)."""
     cases = [(FIXTURES / "wav" / f"{f.name}.wav") for f in generate.build_fixtures()]
@@ -480,6 +559,7 @@ def main():
     parser.add_argument("--ffprobe", required=True)
     parser.add_argument("--zffprobe", required=True)
     parser.add_argument("--writer", required=True, help="the write driver (zig build test-tools)")
+    parser.add_argument("--zffmpeg", required=True)
     parser.add_argument("--report", help="also write the Markdown report to this file")
     args = parser.parse_args()
 
@@ -527,6 +607,7 @@ def main():
     ]
     compare_au(args, lines, failures)
     compare_writer(args, lines, failures)
+    compare_zffmpeg(args, lines, failures)
     if "au-probe" not in NOT_IMPLEMENTED:
         compare_pipes(args, lines, failures)
     if NOT_IMPLEMENTED:

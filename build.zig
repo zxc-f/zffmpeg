@@ -160,6 +160,90 @@ const probe_cases = [_]ProbeCase{
     .{ .name = "truncated AU pipe", .set = .au, .args = &.{"-"}, .stdin_fixture = "au_truncated_data", .exit_code = 2, .stderr = "zffprobe: -: Truncated\n" },
 };
 
+/// A zffmpeg process run: `args`, then the input fixture's path (or standard
+/// input), then `tail`, then an output file in a fresh directory if
+/// `output_file` names one. Stdout, stderr, the status and the output file's
+/// bytes are checked.
+const ConvertCase = struct {
+    name: []const u8,
+    /// Arguments before the input; end with "-i" when `input` is set.
+    args: []const []const u8 = &.{},
+    set: FixtureSet = .wav,
+    /// zig/testing/fixtures/<set>/<name>.<set>, placed after `args`.
+    input: ?[]const u8 = null,
+    /// Piped to standard input instead; `args` then ends with "-i", "-".
+    stdin_input: ?[]const u8 = null,
+    /// Output options and the output, after the input.
+    tail: []const []const u8 = &.{},
+    /// Name of an output file created in a fresh directory, after `tail`.
+    output_file: ?[]const u8 = null,
+    /// The exact bytes `output_file` must hold.
+    output_bytes: ?[]const u8 = null,
+    exit_code: u8,
+    /// Exact stdout, unless `stdout_contains` is set.
+    stdout: []const u8 = "",
+    stdout_contains: ?[]const u8 = null,
+    stderr: ?[]const u8 = null,
+    stderr_contains: ?[]const u8 = null,
+};
+
+const zffmpeg_usage = "usage: zffmpeg [-y | -n] -i <input | -> [-c copy] [-f wav|au] <output | ->\n";
+
+// The paired WAV and AU fixtures hold the same samples, so each is the exact
+// expected output of converting the other.
+const wav_mono_8k = @embedFile("zig/testing/fixtures/wav/mono_8k.wav");
+const wav_stereo_44k1 = @embedFile("zig/testing/fixtures/wav/stereo_44k1.wav");
+const wav_empty_data = @embedFile("zig/testing/fixtures/wav/empty_data.wav");
+const wav_mono_192k = @embedFile("zig/testing/fixtures/wav/mono_192k_rate_limit.wav");
+const au_mono_8k = @embedFile("zig/testing/fixtures/au/au_mono_8k.au");
+const au_stereo_44k1 = @embedFile("zig/testing/fixtures/au/au_stereo_44k1.au");
+const au_empty_data = @embedFile("zig/testing/fixtures/au/au_empty_data.au");
+const au_mono_192k = @embedFile("zig/testing/fixtures/au/au_mono_192k_rate_limit.au");
+
+/// T13b: every cell of the operation matrix (files and pipes, transcode and
+/// copy), the output format from -f or the extension, late and early media
+/// errors, read and open failures, and the command line. The overwrite policy,
+/// same-file refusal, partial-output removal and write failures need prepared
+/// files; zig/testing/zffmpeg_cases.zig runs those.
+const convert_cases = [_]ConvertCase{
+    .{ .name = "WAV to WAV", .args = &.{"-i"}, .input = "mono_8k", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_mono_8k, .stderr = "" },
+    .{ .name = "WAV copy to WAV from a pipe", .args = &.{ "-i", "-" }, .stdin_input = "stereo_44k1", .tail = &.{ "-c", "copy", "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_stereo_44k1, .stderr = "" },
+    .{ .name = "WAV to AU", .args = &.{"-i"}, .input = "mono_8k", .tail = &.{ "-f", "au", "-" }, .exit_code = 0, .stdout = au_mono_8k, .stderr = "" },
+    .{ .name = "WAV to AU from a pipe", .args = &.{ "-i", "-" }, .stdin_input = "stereo_44k1", .tail = &.{ "-f", "au", "-" }, .exit_code = 0, .stdout = au_stereo_44k1, .stderr = "" },
+    .{ .name = "WAV at 192 kHz to AU", .args = &.{"-i"}, .input = "mono_192k_rate_limit", .tail = &.{ "-f", "au", "-" }, .exit_code = 0, .stdout = au_mono_192k, .stderr = "" },
+    .{ .name = "empty WAV to AU", .args = &.{"-i"}, .input = "empty_data", .tail = &.{ "-f", "au", "-" }, .exit_code = 0, .stdout = au_empty_data, .stderr = "" },
+    .{ .name = "AU to AU", .set = .au, .args = &.{"-i"}, .input = "au_mono_8k", .tail = &.{ "-f", "au", "-" }, .exit_code = 0, .stdout = au_mono_8k, .stderr = "" },
+    .{ .name = "AU copy to AU", .set = .au, .args = &.{"-i"}, .input = "au_stereo_44k1", .tail = &.{ "-c", "copy", "-f", "au", "-" }, .exit_code = 0, .stdout = au_stereo_44k1, .stderr = "" },
+    .{ .name = "AU to WAV", .set = .au, .args = &.{"-i"}, .input = "au_stereo_44k1", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_stereo_44k1, .stderr = "" },
+    .{ .name = "AU at 192 kHz to WAV from a pipe", .set = .au, .args = &.{ "-i", "-" }, .stdin_input = "au_mono_192k_rate_limit", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_mono_192k, .stderr = "" },
+    .{ .name = "empty AU to WAV", .set = .au, .args = &.{"-i"}, .input = "au_empty_data", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_empty_data, .stderr = "" },
+    .{ .name = "WAV copy to AU is rejected", .args = &.{"-i"}, .input = "mono_8k", .tail = &.{ "-c", "copy", "-f", "au", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
+    .{ .name = "AU copy to WAV is rejected", .set = .au, .args = &.{"-i"}, .input = "au_mono_8k", .tail = &.{ "-c:a", "copy", "-f", "wav", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
+    .{ .name = "output format from the extension", .args = &.{"-i"}, .input = "mono_8k", .output_file = "out.au", .output_bytes = au_mono_8k, .exit_code = 0, .stderr = "" },
+    .{ .name = "an uppercase extension", .set = .au, .args = &.{"-i"}, .input = "au_stereo_44k1", .output_file = "OUT.WAV", .output_bytes = wav_stereo_44k1, .exit_code = 0, .stderr = "" },
+    .{ .name = "-f wins over the extension", .args = &.{"-i"}, .input = "mono_8k", .tail = &.{ "-f", "wav" }, .output_file = "out.au", .output_bytes = wav_mono_8k, .exit_code = 0, .stderr = "" },
+    .{ .name = "an error after the data", .args = &.{"-i"}, .input = "duplicate_data", .tail = &.{ "-f", "au", "-" }, .exit_code = 2, .stderr_contains = ": InvalidWave\n" },
+    .{ .name = "a truncated pipe", .set = .au, .args = &.{ "-i", "-" }, .stdin_input = "au_truncated_data", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stderr = "zffmpeg: -: Truncated\n" },
+    .{ .name = "a malformed header", .args = &.{"-i"}, .input = "not_riff", .tail = &.{ "-f", "au", "-" }, .exit_code = 2, .stderr_contains = ": InvalidRiff\n" },
+    .{ .name = "an unsupported input", .args = &.{"-i"}, .input = "rifx_big_endian", .tail = &.{ "-f", "au", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
+    .{ .name = "an input limit", .args = &.{"-i"}, .input = "chunks_over_limit", .tail = &.{ "-f", "au", "-" }, .exit_code = 5, .stderr_contains = ": LimitExceeded\n" },
+    .{ .name = "a missing input", .args = &.{ "-i", "no-such-file.wav", "-f", "wav", "-" }, .exit_code = 4, .stderr = "zffmpeg: no-such-file.wav: FileNotFound\n" },
+    .{ .name = "a directory as the input", .args = &.{ "-i", "zig", "-f", "wav", "-" }, .exit_code = 4, .stderr = "zffmpeg: zig: IsDir\n" },
+    .{ .name = "an output in a missing directory", .args = &.{"-i"}, .input = "mono_8k", .tail = &.{ "-f", "wav", "no-such-dir" ++ std.fs.path.sep_str ++ "out.wav" }, .exit_code = 4, .stderr_contains = ": FileNotFound\n" },
+    .{ .name = "no arguments", .exit_code = 1, .stderr = "zffmpeg: missing -i <input>\n" ++ zffmpeg_usage },
+    .{ .name = "help", .args = &.{"--help"}, .exit_code = 0, .stdout_contains = zffmpeg_usage, .stderr = "" },
+    .{ .name = "-y with -n", .args = &.{ "-y", "-n", "-i", "a.wav", "b.wav" }, .exit_code = 1, .stderr = "zffmpeg: -y and -n contradict each other\n" ++ zffmpeg_usage },
+    .{ .name = "two inputs", .args = &.{ "-i", "a.wav", "-i", "b.wav", "c.wav" }, .exit_code = 1, .stderr_contains = "only one input is supported\n" },
+    .{ .name = "an input option", .args = &.{ "-f", "wav", "-i", "a.wav", "b.wav" }, .exit_code = 1, .stderr_contains = "input options are not supported; put this after -i <input>: -f\n" },
+    .{ .name = "an option after the output", .args = &.{ "-i", "a.wav", "b.wav", "-y" }, .exit_code = 1, .stderr_contains = "options after the output are not supported: -y\n" },
+    .{ .name = "no output", .args = &.{ "-i", "a.wav" }, .exit_code = 1, .stderr_contains = "missing output\n" },
+    .{ .name = "an unknown option", .args = &.{ "-i", "a.wav", "-ar", "8000", "b.wav" }, .exit_code = 1, .stderr_contains = "unknown option: -ar\n" },
+    .{ .name = "an encoder name", .args = &.{ "-i", "a.wav", "-c", "pcm_s16le", "b.wav" }, .exit_code = 1, .stderr_contains = "only -c copy is supported; got: pcm_s16le\n" },
+    .{ .name = "a missing value", .args = &.{ "-i", "a.wav", "-f" }, .exit_code = 1, .stderr_contains = "missing value for: -f\n" },
+    .{ .name = "standard output needs -f", .args = &.{ "-i", "a.wav", "-" }, .exit_code = 1, .stderr_contains = "-f is required when writing to standard output\n" },
+    .{ .name = "an unsupported -f", .args = &.{ "-i", "a.wav", "-f", "mp3", "-" }, .exit_code = 3, .stderr = "zffmpeg: mp3: unsupported output format\n" },
+};
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -183,7 +267,7 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(lib);
 
-    const test_step = b.step("test", "Run the av module, example and zffprobe tests");
+    const test_step = b.step("test", "Run the av module, example, zffprobe and zffmpeg tests");
 
     const av_tests = b.addTest(.{
         .name = "av",
@@ -226,6 +310,44 @@ pub fn build(b: *std.Build) void {
         for (probe_cases) |case| addProbeCase(b, test_step, probe, case);
     }
 
+    const zffmpeg = b.addExecutable(.{
+        .name = "zffmpeg",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("zig/cli/ffmpeg.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "av", .module = av }},
+        }),
+    });
+    b.installArtifact(zffmpeg);
+
+    const run_zffmpeg = b.addRunArtifact(zffmpeg);
+    run_zffmpeg.addPassthruArgs();
+    b.step("zffmpeg", "Run zffmpeg; pass its arguments after --").dependOn(&run_zffmpeg.step);
+
+    if (test_filters.len == 0) {
+        for (convert_cases) |case| addConvertCase(b, test_step, zffmpeg, case);
+
+        // Cases that need prepared files run in a fresh directory each time.
+        const cases_tool = b.addExecutable(.{
+            .name = "zffmpeg-cases",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("zig/testing/zffmpeg_cases.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "av", .module = av }},
+            }),
+        });
+        const run_cases = b.addRunArtifact(cases_tool);
+        run_cases.setName("zffmpeg: prepared-file cases");
+        run_cases.addArtifactArg(zffmpeg);
+        run_cases.addDirectoryArg(b.path("zig/testing/fixtures"));
+        _ = run_cases.addOutputDirectoryArg("work");
+        run_cases.expectExitCode(0);
+        run_cases.expectStdErrEqual("");
+        test_step.dependOn(&run_cases.step);
+    }
+
     // Test tools for the FFmpeg comparison (zig/testing/reference/compare.py),
     // kept out of the default install. `zig build test-tools` installs them in
     // zig-out/bin; `zig build test` compiles them, so a break shows in every mode.
@@ -254,6 +376,26 @@ fn addProbeCase(b: *std.Build, test_step: *std.Build.Step, probe: *std.Build.Ste
     if (case.stdout_contains) |text| run.expectStdOutMatch(text) else run.expectStdOutEqual(case.stdout);
     if (case.stderr) |text| run.expectStdErrEqual(text);
     if (case.stderr_contains) |text| run.expectStdErrMatch(text);
+    test_step.dependOn(&run.step);
+}
+
+fn addConvertCase(b: *std.Build, test_step: *std.Build.Step, zffmpeg: *std.Build.Step.Compile, case: ConvertCase) void {
+    const run = b.addRunArtifact(zffmpeg);
+    run.setName(b.fmt("zffmpeg: {s}", .{case.name}));
+    run.setCwd(b.path("."));
+    run.addArgs(case.args);
+    if (case.input) |name| run.addFileArg(fixturePath(b, case.set, name));
+    if (case.stdin_input) |name| run.setStdIn(.{ .lazy_path = fixturePath(b, case.set, name) });
+    run.addArgs(case.tail);
+    run.expectExitCode(case.exit_code);
+    if (case.stdout_contains) |text| run.expectStdOutMatch(text) else run.expectStdOutEqual(case.stdout);
+    if (case.stderr) |text| run.expectStdErrEqual(text);
+    if (case.stderr_contains) |text| run.expectStdErrMatch(text);
+    if (case.output_file) |name| {
+        const output = run.addOutputFileArg(name);
+        const check = b.addCheckFile(output, .{ .expected_exact = case.output_bytes.? });
+        test_step.dependOn(&check.step);
+    }
     test_step.dependOn(&run.step);
 }
 
