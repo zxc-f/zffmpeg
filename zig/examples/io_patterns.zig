@@ -41,8 +41,8 @@ pub fn readFileU32Le(reader: *std.Io.File.Reader) (ReadError || std.Io.File.Read
 
 test "memory reader consumes one field and preserves the following byte" {
     var reader = std.Io.Reader.fixed(&.{ 0x78, 0x56, 0x34, 0x12, 0xab });
-    try std.testing.expectEqual(@as(u32, 0x12345678), try readU32Le(&reader));
-    try std.testing.expectEqual(@as(u8, 0xab), try reader.takeByte());
+    try std.testing.expectEqual(0x12345678, try readU32Le(&reader));
+    try std.testing.expectEqual(0xab, try reader.takeByte());
 }
 
 test "every short field reports truncation" {
@@ -60,7 +60,7 @@ test "one-byte source fragments use the same field parser" {
         .{ .buffer = &.{ 0x34, 0x12 } },
     });
     source.artificial_limit = .limited(1);
-    try std.testing.expectEqual(@as(u32, 0x12345678), try readU32Le(&source.interface));
+    try std.testing.expectEqual(0x12345678, try readU32Le(&source.interface));
 }
 
 test "I/O failure is distinct from truncated data" {
@@ -101,8 +101,8 @@ test "file adapters work with empty small and larger caller buffers" {
         var buffer: [64]u8 = undefined;
         var reader = file.readerStreaming(io, buffer[0..capacity]);
         // Reuse the same adapter: reconstructing it could discard read-ahead bytes.
-        try std.testing.expectEqual(@as(u32, 0x12345678), try readFileU32Le(&reader));
-        try std.testing.expectEqual(@as(u32, 0x90abcdef), try readFileU32Le(&reader));
+        try std.testing.expectEqual(0x12345678, try readFileU32Le(&reader));
+        try std.testing.expectEqual(0x90abcdef, try readFileU32Le(&reader));
         try std.testing.expectError(error.Truncated, readFileU32Le(&reader));
     }
 }
@@ -122,7 +122,7 @@ test "file read failure returns the adapter's retained error" {
     } else |err| {
         // The generic interface reports only ReadFailed; the adapter keeps the cause.
         const retained = reader.err orelse return error.TestExpectedError;
-        try std.testing.expectEqual(@as(anyerror, retained), @as(anyerror, err));
+        try std.testing.expectEqual(retained, err);
         try std.testing.expect(err != error.IoFailure);
     }
 }

@@ -25,30 +25,39 @@ const help = usage ++
     \\
 ;
 
-const exit_ok = 0;
-const exit_usage = 1;
-const exit_invalid = 2;
-const exit_unsupported = 3;
-const exit_io = 4;
-const exit_limit = 5;
-const exit_canceled = 6;
+/// The documented exit statuses (port.md "Initial probe output"). Helpers
+/// return this type; `main` converts it to the process status once.
+const ExitStatus = enum(u8) {
+    ok = 0,
+    usage = 1,
+    invalid = 2,
+    unsupported = 3,
+    io = 4,
+    limit = 5,
+    canceled = 6,
+};
+
+/// Every error that reaches the exit-status mapping: probing a borrowed file
+/// or a path, and writing the report to stdout.
+const ProbeError = av.file.ReadError || std.Io.File.OpenError || std.Io.File.Writer.Error;
 
 /// Every resource is released before `main` returns its status.
 pub fn main(init: std.process.Init) u8 {
-    const args = init.minimal.args.toSlice(init.arena.allocator()) catch {
-        printError(init.io, "zffprobe: out of memory\n", .{});
-        return exit_limit;
-    };
-    return run(init.io, args);
+    return @backingInt(run(init));
 }
 
-fn run(io: std.Io, args: []const [:0]const u8) u8 {
+fn run(init: std.process.Init) ExitStatus {
+    const io = init.io;
+    const args = init.minimal.args.toSlice(init.arena.allocator()) catch {
+        printError(io, "zffprobe: out of memory\n", .{});
+        return .limit;
+    };
     if (args.len == 2 and (std.mem.eql(u8, args[1], "-h") or std.mem.eql(u8, args[1], "--help"))) {
         return writeStdout(io, help);
     }
     if (args.len != 2) {
         printError(io, usage, .{});
-        return exit_usage;
+        return .usage;
     }
     const path = args[1];
     var buffer: [av.file.default_buffer_len]u8 = undefined;
@@ -58,7 +67,7 @@ fn run(io: std.Io, args: []const [:0]const u8) u8 {
         av.file.probePath(io, std.Io.Dir.cwd(), path, &buffer, .{});
     const info = result catch |err| {
         printError(io, "zffprobe: {s}: {t}\n", .{ path, err });
-        return exitCode(err);
+        return exitStatus(err);
     };
 
     var report_buffer: [512]u8 = undefined;
@@ -91,28 +100,29 @@ fn writeReport(out: *std.Io.Writer, info: av.wav.Info) std.Io.Writer.Error!void 
     });
 }
 
-fn exitCode(err: anyerror) u8 {
+/// Contract errors map to their categories; every remaining platform error
+/// in `ProbeError` is an I/O failure.
+fn exitStatus(err: ProbeError) ExitStatus {
     return switch (err) {
-        error.InvalidRiff, error.InvalidWave, error.InvalidFormat, error.Truncated => exit_invalid,
-        error.UnsupportedFormat, error.UnsupportedStreamingSize => exit_unsupported,
+        error.InvalidRiff, error.InvalidWave, error.InvalidFormat, error.Truncated => .invalid,
+        error.UnsupportedFormat, error.UnsupportedStreamingSize => .unsupported,
         error.LimitExceeded,
-        error.OutOfMemory,
         error.SystemResources,
         error.ProcessFdQuotaExceeded,
         error.SystemFdQuotaExceeded,
-        => exit_limit,
-        error.Canceled => exit_canceled,
-        else => exit_io,
+        => .limit,
+        error.Canceled => .canceled,
+        else => .io,
     };
 }
 
 /// Writes `bytes` to stdout and flushes; returns the exit status.
-fn writeStdout(io: std.Io, bytes: []const u8) u8 {
+fn writeStdout(io: std.Io, bytes: []const u8) ExitStatus {
     std.Io.File.stdout().writeStreamingAll(io, bytes) catch |err| {
         printError(io, "zffprobe: cannot write output: {t}\n", .{err});
-        return exitCode(err);
+        return exitStatus(err);
     };
-    return exit_ok;
+    return .ok;
 }
 
 fn printError(io: std.Io, comptime fmt: []const u8, args: anytype) void {

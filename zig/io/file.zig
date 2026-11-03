@@ -147,8 +147,7 @@ test "files agree with memory for every fixture and buffer size" {
                 try std.testing.expectEqual(info.format.sample_rate, got.format.sample_rate);
                 try std.testing.expectEqual(info.format.layout, got.format.layout);
             } else |want| {
-                const err = if (result) |_| return error.TestExpectedError else |e| e;
-                try std.testing.expectEqualStrings(@errorName(want), @errorName(err));
+                try std.testing.expectError(want, result);
             }
         }
     }

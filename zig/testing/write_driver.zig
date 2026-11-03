@@ -24,22 +24,36 @@ const Container = enum { wav, au };
 /// large file into memory.
 const max_input_bytes = 1 << 20;
 
+/// The driver's own status contract (see the module docs); it does not share
+/// zffprobe's categories.
+const Status = enum(u8) {
+    ok = 0,
+    usage = 1,
+    failure = 2,
+};
+
 pub fn main(init: std.process.Init) u8 {
+    return @backingInt(run(init));
+}
+
+fn run(init: std.process.Init) Status {
     const io = init.io;
     const args = init.minimal.args.toSlice(init.arena.allocator()) catch {
         printError(io, "write-driver: out of memory\n", .{});
-        return 2;
+        return .failure;
     };
-    const container = if (args.len == 6) std.meta.stringToEnum(Container, args[1]) else null;
-    if (container == null) {
-        printError(io, usage, .{});
-        return 1;
-    }
-    write(io, init.gpa, container.?, args[2], args[3], args[4], args[5]) catch |err| {
+    if (args.len != 6) return usageError(io);
+    const container = std.meta.stringToEnum(Container, args[1]) orelse return usageError(io);
+    write(io, init.gpa, container, args[2], args[3], args[4], args[5]) catch |err| {
         printError(io, "write-driver: {t}\n", .{err});
-        return 2;
+        return .failure;
     };
-    return 0;
+    return .ok;
+}
+
+fn usageError(io: std.Io) Status {
+    printError(io, usage, .{});
+    return .usage;
 }
 
 fn write(

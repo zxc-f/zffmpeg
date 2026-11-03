@@ -288,6 +288,19 @@ fn decodeAll(reader: *std.Io.Reader, limits: Limits, storage: []i16) Error!Decod
     return .{ .format = info.format, .samples = storage[0..len] };
 }
 
+/// The parser error each fixture failure names. The manifest's `Failure` stays
+/// independent of the parser; this exhaustive switch is the only link.
+fn expectedError(failure: fixtures.au.Failure) Error {
+    return switch (failure) {
+        .InvalidAu => error.InvalidAu,
+        .InvalidFormat => error.InvalidFormat,
+        .Truncated => error.Truncated,
+        .UnsupportedFormat => error.UnsupportedFormat,
+        .UnsupportedStreamingSize => error.UnsupportedStreamingSize,
+        .LimitExceeded => error.LimitExceeded,
+    };
+}
+
 fn expectFixture(comptime fixture: fixtures.au.Fixture, reader: *std.Io.Reader) !void {
     var storage: [256]i16 = undefined;
     const result = decodeAll(reader, .{}, &storage);
@@ -301,16 +314,9 @@ fn expectFixture(comptime fixture: fixtures.au.Fixture, reader: *std.Io.Reader) 
             try std.testing.expectEqual(stream.sample_rate, decoded.format.sample_rate);
             try std.testing.expectEqualSlices(i16, stream.samples, decoded.samples);
         },
-        .reject => |failure| {
-            if (result) |_| {
-                std.debug.print("fixture {s}: accepted, expected error.{t}\n", .{ fixture.name, failure });
-                return error.TestExpectedError;
-            } else |err| {
-                if (!std.mem.eql(u8, @errorName(err), @tagName(failure))) {
-                    std.debug.print("fixture {s}: got error.{t}, expected error.{t}\n", .{ fixture.name, err, failure });
-                    return error.TestUnexpectedError;
-                }
-            }
+        .reject => |failure| std.testing.expectError(expectedError(failure), result) catch |err| {
+            std.debug.print("fixture {s}\n", .{fixture.name});
+            return err;
         },
     }
 }
@@ -342,10 +348,7 @@ test "probing validates without decoding and agrees with decoding" {
                 try std.testing.expectEqual(stream.sample_rate, info.format.sample_rate);
                 try std.testing.expectEqual(stream.samples.len / stream.channels, info.frame_count);
             },
-            .reject => |failure| {
-                const err = if (result) |_| return error.TestExpectedError else |e| e;
-                try std.testing.expectEqualStrings(@tagName(failure), @errorName(err));
-            },
+            .reject => |failure| try std.testing.expectError(expectedError(failure), result),
         }
     }
 }

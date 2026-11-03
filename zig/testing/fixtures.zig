@@ -11,8 +11,9 @@
 
 const std = @import("std");
 
-/// Errors of the first WAV contract (port.md). The names match the parser's
-/// error names exactly so tests can compare them with `@errorName`.
+/// Errors of the first WAV contract (port.md), named exactly as the parser's
+/// errors. This enum stays independent of the parser; the WAV tests map each
+/// tag to the expected error value with an exhaustive switch.
 pub const Failure = enum {
     InvalidRiff,
     InvalidWave,
@@ -129,14 +130,10 @@ fn expectHashes(comptime Contract: type) !void {
         var digest: [Sha256.digest_length]u8 = undefined;
         Sha256.hash(Contract.bytes(fixture.name), &digest, .{});
         const actual = std.fmt.bytesToHex(digest, .lower);
-        if (!std.mem.eql(u8, fixture.sha256, &actual)) {
-            std.debug.print("fixture {s}: manifest SHA-256 {s}, file SHA-256 {s}\n", .{
-                fixture.name,
-                fixture.sha256,
-                &actual,
-            });
-            return error.FixtureHashMismatch;
-        }
+        std.testing.expectEqualStrings(fixture.sha256, &actual) catch |err| {
+            std.debug.print("fixture {s}: the manifest SHA-256 differs from the file's\n", .{fixture.name});
+            return err;
+        };
     }
 }
 
