@@ -121,7 +121,7 @@ fn write(
     defer gpa.free(encoded);
     if (frames > 0) {
         const layout = try av.samples.Layout.init(codec.storage(), channels, frames, .{ .line = 1 });
-        _ = try av.pcm.encode(codec, try av.samples.Buffer.init(layout, raw), 0, frames, encoded);
+        _ = try av.pcm.encode(codec, try av.samples.View.init(layout, raw), 0, frames, encoded);
     }
 
     const file = try cwd.createFile(io, output_path, .{});

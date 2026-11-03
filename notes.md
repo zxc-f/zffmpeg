@@ -209,7 +209,8 @@ port.md's contract table updated, and (after T06) the parser.
 | Decision | Current choice and reason | To change it |
 | --- | --- | --- |
 | Kernels (T23a) | `resample/audioconvert.zig` reproduces libswresample's direct conversion (`full_convert`, no resampling, rematrixing or dither) for every pair of the twelve formats, bit-exact on the 232 vectors of the pinned libswresample, floats included: integer shifts, round-to-nearest-even int-to-float conversion times an exact power of two, and float-to-int `lrint` (half to even) with clipping. | `audioconvert.zig`, `sampleconv_vectors.c`. |
-| Undefined C cases | Where FFmpeg's `lrint`/`llrint` overflow (a product beyond the 64-bit range, like 1.0 to s64, which x86 turns into the most negative value) or see NaN, the result is platform-dependent; the port saturates and turns NaN into 0, and the vectors stay where C is defined. | `convertSample` and its tests. |
+| Undefined C cases | Where FFmpeg's `lrint`/`llrint` see NaN or overflow (a product beyond the 64-bit range, like 1.0 to s64), C is undefined; the port follows x86-64, the reference platform: the most negative 64-bit value, then FFmpeg's clipping (so NaN and +inf become -32768 in s16, as FFmpeg's x86 builds give and `compare.py` checks on the float fixtures). ARM builds of FFmpeg saturate instead, and Windows' 32-bit `long` also overflows for finite products from 2^31 to 2^63 in the u8 and s16 paths, which the port computes in 64 bits. | `toI64` in `audioconvert.zig` and its tests. |
+| Pipeline (T23a) | `Frame` holds any sample format; `pcm.Decoder` and `pcm.Encoder` take every codec in its storage, and `audioconvert.Converter` sits between them when the storages differ. `compare.py` checks every converted zffmpeg output by decoding it and FFmpeg's own conversion (as raw PCM of the codec) to the same samples. | `frame.zig`, `pcm.zig`, `convert.zig`, `check_converted`. |
 | Scope decisions | The project owner chose FFmpeg's automatic conversion to the output's default codec when transcoding, plus `-c:a` to pick another, and every dither method, noise shaping included. | TODO.md T23a; port.md. |
 
 ## Raw PCM contract
@@ -257,7 +258,7 @@ port.md's contract table updated, and (after T06) the parser.
 | `Alignment` union | `.sample_padding` and `.line = n` instead of FFmpeg's `align = 0` sentinel. | Same. |
 | Oracle from libavutil | The vectors come from calling the pinned FFmpeg's functions (a C generator), not from a reimplementation, and CI regenerates and diffs them. The generator is a reference tool; nothing of it enters the port. | `zig/testing/reference/samplefmt_vectors.c`, the reference job. |
 | LF vectors | The generator's output is stored with LF endings (`.gitattributes`), and MinGW's `\r\n` is stripped when generating on Windows, so both platforms give identical bytes. | `.gitattributes`, the reference README. |
-| s16-only users | The AU writer rejects other formats (`UnsupportedFormat`), the WAV writer rejects a storage that is not its codec's, `Frame.init` rejects them and the PCM stages assert them, so the larger enum cannot reach code that assumes s16. | T21a widened the WAV writer; T22a widens AU; T23a the stages. |
+| s16-only users | None since T23a: the writers check that the storage is their codec's, and `Frame` and the PCM stages take every format. | T21a widened the WAV writer, T22a AU, T23a the stages. |
 
 ## Packets, frames and stages
 

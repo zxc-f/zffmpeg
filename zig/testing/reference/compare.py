@@ -886,8 +886,8 @@ def compare_zffmpeg(args, lines, failures):
                     input_args = forced_input(fixture, container)
                 code, _, err = zffprobe_raw(args.zffmpeg, *input_args, "-i", path, *options, out)
                 output_codec = stream.codec if copy else S16_CODEC[output]
-                supported = (stream.codec in carried[output] if copy
-                             else stream.storage == "s16" and generate.CODEC_STORAGE[output_codec] == "s16")
+                # Since T23a any storage transcodes to the output's default codec.
+                supported = stream.codec in carried[output] if copy else True
                 if not supported:
                     rejected_total += 1
                     if code == 3 and b"UnsupportedOperation" in err and not out.exists():
@@ -915,7 +915,10 @@ def compare_zffmpeg(args, lines, failures):
                     # FFmpeg reads raw output with the stream's parameters.
                     output_args = (raw_input_args(output, (rate, channels)) if output in generate.RAW_FORMATS
                                    else output if output in ("au", "aiff") else None)
-                    lossy = codec != stream.codec and codec in ("pcm_alaw", "pcm_mulaw")
+                    # A G.711 encoding loses precision, and a storage change converts the
+                    # samples: either way the bytes must be FFmpeg's own conversion (T23a).
+                    lossy = codec != stream.codec and (codec in ("pcm_alaw", "pcm_mulaw")
+                                                       or generate.CAF_STORAGE[codec] != stream.storage)
                     if output == "wav" and frames == 0:
                         differences[("duration_ts", "N/A")] = "FFmpeg reads data size 0 as unknown length"
                     if output == "w64":
@@ -923,14 +926,14 @@ def compare_zffmpeg(args, lines, failures):
                     if output in generate.RAW_FORMATS and frames == 0:
                         differences[("duration_ts", "N/A")] = "FFmpeg gives an empty raw file no duration"
                     if lossy:
-                        # A-law and mu-law lose precision: the samples cannot be the
-                        # input's, so the bytes must be FFmpeg's own encoding.
                         if fixture.name in KNOWN_AU_DECODE_DIFFERENCES:
                             notes.append("lossy, and FFmpeg reads the input differently: not compared")
+                        elif frames == 0:
+                            notes.append("empty: nothing to convert")
                         else:
-                            problems += check_ffmpeg_conversion(args, path, input_args, out, output, copy, work)
+                            problems += check_converted(args, path, input_args, out, output, output_args, codec, work)
                             if not problems:
-                                notes.append("lossy: equal to FFmpeg's own encoding")
+                                notes.append("converted: the samples of FFmpeg's own conversion")
                     elif output == "w64" and frames == 0:
                         probe_code, _, _ = ffprobe(args.ffprobe, out)
                         z_code, z_fields, _ = zffprobe(args.zffprobe, out)
@@ -977,6 +980,36 @@ def compare_zffmpeg(args, lines, failures):
 # s16le (lossless transcoding), A-law (lossy transcoding) and f64be (copy only).
 ZFFMPEG_OUTPUTS = ("wav", "w64", "au", "aiff", "s16le", "alaw", "f64be")
 
+
+def check_converted(args, path, input_args, out, output, output_args, codec, work):
+    """A transcode that converts the sample format or encodes G.711 (T23a):
+    zffmpeg's output must hold `codec` and decode, in FFmpeg, to the samples
+    of FFmpeg's own conversion of the same input (`-bitexact -c:a <codec>`),
+    written as raw PCM of that codec, so no container header (FFmpeg's Wave64
+    counts its padding as samples) gets in the way. Returns the problems."""
+    raw_format = next((fmt for fmt, c in generate.RAW_FORMATS.items() if c == codec), None)
+    reference = work / "ffmpeg-converted.raw"
+    container = raw_format or output
+    process = run(args.ffmpeg, "-v", "error", "-nostdin", "-y", *input_args, "-i", path, "-bitexact",
+                  "-c:a", codec, "-f", container, reference)
+    if process.returncode != 0:
+        return [f"ffmpeg's own conversion failed: {first_line(text(process.stderr))}"]
+    storage = generate.CAF_STORAGE[codec]
+    code, fields, err = ffprobe(args.ffprobe, out, output_args)
+    if code != 0 or fields.get("codec_name") != codec:
+        return [f"ffprobe reads {fields.get('codec_name')} ({first_line(err)}), expected {codec}"]
+    if raw_format is not None:
+        rate, channels = int(fields["sample_rate"]), int(fields["channels"])
+        reference_args = raw_input_args(raw_format, (rate, channels))
+    else:
+        reference_args = output_args
+    ours_code, ours, ours_err = ffmpeg_decode(args.ffmpeg, out, output_args, storage)
+    theirs_code, theirs, theirs_err = ffmpeg_decode(args.ffmpeg, reference, reference_args, storage)
+    if ours_code != 0 or theirs_code != 0:
+        return [f"decoding failed: ours {first_line(ours_err)}, FFmpeg's {first_line(theirs_err)}"]
+    if ours != theirs:
+        return [f"samples differ from FFmpeg's own conversion ({len(ours)} and {len(theirs)} bytes)"]
+    return []
 
 def check_ffmpeg_conversion(args, path, input_args, out, output, copy, work):
     """The same conversion by FFmpeg (`-bitexact`, so no `encoder` tag), whose

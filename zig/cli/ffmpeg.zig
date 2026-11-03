@@ -6,7 +6,7 @@
 //! only) or raw PCM stream (TODO.md T13b, T21b, T22b, T22c, T22d).
 //!
 //!     zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate> | -ar <rate>]
-//!             [-ch_layout mono|stereo | -ac 1|2] -i <input | -> [-c copy] [-f <format>] <output | ->
+//!             [-ch_layout mono|stereo | -ac 1|2] -i <input | -> [-c copy|<encoder>] [-f <format>] <output | ->
 //!
 //! The input container is detected from content as FFmpeg's probing would
 //! (T16), with the file name's extension as FFmpeg's fallback for raw PCM
@@ -37,7 +37,7 @@ const status = @import("status.zig");
 const ExitStatus = status.ExitStatus;
 const printError = status.printError;
 
-const usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout mono|stereo] -i <input | -> [-c copy] [-f <format>] <output | ->\n";
+const usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout mono|stereo] -i <input | -> [-c copy|<encoder>] [-f <format>] <output | ->\n";
 const help = usage ++
     \\
     \\Converts one WAV, Wave64, AU, AIFF, CAF (input only) or raw PCM stream
@@ -49,7 +49,9 @@ const help = usage ++
     \\.aifc, .sb, .ub, .al, .ul, .sw). Formats: wav, w64, au, aiff and the raw
     \\formats u8, s8, s16le, s16be, s24le, s24be, s32le, s32be, f32le, f32be,
     \\f64le, f64be, alaw and mulaw.
-    \\-c copy keeps the encoded samples and needs the same codec on both sides.
+    \\-c copy keeps the encoded samples and needs the same codec on both sides;
+    \\-c <encoder> (such as pcm_s24le) picks the output codec, which the output
+    \\must carry. Transcoding converts the sample format as FFmpeg does.
     \\-y replaces an existing output; without it (or with -n) an existing output
     \\is an error.
     \\Exit codes: 0 success, 1 usage, 2 invalid or truncated media,
@@ -70,6 +72,8 @@ const Command = struct {
     /// The `-f` value after `-i`, if any; resolved by `outputContainer`.
     format: ?[]const u8,
     mode: av.convert.Mode,
+    /// The `-c` encoder, when it names one rather than `copy`.
+    encoder: ?av.pcm.Codec,
     overwrite: bool,
 };
 
@@ -140,6 +144,7 @@ fn run(init: std.process.Init) ExitStatus {
     return convert(io, command, .{
         .output = container,
         .mode = command.mode,
+        .codec = command.encoder,
         .input = .{ .format = input_container, .raw = raw_params },
         .tags = .{ .gpa = init.gpa, .dictionary = &tags },
     });
@@ -156,7 +161,9 @@ fn parse(args: []const [:0]const u8) Parsed {
     var input_layout: ?[]const u8 = null;
     var input_channels: ?[]const u8 = null;
     var format: ?[]const u8 = null;
+    var codec_given = false;
     var copy = false;
+    var encoder: ?av.pcm.Codec = null;
     var yes = false;
     var no = false;
     var i: usize = 1;
@@ -198,9 +205,15 @@ fn parse(args: []const [:0]const u8) Parsed {
                 if (slot.* != null) return .{ .usage = .{ .reason = "given twice", .arg = arg } };
                 slot.* = value;
             } else {
-                if (copy) return .{ .usage = .{ .reason = "given twice", .arg = arg } };
-                if (!std.mem.eql(u8, value, "copy")) return .{ .usage = .{ .reason = "only -c copy is supported; got", .arg = value } };
-                copy = true;
+                if (codec_given) return .{ .usage = .{ .reason = "given twice", .arg = arg } };
+                codec_given = true;
+                if (std.mem.eql(u8, value, "copy")) {
+                    copy = true;
+                } else {
+                    // An encoder, as FFmpeg names it (T23a).
+                    const found = av.codecs.findEncoder(value) orelse return .{ .usage = .{ .reason = "unknown encoder", .arg = value } };
+                    encoder = found.codec;
+                }
             }
         } else if (arg.len > 1 and arg[0] == '-') {
             return .{ .usage = .{ .reason = "unknown option", .arg = arg } };
@@ -219,6 +232,7 @@ fn parse(args: []const [:0]const u8) Parsed {
         .input_channels = input_channels,
         .format = format,
         .mode = if (copy) .copy else .transcode,
+        .encoder = encoder,
         .overwrite = yes,
     } };
 }

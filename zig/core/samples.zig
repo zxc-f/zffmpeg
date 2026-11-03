@@ -105,6 +105,24 @@ pub const Layout = struct {
     }
 };
 
+/// Samples in a caller's read-only bytes, laid out by `layout`: what the
+/// encoders and the sample format conversion read (T23a).
+pub const View = struct {
+    layout: Layout,
+    /// At least `layout.size` bytes; only those are used.
+    bytes: []const u8,
+
+    pub fn init(layout: Layout, bytes: []const u8) error{BufferTooSmall}!View {
+        if (bytes.len < layout.size) return error.BufferTooSmall;
+        return .{ .layout = layout, .bytes = bytes[0..layout.size] };
+    }
+
+    /// All `linesize` bytes of plane `index`, padding included.
+    pub fn plane(view: View, index: u32) []const u8 {
+        return view.bytes[view.layout.planeOffset(index)..][0..view.layout.linesize];
+    }
+};
+
 /// Samples in a caller's bytes, laid out by `layout`. A view: it never owns
 /// `bytes`, and copying it copies only the view.
 pub const Buffer = struct {
@@ -121,6 +139,11 @@ pub const Buffer = struct {
     /// All `linesize` bytes of plane `index`, padding included.
     pub fn plane(buffer: Buffer, index: u32) []u8 {
         return buffer.bytes[buffer.layout.planeOffset(index)..][0..buffer.layout.linesize];
+    }
+
+    /// The same samples, read only.
+    pub fn view(buffer: Buffer) View {
+        return .{ .layout = buffer.layout, .bytes = buffer.bytes };
     }
 
     /// Writes silence over `count` samples per channel from `offset` (FFmpeg's

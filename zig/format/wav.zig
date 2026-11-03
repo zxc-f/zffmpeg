@@ -1724,7 +1724,7 @@ fn encodeExpected(comptime stream: fixtures.Stream, out: []u8) ![]const u8 {
     if (frames == 0) return out[0..0];
     const layout = try samples_storage.Layout.init(codec.storage(), stream.channels, frames, .{ .line = 1 });
     const buffer = try samples_storage.Buffer.init(layout, stored[0..raw.len]);
-    return pcm.encode(codec, buffer, 0, frames, out);
+    return pcm.encode(codec, buffer.view(), 0, frames, out);
 }
 
 test "the writer reproduces every writer-output fixture byte for byte" {

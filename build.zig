@@ -419,7 +419,7 @@ const ConvertCase = struct {
     stderr_contains: ?[]const u8 = null,
 };
 
-const zffmpeg_usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout mono|stereo] -i <input | -> [-c copy] [-f <format>] <output | ->\n";
+const zffmpeg_usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout mono|stereo] -i <input | -> [-c copy|<encoder>] [-f <format>] <output | ->\n";
 
 // The paired WAV and AU fixtures hold the same samples, so each is the exact
 // expected output of converting the other.
@@ -482,7 +482,6 @@ const convert_cases = [_]ConvertCase{
     // T21c: tags are carried into WAV, through files and pipes.
     .{ .name = "tags carried to WAV", .args = &.{"-i"}, .input = "info_tags", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_info_tags, .stderr = "" },
     .{ .name = "tags carried by copy from a pipe", .args = &.{ "-i", "-" }, .stdin_input = "info_tags", .tail = &.{ "-c", "copy", "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_info_tags, .stderr = "" },
-    .{ .name = "24-bit transcode is rejected", .args = &.{"-i"}, .input = "s24_stereo_48k_extensible", .tail = &.{ "-f", "au", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
     // T22a: AU carries A-law and mu-law too, so they copy between the containers.
     .{ .name = "A-law copy to AU", .args = &.{"-i"}, .input = "alaw_mono_8k", .tail = &.{ "-c", "copy", "-f", "au", "-" }, .exit_code = 0, .stdout = au_alaw_mono_8k, .stderr = "" },
     .{ .name = "24-bit copy to AU is rejected", .args = &.{"-i"}, .input = "s24_stereo_48k_extensible", .tail = &.{ "-c", "copy", "-f", "au", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
@@ -504,7 +503,10 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "an option after the output", .args = &.{ "-i", "a.wav", "b.wav", "-y" }, .exit_code = 1, .stderr_contains = "options after the output are not supported: -y\n" },
     .{ .name = "no output", .args = &.{ "-i", "a.wav" }, .exit_code = 1, .stderr_contains = "missing output\n" },
     .{ .name = "an unknown option", .args = &.{ "-i", "a.wav", "-ar", "8000", "b.wav" }, .exit_code = 1, .stderr_contains = "unknown option: -ar\n" },
-    .{ .name = "an encoder name", .args = &.{ "-i", "a.wav", "-c", "pcm_s16le", "b.wav" }, .exit_code = 1, .stderr_contains = "only -c copy is supported; got: pcm_s16le\n" },
+    .{ .name = "an unknown encoder", .args = &.{ "-i", "a.wav", "-c", "pcm_dvd", "b.wav" }, .exit_code = 1, .stderr_contains = "unknown encoder: pcm_dvd\n" },
+    // T23a: -c:a picks the encoder; the samples convert to its storage.
+    .{ .name = "24-bit WAV transcoded to 24 bits", .args = &.{"-i"}, .input = "s24_stereo_48k_extensible", .tail = &.{ "-c:a", "pcm_s24le", "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_s24_stereo, .stderr = "" },
+    .{ .name = "an encoder the output does not carry", .args = &.{"-i"}, .input = "mono_8k", .tail = &.{ "-c:a", "pcm_s16le", "-f", "au", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
     .{ .name = "a missing value", .args = &.{ "-i", "a.wav", "-f" }, .exit_code = 1, .stderr_contains = "missing value for: -f\n" },
     .{ .name = "standard output needs -f", .args = &.{ "-i", "a.wav", "-" }, .exit_code = 1, .stderr_contains = "-f is required when writing to standard output\n" },
     .{ .name = "an unsupported -f", .args = &.{ "-i", "a.wav", "-f", "mp3", "-" }, .exit_code = 3, .stderr = "zffmpeg: mp3: unsupported output format\n" },
@@ -529,7 +531,6 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "raw parameters for a WAV input", .args = &.{ "-ar", "8000", "-i" }, .input = "mono_8k", .tail = &.{ "-f", "wav", "-" }, .exit_code = 1, .stderr_contains = ": -sample_rate and -ch_layout apply only to raw PCM input\n" },
     .{ .name = "-ac with -ch_layout", .args = &.{ "-ac", "1", "-ch_layout", "mono", "-i", "a.raw", "b.wav" }, .exit_code = 1, .stderr_contains = "given twice: -ch_layout\n" },
     .{ .name = "an unsupported channel count", .set = .raw, .args = &.{ "-f", "s16le", "-ac", "6", "-i" }, .input = "raw_s16le_mono_8k", .tail = &.{ "-f", "wav", "-" }, .exit_code = 3, .stderr = "zffmpeg: 6: unsupported channel count\n" },
-    .{ .name = "raw f32 transcode is rejected", .set = .raw, .args = &.{ "-f", "f32le", "-i" }, .input = "raw_f32le_mono_8k", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
     // T22d: CAF is read only.
     .{ .name = "CAF copy to WAV", .set = .caf, .args = &.{"-i"}, .input = "caf_s16le_stereo_44k1", .tail = &.{ "-c", "copy", "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_stereo_44k1, .stderr = "" },
     .{ .name = "CAF copy to AU from a pipe", .set = .caf, .args = &.{ "-i", "-" }, .stdin_input = "caf_s16be_mono_8k", .tail = &.{ "-c", "copy", "-f", "au", "-" }, .exit_code = 0, .stdout = au_mono_8k, .stderr = "" },

@@ -19,8 +19,10 @@
 //!
 //! So every result is bit-exact with FFmpeg's on the inputs C defines. Where C
 //! leaves FFmpeg's `lrint`/`llrint` undefined (NaN, or a product beyond the
-//! 64-bit integer range, such as 1.0 to s64, which x86 turns into the most
-//! negative value), this file saturates instead, and NaN becomes 0.
+//! 64-bit range, such as 1.0 to s64), this file gives what x86-64, the
+//! reference platform, gives: the most negative 64-bit value, then clipped.
+//! (Windows' 32-bit `long` also overflows `lrint` for finite products from
+//! 2^31 to 2^63 in the u8 and s16 paths; this file computes those in 64 bits.)
 //! zig/testing/vectors/sampleconv.txt, printed by the pinned libswresample,
 //! checks every pair and layout. The kernels are scalar loops specialized at
 //! compile time per format pair; nothing allocates.
@@ -29,6 +31,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const audio = @import("../core/audio.zig");
 const samples = @import("../core/samples.zig");
+const stage = @import("../core/stage.zig");
+const Frame = @import("../core/frame.zig").Frame;
 
 /// Stored samples are in the target's byte order (T20a).
 const native_endian = builtin.cpu.arch.endian();
@@ -120,19 +124,20 @@ fn roundEven(x: anytype) @TypeOf(x) {
     return 2 * @round(x / 2);
 }
 
-/// `x`, an integral float, clipped to `[min, max]`; NaN is 0.
-fn clipToInt(comptime T: type, x: anytype, min: T, max: T) T {
+/// `llrint` of an already rounded float as x86-64 computes it, the
+/// reference platform: NaN and values outside the 64-bit range give the most
+/// negative value (the "integer indefinite"), which C leaves undefined.
+fn toI64(x: anytype) i64 {
     const F = @TypeOf(x);
-    if (std.math.isNan(x)) return 0;
-    const low: F = @floatFromInt(min);
-    // max + 1 is a power of two, exactly representable, unlike max itself.
-    const wide_max: i128 = max;
-    const high: F = @floatFromInt(wide_max + 1);
-    if (x <= low) return min;
-    if (x >= high) return max;
+    const limit: F = 9223372036854775808.0; // 2^63, exact
+    if (std.math.isNan(x) or x >= limit or x < -limit) return std.math.minInt(i64);
     return @intFromFloat(x);
 }
 
+/// FFmpeg's `av_clip` to `[min, max]`.
+fn clip(comptime T: type, value: i64, min: T, max: T) T {
+    return @intCast(std.math.clamp(value, min, max));
+}
 fn convertSample(comptime out: Kind, comptime in: Kind, value: in.Type()) out.Type() {
     const Out = out.Type();
     if (comptime !in.isFloat() and !out.isFloat()) return narrow(out, widen(in, value));
@@ -147,13 +152,16 @@ fn convertSample(comptime out: Kind, comptime in: Kind, value: in.Type()) out.Ty
     const F = in.Type();
     const one: F = 1;
     const rounded = roundEven(value * std.math.ldexp(one, out.bits() - 1));
-    if (comptime out == .u8) return @intCast(clipToInt(i64, rounded, -0x80, 0x7F) + 0x80);
-    return clipToInt(Out, rounded, std.math.minInt(Out), std.math.maxInt(Out));
+    const whole = toI64(rounded);
+    // u8 adds 128 before clipping, in 64 bits: the most negative value stays negative.
+    if (comptime out == .u8) return clip(u8, whole +| 0x80, 0, 0xFF);
+    if (comptime out == .s64) return whole;
+    return clip(Out, whole, std.math.minInt(Out), std.math.maxInt(Out));
 }
 /// Converts `count` samples per channel from `src` at `src_offset` into `dst`
 /// at `dst_offset`. Any formats, packed or planar; the channel counts must
 /// match, and the ranges must not overlap.
-pub fn convert(dst: samples.Buffer, src: samples.Buffer, dst_offset: u32, src_offset: u32, count: u32) void {
+pub fn convert(dst: samples.Buffer, src: samples.View, dst_offset: u32, src_offset: u32, count: u32) void {
     std.debug.assert(dst.layout.channels == src.layout.channels);
     const dst_start: u64 = dst_offset;
     const src_start: u64 = src_offset;
@@ -166,7 +174,7 @@ pub fn convert(dst: samples.Buffer, src: samples.Buffer, dst_offset: u32, src_of
     }
 }
 
-fn convertKinds(comptime out: Kind, comptime in: Kind, dst: samples.Buffer, src: samples.Buffer, dst_offset: u32, src_offset: u32, count: u32) void {
+fn convertKinds(comptime out: Kind, comptime in: Kind, dst: samples.Buffer, src: samples.View, dst_offset: u32, src_offset: u32, count: u32) void {
     const in_size = @sizeOf(in.Type());
     const out_size = @sizeOf(out.Type());
     const channels = dst.layout.channels;
@@ -186,6 +194,102 @@ fn convertKinds(comptime out: Kind, comptime in: Kind, dst: samples.Buffer, src:
             store(out, to[out_at..][0..out_size], convertSample(out, in, value));
         }
     }
+}
+
+/// Converts frames to another sample format, rate and layout unchanged, as a
+/// send/receive stage (core/stage.zig).
+///
+/// Holds at most one frame. A received frame borrows the caller's `storage`
+/// and stays valid until the next `send` or `reset`; its timestamp is the
+/// input's. A frame is read during `send` and not retained; a failed `send`
+/// consumes nothing and leaves the state unchanged.
+pub const Converter = struct {
+    in_format: audio.Format,
+    out_format: audio.Format,
+    storage: []u8,
+    pending: ?Frame = null,
+    state: stage.State = .accepting,
+
+    pub const Error = stage.SendError || error{
+        /// The frame's format is not the converter's input format.
+        FormatMismatch,
+        /// `storage` cannot hold the converted samples.
+        OutputTooSmall,
+    };
+
+    /// `in_format` and `out_format` must differ only in the sample format.
+    /// `storage` bounds the frame size: its samples, converted, must fit in
+    /// `storage.len` bytes.
+    pub fn init(in_format: audio.Format, out_format: audio.Format, storage: []u8) Converter {
+        std.debug.assert(in_format.sample_rate == out_format.sample_rate and in_format.layout == out_format.layout);
+        return .{ .in_format = in_format, .out_format = out_format, .storage = storage };
+    }
+
+    pub fn send(c: *Converter, frame: Frame) Error!stage.Send {
+        if (c.state != .accepting) return error.InputAfterEnd;
+        if (c.pending != null) return .full;
+        if (!std.meta.eql(frame.format, c.in_format)) return error.FormatMismatch;
+        const frames = frame.frameCount();
+        const out_len = frames * c.out_format.bytesPerFrame();
+        if (out_len > c.storage.len) return error.OutputTooSmall;
+        if (frames > 0) {
+            // Fewer than storage.len bytes, so the count fits in u32 for any
+            // storage a caller can hold.
+            const count = std.math.cast(u32, frames) orelse return error.OutputTooSmall;
+            const layout = samples.Layout.init(c.out_format.sample_format, c.out_format.channelCount(), count, .{ .line = 1 }) catch return error.OutputTooSmall;
+            const output = samples.Buffer.init(layout, c.storage) catch unreachable; // checked above
+            convert(output, frame.view(), 0, 0, count);
+        }
+        c.pending = .{ .format = c.out_format, .data = c.storage[0..out_len], .pts = frame.pts };
+        return .accepted;
+    }
+
+    pub fn finishInput(c: *Converter) void {
+        if (c.state == .accepting) c.state = .draining;
+    }
+
+    pub fn receive(c: *Converter) stage.Receive(Frame) {
+        if (c.pending) |frame| {
+            c.pending = null;
+            return .{ .output = frame };
+        }
+        switch (c.state) {
+            .accepting => return .need_input,
+            .draining, .drained => {
+                c.state = .drained;
+                return .drained;
+            },
+        }
+    }
+
+    pub fn reset(c: *Converter) void {
+        c.pending = null;
+        c.state = .accepting;
+    }
+};
+
+comptime {
+    stage.check(Converter, Frame, Frame);
+}
+
+test "the converter stage converts whole frames and keeps the timestamp" {
+    const in_format = try audio.Format.init(8000, 2, .s16);
+    const out_format = try audio.Format.init(8000, 2, .fltp);
+    var storage: [16]u8 = undefined;
+    var converter: Converter = .init(in_format, out_format, &storage);
+    const frame = try Frame.fromS16(in_format, &.{ 16384, -32768, 0, 8192 }, 7);
+    try std.testing.expectEqual(stage.Send.accepted, try converter.send(frame));
+    try std.testing.expectEqual(stage.Send.full, try converter.send(frame));
+    const out = converter.receive().output;
+    try std.testing.expectEqual(7, out.pts);
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&[_]f32{ 0.5, 0, -1, 0.25 }), out.data);
+    const mono = try audio.Format.init(8000, 1, .s16);
+    try std.testing.expectError(error.FormatMismatch, converter.send(try Frame.fromS16(mono, &.{1}, null)));
+    var small: [8]u8 = undefined;
+    var tight: Converter = .init(in_format, out_format, &small);
+    try std.testing.expectError(error.OutputTooSmall, tight.send(frame));
+    converter.finishInput();
+    try std.testing.expect(converter.receive() == .drained);
 }
 
 fn expectConverted(comptime out: Kind, comptime in: Kind, value: in.Type(), want: out.Type()) !void {
@@ -227,11 +331,13 @@ test "float to integer rounds half to even and clips" {
     try expectConverted(.s32, .dbl, -1.0, std.math.minInt(i32));
     try expectConverted(.s64, .dbl, -1.0, std.math.minInt(i64));
     try expectConverted(.s64, .dbl, 0.5, 1 << 62);
-    // Where C is undefined, this file saturates; NaN is 0.
-    try expectConverted(.s64, .flt, 1.0, std.math.maxInt(i64));
-    try expectConverted(.s16, .flt, std.math.inf(f32), 32767);
-    try expectConverted(.s16, .dbl, std.math.nan(f64), 0);
-    try expectConverted(.u8, .flt, std.math.nan(f32), 0x80);
+    // Where C is undefined, x86-64's most negative 64-bit value, clipped.
+    try expectConverted(.s64, .flt, 1.0, std.math.minInt(i64));
+    try expectConverted(.s16, .flt, std.math.inf(f32), -32768);
+    try expectConverted(.s16, .dbl, std.math.nan(f64), -32768);
+    try expectConverted(.u8, .flt, std.math.nan(f32), 0);
+    try expectConverted(.s32, .dbl, -std.math.inf(f64), std.math.minInt(i32));
+    try expectConverted(.s16, .flt, 65536.0, 32767); // in range for 64 bits
 }
 
 test "float to float rounds to nearest even" {
@@ -251,7 +357,7 @@ test "packed and planar buffers convert by channel, at any offset" {
     const out_layout = try samples.Layout.init(.fltp, 2, 4, .{ .line = 1 });
     var out_bytes: [32]u8 = @splat(0);
     const output = try samples.Buffer.init(out_layout, &out_bytes);
-    convert(output, input, 1, 0, 3);
+    convert(output, input.view(), 1, 0, 3);
     const left = [_]f32{ 0, 0, 0.5, -1.0 / 32768.0 };
     const right = [_]f32{ 0, -1, 32767.0 / 32768.0, 1.0 / 32768.0 };
     for (left, right, 0..) |l, r, i| {
@@ -373,7 +479,7 @@ test "every conversion equals the pinned libswresample's" {
         }
         const out_layout = try samples.Layout.init(out_format, 2, frames, .{ .line = 1 });
         const output = try samples.Buffer.init(out_layout, out_bytes);
-        convert(output, input, 0, 0, frames);
+        convert(output, input.view(), 0, 0, frames);
 
         // The digest is of little-endian samples.
         const out_width = out_format.bytesPerSample();
