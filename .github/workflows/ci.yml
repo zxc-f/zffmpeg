@@ -1,5 +1,6 @@
-# Linux checks for the Zig package and the FFmpeg reference comparison. Native
-# Windows CI is deferred; other targets are compiled but not run (TODO.md T11).
+# Linux checks for the Zig package and the FFmpeg reference comparison.
+# Development is verified on Linux only (TODO.md "Platform policy"); other
+# targets are compiled but not run, as a portability guard (TODO.md T62-T63).
 name: CI
 
 on:

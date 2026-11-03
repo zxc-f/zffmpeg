@@ -14,8 +14,9 @@ Current state: the first WAV/PCM path is complete. The `av` module (rooted at
 `zig/root.zig`) exports `pcm`, `audio`, `time`, `wav` (bounded parser and
 known-length writer) and `file` (file and pipe adapters); `zffprobe` is the
 first tool. Tests cover 52 fixtures, process runs of `zffprobe`, and a CI
-comparison against a pinned FFmpeg build. Native Windows runs are still
-outstanding (T11); T12 is next. When the state changes, update the current-state
+comparison against a pinned FFmpeg build. Verification is Linux-only during
+development; Windows and ARM wait for T62–T63. T12 is next, and TODO.md lays out
+the roadmap through T64. When the state changes, update the current-state
 statements in README.md, port.md ("Status and scope"), the TODO.md introduction
 and this file together.
 
@@ -39,10 +40,12 @@ zig test zig/examples/io_patterns.zig        # one standalone example, without t
 python3 zig/testing/fixtures/generate.py --check   # WAV fixtures are current (Python 3, stdlib only)
 ```
 
-[.github/workflows/ci.yml](.github/workflows/ci.yml) (Linux only; native Windows
-CI is deferred to T11) runs the version check, formatting, the fixture
-`--check`, a check that every `zig/examples/*.zig` is registered in `build.zig`, `zig build` in Debug and
-ReleaseSafe, and `zig build test` in Debug, ReleaseSafe and ReleaseFast. If no
+[.github/workflows/ci.yml](.github/workflows/ci.yml) (Linux only; see the
+[platform policy](#platform-policy-and-portable-zig-code)) runs the version
+check, formatting, the fixture `--check`, a check that every
+`zig/examples/*.zig` is registered in `build.zig`, `zig build` in Debug and
+ReleaseSafe, `zig build test` in Debug, ReleaseSafe and ReleaseFast, a
+compile-only cross build, and the FFmpeg reference comparison. If no
 local Zig 0.17.0 is available, the pull request's CI run is the verification;
 never report local results that were not run. CI also runs on a branch without
 a pull request through `workflow_dispatch`. The C reference uses `configure` and
@@ -90,7 +93,7 @@ package manifest and per-file provenance.
     `testing/` created only when their first feature lands.
   - "Provenance and feature tracking": ledger statuses are planned,
     implemented, verified and optimized.
-- [TODO.md](TODO.md): ordered tasks T01–T13 with stable IDs, dependencies and
+- [TODO.md](TODO.md): ordered tasks T01–T64 with stable IDs, dependencies and
   "Done when" criteria. Check an item only with an evidence note naming the
   files and checks run (for CI, the run link); keep unfinished items unchecked
   with what remains. Update the port.md ledger when a whole capability changes.
@@ -156,6 +159,45 @@ and existing user changes.
   backpressure. Preserve timestamp, rounding, draining, and seek semantics.
 - Implement portable scalar behavior first. Add SIMD or architecture-specific
   kernels only with comparisons against the scalar implementation.
+
+## Platform policy and portable Zig code
+
+During development every task is verified on Linux x86-64 only (TODO.md
+"Platform policy"). CI's native runs in Debug, ReleaseSafe and ReleaseFast and
+the FFmpeg reference job are the evidence. Windows, ARM and macOS runs wait for
+TODO.md T62–T63: do not add them to CI or claim them before then. CI also
+cross-compiles for x86_64-windows-gnu, aarch64-linux-musl and aarch64-macos as
+a compile-only guard; keep it green.
+
+### Portable Zig code
+
+Write code that will pass on Windows and ARM later without rework:
+
+- Reach the OS only through `std.Io` (files, directories, stdio, clocks,
+  cancellation, concurrency) and `std.process.Init` (arguments, `environ_map`,
+  `io`, `gpa`). Do not import `std.os.linux`, call `std.posix` directly, link
+  libc, or use fork/exec, signals, `ioctl` or `mmap`. If a feature truly needs
+  an OS facility, put it behind a `zig/io/` adapter with a portable fallback.
+- Treat paths as opaque arguments opened relative to a `std.Io.Dir`, and build
+  new ones with `std.fs.path`. Never hard-code `/` separators, `/dev/*`,
+  `/proc`, `/tmp` or `~`. Tests use `std.testing.tmpDir`; `-` means standard
+  input.
+- Do not rely on case-sensitive names, symlinks, permission bits, deleting or
+  renaming open files, a seekable or terminal stdin, or console encoding. Write
+  `\n` and format numbers with `std.fmt`.
+- Keep byte order explicit (`.little`/`.big`). Never reinterpret byte buffers
+  as native-endian integers or structs.
+- Use fixed-width integers for file offsets, sizes and sample or frame counts.
+  Keep `usize` for in-memory indexing and convert with checks
+  (`std.math.cast`), so 32-bit targets cannot overflow silently.
+- Write SIMD as portable `@Vector` code next to a scalar reference. No inline
+  assembly or target intrinsics until the platform milestone; guard any
+  target-specific choice with `builtin` and keep a fallback.
+- Assert OS-specific error names only in tests gated on `builtin.os.tag`, next
+  to a portable assertion, as [zig/io/file.zig](zig/io/file.zig) does.
+- Keep `build.zig` free of system libraries and shell commands; run processes
+  through `std.Build.Step.Run`. Test helpers are Zig or standard-library
+  Python. Bash is limited to the Linux-only FFmpeg reference tooling.
 
 ## Zig 0.17 I/O and test patterns
 

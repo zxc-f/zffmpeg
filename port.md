@@ -13,7 +13,8 @@ fixtures with expected results ([zig/testing/fixtures](zig/testing/fixtures/READ
 and CI compares them with a pinned FFmpeg build
 ([zig/testing/reference](zig/testing/reference/README.md)). This standalone
 repository tracks the port's own files. FFmpeg in `.references/ffmpeg` remains
-the behavioral reference. Native Windows runs are outstanding (T11); T12 is next.
+the behavioral reference. Verification is Linux-only during development;
+Windows and ARM wait for the platform milestone (TODO.md T62–T63). T12 is next.
 
 The goal is a native Zig multimedia library and tools, built incrementally from
 FFmpeg's functionality. Use idiomatic Zig APIs and explicit resource ownership.
@@ -593,6 +594,10 @@ Progress is measured by working, tested behavior, not by translated file counts.
 | 5 — next compressed slice | Select one end-to-end path based on needs, such as MP3 demux/decode; scope AAC, H.264 and MP4/Matroska separately. | Document the chosen profiles, parser/demux dependencies, seek/error/drain behavior and reference comparisons. |
 | 6 — optimization/platforms | SIMD, threading, hardware and devices; broader CLI/API adapters. | Scalar comparisons, benchmarks, CPU fallback checks, platform integration tests and explicit compatibility claims. |
 
+[TODO.md](TODO.md#roadmap-to-a-nearly-complete-port) breaks phases 3–6 into
+milestones 4–12 (T14–T64), with dependencies, upstream references and
+completion criteria, and lists what is not planned.
+
 Later slices start with native implementations and no external codec libraries.
 Choose the dependency policy explicitly before a format requiring compression
 support, such as PNG; a zlib binding must not silently count as a native port.
@@ -697,10 +702,10 @@ Linux runners and also executes Windows binaries through Wine. Its broad FATE
 configuration enables GPL/nonfree components. This project instead uses a
 dedicated minimal GitHub Actions [Linux workflow](.github/workflows/ci.yml),
 which builds and tests the package in every mode and runs the reference
-comparison.
-Native Windows CI is deferred; until a Windows job exists, Windows evidence
-comes only from recorded local runs. Neither Wine nor a cross-compile
-substitutes for a native run.
+comparison. Development is verified on Linux only by decision (TODO.md
+"Platform policy"): native Windows and ARM runs start in the platform milestone
+(T62–T63), and code stays portable meanwhile (CLAUDE.md "Portable Zig code").
+Neither Wine nor a cross-compile substitutes for a native run.
 
 Use format specifications and independent hand-checked vectors alongside the
 C reference. A mismatch needs investigation; agreeing with an upstream bug is
@@ -722,8 +727,10 @@ particularly stricter malformed-input handling and unsupported features.
 - Feed identical data in different chunk sizes, including one byte at a time;
   results must be independent of I/O chunk boundaries. Run non-seekable cases
   separately from seekable input and report which behaviors require seeking.
-- Add native Windows and Linux validation early; cross-compilation alone does
-  not validate OS behavior. Compile additional targets as modules mature.
+- Validate natively on Linux during development; Windows and ARM validation
+  comes in the platform milestone (TODO.md T62–T63), once the code is more
+  complete. Cross-compilation alone does not validate OS behavior, but CI
+  compiles Windows and AArch64 targets to catch Linux-only APIs early.
 
 Use Debug and ReleaseSafe during implementation; exercise optimized builds with
 malformed inputs before release. Explicit parser checks must work when runtime
@@ -865,6 +872,11 @@ language/build documentation; review suggestions are not themselves evidence.
   synchronization. `cleanExit` is success-only and a no-op in Debug builds.
 - Reference CI: FFmpeg's workflow has Wine coverage but no native Windows
   runner, so it supplies no native Windows evidence for this project.
+- Adopted on 2026-11-03: development is verified on Linux x86-64 only. Windows,
+  ARM and macOS verification moves to TODO.md T62–T63, when the code is more
+  complete; new code follows CLAUDE.md "Portable Zig code" so that those runs
+  find little to fix, and CI keeps compile-only Windows and AArch64 builds as a
+  guard.
 - Not adopted: a mandatory T07 split into a custom incremental state machine,
   or indiscriminate license tagging. Known-size sequential input uses the same
   blocking Reader parser; nonblocking resumability remains a separate capability.

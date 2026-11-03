@@ -784,4 +784,5 @@ by casting the file to a slice.
 - `find` / `trimStart` / `allocator.print` / `@fromBackingInt` / `@trunc`.
 - Overflowing size math uses `std.math.mul` / `add`, not `+%` and not a bare `+` that is only safe in Debug.
 - Tests do not print to stdout. `expectEqual` needs no `@as`; peer type resolution types both arguments.
+- No OS-specific code: no `std.os.linux`, direct `std.posix` calls or libc; no hard-coded `/` paths; explicit byte order; fixed-width integers for sizes and counts. See CLAUDE.md "Portable Zig code".
 - If a snippet's first line is `const std = @import("std");` and its second line could have been written in 0.13, it is not done.

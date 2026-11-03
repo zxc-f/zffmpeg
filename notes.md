@@ -27,7 +27,7 @@ When you make a new revisable decision, add it here in the same change.
 
 | Decision | Current choice and reason | To change it |
 | --- | --- | --- |
-| Platforms | Linux only (`ubuntu-24.04`). Native Windows CI is deferred (T11). | Add a `windows-latest` job, or a recorded local Windows script, when Windows evidence is needed. |
+| Platforms | Linux x86-64 only (`ubuntu-24.04`) during development, decided on 2026-11-03: every task's evidence comes from Linux runs. Windows, ARM and macOS runs wait until the code is more complete. New code follows CLAUDE.md "Portable Zig code", and a compile-only cross build for x86_64-windows-gnu, aarch64-linux-musl and aarch64-macos catches Linux-only APIs. | Start TODO.md T62 (Windows) and T63 (ARM, macOS, big-endian) when the Linux-only phase ends; update the platform policy in TODO.md and CLAUDE.md together. |
 | Build modes | `zig build` in Debug and ReleaseSafe; `zig build test` in Debug, ReleaseSafe and ReleaseFast. ReleaseFast runs without safety checks, so parser checks must be explicit. | `.github/workflows/ci.yml`. |
 | Actions | `actions/checkout` v6.1.0 and `mlugg/setup-zig` v2.2.1, pinned by commit SHA. `setup-zig` targets Node 20, which GitHub runs on Node 24 with a deprecation warning. | Bump both SHAs together when a newer `setup-zig` release targets Node 24. |
 | Example tests | Standalone per-file `zig test` loops were dropped from CI; `zig build test` covers the examples. | Re-add them if examples ever depend on build options. |

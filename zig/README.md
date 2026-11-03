@@ -51,7 +51,8 @@ the version check, formatting, the fixture `--check`, a compile-only cross build
 for Windows, AArch64 Linux and AArch64 macOS, `zig build` in Debug and ReleaseSafe, and `zig build test` in Debug,
 ReleaseSafe and ReleaseFast. `reference` builds the pinned FFmpeg with Clang and
 compares every fixture with it ([testing/reference](testing/reference/README.md)).
-Native Windows CI is deferred (T11).
+Development is verified on Linux only; the cross build is a portability guard,
+not a test run. Windows and ARM runs wait for TODO.md T62–T63.
 
 ## Build graph
 

@@ -8,8 +8,9 @@ Current state: the first complete path works. The `av` library reads and writes
 signed 16-bit PCM WAV (bounded parser, known-length writer, file and pipe
 adapters), and the `zffprobe` tool validates a WAV file and reports its stream.
 Both are checked against 52 fixtures and against a pinned FFmpeg build in CI
-(Linux). Other codecs, containers and a conversion tool are still planned. The
-compiler is **Zig 0.17.0**, enforced by the build.
+(Linux). Other codecs, containers and a conversion tool are still planned;
+[TODO.md](TODO.md) lays out the roadmap. Development is verified on Linux
+only. The compiler is **Zig 0.17.0**, enforced by the build.
 
 ## Project files
 
@@ -99,7 +100,10 @@ The [Linux CI workflow](.github/workflows/ci.yml) runs the version check,
 formatting, the fixture check (`python3 zig/testing/fixtures/generate.py --check`),
 `zig build` in Debug and ReleaseSafe, and `zig build test` in
 Debug, ReleaseSafe and ReleaseFast on every pull request and push to `master`.
-Native Windows CI is deferred; see T11 in [TODO.md](TODO.md).
+Development is verified on Linux only; Windows and ARM come later (see the
+platform policy in [TODO.md](TODO.md#platform-policy-linux-only-during-development)).
+New code stays portable, and CI compiles Windows and AArch64 targets without
+running them.
 
 The I/O example tests exercise memory and file adapters, fragmented input,
 truncation, generic and file-specific I/O failure, and output capacity. The PCM
