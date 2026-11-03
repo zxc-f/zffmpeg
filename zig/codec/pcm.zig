@@ -102,7 +102,9 @@ pub const Decoder = struct {
     };
 
     /// `storage` bounds the packet size: at most `storage.len` samples.
+    /// `format` must store packed s16, which the frames carry.
     pub fn init(endian: std.lang.Endian, format: audio.Format, storage: []i16) Decoder {
+        std.debug.assert(format.sample_format == .s16);
         return .{ .endian = endian, .format = format, .storage = storage };
     }
 
@@ -166,7 +168,9 @@ pub const Encoder = struct {
     };
 
     /// `storage` bounds the frame size: at most `storage.len` bytes encoded.
+    /// `format` must store packed s16, which the frames carry.
     pub fn init(endian: std.lang.Endian, format: audio.Format, storage: []u8) Encoder {
+        std.debug.assert(format.sample_format == .s16);
         return .{ .endian = endian, .format = format, .storage = storage };
     }
 

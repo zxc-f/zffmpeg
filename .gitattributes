@@ -1,2 +1,5 @@
 # Fixture data must stay byte-exact on every platform.
 *.wav binary
+*.au binary
+# Oracle vectors are compared line by line; keep one line ending everywhere.
+zig/testing/vectors/*.txt text eol=lf

@@ -2,11 +2,11 @@
 // Original file for this project; not translated from FFmpeg source.
 // Layout and sample-format names follow libavutil/channel_layout.h and
 // samplefmt.c at the pinned reference revision; see port.md.
-//! Audio stream descriptions for the first PCM path: sample rate, channel
-//! layout and order, sample format, and borrowed interleaved samples.
+//! Audio stream descriptions: sample rate, channel layout and order, sample
+//! format (storage, T20a), and borrowed interleaved samples.
 //!
-//! Only what WAV/PCM s16 needs exists here. Policy limits such as the WAV
-//! parser's 192 kHz cap belong to the parser, not to these types.
+//! Layouts are only mono and stereo so far (T23b). Policy limits such as the
+//! WAV parser's 192 kHz cap belong to the parser, not to these types.
 
 const std = @import("std");
 const time = @import("time.zig");
@@ -46,19 +46,84 @@ pub const ChannelLayout = enum {
     }
 };
 
+/// How decoded samples are stored (TODO.md T20a): a sample type, packed
+/// (channels interleaved in one plane) or planar (one plane per channel). This
+/// is storage only, separate from codec identity and from what a container
+/// carries. Tags are FFmpeg's names; FFmpeg's `dsd` is not supported.
 pub const SampleFormat = enum {
-    /// Signed 16-bit, interleaved (FFmpeg `s16`).
+    /// Unsigned 8-bit, packed; silence is 0x80.
+    u8,
+    /// Signed 16-bit, packed.
     s16,
+    s32,
+    s64,
+    /// 32-bit float, packed (FFmpeg `flt`).
+    flt,
+    /// 64-bit float, packed (FFmpeg `dbl`).
+    dbl,
+    /// The planar forms of the same types.
+    u8p,
+    s16p,
+    s32p,
+    s64p,
+    fltp,
+    dblp,
 
     pub fn bytesPerSample(format: SampleFormat) u8 {
         return switch (format) {
-            .s16 => 2,
+            .u8, .u8p => 1,
+            .s16, .s16p => 2,
+            .s32, .s32p, .flt, .fltp => 4,
+            .s64, .s64p, .dbl, .dblp => 8,
         };
+    }
+
+    /// One plane per channel, rather than channels interleaved in one plane.
+    pub fn isPlanar(format: SampleFormat) bool {
+        return switch (format) {
+            .u8, .s16, .s32, .s64, .flt, .dbl => false,
+            .u8p, .s16p, .s32p, .s64p, .fltp, .dblp => true,
+        };
+    }
+
+    /// The packed form of the same sample type.
+    pub fn packedForm(format: SampleFormat) SampleFormat {
+        return switch (format) {
+            .u8, .u8p => .u8,
+            .s16, .s16p => .s16,
+            .s32, .s32p => .s32,
+            .s64, .s64p => .s64,
+            .flt, .fltp => .flt,
+            .dbl, .dblp => .dbl,
+        };
+    }
+
+    /// The planar form of the same sample type.
+    pub fn planarForm(format: SampleFormat) SampleFormat {
+        return switch (format) {
+            .u8, .u8p => .u8p,
+            .s16, .s16p => .s16p,
+            .s32, .s32p => .s32p,
+            .s64, .s64p => .s64p,
+            .flt, .fltp => .fltp,
+            .dbl, .dblp => .dblp,
+        };
+    }
+
+    /// The byte every byte of a silent sample holds: 0x80 for unsigned 8-bit,
+    /// 0 otherwise (all-zero is also 0.0 for both float types).
+    pub fn silenceByte(format: SampleFormat) u8 {
+        return if (format.packedForm() == .u8) 0x80 else 0;
     }
 
     /// FFmpeg's sample-format name, as used in probe output.
     pub fn name(format: SampleFormat) []const u8 {
         return @tagName(format);
+    }
+
+    /// The format FFmpeg calls `text`, or `null`.
+    pub fn fromName(text: []const u8) ?SampleFormat {
+        return std.meta.stringToEnum(SampleFormat, text);
     }
 };
 

@@ -10,6 +10,9 @@
 //!   interleaved samples (`core/audio.zig`).
 //! - `time`: time bases and FFmpeg-compatible timestamp rescaling
 //!   (`core/time.zig`).
+//! - `samples`: decoded sample storage for every sample format, packed or
+//!   planar: buffer sizes, plane offsets, silence and copying
+//!   (`core/samples.zig`).
 //! - `packet`, `frame`: encoded packets and decoded audio frames, as views
 //!   with explicit `clone`d ownership (`core/packet.zig`, `core/frame.zig`).
 //! - `stage`: the send/receive contract of buffering stages, which
@@ -31,6 +34,7 @@
 pub const pcm = @import("codec/pcm.zig");
 pub const audio = @import("core/audio.zig");
 pub const time = @import("core/time.zig");
+pub const samples = @import("core/samples.zig");
 pub const packet = @import("core/packet.zig");
 pub const frame = @import("core/frame.zig");
 pub const stage = @import("core/stage.zig");
@@ -44,6 +48,7 @@ test {
     _ = @import("codec/pcm.zig");
     _ = @import("core/audio.zig");
     _ = @import("core/time.zig");
+    _ = @import("core/samples.zig");
     _ = @import("core/packet.zig");
     _ = @import("core/frame.zig");
     _ = @import("core/stage.zig");

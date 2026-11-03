@@ -20,8 +20,10 @@ pub const Frame = struct {
     /// Presentation time in `format.timeBase()` units, or `null` when unknown.
     pts: ?i64 = null,
 
-    /// Checks that `samples` holds whole frames of `format`.
-    pub fn init(format: audio.Format, samples: []const i16, pts: ?i64) error{IncompleteFrame}!Frame {
+    /// Checks that `format` stores packed s16, the samples' type, and that
+    /// `samples` holds whole frames of it.
+    pub fn init(format: audio.Format, samples: []const i16, pts: ?i64) error{ UnsupportedSampleFormat, IncompleteFrame }!Frame {
+        if (format.sample_format != .s16) return error.UnsupportedSampleFormat;
         if (samples.len % format.channelCount() != 0) return error.IncompleteFrame;
         return .{ .format = format, .samples = samples, .pts = pts };
     }
@@ -55,6 +57,8 @@ pub const Frame = struct {
 test "a frame holds whole frames and counts them" {
     const stereo = try audio.Format.init(44100, 2, .s16);
     try std.testing.expectError(error.IncompleteFrame, Frame.init(stereo, &.{ 1, 2, 3 }, null));
+    const planar = try audio.Format.init(44100, 2, .s16p);
+    try std.testing.expectError(error.UnsupportedSampleFormat, Frame.init(planar, &.{ 1, 2 }, null));
     const frame = try Frame.init(stereo, &.{ 1, 2, 3, 4 }, 10);
     try std.testing.expectEqual(2, frame.frameCount());
     try std.testing.expectEqual(10, frame.pts);

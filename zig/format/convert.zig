@@ -276,6 +276,7 @@ fn Transcoder(comptime W: type) type {
 fn outputFailure(err: wav.WriteError) std.Io.Writer.Error {
     return switch (err) {
         error.WriteFailed => error.WriteFailed,
+        error.UnsupportedFormat,
         error.InvalidFormat,
         error.LimitExceeded,
         error.SizeOverflow,

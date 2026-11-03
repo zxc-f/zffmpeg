@@ -116,6 +116,13 @@ jobs:
           echo "fixtures $(cat zig/testing/fixtures/wav/*.wav | sha256sum)"
           echo "au fixtures $(cat zig/testing/fixtures/au/*.au | sha256sum)"
 
+      # The committed T20a oracle must be what this FFmpeg build prints.
+      - name: Check the sample-format vectors (T20a)
+        run: |
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/samplefmt_vectors.c \
+            .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o samplefmt-vectors
+          ./samplefmt-vectors | diff -u zig/testing/vectors/samplefmt.txt -
+
       - name: Build zffprobe, zffmpeg and the test tools
         run: zig build -Doptimize=ReleaseSafe install test-tools
 

@@ -287,6 +287,8 @@ pub fn decodeToRaw(reader: *std.Io.Reader, out: *std.Io.Writer, limits: Limits) 
 
 /// The header checks `Writer.check` and `Writer.begin` share.
 pub const HeaderError = error{
+    /// The sample format is not `s16` (the only one written so far, T21a).
+    UnsupportedFormat,
     /// A zero sample rate.
     InvalidFormat,
     /// The sample rate is above `Limits.max_sample_rate`.
@@ -329,6 +331,7 @@ pub const Writer = struct {
     }
 
     fn encodeHeader(format: audio.Format, frame_count: u64, limits: Limits) HeaderError![canonical_header_len]u8 {
+        if (format.sample_format != .s16) return error.UnsupportedFormat;
         if (format.sample_rate == 0) return error.InvalidFormat;
         if (format.sample_rate > limits.max_sample_rate) return error.LimitExceeded;
         const frame_bytes = format.bytesPerFrame();
@@ -612,6 +615,8 @@ test "the writer checks every size before writing the header" {
     try std.testing.expectError(error.LimitExceeded, Writer.begin(&out, fast, 0, .{}));
     const zero_rate: audio.Format = .{ .sample_rate = 0, .layout = .mono, .sample_format = .s16 };
     try std.testing.expectError(error.InvalidFormat, Writer.begin(&out, zero_rate, 0, .{}));
+    const floats = try audio.Format.init(8000, 1, .flt);
+    try std.testing.expectError(error.UnsupportedFormat, Writer.begin(&out, floats, 0, .{}));
     try std.testing.expectEqual(0, out.buffered().len);
 
     _ = try Writer.begin(&out, mono, max_frames, .{});
