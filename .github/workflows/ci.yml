@@ -41,6 +41,9 @@ jobs:
             exit 1
           }
 
+      - name: Check that the WAV fixtures are current
+        run: python3 zig/testing/fixtures/generate.py --check
+
       - name: Require every example to be registered in build.zig
         run: |
           for f in zig/examples/*.zig; do

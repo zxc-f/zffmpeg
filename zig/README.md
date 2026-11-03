@@ -40,8 +40,12 @@ with no matching tests runs zero tests and passes. Build output goes to
 `zig-out/` and `.zig-cache/`, both ignored by Git. A single example also still
 runs on its own with `zig test zig/examples/<name>.zig`.
 
+Python 3 (standard library only) is needed only to regenerate the WAV fixtures
+with `python3 zig/testing/fixtures/generate.py`; building and testing do not
+need it.
+
 The [Linux CI workflow](../.github/workflows/ci.yml) runs the version check,
-formatting, `zig build` in Debug and ReleaseSafe, and `zig build test` in Debug,
+formatting, the fixture `--check`, `zig build` in Debug and ReleaseSafe, and `zig build test` in Debug,
 ReleaseSafe and ReleaseFast. Native Windows CI is deferred (T11).
 
 ## Build graph
@@ -61,7 +65,9 @@ ReleaseSafe and ReleaseFast. Native Windows CI is deferred (T11).
   CI fails when a file in `examples/` is missing from that list.
 - **Tests inside `av`:** Zig analyzes lazily, so a file's tests run only when
   `root.zig` references that file from a `test` block. Add the reference with
-  each new file.
+  each new file. `root.zig` already references `testing/fixtures.zig`, which
+  imports `testing/fixtures/manifest.zon` and embeds every fixture, so a missing
+  or changed fixture fails `zig build test`.
 - **Targets:** `-Dtarget` and `-Doptimize` come from `standardTargetOptions` and
   `standardOptimizeOption`. The test step runs on the host; cross-target
   compilation needs its own step and is not native-run evidence.
@@ -90,6 +96,8 @@ C compiler play no part in the native build.
 | File | License | Origin |
 | --- | --- | --- |
 | `build.zig`, `build.zig.zon`, `zig/root.zig` | `LGPL-2.1-or-later` (SPDX header) | Original project files. The build structure follows the Zig 0.17 build-system guide and port.md; no code is copied. |
+| `zig/testing/fixtures.zig`, `zig/testing/fixtures/generate.py` | `LGPL-2.1-or-later` (SPDX header) | Original project files. |
+| `zig/testing/fixtures/wav/*.wav`, `manifest.zon` | Generated data | Written by `generate.py`; see the [fixture README](testing/fixtures/README.md#provenance). |
 | `.zig-version` | Not applicable | A one-line version marker. |
 | `zig/README.md` | Project documentation | Original. |
 | `zig/examples/*.zig` | `LGPL-2.1-or-later` (SPDX header) | Original examples; see their headers. |

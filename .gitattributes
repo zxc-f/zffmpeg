@@ -1,0 +1,2 @@
+# Fixture data must stay byte-exact on every platform.
+*.wav binary

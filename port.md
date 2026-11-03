@@ -8,9 +8,10 @@ minimal Zig package and build ([build.zig](build.zig), the `av` module rooted at
 tested standalone examples ([I/O patterns](zig/examples/io_patterns.zig) and a
 [PCM s16 kernel](zig/examples/pcm_s16.zig)) and a Linux CI workflow. This
 standalone repository tracks the port's own files. FFmpeg in `.references/ffmpeg`
-remains the behavioral reference. There is no codec, container or command-line
-tool yet; the `av` module exports nothing and the examples do not implement WAV
-support.
+remains the behavioral reference. The first WAV contract has named fixtures with
+expected results ([zig/testing/fixtures](zig/testing/fixtures/README.md)). There
+is no codec, container or command-line tool yet; the `av` module exports nothing
+and the examples do not implement WAV support.
 
 The goal is a native Zig multimedia library and tools, built incrementally from
 FFmpeg's functionality. Use idiomatic Zig APIs and explicit resource ownership.
@@ -196,9 +197,10 @@ zig/
   cli/
     probe.zig                # first tool: zffprobe
   testing/                   # native tests; FFmpeg tests stay in its clone
+    fixtures.zig             # existing: typed fixture manifest and integrity tests
     integration.zig
     differential.zig
-    fixtures/                # tiny fixtures; README.md is their contract
+    fixtures/                # existing: tiny fixtures; README.md is their contract
 ```
 
 Keep the shared core small. Add packet/frame ownership types when buffering is
@@ -599,18 +601,20 @@ support, such as PNG; a zlib binding must not silently count as a native port.
 ### First WAV contract
 
 These are **chosen first-subset rules**, not claims about all valid WAV files or
-FFmpeg's acceptance policy. T02 will turn each row into named fixtures and
-expected results in `zig/testing/fixtures/README.md`, the canonical fixture
-contract. Defaults below are project policy and may be revised with evidence.
+FFmpeg's acceptance policy. T02 turned each row into named fixtures and expected
+results in [zig/testing/fixtures/README.md](zig/testing/fixtures/README.md), the
+canonical fixture contract, which also records the boundary decisions and the
+error precedence. Defaults below are project policy and may be revised with
+evidence.
 
 | Case | Initial behavior |
 | --- | --- |
-| Container | Little-endian RIFF/WAVE only. Reject RF64, BW64, W64, RIFX and unknown-size sentinels as unsupported. |
-| `fmt ` | Accept 16 bytes, or 18 bytes with `cbSize == 0`; tag 1, 16-bit signed PCM, mono or stereo. Short fields are truncated; other complete variants are unsupported. |
-| Rate/alignment | Rate must be positive; default rate limit 192,000 Hz. Require `block_align == channels * 2` with checked arithmetic. Zero channels/rate or an inconsistent `block_align` are invalid. `byte_rate` is informational: decoding never uses it and FFmpeg does not validate it, so accept a mismatch and ignore the value. |
+| Container | Little-endian RIFF/WAVE only. Reject RF64, BW64, W64 and RIFX as `UnsupportedFormat`, and the `riff_size` sentinels 0 and 0xFFFFFFFF as `UnsupportedStreamingSize`. |
+| `fmt ` | Accept 16 bytes, or 18 bytes with `cbSize == 0`; tag 1, 16-bit signed PCM, mono or stereo. A `fmt ` declaring fewer than 16 bytes is `InvalidFormat`; input ending inside it is `Truncated`; other complete variants are `UnsupportedFormat`. |
+| Rate/alignment | Rate must be positive; default rate limit 192,000 Hz (above it: `LimitExceeded`). Require `block_align == channels * 2` with checked arithmetic. Zero channels/rate or an inconsistent `block_align` are invalid. `byte_rate` is informational: decoding never uses it and FFmpeg does not validate it, so accept a mismatch and ignore the value. |
 | Ordering | Exactly one `fmt ` before exactly one `data`. Reject missing/duplicate required chunks within the declared RIFF extent. |
 | Data length | Explicit length, divisible by block alignment. Zero means an empty stream, never read-to-EOF. Reject `0xFFFFFFFF` as unsupported streaming size. |
-| Bounds | Account for chunk headers, bodies and odd-size padding inside `riff_size + 8`. Never read beyond that extent. Known input size permits early truncation checks; otherwise detect it during consumption. T02 decides whether these common real-world cases are truncation or tolerated: a final odd-sized chunk whose padding byte is missing at EOF, a chunk (including `data`) whose declared size exceeds the RIFF extent, and a `riff_size` that disagrees with a known input length. |
+| Bounds | Account for chunk headers, bodies and odd-size padding inside `riff_size + 8`. Never read beyond that extent. Known input size permits early truncation checks; otherwise detect it during consumption. A chunk (including `data`) whose declared size runs past the extent is `InvalidRiff`; so is an extent that leaves fewer than 8 bytes for a chunk header. A final odd-sized chunk whose pad byte lies outside the extent is complete; a pad byte inside the extent but missing from the input is `Truncated`, as is any input shorter than the extent. |
 | Unknown chunks | Skip bounded contents and padding. Continue validation after `data` to the RIFF end so later duplicates/truncated chunks are detected. Ignore bytes outside the declared RIFF extent. |
 | Completion | Header discovery is not full-file validation. Success requires consuming/validating the declared extent. Errors found after emitting audio are reported; callers must not assume atomic output. |
 | Resource defaults | At most 4,096 chunks and 1 MiB of retained non-audio bytes (headers and chunk contents the parser keeps in memory); a 64 KiB streaming work buffer. Skipped chunk bodies and padding are bounded by the chunk-count limit and the RIFF extent, not by the byte limit, so large `LIST`, `id3 ` or `iXML` chunks remain readable. Data streams within RIFF's checked 32-bit length limits, without whole-file allocation. Expose configurable policy limits. |
@@ -627,10 +631,13 @@ Use format errors such as `InvalidRiff`, `InvalidWave`, `InvalidFormat`,
 `LimitExceeded`. Preserve `IoFailure`, `Canceled` (Zig's `std.Io.Cancelable`
 spelling), and allocation failures at
 the appropriate boundary. Successful completion is a normal result, not an EOF
-error. T02 specifies error precedence for inputs violating several rules.
+error. The fixture README specifies the error precedence for inputs violating
+several rules: the first violation in stream order wins.
 
 `wavdec.c` accepts more than this subset: it handles duplicate `fmt ` chunks
-permissively and treats zero/maximum data sizes as unknown-length cases.
+permissively, treats zero/maximum data sizes as unknown-length cases, ignores
+`riff_size` and stops at end of input, so it tolerates every bounds violation
+above.
 `riffenc.c` selects extensible headers above 48 kHz. Our writer deliberately
 keeps tag 1 for the supported rate range; compare samples and metadata with
 FFmpeg, not byte-identical headers. A decoded field match is the compatibility
@@ -819,9 +826,10 @@ Only mark a feature verified after its acceptance evidence exists.
 | Project guidance and architecture | Implemented | `CLAUDE.md` (imported by `AGENTS.md`) and this file. |
 | Standalone Zig I/O example | Verified | Original [source](zig/examples/io_patterns.zig); formatting and 6/6 tests per mode in Debug, ReleaseSafe and ReleaseFast on native Windows, Zig 0.17.0. A seventh test, for the file adapter's retained `.err`, was added later; all 7 tests passed per mode in [Linux CI run 41544372319](https://github.com/zxc-f/zffmpeg/actions/runs/41544372319), Zig 0.17.0, but have not been rerun on Windows. Individual fields only; no media parser, allocations or optimization claims. Provenance and reference evidence: [zigimg analysis](doc/zigimg-reference.md). |
 | Standalone PCM s16 kernel example | Verified | Original [source](zig/examples/pcm_s16.zig), moved from this document; formatting and 2/2 tests passed per mode in [Linux CI run 41544372319](https://github.com/zxc-f/zffmpeg/actions/runs/41544372319), Zig 0.17.0. Design example only; T04 promotes it into the library. |
-| Linux CI | Implemented | [Workflow](.github/workflows/ci.yml) requires `zig version` 0.17.0 and runs formatting plus every example in Debug, ReleaseSafe and ReleaseFast on `ubuntu-24.04`; first passing run: [Linux CI run 41544372319](https://github.com/zxc-f/zffmpeg/actions/runs/41544372319). Native Windows CI is deferred. |
-| Zig toolchain/build/package | Planned | Local Zig 0.17.0 detected; create pinned module/test build. |
+| Linux CI | Implemented | [Workflow](.github/workflows/ci.yml) on `ubuntu-24.04` requires `zig version` 0.17.0, checks `zig fmt` on `build.zig`, `build.zig.zon` and `zig/` and that every example is registered in `build.zig`, runs `zig build` in Debug and ReleaseSafe and `zig build test` in Debug, ReleaseSafe and ReleaseFast. First example-only pass: [run 41544372319](https://github.com/zxc-f/zffmpeg/actions/runs/41544372319); first build/test pass: [run 41548960006](https://github.com/zxc-f/zffmpeg/actions/runs/41548960006). Native Windows CI is deferred. |
+| Zig toolchain/build/package | Verified | [build.zig](build.zig) (exact Zig 0.17.0 check, `av` module, `libzffmpeg.a`, test step for `av` and each example), [build.zig.zon](build.zig.zon) (toolchain-generated fingerprint, `.paths` allowlist, no dependencies), [zig/README.md](zig/README.md). Original `LGPL-2.1-or-later` files. `zig build` passed in Debug and ReleaseSafe and `zig build test` passed 9/9 in Debug, ReleaseSafe and ReleaseFast in [run 41548960006](https://github.com/zxc-f/zffmpeg/actions/runs/41548960006); failure propagation shown in [run 41548611661](https://github.com/zxc-f/zffmpeg/actions/runs/41548611661). Linux only; no C build dependency. |
 | Core types and readers | Planned | Implement only time/audio views and byte access needed for WAV/PCM first. |
+| WAV fixture contract | Implemented | [zig/testing/fixtures](zig/testing/fixtures/README.md): 52 fixtures generated independently of the Zig code by `generate.py` (original, `LGPL-2.1-or-later`), with expected results, boundary decisions and error precedence; integrity-tested by [fixtures.zig](zig/testing/fixtures.zig) in [run 41550661260](https://github.com/zxc-f/zffmpeg/actions/runs/41550661260). Verified against a parser in T06. |
 | WAV + PCM s16le | Planned | First complete multimedia path, scoped above. |
 | zffprobe / zffmpeg | Planned | Add after the corresponding library path works. |
 

@@ -6,13 +6,14 @@ in WAV, followed by a small probe tool.
 
 Current state: architecture, an implementation checklist, a minimal Zig package
 and build (the `av` library module, its tests and two tested standalone
-examples) and a Linux CI workflow. Codecs, containers and the CLI are still
+examples), the WAV fixture contract and a Linux CI workflow. Codecs, containers and the CLI are still
 planned. The compiler is **Zig 0.17.0**, enforced by the build.
 
 ## Project files
 
 - [port.md](port.md): architecture, supported-subset contracts and verification plan.
-- [TODO.md](TODO.md): ordered tasks and completion evidence; T01 is next.
+- [TODO.md](TODO.md): ordered tasks and completion evidence.
+- [notes.md](notes.md): revisable decisions, each with what to change together.
 - [CLAUDE.md](CLAUDE.md): repository guidance for development; [AGENTS.md](AGENTS.md)
   contains only `@CLAUDE.md` so other agents load the same file.
 - [doc/zigimg-reference.md](doc/zigimg-reference.md): pinned zigimg source analysis.
@@ -20,6 +21,8 @@ planned. The compiler is **Zig 0.17.0**, enforced by the build.
 - [build.zig](build.zig), [build.zig.zon](build.zig.zon): the package and build;
   [zig/README.md](zig/README.md) documents commands, version policy and layout.
 - [zig/root.zig](zig/root.zig): root of the `av` library module.
+- [zig/testing/fixtures/README.md](zig/testing/fixtures/README.md): the WAV fixture
+  contract (52 fixtures, expected results, decisions, error precedence).
 - [zig/examples/io_patterns.zig](zig/examples/io_patterns.zig): runnable I/O example.
 - [zig/examples/pcm_s16.zig](zig/examples/pcm_s16.zig): runnable PCM kernel example.
 - [.github/workflows/ci.yml](.github/workflows/ci.yml): Linux CI for the build and tests.
@@ -82,7 +85,8 @@ package manifest. A single example also runs with
 `zig test zig/examples/<name>.zig`.
 
 The [Linux CI workflow](.github/workflows/ci.yml) runs the version check,
-formatting, `zig build` in Debug and ReleaseSafe, and `zig build test` in
+formatting, the fixture check (`python3 zig/testing/fixtures/generate.py --check`),
+`zig build` in Debug and ReleaseSafe, and `zig build test` in
 Debug, ReleaseSafe and ReleaseFast on every pull request and push to `master`.
 Native Windows CI is deferred; see T11 in [TODO.md](TODO.md).
 
@@ -93,8 +97,8 @@ output on failure. Follow [TODO.md](TODO.md) for the first library milestone.
 
 ## Source provenance
 
-The build files, the `av` module and the standalone examples are original
-project code and declare `LGPL-2.1-or-later` in their source headers; [LICENSE](LICENSE) contains the
+The build files, the `av` module, the fixture generator and the standalone
+examples are original project code and declare `LGPL-2.1-or-later` in their source headers; [LICENSE](LICENSE) contains the
 GNU Lesser General Public License v2.1 text, copied verbatim from FFmpeg's
 `COPYING.LGPLv2.1` at the pinned revision. Reference repositories retain their own
 license files and notices inside their ignored clones. Record the source,

@@ -11,10 +11,10 @@ multimedia functionality. Implement algorithms and APIs in Zig; compiling FFmpeg
 `zig cc`, translating headers, or wrapping libav* does not constitute the port.
 
 Current state: the minimal Zig package and build (the `av` module rooted at
-`zig/root.zig`, which exports nothing yet), two tested standalone examples (I/O
-patterns and a PCM s16 kernel) and a Linux CI workflow; no codec/container
-implementation yet. The next tasks are T02 (the WAV fixture contract) and T03
-(the reference build); T04 needs T02. When the state changes, update the current-state
+`zig/root.zig`, which exports nothing yet), the WAV fixture contract with 52
+fixtures, two tested standalone examples (I/O patterns and a PCM s16 kernel) and
+a Linux CI workflow; no codec/container implementation yet. The next tasks are
+T03 (the reference build), T04 (PCM kernels) and T05 (audio/time types). When the state changes, update the current-state
 statements in README.md, port.md ("Status and scope"), the TODO.md introduction
 and this file together.
 
@@ -34,11 +34,12 @@ zig build test -Dtest-filter="truncation"    # only tests whose names contain th
 zig build test --summary all                 # per-artifact test counts
 zig fmt --check build.zig build.zig.zon zig/
 zig test zig/examples/io_patterns.zig        # one standalone example, without the build
+python3 zig/testing/fixtures/generate.py --check   # WAV fixtures are current (Python 3, stdlib only)
 ```
 
 [.github/workflows/ci.yml](.github/workflows/ci.yml) (Linux only; native Windows
-CI is deferred to T11) runs the version check, formatting, a check that every
-`zig/examples/*.zig` is registered in `build.zig`, `zig build` in Debug and
+CI is deferred to T11) runs the version check, formatting, the fixture
+`--check`, a check that every `zig/examples/*.zig` is registered in `build.zig`, `zig build` in Debug and
 ReleaseSafe, and `zig build test` in Debug, ReleaseSafe and ReleaseFast. If no
 local Zig 0.17.0 is available, the pull request's CI run is the verification;
 never report local results that were not run. CI also runs on a branch without
@@ -51,6 +52,8 @@ When adding code:
 - Reference each new `av` file that has tests from a `test` block in
   `zig/root.zig`; Zig analyzes lazily, so unreferenced files' tests never run.
 - Export only supported features from `zig/root.zig`.
+- Change WAV fixtures only in `zig/testing/fixtures/generate.py`, then rerun it;
+  never edit the generated `.wav` files, `manifest.zon` or the README table.
 
 [zig/README.md](zig/README.md) documents the build graph, version policy,
 package manifest and per-file provenance.
@@ -59,6 +62,10 @@ package manifest and per-file provenance.
 
 - [README.md](README.md): setup, pinned reference clone commands, runnable commands.
 - [zig/README.md](zig/README.md): build graph, version policy, manifest, provenance.
+- [zig/testing/fixtures/README.md](zig/testing/fixtures/README.md): the WAV
+  fixture contract: every fixture's expected result, the boundary decisions and
+  the error precedence the parser must follow. `zig/testing/fixtures.zig`
+  exposes the fixtures to tests.
 - [port.md](port.md): architecture, contracts and the feature ledger. Read it
   before architectural work. Key sections:
   - "First WAV contract": the accepted subset, limits, error names (`Truncated`,
@@ -78,6 +85,8 @@ package manifest and per-file provenance.
   "Done when" criteria. Check an item only with an evidence note naming the
   files and checks run (for CI, the run link); keep unfinished items unchecked
   with what remains. Update the port.md ledger when a whole capability changes.
+- [notes.md](notes.md): every revisable project decision, its reason and what to
+  change together. Add new revisable decisions there in the same change.
 - [doc/zigimg-reference.md](doc/zigimg-reference.md): pinned zigimg analysis,
   the source of the I/O adapter rules below.
 - [doc/zig-0.17-guide.md](doc/zig-0.17-guide.md): how to write Zig 0.17 here:

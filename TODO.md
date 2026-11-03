@@ -3,14 +3,16 @@
 This is the execution checklist for [port.md](port.md). The plan explains the
 architecture and compatibility rules; this file records the work to do next.
 The repository tracks project documentation, the minimal Zig package and build
-(the `av` module, documented in [zig/README.md](zig/README.md)), two tested
+(the `av` module, documented in [zig/README.md](zig/README.md)), the WAV fixture
+contract ([zig/testing/fixtures](zig/testing/fixtures/README.md)), two tested
 standalone Zig examples and a Linux CI workflow. FFmpeg and zigimg are
 independent clones in ignored `.references/`; see
 [README.md](README.md#clone-the-reference-repositories) for setup. There is no
 codec/container implementation yet.
 
-**Next tasks: T02 — materialize the WAV contract and fixtures, and T03 — the C
-reference setup (independent of T02). T04 and T05 need T01 and T02.**
+**Next tasks: T04 — PCM sample conversion kernels, T05 — audio/time types (both
+unblocked by T01 and T02), and T03 — the C reference setup, which runs
+independently.**
 
 Work through the first WAV/PCM path before expanding the framework. Tasks have
 stable IDs for references. Check an item only when its completion criteria are
@@ -59,7 +61,7 @@ agree with the [first WAV contract](port.md#first-wav-contract).
 
 ## First milestone: build and a tested PCM kernel
 
-- [ ] **T01 — Add the minimal Zig package and build.** One package, one named
+- [x] **T01 — Add the minimal Zig package and build.** One package, one named
   library module `av` at `zig/root.zig`; internal files use ordinary imports.
   Preserve target/optimization options. Default install must compile an artifact,
   and `test` must execute its test artifact. Explicitly aggregate the existing
@@ -78,8 +80,22 @@ agree with the [first WAV contract](port.md#first-wav-contract).
   Document library setup in `zig/README.md`, update the root README's runnable
   commands and keep outputs ignored. Update the README, plan, checklist and
   agent guidance current-state statements in the same change.
+  Evidence: [build.zig](build.zig), [build.zig.zon](build.zig.zon),
+  [.zig-version](.zig-version), [zig/root.zig](zig/root.zig),
+  [zig/README.md](zig/README.md) and [ci.yml](.github/workflows/ci.yml), merged in
+  zxc-f/zffmpeg#4. The fingerprint `0x4b4a1226947194f5` is the value `zig build`
+  suggested for the manifest without one ([run 41548322449](https://github.com/zxc-f/zffmpeg/actions/runs/41548322449)). A temporary
+  failing test made `zig build test` report `av 0 pass, 1 fail` and exit with
+  status 1 ([run 41548611661](https://github.com/zxc-f/zffmpeg/actions/runs/41548611661)); it was then reverted. On the PR head,
+  [run 41548960006](https://github.com/zxc-f/zffmpeg/actions/runs/41548960006) passed the exact-version check,
+  `zig fmt --check build.zig build.zig.zon zig/`, the example-registration check,
+  `zig build` in Debug and ReleaseSafe, and `zig build test` with 9/9 tests
+  (`av` 0, `io_patterns` 7, `pcm_s16` 2) in Debug, ReleaseSafe and ReleaseFast
+  on `ubuntu-24.04`. No C dependency: `build.zig` has no C sources, libc, system
+  libraries or package dependencies, and CI builds from a checkout without
+  `.references/`. Native Windows was not run (T11).
 
-- [ ] **T02 — Materialize the WAV contract and fixtures.** Create the canonical
+- [x] **T02 — Materialize the WAV contract and fixtures.** Create the canonical
   `zig/testing/fixtures/README.md` with a named fixture for each rule in port.md:
   `fmt ` sizes/extensions, mono/stereo, rate/alignment, chunk order/duplicates,
   empty data versus unknown size, padding, truncation, limits and trailing data.
@@ -93,6 +109,18 @@ agree with the [first WAV contract](port.md#first-wav-contract).
   `byte_rate`, which is accepted and ignored. Keep required tiny
   fixtures local and fail if any are missing. Done when small independent
   vectors make every accepted/rejected case reproducible.
+  Evidence: [fixture README](zig/testing/fixtures/README.md),
+  [generate.py](zig/testing/fixtures/generate.py),
+  [manifest.zon](zig/testing/fixtures/manifest.zon) and
+  [fixtures.zig](zig/testing/fixtures.zig). 52 committed fixtures (12 accepted,
+  5 of them exact writer output, and 40 rejected) plus one synthesized 2 MiB
+  vector, each with its expected result and SHA-256. The README records the
+  boundary decisions, the error precedence and a byte-by-byte check of
+  `mono_8k`. [run 41550661260](https://github.com/zxc-f/zffmpeg/actions/runs/41550661260): `generate.py --check` passed, and `zig build test`
+  passed 12/12 in Debug, ReleaseSafe and ReleaseFast, including the `av`
+  fixture tests (manifest consistency, every file embedded and matching its
+  SHA-256). Remaining: no parser consumes the fixtures until T06, and the FFmpeg
+  comparison of accepted fixtures belongs to T03/T10.
 
 - [ ] **T03 — Establish the C reference comparison setup.** Use Linux x86-64 in
   a pinned container or WSL environment. Build `.references/ffmpeg` at the
@@ -128,7 +156,8 @@ agree with the [first WAV contract](port.md#first-wav-contract).
 - [ ] **T06 — Implement one bounded WAV parser.** Depends on T02 and T05. Accept
   `*std.Io.Reader`, initially tested with `Reader.fixed`; read exact fields into
   local arrays instead of casting structs. Implement T02's complete contract,
-  including validation after data and contextual EOF/error mapping. Use checked
+  including validation after data and contextual EOF/error mapping; test every
+  fixture through `zig/testing/fixtures.zig`, matching its error precedence. Use checked
   size arithmetic in every optimization mode. Add a bounded `std.testing.fuzz`
   entry using `Smith`, plus deterministic fixture regressions; sustained fuzzing
   remains later work. Done when all contract cases pass in Debug, ReleaseSafe
