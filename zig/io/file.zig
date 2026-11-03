@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Original file for this project.
-//! File and stream adapters for the WAV path.
+//! File and stream adapters for the WAV and AU paths.
 //!
 //! Borrowed-handle functions (`probeFile`, `decodeFile`, `writeFile`) take an
 //! open `std.Io.File` and never close it. Path helpers (`probePath`,
@@ -17,32 +17,38 @@
 //! When the generic reader or writer reports a failure, the adapter's detailed
 //! error (its `.err`, which includes `error.Canceled`) replaces `IoFailure` or
 //! `WriteFailed`.
+//!
+//! `probeFile` and `probePath` detect the container (format/detect.zig); the
+//! decode and write helpers are WAV-only. To write AU, build an `au.Writer` over
+//! `file.writerStreaming(...).interface`.
 
 const std = @import("std");
 const audio = @import("../core/audio.zig");
 const wav = @import("../format/wav.zig");
+const detect = @import("../format/detect.zig");
 
 /// Recommended scratch buffer size for the file adapters.
 pub const default_buffer_len = 64 * 1024;
 
-pub const ReadError = wav.Error || std.Io.File.Reader.Error;
+pub const ReadError = detect.Error || std.Io.File.Reader.Error;
 pub const DecodeError = wav.DecodeError || std.Io.File.Reader.Error;
 pub const WriteError = wav.WriteError || std.Io.File.Writer.Error;
 
-/// Validates the WAV stream in a borrowed file without decoding samples.
-pub fn probeFile(io: std.Io, file: std.Io.File, buffer: []u8, limits: wav.Limits) ReadError!wav.Info {
+/// Detects the container (WAV or AU) of the stream in a borrowed file and
+/// validates the stream without decoding samples.
+pub fn probeFile(io: std.Io, file: std.Io.File, buffer: []u8, limits: detect.Limits) ReadError!detect.Probed {
     var reader = file.readerStreaming(io, buffer);
-    return wav.probe(&reader.interface, limits) catch |err| return withReadCause(err, &reader);
+    return detect.probe(&reader.interface, limits) catch |err| return withReadCause(err, &reader);
 }
 
-/// Opens `sub_path` in `dir`, validates its WAV stream and closes it.
+/// Opens `sub_path` in `dir`, detects and validates its stream and closes it.
 pub fn probePath(
     io: std.Io,
     dir: std.Io.Dir,
     sub_path: []const u8,
     buffer: []u8,
-    limits: wav.Limits,
-) (ReadError || std.Io.File.OpenError)!wav.Info {
+    limits: detect.Limits,
+) (ReadError || std.Io.File.OpenError)!detect.Probed {
     const file = try dir.openFile(io, sub_path, .{});
     defer file.close(io);
     return probeFile(io, file, buffer, limits);
@@ -116,11 +122,16 @@ fn withWriteCause(err: anytype, file_writer: *const std.Io.File.Writer) (@TypeOf
 
 const builtin = @import("builtin");
 const fixtures = @import("../testing/fixtures.zig");
+const au = @import("../format/au.zig");
 
 fn writeFixture(io: std.Io, dir: std.Io.Dir, comptime name: []const u8) !void {
-    const file = try dir.createFile(io, name ++ ".wav", .{});
+    try writeBytes(io, dir, name ++ ".wav", fixtures.bytes(name));
+}
+
+fn writeBytes(io: std.Io, dir: std.Io.Dir, sub_path: []const u8, bytes: []const u8) !void {
+    const file = try dir.createFile(io, sub_path, .{});
     defer file.close(io);
-    try file.writeStreamingAll(io, fixtures.bytes(name));
+    try file.writeStreamingAll(io, bytes);
 }
 
 test "files agree with memory for every fixture and buffer size" {
@@ -141,6 +152,33 @@ test "files agree with memory for every fixture and buffer size" {
                 try std.testing.expectEqual(info.frame_count, got.frame_count);
                 try std.testing.expectEqual(info.format.sample_rate, got.format.sample_rate);
                 try std.testing.expectEqual(info.format.layout, got.format.layout);
+            } else |want| {
+                const err = if (result) |_| return error.TestExpectedError else |e| e;
+                try std.testing.expectEqualStrings(@errorName(want), @errorName(err));
+            }
+        }
+    }
+}
+
+test "AU files agree with memory for every fixture and buffer size" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [default_buffer_len]u8 = undefined;
+
+    inline for (fixtures.au.all) |fixture| {
+        const path = fixture.name ++ ".au";
+        try writeBytes(io, tmp.dir, path, fixtures.au.bytes(fixture.name));
+        var memory: std.Io.Reader = .fixed(fixtures.au.bytes(fixture.name));
+        const expected = detect.probe(&memory, .{});
+
+        for ([_]usize{ 0, 1, 64, default_buffer_len }) |capacity| {
+            const result = probePath(io, tmp.dir, path, buffer[0..capacity], .{});
+            if (expected) |info| {
+                const got = try result;
+                try std.testing.expectEqual(info.container, got.container);
+                try std.testing.expectEqual(info.frame_count, got.frame_count);
+                try std.testing.expectEqual(info.format, got.format);
             } else |want| {
                 const err = if (result) |_| return error.TestExpectedError else |e| e;
                 try std.testing.expectEqualStrings(@errorName(want), @errorName(err));
@@ -261,6 +299,72 @@ test "writer adapters produce the writer-output fixtures" {
             var content: [256]u8 = undefined;
             const written = try tmp.dir.readFile(io, fixture.name ++ ".wav", &content);
             try std.testing.expectEqualSlices(u8, fixtures.bytes(fixture.name), written);
+        }
+    }
+}
+
+// The adapters above are WAV-only; these run the AU parser and writer over
+// real files with the same reader and writer buffer sizes.
+test "AU files decode like memory with every reader buffer size" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [default_buffer_len]u8 = undefined;
+
+    inline for (fixtures.au.all) |fixture| {
+        const path = fixture.name ++ ".au";
+        try writeBytes(io, tmp.dir, path, fixtures.au.bytes(fixture.name));
+        var memory: std.Io.Reader = .fixed(fixtures.au.bytes(fixture.name));
+        var expected_raw: [512]u8 = undefined;
+        var expected_out: std.Io.Writer = .fixed(&expected_raw);
+        const expected = au.decodeToRaw(&memory, &expected_out, .{});
+
+        for ([_]usize{ 0, 1, 64, default_buffer_len }) |capacity| {
+            const file = try tmp.dir.openFile(io, path, .{});
+            defer file.close(io);
+            var reader = file.readerStreaming(io, buffer[0..capacity]);
+            var raw: [512]u8 = undefined;
+            var out: std.Io.Writer = .fixed(&raw);
+            const result = au.decodeToRaw(&reader.interface, &out, .{});
+            if (expected) |info| {
+                const got = try result;
+                try std.testing.expectEqual(info.frame_count, got.frame_count);
+                try std.testing.expectEqual(info.format.sample_rate, got.format.sample_rate);
+                try std.testing.expectEqual(info.format.layout, got.format.layout);
+            } else |want| {
+                try std.testing.expectError(want, result);
+            }
+            // Samples delivered before a failure are the same too.
+            try std.testing.expectEqualSlices(u8, expected_out.buffered(), out.buffered());
+        }
+    }
+}
+
+test "the AU writer reproduces its fixtures through every writer buffer size" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [64]u8 = undefined;
+
+    inline for (fixtures.au.all) |fixture| {
+        if (fixture.writer_output) {
+            const stream = fixture.expected.accept;
+            const format = try audio.Format.init(stream.sample_rate, stream.channels, .s16);
+            const path = fixture.name ++ ".au";
+            for ([_]usize{ 0, 1, 64 }) |capacity| {
+                {
+                    const file = try tmp.dir.createFile(io, path, .{});
+                    defer file.close(io);
+                    var file_writer = file.writerStreaming(io, buffer[0..capacity]);
+                    const frame_count = stream.samples.len / format.channelCount();
+                    var writer = try au.Writer.begin(&file_writer.interface, format, frame_count, .{});
+                    try writer.writeFrames(stream.samples);
+                    try writer.finish();
+                }
+                var content: [256]u8 = undefined;
+                const written = try tmp.dir.readFile(io, path, &content);
+                try std.testing.expectEqualSlices(u8, fixtures.au.bytes(fixture.name), written);
+            }
         }
     }
 }

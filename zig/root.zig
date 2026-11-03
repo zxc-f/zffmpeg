@@ -12,8 +12,12 @@
 //!   (`core/time.zig`).
 //! - `wav`: bounded RIFF/WAVE parsing and known-length writing for s16 PCM
 //!   (`format/wav.zig`).
-//! - `file`: file and stream adapters for the WAV path, with borrowed-handle
-//!   and path variants (`io/file.zig`).
+//! - `au`: bounded Sun AU parsing and known-length writing for s16 big-endian
+//!   PCM (`format/au.zig`).
+//! - `detect`: WAV or AU content detection that hands the bytes it read to the
+//!   chosen parser (`format/detect.zig`).
+//! - `file`: file and stream adapters for the WAV and AU paths, with
+//!   borrowed-handle and path variants (`io/file.zig`).
 //!
 //! Zig analyzes files lazily, so tests run only in files this module imports.
 //! When a file with tests is added, reference it from the `test` block here.
@@ -22,6 +26,8 @@ pub const pcm = @import("codec/pcm.zig");
 pub const audio = @import("core/audio.zig");
 pub const time = @import("core/time.zig");
 pub const wav = @import("format/wav.zig");
+pub const au = @import("format/au.zig");
+pub const detect = @import("format/detect.zig");
 pub const file = @import("io/file.zig");
 
 test {
@@ -29,7 +35,10 @@ test {
     _ = @import("core/audio.zig");
     _ = @import("core/time.zig");
     _ = @import("format/wav.zig");
+    _ = @import("format/au.zig");
+    _ = @import("format/detect.zig");
+    _ = @import("format/prefix.zig");
     _ = @import("io/file.zig");
-    // Test-only files: the WAV fixture contract and its integrity checks.
+    // Test-only files: the WAV and AU fixture contracts and their integrity checks.
     _ = @import("testing/fixtures.zig");
 }
