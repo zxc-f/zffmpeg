@@ -573,6 +573,40 @@ sample formats stay in T20.
     and T19a's full WAV and AU probe comparison, over files and pipes, is
     mandatory and passes.
 
+    ```text
+    ID / parent: T12c / T12
+    State: validating
+    Supported behavior and explicit exclusions: zffprobe and av.detect choose
+      the container from the first 4 bytes: `.snd` is AU, anything else goes
+      to the WAV parser. AU reports format=au, codec=pcm_s16be. Excluded:
+      file-name hints, scored probing and a third format (T16, T26a).
+    Needs (verified) / lands with / verified after: T12b (verified); alone.
+    Contract and source provenance: port.md "Initial probe output", the AU
+      fixture README's "Content detection", notes.md "Content detection" and
+      "Detection prefix". Original code; FFmpeg's au_probe read only to
+      record the difference.
+    Required fixtures / optional corpus: the 52 WAV and 29 AU fixtures,
+      through detection, as files and through pipes. No optional corpus.
+    Ownership, state transitions and limits: detection reads at most 4 bytes
+      into a Prefix the chosen parser owns; its first header read consumes
+      them. No allocation; each parser keeps its own limits.
+    Comparison rule and intentional differences: zffprobe's report, status
+      and error per fixture; a pipe gives the file's result. au_bad_magic
+      reports InvalidRiff (not AU by content); au_empty_data is detected,
+      unlike FFmpeg's content probe.
+    Implementation files and test entry points: zig/format/detect.zig,
+      zig/format/prefix.zig, Parser.initPrefixed in wav.zig and au.zig,
+      zig/io/file.zig, zig/cli/probe.zig; tests in those files; 9 AU
+      probe_cases in build.zig; check_zffprobe_au and compare_pipes in
+      compare.py.
+    Evidence commit / Linux CI run / reference report: pending.
+    Required cases: pending.
+    Optional cases: none.
+    Fuzz seeds, budget and result: detect.zig's differential entry, 4 seeds,
+      run under `zig build test`; no sustained run.
+    Remaining work or blocker / next action: CI on the implementation commit.
+    ```
+
 - [ ] **T13 — A minimal `zffmpeg` for conversion and stream copy.** Checked
   when T13a and T13b are. The operation matrix:
 

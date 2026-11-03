@@ -70,6 +70,23 @@ written; the largest stream is the largest whole number of frames within
 `au_limit_before_unsupported` and `au_unsupported_before_invalid` pin the field
 order.
 
+## Content detection
+
+`zffprobe` and `av.detect` (T12c) choose the container from content, not the
+file name. They read at most the first 4 bytes: `.snd` selects this contract's
+parser, and anything else, including input shorter than 4 bytes, goes to the
+WAV parser, whose results are those of the [WAV contract](../README.md). The
+bytes read are handed to the chosen parser, so a pipe loses nothing. Two
+fixtures therefore report differently through detection than to the AU parser
+alone:
+
+| Fixture | AU parser | Through detection |
+| --- | --- | --- |
+| `au_bad_magic` | `InvalidAu` | `InvalidRiff`: not AU by content, so the WAV parser reports it. |
+| `au_empty_data` | accepted | accepted: the magic alone selects AU, while FFmpeg's content probe does not detect it. |
+
+Every other fixture gives the same result both ways.
+
 ## Decisions
 
 FFmpeg's behavior is from `libavformat/au.c` and `pcm.c` at the pinned

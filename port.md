@@ -732,7 +732,9 @@ In summary:
 The errors share the WAV contract's names where the meaning matches, plus
 `InvalidAu` for a malformed AU header. Parser acceptance and automatic format
 detection are observable separately: FFmpeg's content probe does not detect an
-AU file whose data size is 0, although its parser reads it.
+AU file whose data size is 0, although its parser reads it. Our detection
+(T12c) checks only the `.snd` magic, so it detects that file; a stream without
+the magic goes to the WAV parser instead ([detection rules](zig/testing/fixtures/au/README.md#content-detection)).
 
 ### CLI policy
 
@@ -756,12 +758,19 @@ stable report separate from T51's future FFprobe-compatible mode.
 
 T09's `zffprobe` reports stable UTF-8 `key=value` lines, in this order:
 `format`, `codec`, `sample_fmt`, `channels`, `channel_layout`, `sample_rate`,
-`nb_samples`, `duration_num`, `duration_den`. Use `wav`, `pcm_s16le`, `s16` and
-`mono`/`stereo` as canonical strings. `nb_samples` counts sample frames (samples
+`nb_samples`, `duration_num`, `duration_den`. Use `wav` with `pcm_s16le`, or
+`au` with `pcm_s16be` (T12c), and `s16` and `mono`/`stereo` as canonical strings. `nb_samples` counts sample frames (samples
 per channel); duration is exact and unreduced in the stream's `1/sample_rate`
 time base: `duration_num = nb_samples` and `duration_den = sample_rate`, with no
 decimal rounding or fraction reduction. Empty data reports `duration_num=0` and
 the stream's sample rate as `duration_den`. Emit the report only after validation.
+
+The container is detected from content, not the file name (T12c,
+`zig/format/detect.zig`): a stream that starts with `.snd` is AU, and anything
+else goes to the WAV parser, so WAV reports and errors are unchanged and a file
+of neither kind reports `InvalidRiff`. Detection reads at most 4 bytes and hands
+them to the chosen parser, so standard input loses no bytes. A malformed AU
+header is `InvalidAu`, exit code 2.
 
 Exit codes: 0 success/help, 1 usage, 2 invalid/truncated media, 3 unsupported
 media, 4 I/O failure, 5 resource/allocation limit, 6 cancellation. Diagnostics

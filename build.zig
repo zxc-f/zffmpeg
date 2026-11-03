@@ -28,12 +28,17 @@ const examples = [_]Example{
     .{ .name = "io_patterns", .path = "zig/examples/io_patterns.zig" },
 };
 
+/// The fixture directories: zig/testing/fixtures/wav/ and zig/testing/fixtures/au/.
+const FixtureSet = enum { wav, au };
+
 /// A zffprobe process run with its expected exit code and output.
 const ProbeCase = struct {
     name: []const u8,
     /// Arguments placed before the fixture path, if any.
     args: []const []const u8 = &.{},
-    /// Passed as the file argument: zig/testing/fixtures/wav/<name>.wav.
+    /// Which fixture directory `fixture` and `stdin_fixture` name a file in.
+    set: FixtureSet = .wav,
+    /// Passed as the file argument: zig/testing/fixtures/<set>/<name>.<set>.
     fixture: ?[]const u8 = null,
     /// Piped to standard input instead (a non-seekable stream).
     stdin_fixture: ?[]const u8 = null,
@@ -45,7 +50,7 @@ const ProbeCase = struct {
     stderr_contains: ?[]const u8 = null,
 };
 
-const usage_line = "usage: zffprobe <file.wav | ->\n";
+const usage_line = "usage: zffprobe <file.wav | file.au | ->\n";
 
 const mono_8k_report =
     \\format=wav
@@ -86,8 +91,48 @@ const empty_data_report =
     \\
 ;
 
+const au_mono_8k_report =
+    \\format=au
+    \\codec=pcm_s16be
+    \\sample_fmt=s16
+    \\channels=1
+    \\channel_layout=mono
+    \\sample_rate=8000
+    \\nb_samples=8
+    \\duration_num=8
+    \\duration_den=8000
+    \\
+;
+
+const au_stereo_44k1_report =
+    \\format=au
+    \\codec=pcm_s16be
+    \\sample_fmt=s16
+    \\channels=2
+    \\channel_layout=stereo
+    \\sample_rate=44100
+    \\nb_samples=4
+    \\duration_num=4
+    \\duration_den=44100
+    \\
+;
+
+const au_empty_data_report =
+    \\format=au
+    \\codec=pcm_s16be
+    \\sample_fmt=s16
+    \\channels=1
+    \\channel_layout=mono
+    \\sample_rate=8000
+    \\nb_samples=0
+    \\duration_num=0
+    \\duration_den=8000
+    \\
+;
+
 /// T09: valid, empty, malformed, unsupported, I/O, resource-limit and usage
-/// cases, each checking stdout, stderr and the exit status.
+/// cases, each checking stdout, stderr and the exit status. T12c adds the same
+/// for AU, including a pipe, and a non-AU magic that detection sends to WAV.
 const probe_cases = [_]ProbeCase{
     .{ .name = "valid mono file", .fixture = "mono_8k", .exit_code = 0, .stdout = mono_8k_report, .stderr = "" },
     .{ .name = "valid stereo from a pipe", .args = &.{"-"}, .stdin_fixture = "stereo_44k1", .exit_code = 0, .stdout = stereo_44k1_report, .stderr = "" },
@@ -104,6 +149,15 @@ const probe_cases = [_]ProbeCase{
     .{ .name = "no arguments", .exit_code = 1, .stderr = usage_line },
     .{ .name = "too many arguments", .args = &.{ "a.wav", "b.wav" }, .exit_code = 1, .stderr = usage_line },
     .{ .name = "help", .args = &.{"--help"}, .exit_code = 0, .stdout_contains = usage_line, .stderr = "" },
+    .{ .name = "valid AU file", .set = .au, .fixture = "au_mono_8k", .exit_code = 0, .stdout = au_mono_8k_report, .stderr = "" },
+    .{ .name = "valid AU from a pipe", .set = .au, .args = &.{"-"}, .stdin_fixture = "au_stereo_44k1", .exit_code = 0, .stdout = au_stereo_44k1_report, .stderr = "" },
+    .{ .name = "empty AU data", .set = .au, .fixture = "au_empty_data", .exit_code = 0, .stdout = au_empty_data_report, .stderr = "" },
+    .{ .name = "malformed AU header", .set = .au, .fixture = "au_offset_too_small", .exit_code = 2, .stderr_contains = ": InvalidAu\n" },
+    .{ .name = "non-AU magic goes to WAV", .set = .au, .fixture = "au_bad_magic", .exit_code = 2, .stderr_contains = ": InvalidRiff\n" },
+    .{ .name = "unsupported AU encoding", .set = .au, .fixture = "au_encoding_mulaw", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
+    .{ .name = "unknown AU size", .set = .au, .fixture = "au_unknown_size", .exit_code = 3, .stderr_contains = ": UnsupportedStreamingSize\n" },
+    .{ .name = "AU rate limit", .set = .au, .fixture = "au_rate_over_limit", .exit_code = 5, .stderr_contains = ": LimitExceeded\n" },
+    .{ .name = "truncated AU pipe", .set = .au, .args = &.{"-"}, .stdin_fixture = "au_truncated_data", .exit_code = 2, .stderr = "zffprobe: -: Truncated\n" },
 };
 
 pub fn build(b: *std.Build) void {
@@ -194,8 +248,8 @@ fn addProbeCase(b: *std.Build, test_step: *std.Build.Step, probe: *std.Build.Ste
     run.setName(b.fmt("zffprobe: {s}", .{case.name}));
     run.setCwd(b.path("."));
     run.addArgs(case.args);
-    if (case.fixture) |name| run.addFileArg(fixturePath(b, name));
-    if (case.stdin_fixture) |name| run.setStdIn(.{ .lazy_path = fixturePath(b, name) });
+    if (case.fixture) |name| run.addFileArg(fixturePath(b, case.set, name));
+    if (case.stdin_fixture) |name| run.setStdIn(.{ .lazy_path = fixturePath(b, case.set, name) });
     run.expectExitCode(case.exit_code);
     if (case.stdout_contains) |text| run.expectStdOutMatch(text) else run.expectStdOutEqual(case.stdout);
     if (case.stderr) |text| run.expectStdErrEqual(text);
@@ -203,6 +257,6 @@ fn addProbeCase(b: *std.Build, test_step: *std.Build.Step, probe: *std.Build.Ste
     test_step.dependOn(&run.step);
 }
 
-fn fixturePath(b: *std.Build, name: []const u8) std.Build.LazyPath {
-    return b.path(b.fmt("zig/testing/fixtures/wav/{s}.wav", .{name}));
+fn fixturePath(b: *std.Build, set: FixtureSet, name: []const u8) std.Build.LazyPath {
+    return b.path(b.fmt("zig/testing/fixtures/{t}/{s}.{t}", .{ set, name, set }));
 }

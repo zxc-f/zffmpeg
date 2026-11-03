@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Original file for this project.
-//! File and stream adapters for the WAV path.
+//! File and stream adapters for the WAV and AU paths.
 //!
 //! Borrowed-handle functions (`probeFile`, `decodeFile`, `writeFile`) take an
 //! open `std.Io.File` and never close it. Path helpers (`probePath`,
@@ -17,32 +17,38 @@
 //! When the generic reader or writer reports a failure, the adapter's detailed
 //! error (its `.err`, which includes `error.Canceled`) replaces `IoFailure` or
 //! `WriteFailed`.
+//!
+//! `probeFile` and `probePath` detect the container (format/detect.zig); the
+//! decode and write helpers are WAV-only. To write AU, build an `au.Writer` over
+//! `file.writerStreaming(...).interface`.
 
 const std = @import("std");
 const audio = @import("../core/audio.zig");
 const wav = @import("../format/wav.zig");
+const detect = @import("../format/detect.zig");
 
 /// Recommended scratch buffer size for the file adapters.
 pub const default_buffer_len = 64 * 1024;
 
-pub const ReadError = wav.Error || std.Io.File.Reader.Error;
+pub const ReadError = detect.Error || std.Io.File.Reader.Error;
 pub const DecodeError = wav.DecodeError || std.Io.File.Reader.Error;
 pub const WriteError = wav.WriteError || std.Io.File.Writer.Error;
 
-/// Validates the WAV stream in a borrowed file without decoding samples.
-pub fn probeFile(io: std.Io, file: std.Io.File, buffer: []u8, limits: wav.Limits) ReadError!wav.Info {
+/// Detects the container (WAV or AU) of the stream in a borrowed file and
+/// validates the stream without decoding samples.
+pub fn probeFile(io: std.Io, file: std.Io.File, buffer: []u8, limits: detect.Limits) ReadError!detect.Probed {
     var reader = file.readerStreaming(io, buffer);
-    return wav.probe(&reader.interface, limits) catch |err| return withReadCause(err, &reader);
+    return detect.probe(&reader.interface, limits) catch |err| return withReadCause(err, &reader);
 }
 
-/// Opens `sub_path` in `dir`, validates its WAV stream and closes it.
+/// Opens `sub_path` in `dir`, detects and validates its stream and closes it.
 pub fn probePath(
     io: std.Io,
     dir: std.Io.Dir,
     sub_path: []const u8,
     buffer: []u8,
-    limits: wav.Limits,
-) (ReadError || std.Io.File.OpenError)!wav.Info {
+    limits: detect.Limits,
+) (ReadError || std.Io.File.OpenError)!detect.Probed {
     const file = try dir.openFile(io, sub_path, .{});
     defer file.close(io);
     return probeFile(io, file, buffer, limits);
@@ -146,6 +152,33 @@ test "files agree with memory for every fixture and buffer size" {
                 try std.testing.expectEqual(info.frame_count, got.frame_count);
                 try std.testing.expectEqual(info.format.sample_rate, got.format.sample_rate);
                 try std.testing.expectEqual(info.format.layout, got.format.layout);
+            } else |want| {
+                const err = if (result) |_| return error.TestExpectedError else |e| e;
+                try std.testing.expectEqualStrings(@errorName(want), @errorName(err));
+            }
+        }
+    }
+}
+
+test "AU files agree with memory for every fixture and buffer size" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [default_buffer_len]u8 = undefined;
+
+    inline for (fixtures.au.all) |fixture| {
+        const path = fixture.name ++ ".au";
+        try writeBytes(io, tmp.dir, path, fixtures.au.bytes(fixture.name));
+        var memory: std.Io.Reader = .fixed(fixtures.au.bytes(fixture.name));
+        const expected = detect.probe(&memory, .{});
+
+        for ([_]usize{ 0, 1, 64, default_buffer_len }) |capacity| {
+            const result = probePath(io, tmp.dir, path, buffer[0..capacity], .{});
+            if (expected) |info| {
+                const got = try result;
+                try std.testing.expectEqual(info.container, got.container);
+                try std.testing.expectEqual(info.frame_count, got.frame_count);
+                try std.testing.expectEqual(info.format, got.format);
             } else |want| {
                 const err = if (result) |_| return error.TestExpectedError else |e| e;
                 try std.testing.expectEqualStrings(@errorName(want), @errorName(err));
