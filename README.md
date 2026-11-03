@@ -12,7 +12,8 @@ planned. The compiler is **Zig 0.17.0**, enforced by the build.
 ## Project files
 
 - [port.md](port.md): architecture, supported-subset contracts and verification plan.
-- [TODO.md](TODO.md): ordered tasks and completion evidence; T01 is next.
+- [TODO.md](TODO.md): ordered tasks and completion evidence.
+- [notes.md](notes.md): revisable decisions, each with what to change together.
 - [CLAUDE.md](CLAUDE.md): repository guidance for development; [AGENTS.md](AGENTS.md)
   contains only `@CLAUDE.md` so other agents load the same file.
 - [doc/zigimg-reference.md](doc/zigimg-reference.md): pinned zigimg source analysis.

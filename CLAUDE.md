@@ -85,6 +85,8 @@ package manifest and per-file provenance.
   "Done when" criteria. Check an item only with an evidence note naming the
   files and checks run (for CI, the run link); keep unfinished items unchecked
   with what remains. Update the port.md ledger when a whole capability changes.
+- [notes.md](notes.md): every revisable project decision, its reason and what to
+  change together. Add new revisable decisions there in the same change.
 - [doc/zigimg-reference.md](doc/zigimg-reference.md): pinned zigimg analysis,
   the source of the I/O adapter rules below.
 - [doc/zig-0.17-guide.md](doc/zig-0.17-guide.md): how to write Zig 0.17 here:
