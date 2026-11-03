@@ -12,6 +12,8 @@
 //!   (`core/time.zig`).
 //! - `wav`: bounded RIFF/WAVE parsing and known-length writing for s16 PCM
 //!   (`format/wav.zig`).
+//! - `au`: bounded Sun AU parsing and known-length writing for s16 big-endian
+//!   PCM (`format/au.zig`).
 //! - `file`: file and stream adapters for the WAV path, with borrowed-handle
 //!   and path variants (`io/file.zig`).
 //!
@@ -22,6 +24,7 @@ pub const pcm = @import("codec/pcm.zig");
 pub const audio = @import("core/audio.zig");
 pub const time = @import("core/time.zig");
 pub const wav = @import("format/wav.zig");
+pub const au = @import("format/au.zig");
 pub const file = @import("io/file.zig");
 
 test {
@@ -29,6 +32,7 @@ test {
     _ = @import("core/audio.zig");
     _ = @import("core/time.zig");
     _ = @import("format/wav.zig");
+    _ = @import("format/au.zig");
     _ = @import("io/file.zig");
     // Test-only files: the WAV and AU fixture contracts and their integrity checks.
     _ = @import("testing/fixtures.zig");

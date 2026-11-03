@@ -54,7 +54,6 @@ LAYOUT = {1: "mono", 2: "stereo"}
 # rules"). Each is reported as not implemented, never as a pass or a skip; the
 # subtask that owns it deletes its entry here, which makes the check mandatory.
 NOT_IMPLEMENTED = {
-    "au-writer": "T12b: FFmpeg reads AU files written by the Zig AU writer",
     "au-probe": "T12c: zffprobe on every AU fixture, and on every fixture through a pipe",
 }
 
@@ -356,17 +355,19 @@ def compare_writer(args, lines, failures):
         "| Stream | Output | FFmpeg | Result |",
         "| --- | --- | --- | --- |",
     ]
-    streams = [f for f in generate.build_fixtures() if f.writer_output]
+    streams = [("wav", f) for f in generate.build_fixtures() if f.writer_output]
+    if "au-writer" not in NOT_IMPLEMENTED:
+        streams += [("au", f) for f in generate.build_au_fixtures() if f.writer_output]
     passed = 0
     with tempfile.TemporaryDirectory() as tmp:
         work = pathlib.Path(tmp)
-        for fixture in streams:
+        for container, fixture in streams:
             channels, rate, samples = fixture.accept
             frames = len(samples) // channels
             raw = work / f"{fixture.name}.s16le"
-            out = work / f"{fixture.name}.wav"
+            out = work / f"{fixture.name}.{container}"
             raw.write_bytes(generate.pcm(samples))
-            process = run(args.writer, "wav", rate, channels, raw, out)
+            process = run(args.writer, container, rate, channels, raw, out)
             problems, notes = [], []
             if process.returncode != 0:
                 problems.append(f"write-driver exited {process.returncode}: {first_line(text(process.stderr))}")
@@ -376,18 +377,24 @@ def compare_writer(args, lines, failures):
                 output = f"{len(written)} bytes, " + ("equal to the fixture" if written == fixture.data else "differs")
                 if written != fixture.data:
                     problems.append("output differs from the writer-output fixture")
-                expected = expected_stream("wav", "pcm_s16le", channels, rate, frames)
-                stream_problems, notes = check_stream(args, fixture.name, out, expected, samples)
+                if container == "wav":
+                    expected = expected_stream("wav", "pcm_s16le", channels, rate, frames)
+                    stream_problems, notes = check_stream(args, fixture.name, out, expected, samples)
+                else:
+                    # Forced, because FFmpeg's probe does not detect an empty AU file.
+                    expected = expected_stream("au", "pcm_s16be", channels, rate, frames)
+                    stream_problems, notes = check_stream(args, fixture.name, out, expected, samples, "au",
+                                                          field_differences=KNOWN_AU_FIELD_DIFFERENCES)
                 problems += stream_problems
             verdict = "same samples and stream" if not problems else "differs"
             if notes:
                 verdict += "; " + "; ".join(notes)
             result = "pass" if not problems else "**FAIL**: " + "; ".join(problems)
-            label = f"WAV {LAYOUT[channels]}, {rate} Hz, {frames_text(frames)} (`{fixture.name}`)"
+            label = f"{container.upper()} {LAYOUT[channels]}, {rate} Hz, {frames_text(frames)} (`{fixture.name}`)"
             lines.append(f"| {label} | {output} | {verdict} | {result} |")
             passed += not problems
             failures.extend(f"writer {fixture.name}: {problem}" for problem in problems)
-    lines += ["", f"Zig-written WAV files FFmpeg reads as expected: {passed}/{len(streams)}."]
+    lines += ["", f"Zig-written files FFmpeg reads as expected: {passed}/{len(streams)}."]
 
 
 def main():
