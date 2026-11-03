@@ -26,13 +26,20 @@ the operation matrix, and FFmpeg must read each actual output with the expected
 samples and stream; copy across codecs must fail without creating output. AU
 and AIFF outputs of canonical inputs must equal FFmpeg's own conversion.
 
+Registries (T16): the codec descriptors, decoders and encoders, and the
+formats with their muxers' extensions, MIME types and default codecs, as the
+registry dump prints them, must equal the reference build's own `ffmpeg
+-codecs`, `ffmpeg -formats` and `ffmpeg -h muxer=...`, and cover exactly the
+codecs and formats it enables.
+
 Checks whose Zig code has not landed yet are listed as not implemented, never
 counted as passes or skips. Expectations come from generate.py, the same
 independent source as the committed fixtures.
 
     python3 zig/testing/reference/compare.py --ffmpeg BIN --ffprobe BIN \\
         --zffprobe zig-out/bin/zffprobe --writer zig-out/bin/write-driver \\
-        --zffmpeg zig-out/bin/zffmpeg [--report report.md]
+        --zffmpeg zig-out/bin/zffmpeg --registry zig-out/bin/registry-dump \\
+        [--report report.md]
 """
 
 import argparse
@@ -994,6 +1001,88 @@ def compare_unknown_length(args, lines, failures):
                   f"{accepted_ok}/{len(accepted)}."]
 
 
+def ffmpeg_help_fields(binary, kind, name):
+    """The `Common extensions`, `Mime type` and `Default audio codec` lines of
+    `ffmpeg -h <kind>=<name>`, without their final period."""
+    process = run(binary, "-hide_banner", "-h", f"{kind}={name}")
+    fields = {}
+    for line in text(process.stdout).splitlines():
+        key, separator, value = line.strip().partition(": ")
+        if separator and key in ("Common extensions", "Mime type", "Default audio codec"):
+            fields[key] = value.rstrip(".")
+    return fields
+
+
+def compare_registries(args, lines, failures):
+    """The registry dump against FFmpeg's own listings (T16). The reference
+    build enables exactly the codecs and formats the port implements, so the
+    two sets must be equal, and every field must match."""
+    ours = text(run(args.registry).stdout).splitlines()
+    codecs = {}
+    formats = {}
+    muxers = {}
+    for line in ours:
+        kind, _, rest = line.partition(" ")
+        if kind == "codec":
+            name, flags, long_name = rest.split(" ", 2)
+            codecs[name] = (flags, long_name)
+        elif kind == "format":
+            name, flags, long_name = rest.split(" ", 2)
+            formats[name] = (flags, long_name)
+        elif kind == "muxer":
+            name, extensions, mime, codec = rest.split(" ")
+            muxers[name] = {"Common extensions": extensions, "Mime type": mime, "Default audio codec": codec}
+    problems = []
+    if not codecs or not formats:
+        problems.append(f"the registry dump printed {len(ours)} lines")
+
+    their_codecs = {}
+    for line in text(run(args.ffmpeg, "-hide_banner", "-codecs").stdout).splitlines():
+        match = re.match(r"^ ([D.][E.][VASDT.][I.][L.][S.]) (\S+)\s+(.*)$", line)
+        if match:
+            their_codecs[match.group(2)] = (match.group(1), match.group(3))
+    enabled = {name for name, (flags, _) in their_codecs.items() if flags.startswith("DE")}
+    if enabled != set(codecs):
+        problems.append(f"codecs FFmpeg decodes and encodes {sorted(enabled)}, the registry {sorted(codecs)}")
+    for name, value in codecs.items():
+        if their_codecs.get(name) != value:
+            problems.append(f"codec {name}: ours {value}, FFmpeg's {their_codecs.get(name)}")
+
+    their_formats = {}
+    for line in text(run(args.ffmpeg, "-hide_banner", "-formats").stdout).splitlines():
+        match = re.match(r"^ ([D ])([E ])[d ] (\S+)\s+(.*)$", line)
+        if match:
+            flags = (match.group(1) + match.group(2)).replace(" ", ".")
+            their_formats[match.group(3)] = (flags, match.group(4))
+    if set(their_formats) != set(formats):
+        problems.append(f"FFmpeg's formats {sorted(their_formats)}, the registry {sorted(formats)}")
+    for name, value in formats.items():
+        if their_formats.get(name) != value:
+            problems.append(f"format {name}: ours {value}, FFmpeg's {their_formats.get(name)}")
+        if value[0][0] == "D":
+            # Detection uses no file names, which is FFmpeg's choice too only
+            # while no registered demuxer declares an extension.
+            demuxer = ffmpeg_help_fields(args.ffmpeg, "demuxer", name)
+            if "Common extensions" in demuxer:
+                problems.append(f"FFmpeg's {name} demuxer declares extensions {demuxer['Common extensions']}")
+    for name, ours_fields in muxers.items():
+        theirs = ffmpeg_help_fields(args.ffmpeg, "muxer", name)
+        theirs = {key: theirs.get(key, "-") for key in ours_fields}
+        if theirs != ours_fields:
+            problems.append(f"muxer {name}: ours {ours_fields}, FFmpeg's {theirs}")
+
+    failures.extend(f"registry: {problem}" for problem in problems)
+    lines += [
+        "",
+        "## Registries (T16)",
+        "",
+        f"Codec descriptors, decoders and encoders equal to `ffmpeg -codecs`: "
+        f"{len(codecs) if not problems else 'see failures'} codecs; formats equal to `ffmpeg -formats`: "
+        f"{len(formats)}; muxers' extensions, MIME types and default codecs equal to `ffmpeg -h muxer=...`: "
+        f"{len(muxers)}. Result: {'pass' if not problems else '**FAIL**'}.",
+    ]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--ffmpeg", required=True)
@@ -1001,6 +1090,7 @@ def main():
     parser.add_argument("--zffprobe", required=True)
     parser.add_argument("--writer", required=True, help="the write driver (zig build test-tools)")
     parser.add_argument("--zffmpeg", required=True)
+    parser.add_argument("--registry", required=True, help="the registry dump (zig build test-tools)")
     parser.add_argument("--report", help="also write the Markdown report to this file")
     args = parser.parse_args()
 
@@ -1047,7 +1137,9 @@ def main():
         f"Rejected fixtures that FFmpeg accepts (intentional differences): {ffmpeg_accepts_rejected}/{rejected}.",
     ]
     compare_unknown_length(args, lines, failures)
+    compare_registries(args, lines, failures)
     compare_detection(args, lines, failures)
+
     for container, title, build, field_differences, decode_differences in FORCED_CONTRACTS:
         compare_forced(args, lines, failures, container, title, build, field_differences, decode_differences)
     compare_writer(args, lines, failures)

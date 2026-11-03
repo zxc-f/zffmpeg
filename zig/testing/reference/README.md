@@ -10,7 +10,7 @@ binaries are never committed.
 | Path | Role |
 | --- | --- |
 | [build-ffmpeg.sh](build-ffmpeg.sh) | Clones or checks out `.references/ffmpeg` at the pinned commit, builds it out of tree in `.references/ffmpeg-build` and installs it to the given prefix. It records the configure arguments, commit, compiler and `config.log` in `<prefix>/share/zffmpeg-reference/`. |
-| [compare.py](compare.py) | Runs FFmpeg's `ffprobe` and `ffmpeg` and our `zffprobe` on every [WAV fixture](../fixtures/README.md), [AU fixture](../fixtures/au/README.md) and [AIFF fixture](../fixtures/aiff/README.md), has FFmpeg read the files the Zig [write driver](../write_driver.zig) and `zffmpeg` produce, checks `zffprobe` through a pipe, prints a Markdown report and exits with status 1 on any failure. Python 3, standard library only. |
+| [compare.py](compare.py) | Runs FFmpeg's `ffprobe` and `ffmpeg` and our `zffprobe` on every [WAV fixture](../fixtures/README.md), [AU fixture](../fixtures/au/README.md) and [AIFF fixture](../fixtures/aiff/README.md), has FFmpeg read the files the Zig [write driver](../write_driver.zig) and `zffmpeg` produce, checks `zffprobe` through a pipe, compares the [registry dump](../registry_dump.zig) with FFmpeg's own codec and format listings, prints a Markdown report and exits with status 1 on any failure. Python 3, standard library only. |
 
 ## Reproduce
 
@@ -26,7 +26,7 @@ zig build -Doptimize=ReleaseSafe install test-tools
 ```
 
 ```bash
-python3 zig/testing/reference/compare.py --ffmpeg .references/ffmpeg-install/bin/ffmpeg --ffprobe .references/ffmpeg-install/bin/ffprobe --zffprobe zig-out/bin/zffprobe --writer zig-out/bin/write-driver --zffmpeg zig-out/bin/zffmpeg
+python3 zig/testing/reference/compare.py --ffmpeg .references/ffmpeg-install/bin/ffmpeg --ffprobe .references/ffmpeg-install/bin/ffprobe --zffprobe zig-out/bin/zffprobe --writer zig-out/bin/write-driver --zffmpeg zig-out/bin/zffmpeg --registry zig-out/bin/registry-dump
 ```
 
 The T20a sample-storage vectors come from the same build. The generator is

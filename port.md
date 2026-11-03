@@ -602,6 +602,21 @@ boundary and keep sample/block loops specialized and directly callable.
 Runtime input detection and probing still happen at runtime: a comptime registry
 does not make a runtime codec choice a comptime value.
 
+T16 follows this. [codec/registry.zig](zig/codec/registry.zig) (`av.codecs`)
+holds one descriptor per codec, in `pcm.Codec`'s order (media type, FFmpeg's
+name and long name, the intra-only, lossy and lossless properties) and the
+decoder and encoder lists; `stage.check` validates at compile time that each
+stage type keeps the send/receive signatures. [format/registry.zig](zig/format/registry.zig)
+(`av.formats`) holds one entry per `Container`: FFmpeg's name and long name, the
+demuxer's probe (none for a format without a content signature, which probing
+never chooses) and the muxer's extensions, MIME type, default audio codec and
+carried codecs; the tools resolve `-f` and output extensions through it.
+Compile-time checks reject a missing or misordered entry, a duplicate name or
+extension, and a muxer that does not carry its default codec. The parsers and
+writers stay behind exhaustive switches on `Container`. `compare.py` checks
+both tables against the reference build's `ffmpeg -codecs`, `-formats` and
+`-h muxer=...`.
+
 ### Reflection and type generation in 0.17
 
 The installed 0.17 standard library confirms that struct reflection exposes

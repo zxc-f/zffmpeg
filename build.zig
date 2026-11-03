@@ -564,9 +564,20 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "av", .module = av }},
         }),
     });
+    const registry_dump = b.addExecutable(.{
+        .name = "registry-dump",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("zig/testing/registry_dump.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "av", .module = av }},
+        }),
+    });
     const test_tools = b.step("test-tools", "Install the test tools that compare.py runs");
-    test_tools.dependOn(&b.addInstallArtifact(write_driver, .{}).step);
-    test_step.dependOn(&write_driver.step);
+    for ([_]*std.Build.Step.Compile{ write_driver, registry_dump }) |tool| {
+        test_tools.dependOn(&b.addInstallArtifact(tool, .{}).step);
+        test_step.dependOn(&tool.step);
+    }
 }
 
 fn addProbeCase(b: *std.Build, test_step: *std.Build.Step, probe: *std.Build.Step.Compile, case: ProbeCase) void {

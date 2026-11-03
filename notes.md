@@ -184,11 +184,20 @@ port.md's contract table updated, and (after T06) the parser.
 | Unknown length | Not supported: a `FORM` size below 4 is `InvalidAiff` and is not detected. FFmpeg writes zero sizes to a pipe, and its own demuxer rejects that file the same way, so there is nothing to interoperate with. | The AIFF README's decisions. |
 | Writer header | FFmpeg's seekable output without metadata, byte for byte (plain AIFF for `NONE`, AIFF-C with `FVER` otherwise), so FFmpeg's `-bitexact` copy of each writer-output fixture is identical. | `generate.py` (`canonical_aiff`) and the AIFF writer. |
 
+## Registries (T16)
+
+| Decision | Current choice and reason | To change it |
+| --- | --- | --- |
+| Codec identity | `pcm.Codec` is the codec identifier while every implemented codec is PCM; `codec/registry.zig` adds one descriptor per codec (media type, FFmpeg's name and long name, the `-codecs` properties) and the decoder and encoder lists. A second enum would only mirror it. | The first non-PCM codec widens the identifier into a general one and moves the PCM-specific fields. |
+| Decoder and encoder registries | Every PCM codec has a decoder and an encoder named as the codec, as in `allcodecs.c`; `stage` marks the s16-stored ones that run as send/receive stages, whose signatures `stage.check` validates at compile time. | `codec/registry.zig`; T23a makes every codec a stage. |
+| Format registry | One entry per `Container` in its order: FFmpeg's name and long name, the demuxer's probe (optional: a format without a content signature is never chosen) and the muxer's extensions, MIME type, default audio codec and carried codecs. The tools take `-f` names and output extensions from it. Validated at compile time (order, names, unique lowercase extensions, the default codec carried). | `format/registry.zig`; raw PCM (T22c) registers a probe-less demuxer. |
+| Checked against FFmpeg | A test tool, `registry-dump`, prints both registries, and `compare.py` requires them to equal the reference build's `ffmpeg -codecs`, `-formats` and `-h muxer=...` and to cover exactly the codecs and formats it enables. | `zig/testing/registry_dump.zig`, `compare_registries`; the reference configuration. |
+
 ## Conversion pipeline
 
 | Decision | Current choice and reason | To change it |
 | --- | --- | --- |
-| Location and shape | `zig/format/convert.zig`, next to `detect.zig`, the other code that dispatches between containers: a `Conversion` with a two-container input union and a `switch` on the output, no registry or codec context. A third format replaces both switches with T16's dispatch. | port.md "Conversion pipeline"; T16. |
+| Location and shape | `zig/format/convert.zig`, next to `detect.zig`, the other code that dispatches between containers: a `Conversion` with an input union of the parser types and a `switch` on the output container. T16 kept these exhaustive switches when AIFF made a third parser: the parsers' and writers' types and options differ, and an exhaustive `switch` on `Container` makes the compiler flag every place a new format must handle, which port.md's dispatch guidance prefers for a handful of implementations. The format registry owns the facts looked up by name. | port.md "Conversion pipeline" and "Dispatch and registration"; a vtable when callers need one handle for many formats. |
 | Two phases | `init` makes every check that does not need the rest of the input and writes nothing; `run` writes. T13b can then reject a command before it creates the output file. | `convert.zig` and its tests; T13b's preflight. |
 | Check order | Input header, then the request (matrix), then the output header, as FFmpeg opens the input before setting up output streams: a malformed input reports its own error even when the request would also fail. | port.md "Conversion pipeline" and `convert.zig`'s tests. |
 | Copy reads raw bytes | Stream copy moves encoded data through `Parser.readData` and `Writer.writeData`, not a decode and re-encode that happens to give the same bytes, so the matrix's copy cells really copy; `readSamples` and `writeFrames` now build on them. | `wav.zig`, `au.zig`, `convert.zig`. |

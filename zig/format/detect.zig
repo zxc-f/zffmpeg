@@ -3,8 +3,9 @@
 // libavformat/format.c (probe_input_format_internal, av_probe_input_buffer2),
 // wavdec.c, au.c and aiffdec.c at the pinned reference revision describe the
 // scoring followed here.
-//! Format detection (TODO.md T12c, T16): the registered demuxers' content
-//! probes, scored as FFmpeg scores them, so each stream gets FFmpeg's winner.
+//! Format detection (TODO.md T12c, T16): the content probes of the demuxers
+//! in the format registry (`registry.zig`), scored as FFmpeg scores them, so
+//! each stream gets FFmpeg's winner.
 //!
 //! `Input.open` reads up to `probe_len` bytes, FFmpeg's first probe size, and
 //! asks every demuxer for a score from 0 to 100. The highest nonzero score
@@ -17,10 +18,11 @@
 //! FFmpeg reads more and probes again while the best score is at most 25
 //! (`AVPROBE_SCORE_RETRY`). Every registered probe decides within its first
 //! bytes and scores 0, 99 or 100, so that loop could never change a winner;
-//! the registry checks at compile time that each probe needs no more than
-//! `probe_len` bytes. A probe that can score low must add the loop.
+//! this file checks at compile time that each probe needs no more than
+//! `probe_len` bytes. A probe that can score low must add the loop. A demuxer
+//! without a probe (a format without a content signature) is never chosen.
 //! Extensions and MIME types, only hints in FFmpeg, are not used: none of
-//! these demuxers declares an extension.
+//! these demuxers declares one.
 
 const std = @import("std");
 const audio = @import("../core/audio.zig");
@@ -29,46 +31,10 @@ const metadata = @import("../core/metadata.zig");
 const wav = @import("wav.zig");
 const au = @import("au.zig");
 const aiff = @import("aiff.zig");
+const registry = @import("registry.zig");
 const Replay = @import("replay.zig").Replay;
 
-pub const Container = enum {
-    wav,
-    /// Sony Wave64, read and written by format/wav.zig.
-    w64,
-    au,
-    /// AIFF and AIFF-C.
-    aiff,
-
-    /// The container name in probe output, as FFmpeg's `format_name`.
-    pub fn name(container: Container) []const u8 {
-        return @tagName(container);
-    }
-
-    /// The container of a stream the WAV parser read.
-    pub fn ofWav(variant: wav.Variant) Container {
-        return switch (variant) {
-            .wav => .wav,
-            .w64 => .w64,
-        };
-    }
-
-    /// Whether this container can carry `codec`.
-    pub fn carries(container: Container, codec: pcm.Codec) bool {
-        return switch (container) {
-            .wav, .w64 => wav.carries(codec),
-            .au => au.carries(codec),
-            .aiff => aiff.carries(codec),
-        };
-    }
-
-    /// The codec transcoding writes, for samples stored as s16.
-    pub fn s16Codec(container: Container) pcm.Codec {
-        return switch (container) {
-            .wav, .w64 => .s16le,
-            .au, .aiff => .s16be,
-        };
-    }
-};
+pub const Container = registry.Container;
 
 /// The WAV, AU and AIFF contract errors, which share their common names, and
 /// `UnknownFormat` for a stream no demuxer recognizes.
@@ -90,93 +56,38 @@ pub const probe_len = 2048;
 /// `AVPROBE_SCORE_MAX`.
 const max_score = 100;
 
-const Demuxer = struct {
-    container: Container,
-    /// A score from 0 to 100 for the first bytes of a stream, which are
-    /// fewer than `probe_len` only when the stream is.
-    probe: *const fn (head: []const u8) u8,
-    /// The most bytes `probe` reads.
-    probe_bytes: usize,
-};
-
-/// The registered demuxers, in FFmpeg's registration order (which matters
-/// only for ties, and none of these can tie).
-const demuxers = [_]Demuxer{
-    .{ .container = .aiff, .probe = aiffProbe, .probe_bytes = 12 },
-    .{ .container = .au, .probe = auProbe, .probe_bytes = 24 },
-    .{ .container = .w64, .probe = w64Probe, .probe_bytes = 41 },
-    .{ .container = .wav, .probe = wavProbe, .probe_bytes = 33 },
-};
-
 comptime {
-    for (demuxers, 0..) |demuxer, i| {
-        if (demuxer.probe_bytes > probe_len) @compileError("a probe reads past the probe buffer: " ++ @tagName(demuxer.container));
-        for (demuxers[i + 1 ..]) |other| {
-            if (other.container == demuxer.container) @compileError("a container is registered twice: " ++ @tagName(demuxer.container));
-        }
+    for (registry.formats) |format| {
+        const demuxer = format.demuxer orelse continue;
+        if (demuxer.probe_bytes > probe_len) @compileError("a probe reads past the probe buffer: " ++ format.name);
     }
-}
-
-/// `wav_probe` in wavdec.c: `WAVE` at 8 after `RIFF` or `RIFX` scores 99,
-/// below the ACT demuxer; after `RF64` or `BW64` with `ds64` at 12, 100. It
-/// needs more than 32 bytes.
-fn wavProbe(head: []const u8) u8 {
-    if (head.len <= 32 or !std.mem.eql(u8, head[8..12], "WAVE")) return 0;
-    const tag = head[0..4];
-    if (std.mem.eql(u8, tag, "RIFF") or std.mem.eql(u8, tag, "RIFX")) return max_score - 1;
-    if ((std.mem.eql(u8, tag, "RF64") or std.mem.eql(u8, tag, "BW64")) and std.mem.eql(u8, head[12..16], "ds64")) {
-        return max_score;
-    }
-    return 0;
-}
-
-/// `w64_probe` in wavdec.c: the `riff` GUID at 0 and the `wave` GUID at 24,
-/// in more than 40 bytes.
-fn w64Probe(head: []const u8) u8 {
-    if (head.len <= 40) return 0;
-    const riff_guid = "riff" ++ [12]u8{ 0x2E, 0x91, 0xCF, 0x11, 0xA5, 0xD6, 0x28, 0xDB, 0x04, 0xC1, 0x00, 0x00 };
-    const wave_guid = "wave" ++ [12]u8{ 0xF3, 0xAC, 0xD3, 0x11, 0x8C, 0xD1, 0x00, 0xC0, 0x4F, 0x8E, 0xDB, 0x8A };
-    if (std.mem.eql(u8, head[0..16], riff_guid) and std.mem.eql(u8, head[24..40], wave_guid)) return max_score;
-    return 0;
-}
-
-/// `au_probe` in au.c: `.snd` and the five header fields after it all
-/// nonzero, in at least 24 bytes. A stream with data size 0 is therefore
-/// not detected, although the AU parser reads it.
-fn auProbe(head: []const u8) u8 {
-    if (head.len < 24 or !std.mem.eql(u8, head[0..4], ".snd")) return 0;
-    var field: usize = 4;
-    while (field < 24) : (field += 4) {
-        if (std.mem.allEqual(u8, head[field..][0..4], 0)) return 0;
-    }
-    return max_score;
-}
-
-/// `aiff_probe` in aiffdec.c: `FORM`, a big-endian size of at least 4, then
-/// `AIFF` or `AIFC`. FFmpeg's zero padding makes shorter input fail.
-fn aiffProbe(head: []const u8) u8 {
-    if (head.len < 12 or !std.mem.eql(u8, head[0..4], "FORM")) return 0;
-    if (std.mem.readInt(u32, head[4..8], .big) < 4) return 0;
-    if (!std.mem.eql(u8, head[8..12], "AIFF") and !std.mem.eql(u8, head[8..12], "AIFC")) return 0;
-    return max_score;
 }
 
 /// FFmpeg's winner for `head`, the first bytes of a stream: the demuxer with
 /// the highest nonzero score, or none when no demuxer scores or the highest
 /// score is tied.
 pub fn probeHead(head: []const u8) ?Container {
+    return winner(&registry.formats, head[0..@min(head.len, probe_len)]);
+}
+
+/// The winner among `formats`. FFmpeg's order only matters for ties, which
+/// mean no winner whatever the order.
+fn winner(formats: []const registry.Format, head: []const u8) ?Container {
     var best: u8 = 0;
-    var winner: ?Container = null;
-    for (demuxers) |demuxer| {
-        const score = demuxer.probe(head[0..@min(head.len, probe_len)]);
+    var chosen: ?Container = null;
+    for (formats) |format| {
+        const demuxer = format.demuxer orelse continue;
+        const score_head = demuxer.probe orelse continue;
+        const score = score_head(head);
+        std.debug.assert(score <= max_score);
         if (score > best) {
             best = score;
-            winner = demuxer.container;
+            chosen = format.container;
         } else if (score == best) {
-            winner = null;
+            chosen = null;
         }
     }
-    return winner;
+    return chosen;
 }
 
 /// A stream opened for parsing: its format, and a reader that replays the
@@ -376,6 +287,31 @@ test "the probes need FFmpeg's minimum lengths and nonzero AU fields" {
     std.mem.writeInt(u32, aiff_head[4..8], 3, .big);
     try std.testing.expectEqual(null, probeHead(&aiff_head));
     try std.testing.expectEqual(null, probeHead(""));
+}
+
+fn alwaysProbe(head: []const u8) u8 {
+    _ = head;
+    return max_score;
+}
+
+test "a demuxer without a probe is never chosen, and a tie chooses none" {
+    const head = fixtures.bytes("mono_8k");
+    // A probe-less demuxer (raw PCM, T22c, will be one) next to WAV.
+    const raw: registry.Format = .{
+        .container = .au,
+        .name = "raw",
+        .long_name = "raw",
+        .demuxer = .{ .probe = null, .probe_bytes = 0 },
+        .muxer = null,
+    };
+    try std.testing.expectEqual(null, winner(&.{raw}, head));
+    try std.testing.expectEqual(Container.wav, winner(&.{ raw, Container.wav.format().* }, head));
+    // Two demuxers scoring 100 for the same bytes tie: no winner.
+    const always: registry.Demuxer = .{ .probe = alwaysProbe, .probe_bytes = 0 };
+    var both = [2]registry.Format{ Container.wav.format().*, Container.aiff.format().* };
+    both[0].demuxer = always;
+    both[1].demuxer = always;
+    try std.testing.expectEqual(null, winner(&both, head));
 }
 
 test "a forced format parses what probing would not detect, and only that format" {

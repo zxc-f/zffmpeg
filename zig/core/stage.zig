@@ -52,3 +52,28 @@ pub const State = enum {
 
 /// `send` after `finishInput`, before `reset`.
 pub const SendError = error{InputAfterEnd};
+
+/// Fails compilation unless `S` keeps this contract's signatures for inputs
+/// of type `Input` and outputs of type `Output`: `send(*S, Input) S.Error!Send`
+/// with `InputAfterEnd` in `S.Error`, `receive(*S) Receive(Output)`, and
+/// `finishInput(*S) void` and `reset(*S) void`. Registries call it for every
+/// stage type they list (TODO.md T16).
+pub fn check(comptime S: type, comptime Input: type, comptime Output: type) void {
+    comptime {
+        if (@TypeOf(S.send) != fn (*S, Input) S.Error!Send) {
+            @compileError(@typeName(S) ++ ".send does not have the stage signature");
+        }
+        // The coercion compiles only if the error is in S.Error.
+        const after_end: S.Error = error.InputAfterEnd;
+        if (after_end != error.InputAfterEnd) unreachable;
+        if (@TypeOf(S.receive) != fn (*S) Receive(Output)) {
+            @compileError(@typeName(S) ++ ".receive does not have the stage signature");
+        }
+        if (@TypeOf(S.finishInput) != fn (*S) void) {
+            @compileError(@typeName(S) ++ ".finishInput does not have the stage signature");
+        }
+        if (@TypeOf(S.reset) != fn (*S) void) {
+            @compileError(@typeName(S) ++ ".reset does not have the stage signature");
+        }
+    }
+}

@@ -189,20 +189,11 @@ fn parse(args: []const [:0]const u8) Parsed {
 
 fn outputContainer(command: Command) error{ FormatRequired, UnknownFormat, UnknownExtension }!av.convert.Container {
     if (command.format) |name| {
-        return std.meta.stringToEnum(av.convert.Container, name) orelse error.UnknownFormat;
+        return av.formats.findMuxer(name) orelse error.UnknownFormat;
     }
     if (isStdio(command.output)) return error.FormatRequired;
-    // FFmpeg matches extensions without regard to case.
-    const extension = std.fs.path.extension(command.output);
-    if (std.ascii.eqlIgnoreCase(extension, ".wav")) return .wav;
-    if (std.ascii.eqlIgnoreCase(extension, ".w64")) return .w64;
-    if (std.ascii.eqlIgnoreCase(extension, ".au")) return .au;
-    // The extensions FFmpeg's AIFF muxer declares.
-    for ([_][]const u8{ ".aif", ".aiff", ".afc", ".aifc" }) |aiff_extension| {
-        if (std.ascii.eqlIgnoreCase(extension, aiff_extension)) return .aiff;
-    }
-
-    return error.UnknownExtension;
+    // The muxers' extensions, without regard to case, as FFmpeg matches them.
+    return av.formats.muxerForExtension(std.fs.path.extension(command.output)) orelse error.UnknownExtension;
 }
 
 fn isStdio(path: []const u8) bool {

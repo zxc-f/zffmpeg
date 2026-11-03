@@ -35,7 +35,7 @@ zig build test -Doptimize=ReleaseSafe
 zig build test -Doptimize=ReleaseFast        # safety checks off; required for parser/size code
 zig build test -Dtest-filter="truncation"    # only tests whose names contain the text
 zig build test --summary all                 # list every step and its test counts
-zig build test-tools                         # install the write driver that compare.py runs
+zig build test-tools                         # install the test tools that compare.py runs
 zig fmt --check build.zig build.zig.zon zig/
 ```
 
@@ -82,12 +82,15 @@ not a test run. Windows and ARM runs wait for TODO.md T62–T63.
   prepared on disk (an existing output, the input as the output, a removed
   partial output, redirected standard streams) run in
   [testing/zffmpeg_cases.zig](testing/zffmpeg_cases.zig), a tool the step
-  runs in a fresh output directory. It also compiles the write driver, so a
+  runs in a fresh output directory. It also compiles the test tools, so a
   break shows in every mode.
 - **`test-tools` step:** installs `zig-out/bin/write-driver`, built from
-  [testing/write_driver.zig](testing/write_driver.zig). It writes a media file
+  [testing/write_driver.zig](testing/write_driver.zig), which writes a media file
   from raw samples with the `av` writers, so the FFmpeg comparison reads actual
-  Zig output (TODO.md T19a). It is a test tool, not part of the default install.
+  Zig output (TODO.md T19a), and `zig-out/bin/registry-dump`, built from
+  [testing/registry_dump.zig](testing/registry_dump.zig), which prints the codec
+  and format registries for the comparison to check against FFmpeg's own
+  listings (T16). They are test tools, not part of the default install.
 - **Examples are registered explicitly** in the `examples` list in `build.zig`.
   CI fails when a file in `examples/` is missing from that list.
 - **Tests inside `av`:** Zig analyzes lazily, so a file's tests run only when
@@ -135,6 +138,7 @@ slowdowns of the default build.
 | `zig/format/wav.zig`, `zig/io/file.zig`, `zig/cli/probe.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. FFmpeg's `wavdec.c`, `wavenc.c`, `w64.c`, `riffenc.c` and `ffprobe` were read for behavior only; no code is copied (the Wave64 GUIDs are format constants). |
 | `zig/format/au.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. FFmpeg's `au.c` and `pcm.c` were read for behavior only; no code is copied. |
 | `zig/format/aiff.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. FFmpeg's `aiffdec.c`, `aiffenc.c` and `aiff.c` were read for behavior only (the 80-bit rate conversion and the compression-type table); no code is copied. |
+| `zig/format/registry.zig`, `zig/codec/registry.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. The names, long names, properties, extensions, MIME types and default codecs are FFmpeg's, from `libavcodec/codec_desc.c`, `allcodecs.c`, `libavformat/allformats.c` and the format descriptors (T16); no code is copied. |
 | `zig/format/detect.zig`, `zig/format/replay.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. The probes and their scoring follow `wav_probe`, `w64_probe`, `au_probe`, `aiff_probe` and `format.c` (T16, T22b); no code is copied. |
 | `zig/codec/g711.zig` | `LGPL-2.1-or-later` (SPDX header) | **Derived** from FFmpeg's `libavcodec/pcm_tablegen.h` at commit `5d5a38a7e46be296eab75982c0986054f731e19e`, © 2010 Reimar Döffinger, `LGPL-2.1-or-later`; its A-law and mu-law conversions come from Sun Microsystems' `g711.c` (unrestricted use). The header keeps that attribution. |
 | `zig/testing/reference/pcm_vectors.c` | `LGPL-2.1-or-later` (SPDX header) | Original reference tool: it drives the pinned FFmpeg's public `libavcodec` API to print the T20b oracle and is not part of the port. |
@@ -148,7 +152,7 @@ slowdowns of the default build.
 | `zig/cli/ffmpeg.zig`, `zig/cli/status.zig`, `zig/testing/zffmpeg_cases.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. FFmpeg's `fftools/ffmpeg_opt.c` (`assert_file_overwrite`) was read for the `-y`/`-n` and same-file behavior only; no code is copied. |
 | `zig/testing/reference/build-ffmpeg.sh`, `compare.py` | `LGPL-2.1-or-later` (SPDX header) | Original scripts; they build and run the separate, unmodified FFmpeg reference. |
 | `zig/codec/pcm.zig`, `zig/core/audio.zig`, `zig/core/time.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. Behavior follows FFmpeg's `libavcodec/pcm.c`, `libavutil/mathematics.c`, `channel_layout.h` and `samplefmt.c` at the pinned revision; no code is copied. |
-| `zig/testing/fixtures.zig`, `zig/testing/fixtures/generate.py`, `zig/testing/write_driver.zig` | `LGPL-2.1-or-later` (SPDX header) | Original project files. |
+| `zig/testing/fixtures.zig`, `zig/testing/fixtures/generate.py`, `zig/testing/write_driver.zig`, `zig/testing/registry_dump.zig` | `LGPL-2.1-or-later` (SPDX header) | Original project files. |
 | `zig/testing/fixtures/wav/*.wav`, `manifest.zon` | Generated data | Written by `generate.py`; see the [fixture README](testing/fixtures/README.md#provenance). |
 | `zig/testing/fixtures/au/*.au`, `au/manifest.zon` | Generated data | Written by `generate.py`; see the [AU fixture README](testing/fixtures/au/README.md#provenance). |
 | `.zig-version` | Not applicable | A one-line version marker. |

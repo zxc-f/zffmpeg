@@ -25,10 +25,14 @@
 //!   PCM (`format/au.zig`).
 //! - `aiff`: bounded AIFF and AIFF-C parsing and known-length writing for
 //!   their PCM encodings (`format/aiff.zig`).
+//! - `codecs`: codec descriptors and the decoder and encoder registries, as
+//!   FFmpeg names them (`codec/registry.zig`).
+//! - `formats`: the format registry, with each container's demuxer probe and
+//!   muxer extensions and codecs, as FFmpeg names them (`format/registry.zig`).
 //! - `detect`: content detection with FFmpeg's winner, or a forced format,
 //!   replaying the bytes it read to the chosen parser (`format/detect.zig`,
 //!   `format/replay.zig`).
-//! - `convert`: synchronous WAV/Wave64/AU conversion and stream copy, with
+//! - `convert`: synchronous WAV/Wave64/AU/AIFF conversion and stream copy, with
 //!   every check made before output starts (`format/convert.zig`).
 //! - `file`: file and stream adapters for the WAV and AU paths, with
 //!   borrowed-handle and path variants (`io/file.zig`).
@@ -47,6 +51,8 @@ pub const metadata = @import("core/metadata.zig");
 pub const wav = @import("format/wav.zig");
 pub const au = @import("format/au.zig");
 pub const aiff = @import("format/aiff.zig");
+pub const codecs = @import("codec/registry.zig");
+pub const formats = @import("format/registry.zig");
 pub const detect = @import("format/detect.zig");
 pub const convert = @import("format/convert.zig");
 pub const file = @import("io/file.zig");
@@ -54,6 +60,7 @@ pub const file = @import("io/file.zig");
 test {
     _ = @import("codec/pcm.zig");
     _ = @import("codec/g711.zig");
+    _ = @import("codec/registry.zig");
     _ = @import("core/audio.zig");
     _ = @import("core/time.zig");
     _ = @import("core/samples.zig");
@@ -64,6 +71,7 @@ test {
     _ = @import("format/wav.zig");
     _ = @import("format/au.zig");
     _ = @import("format/aiff.zig");
+    _ = @import("format/registry.zig");
     _ = @import("format/detect.zig");
     _ = @import("format/replay.zig");
     _ = @import("format/convert.zig");

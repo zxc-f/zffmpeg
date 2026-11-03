@@ -173,7 +173,8 @@ pub const Conversion = struct {
                     .input_codec = info.codec,
                     .output_codec = switch (request.mode) {
                         .copy => info.codec,
-                        .transcode => request.output.s16Codec(),
+                        // An output without a muxer fails the request check below.
+                        .transcode => request.output.s16Codec() orelse info.codec,
                     },
                     .format = info.format,
                     // Both writers put the length in the header up front.
@@ -197,7 +198,7 @@ pub const Conversion = struct {
         }
         const supported = switch (request.mode) {
             .copy => request.output.carries(summary.input_codec),
-            .transcode => summary.input_codec.storage() == .s16,
+            .transcode => summary.input_codec.storage() == .s16 and request.output.s16Codec() != null,
         };
         if (!supported) return error.UnsupportedOperation;
         switch (request.output) {

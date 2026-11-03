@@ -115,6 +115,20 @@ pub fn carries(codec: pcm.Codec) bool {
     return compressionFor(codec) != null;
 }
 
+/// The most bytes `probeScore` reads.
+pub const probe_bytes = 12;
+
+/// FFmpeg's content probe (`aiff_probe` in aiffdec.c), a score from 0 to 100
+/// for the first bytes of a stream: `FORM`, a big-endian size of at least 4,
+/// then `AIFF` or `AIFC` score 100. FFmpeg's zero padding makes shorter
+/// input fail, as here.
+pub fn probeScore(head: []const u8) u8 {
+    if (head.len < probe_bytes or !std.mem.eql(u8, head[0..4], "FORM")) return 0;
+    if (std.mem.readInt(u32, head[4..8], .big) < 4) return 0;
+    if (!std.mem.eql(u8, head[8..12], "AIFF") and !std.mem.eql(u8, head[8..12], "AIFC")) return 0;
+    return 100;
+}
+
 /// The sample size the writer stores in `COMM`: the codec's bits.
 fn bitsFor(codec: pcm.Codec) u16 {
     const sample_bytes: u16 = codec.bytesPerSample();

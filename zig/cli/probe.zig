@@ -52,7 +52,7 @@ fn run(init: std.process.Init) ExitStatus {
         return .usage;
     }
     const format: ?av.detect.Container = if (forced)
-        std.meta.stringToEnum(av.detect.Container, args[2]) orelse {
+        av.formats.findDemuxer(args[2]) orelse {
             printError(io, "zffprobe: {s}: unsupported input format\n", .{args[2]});
             return .unsupported;
         }

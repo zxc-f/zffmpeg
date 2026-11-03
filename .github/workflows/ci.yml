@@ -142,5 +142,6 @@ jobs:
             --zffprobe zig-out/bin/zffprobe \
             --writer zig-out/bin/write-driver \
             --zffmpeg zig-out/bin/zffmpeg \
+            --registry zig-out/bin/registry-dump \
             --report reference-report.md
           cat reference-report.md >> "$GITHUB_STEP_SUMMARY"

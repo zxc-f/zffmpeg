@@ -107,6 +107,22 @@ pub fn carries(codec: pcm.Codec) bool {
     return encodingFor(codec) != null;
 }
 
+/// The most bytes `probeScore` reads.
+pub const probe_bytes = header_len;
+
+/// FFmpeg's content probe (`au_probe` in au.c), a score from 0 to 100 for the
+/// first bytes of a stream: `.snd` and the five header fields after it all
+/// nonzero, in at least 24 bytes, score 100. A stream with data size 0 is
+/// therefore not detected, although the parser reads it.
+pub fn probeScore(head: []const u8) u8 {
+    if (head.len < probe_bytes or !std.mem.eql(u8, head[0..4], ".snd")) return 0;
+    var field: usize = 4;
+    while (field < header_len) : (field += 4) {
+        if (std.mem.allEqual(u8, head[field..][0..4], 0)) return 0;
+    }
+    return 100;
+}
+
 /// Bytes decoded per read; a whole number of frames of every encoding.
 const scratch_len = 4096;
 

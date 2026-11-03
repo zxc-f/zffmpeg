@@ -197,6 +197,35 @@ fn w64Guid(comptime code: *const [4]u8) [16]u8 {
     return code.* ++ w64_suffix;
 }
 
+/// The most bytes `probeScore` reads.
+pub const probe_bytes = 33;
+
+/// FFmpeg's content probe for RIFF and RF64 WAV (`wav_probe` in wavdec.c), a
+/// score from 0 to 100 for the first bytes of a stream: `WAVE` at 8 after
+/// `RIFF` or `RIFX` scores 99, below the ACT demuxer; after `RF64` or `BW64`
+/// with `ds64` at 12, 100. It needs more than 32 bytes.
+pub fn probeScore(head: []const u8) u8 {
+    if (head.len < probe_bytes or !std.mem.eql(u8, head[8..12], "WAVE")) return 0;
+    const tag = head[0..4];
+    if (std.mem.eql(u8, tag, "RIFF") or std.mem.eql(u8, tag, "RIFX")) return 99;
+    if ((std.mem.eql(u8, tag, "RF64") or std.mem.eql(u8, tag, "BW64")) and std.mem.eql(u8, head[12..16], "ds64")) {
+        return 100;
+    }
+    return 0;
+}
+
+/// The most bytes `w64ProbeScore` reads.
+pub const w64_probe_bytes = 41;
+
+/// FFmpeg's content probe for Sony Wave64 (`w64_probe` in wavdec.c): the
+/// `riff` GUID at 0 and the `wave` GUID at 24, in more than 40 bytes, score 100.
+pub fn w64ProbeScore(head: []const u8) u8 {
+    if (head.len < w64_probe_bytes) return 0;
+    const riff_guid = "riff" ++ w64_riff_suffix;
+    if (std.mem.eql(u8, head[0..16], riff_guid) and std.mem.eql(u8, head[24..40], &w64Guid("wave"))) return 100;
+    return 0;
+}
+
 const ChunkHeader = struct {
     /// The RIFF chunk ID, or for Wave64 the 4-character code of a GUID with
     /// the shared suffix (zeros for any other GUID).
