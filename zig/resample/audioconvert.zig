@@ -4,7 +4,8 @@
 // the pinned reference revision give the conversions reproduced here.
 //! Sample format conversion (TODO.md T23a): every T20a sample format to every
 //! other, packed or planar, as libswresample converts when only the format
-//! changes (no resampling, rematrixing or dither).
+//! changes (no resampling, rematrixing or dither). Dithered conversion is
+//! resample/dither.zig, which the `Converter` stage runs when given one.
 //!
 //! The conversions are FFmpeg's `CONV_FUNC` table:
 //!
@@ -33,6 +34,7 @@ const audio = @import("../core/audio.zig");
 const samples = @import("../core/samples.zig");
 const stage = @import("../core/stage.zig");
 const Frame = @import("../core/frame.zig").Frame;
+const Dither = @import("dither.zig").Dither;
 
 /// Stored samples are in the target's byte order (T20a).
 const native_endian = builtin.cpu.arch.endian();
@@ -197,23 +199,28 @@ fn convertKinds(comptime out: Kind, comptime in: Kind, dst: samples.Buffer, src:
 }
 
 /// Converts frames to another sample format, rate and layout unchanged, as a
-/// send/receive stage (core/stage.zig).
+/// send/receive stage (core/stage.zig), dithered or not.
 ///
 /// Holds at most one frame. A received frame borrows the caller's `storage`
 /// and stays valid until the next `send` or `reset`; its timestamp is the
 /// input's. A frame is read during `send` and not retained; a failed `send`
-/// consumes nothing and leaves the state unchanged.
+/// consumes nothing and leaves the state unchanged. The dither's noise runs
+/// on across frames, and `reset` does not restart it.
 pub const Converter = struct {
     in_format: audio.Format,
     out_format: audio.Format,
     storage: []u8,
+    /// libswresample's dither (resample/dither.zig), with its scratch.
+    dither: ?Dither = null,
+    scratch: []u8 = &.{},
     pending: ?Frame = null,
     state: stage.State = .accepting,
 
     pub const Error = stage.SendError || error{
         /// The frame's format is not the converter's input format.
         FormatMismatch,
-        /// `storage` cannot hold the converted samples.
+        /// `storage` cannot hold the converted samples, or the scratch the
+        /// dither's internal format.
         OutputTooSmall,
     };
 
@@ -223,6 +230,17 @@ pub const Converter = struct {
     pub fn init(in_format: audio.Format, out_format: audio.Format, storage: []u8) Converter {
         std.debug.assert(in_format.sample_rate == out_format.sample_rate and in_format.layout == out_format.layout);
         return .{ .in_format = in_format, .out_format = out_format, .storage = storage };
+    }
+
+    /// A converter that dithers with `dither`, made for these formats by
+    /// `Dither.init`; `scratch` must hold `dither.scratchLen` bytes for the
+    /// largest frame, which also bounds the frame size.
+    pub fn initDithered(in_format: audio.Format, out_format: audio.Format, storage: []u8, dither: Dither, scratch: []u8) Converter {
+        std.debug.assert(std.meta.eql(dither.in_format, in_format) and dither.out_format == out_format.sample_format);
+        var c: Converter = .init(in_format, out_format, storage);
+        c.dither = dither;
+        c.scratch = scratch;
+        return c;
     }
 
     pub fn send(c: *Converter, frame: Frame) Error!stage.Send {
@@ -238,7 +256,13 @@ pub const Converter = struct {
             const count = std.math.cast(u32, frames) orelse return error.OutputTooSmall;
             const layout = samples.Layout.init(c.out_format.sample_format, c.out_format.channelCount(), count, .{ .line = 1 }) catch return error.OutputTooSmall;
             const output = samples.Buffer.init(layout, c.storage) catch unreachable; // checked above
-            convert(output, frame.view(), 0, 0, count);
+            if (c.dither) |*d| {
+                const scratch_len = d.scratchLen(count);
+                if (scratch_len > c.scratch.len) return error.OutputTooSmall;
+                d.convert(output, frame.view(), count, c.scratch[0..scratch_len]);
+            } else {
+                convert(output, frame.view(), 0, 0, count);
+            }
         }
         c.pending = .{ .format = c.out_format, .data = c.storage[0..out_len], .pts = frame.pts };
         return .accepted;

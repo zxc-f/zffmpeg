@@ -31,6 +31,8 @@
 //!   (`format/caf.zig`).
 //! - `audioconvert`: sample format conversion between every format, packed
 //!   or planar, as libswresample converts (`resample/audioconvert.zig`).
+//! - `dither`: libswresample's dithered conversion, every method, noise
+//!   shaping included (`resample/dither.zig`).
 //! - `codecs`: codec descriptors and the decoder and encoder registries, as
 //!   FFmpeg names them (`codec/registry.zig`).
 //! - `formats`: the format registry, with each container's demuxer probe and
@@ -60,6 +62,7 @@ pub const aiff = @import("format/aiff.zig");
 pub const raw = @import("format/raw.zig");
 pub const caf = @import("format/caf.zig");
 pub const audioconvert = @import("resample/audioconvert.zig");
+pub const dither = @import("resample/dither.zig");
 pub const codecs = @import("codec/registry.zig");
 pub const formats = @import("format/registry.zig");
 pub const detect = @import("format/detect.zig");
@@ -83,6 +86,7 @@ test {
     _ = @import("format/raw.zig");
     _ = @import("format/caf.zig");
     _ = @import("resample/audioconvert.zig");
+    _ = @import("resample/dither.zig");
     _ = @import("format/registry.zig");
     _ = @import("format/detect.zig");
     _ = @import("format/replay.zig");

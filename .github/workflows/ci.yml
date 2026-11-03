@@ -132,12 +132,16 @@ jobs:
           ./pcm-vectors | diff -u zig/testing/vectors/pcm.txt -
 
       # The committed T23a oracle must be what this build's libswresample gives.
-      - name: Check the sample conversion vectors (T23a)
+      - name: Check the sample conversion and dither vectors (T23a)
         run: |
           clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/sampleconv_vectors.c \
             .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a \
             -lm -pthread -o sampleconv-vectors
           ./sampleconv-vectors | diff -u zig/testing/vectors/sampleconv.txt -
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/dither_vectors.c \
+            .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a \
+            -lm -pthread -o dither-vectors
+          ./dither-vectors 2>/dev/null | diff -u zig/testing/vectors/dither.txt -
 
       - name: Build zffprobe, zffmpeg and the test tools
         run: zig build -Doptimize=ReleaseSafe install test-tools

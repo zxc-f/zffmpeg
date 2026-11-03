@@ -45,11 +45,15 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/pcm_vectors
 ./pcm-vectors | diff -u zig/testing/vectors/pcm.txt -
 ```
 
-The T23a sample conversion vectors come from the reference's `libswresample`:
+The T23a sample conversion and dither vectors come from the reference's
+`libswresample` (the dither generator logs libswresample's fallback warning
+for the shaping methods without a filter at the rate on standard error):
 
 ```bash
 clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/sampleconv_vectors.c .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o sampleconv-vectors
 ./sampleconv-vectors | diff -u zig/testing/vectors/sampleconv.txt -
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/dither_vectors.c .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o dither-vectors
+./dither-vectors 2>/dev/null | diff -u zig/testing/vectors/dither.txt -
 ```
 
 On Windows (MSYS2 UCRT64 clang) link with `-lm -lbcrypt` instead of
@@ -207,6 +211,12 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   equal FFmpeg's own conversion byte for byte instead (T22c). Since T22b, the AU and AIFF
   outputs of every untagged writer-output input must also equal FFmpeg's own
   `ffmpeg -bitexact` conversion byte for byte.
+- **Dither (T23a).** Seven generated inputs of 200000 frames (f32 WAV, s24
+  AIFF, s32 AU, f64 Wave64, raw f32be, s32 CAF written by hand, s16 WAV), so
+  the noise buffer restarts and each demuxer's packet size matters, are
+  converted by FFmpeg and `zffmpeg` with every `-dither_method`, plus three
+  `-dither_scale` values, to `pcm_s16le`, `pcm_u8`, `pcm_s24le` and
+  `pcm_s32le`, each written as raw PCM; the bytes must be equal.
 - **FFmpeg's AU muxer (T22a).** FFmpeg copies each AU writer-output fixture
   into AU (`-f au -i … -bitexact -c:a copy -f au`); the result must equal the
   fixture byte for byte, so FFmpeg's muxer and the Zig writer emit the same

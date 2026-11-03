@@ -34,16 +34,18 @@
 //! The input is read as packets of whole frames (TODO.md T14a), timestamped in
 //! frames since the start (`1/sample_rate`). Stream copy writes those packets'
 //! bytes unchanged; transcoding sends them through `pcm.Decoder`, an
-//! `audioconvert.Converter` when the sample storage changes (T23a), and
-//! `pcm.Encoder` (the core/stage.zig contract) and writes the encoded packets.
+//! `audioconvert.Converter` when the sample storage changes or the request
+//! dithers (T23a), and `pcm.Encoder` (the core/stage.zig contract) and writes
+//! the encoded packets. The dither's noise follows FFmpeg's packet sizes for
+//! the input, not this file's packets (`ffmpegPacketFrames`).
 //! Neither keeps container metadata: the output has the writer's canonical
 //! header, so WAV chunks other than `fmt ` and `data`, AU annotations and AIFF
 //! chunks other than `FVER`, `COMM` and `SSND` are dropped.
 //!
 //! Nothing is allocated. Working memory is fixed, whatever the input length:
 //! a 4 KiB packet buffer, for transcoding 8 KiB of decoded samples and 32 KiB
-//! each of converted samples and encoded bytes, plus the parsers' and
-//! writers' own 4 KiB scratch.
+//! each of converted samples, the dither's scratch and encoded bytes, plus
+//! the parsers' and writers' own 4 KiB scratch.
 
 const std = @import("std");
 const audio = @import("../core/audio.zig");
@@ -58,6 +60,7 @@ const raw = @import("raw.zig");
 const caf = @import("caf.zig");
 const detect = @import("detect.zig");
 const audioconvert = @import("../resample/audioconvert.zig");
+const dither = @import("../resample/dither.zig");
 
 pub const Container = detect.Container;
 
@@ -79,6 +82,14 @@ pub const Request = struct {
     /// must carry; null takes the output container's default codec. The
     /// samples convert to its storage as libswresample would. Not for `copy`.
     codec: ?pcm.Codec = null,
+    /// libswresample's dither for `transcode` (FFmpeg's `-dither_method` and
+    /// `-dither_scale`, T23a), applied where FFmpeg's would: when the sample
+    /// storage changes to a narrower integer one (FFmpeg's filter graph
+    /// converts nothing when it stays the same, as from s32 to a 24-bit
+    /// encoder). `run` sets `output_sample_bits` as FFmpeg's command line
+    /// does, whatever it holds here: 24 for a 24-bit encoder, which scales
+    /// the noise. Ignored for `copy`, as FFmpeg ignores it.
+    dither: dither.Options = .{},
     /// What the caller knows about the input: a forced format (FFmpeg's input
     /// `-f`, T16), its file name and length, raw PCM parameters (T22c).
     input: detect.Source = .{},
@@ -153,6 +164,7 @@ pub const Conversion = struct {
     summary: Summary,
     /// The input's tags, for the output header.
     tags: ?*const metadata.Dictionary,
+    dither: dither.Options,
     /// Frames read so far: the next packet's timestamp.
     next_pts: i64 = 0,
 
@@ -237,7 +249,7 @@ pub const Conversion = struct {
             .raw => try raw.Writer.check(summary.output_codec, summary.outputFormat(), rawOptions(limits)),
             .caf => unreachable, // no muxer: refused above as UnsupportedOperation
         }
-        return .{ .input = input, .limits = limits, .summary = summary, .tags = tags };
+        return .{ .input = input, .limits = limits, .summary = summary, .tags = tags, .dither = request.dither };
     }
 
     /// The frame count a writer's header needs up front.
@@ -288,11 +300,26 @@ pub const Conversion = struct {
                 // any format in at most 8 times.
                 var decoded: [2 * transfer_len]u8 = undefined;
                 var converted: [8 * transfer_len]u8 = undefined;
+                var scratch: [8 * transfer_len]u8 = undefined;
                 var encoded: [8 * transfer_len]u8 = undefined;
+                // FFmpeg's command line tells libswresample a 24-bit encoder
+                // keeps 24 bits of s32.
+                var options = c.dither;
+                options.output_sample_bits = if (s.output_codec.bytesPerSample() == 3) 24 else 0;
+                // Without a format change FFmpeg converts nothing.
+                const changes = out_format.sample_format != s.format.sample_format;
+                var dithered = if (changes) dither.Dither.init(s.format, out_format.sample_format, options) else null;
+                if (dithered) |*d| d.setCalls(ffmpegPacketFrames(s.input, s.input_codec, s.format), s.frame_count);
                 var stages: Transcoder(W) = .{
                     .decoder = .init(s.input_codec, s.format, &decoded),
-                    // libswresample's conversion when the storage differs (T23a).
-                    .converter = if (out_format.sample_format != s.format.sample_format) .init(s.format, out_format, &converted) else null,
+                    // libswresample's conversion when the storage differs or
+                    // it dithers (T23a).
+                    .converter = if (dithered) |d|
+                        .initDithered(s.format, out_format, &converted, d, &scratch)
+                    else if (changes)
+                        .init(s.format, out_format, &converted)
+                    else
+                        null,
                     .encoder = .init(s.output_codec, out_format, &encoded),
                     .writer = writer,
                 };
@@ -340,6 +367,23 @@ pub const Conversion = struct {
         };
     }
 };
+
+/// The frames per packet FFmpeg's demuxer for `container` reads, the last
+/// packet aside. FFmpeg's conversion calls libswresample once per packet, and
+/// the dither's noise depends on those calls (resample/dither.zig).
+fn ffmpegPacketFrames(container: Container, codec: pcm.Codec, format: audio.Format) u32 {
+    const sample_bytes: u32 = codec.bytesPerSample();
+    const block_align = sample_bytes * format.channelCount();
+    return switch (container.family()) {
+        // aiffdec.c's MAX_SIZE and cafdec.c's CAF_MAX_PKT_SIZE: 4096 bytes
+        // of whole frames.
+        .aiff, .caf => 4096 / block_align,
+        // ff_pcm_default_packet_size: the frames of a tenth of a second
+        // (its bit rate over 80 bytes, over the block size), at most
+        // INT_MAX bytes, rounded down to a power of two.
+        .wav, .au, .raw => std.math.floorPowerOfTwo(u32, std.math.clamp(format.sample_rate / 10, 1, std.math.maxInt(i32) / block_align)),
+    };
+}
 
 /// The transcoding stages between the packet reader and the writer `W`.
 ///
@@ -1211,6 +1255,74 @@ test "a long stream converts with fixed memory and exact frame counts" {
         try std.testing.expectEqualSlices(u8, a[0..n], b[0..n]);
         left -= n;
     }
+}
+
+test "a dithered transcode follows FFmpeg's packets, and only a format change dithers" {
+    const gpa = std.testing.allocator;
+    // Raw f32 stereo at 44100 Hz: FFmpeg's raw demuxer reads 4096 frames a
+    // packet, this file 512, and 140000 frames make the noise restart.
+    const frames = 140000;
+    const stereo = try audio.Format.init(44100, 2, .flt);
+    const input = try gpa.alloc(u8, frames * 8);
+    defer gpa.free(input);
+    var x: u32 = 1;
+    for (0..frames * 2) |i| {
+        x = x *% 1664525 +% 1013904223;
+        const signed: i32 = @bitCast(x);
+        const value: f32 = @floatFromInt(signed);
+        std.mem.writeInt(u32, input[4 * i ..][0..4], @bitCast(value * (1.0 / 2147483648.0)), .little);
+    }
+    const output = try gpa.alloc(u8, frames * 4);
+    defer gpa.free(output);
+    const source: detect.Source = .{ .format = .f32le, .raw = .{ .layout = .stereo } };
+    for ([_]?u64{ null, frames * 8 }) |length| {
+        var reader: std.Io.Reader = .fixed(input);
+        var out: std.Io.Writer = .fixed(output);
+        var known = source;
+        known.length = length;
+        const options: dither.Options = .{ .method = .triangular, .scale = 0.75 };
+        _ = try convert(&reader, &out, .{ .output = .s16le, .mode = .transcode, .dither = options, .input = known }, .{});
+        try std.testing.expectEqual(output.len, out.end);
+
+        // The same conversion in FFmpeg's calls.
+        var d = dither.Dither.init(stereo, .s16, options).?; // flt to s16 dithers
+        const expected = try gpa.alloc(u8, frames * 4);
+        defer gpa.free(expected);
+        const scratch = try gpa.alloc(u8, d.scratchLen(4096));
+        defer gpa.free(scratch);
+        const native = try gpa.alloc(u8, 4096 * 8);
+        defer gpa.free(native);
+        var done: u32 = 0;
+        while (done < frames) {
+            const n: u32 = @min(4096, frames - done);
+            for (0..2 * n) |i| {
+                const bits = std.mem.readInt(u32, input[(2 * done + i) * 4 ..][0..4], .little);
+                std.mem.writeInt(u32, native[4 * i ..][0..4], bits, @import("builtin").cpu.arch.endian());
+            }
+            const in_layout = try samples_storage.Layout.init(.flt, 2, n, .{ .line = 1 });
+            const in_buffer = try samples_storage.Buffer.init(in_layout, native);
+            const out_layout = try samples_storage.Layout.init(.s16, 2, n, .{ .line = 1 });
+            const out_buffer = try samples_storage.Buffer.init(out_layout, expected[4 * done ..]);
+            d.convert(out_buffer, in_buffer.view(), n, scratch[0..d.scratchLen(n)]);
+            done += n;
+        }
+        pcm.storedToLittle(.s16, expected);
+        try std.testing.expectEqualSlices(u8, expected, output);
+    }
+
+    // s32 to a 24-bit encoder: FFmpeg's filter graph converts nothing, so
+    // there is nothing to dither.
+    var plain_out: [64]u8 = undefined;
+    var dithered_out: [64]u8 = undefined;
+    const s32_input = input[0 .. 8 * 8];
+    const s32_source: detect.Source = .{ .format = .s32le, .raw = .{ .layout = .stereo } };
+    var plain_reader: std.Io.Reader = .fixed(s32_input);
+    var plain: std.Io.Writer = .fixed(&plain_out);
+    _ = try convert(&plain_reader, &plain, .{ .output = .s24le, .mode = .transcode, .input = s32_source }, .{});
+    var dithered_reader: std.Io.Reader = .fixed(s32_input);
+    var dithered: std.Io.Writer = .fixed(&dithered_out);
+    _ = try convert(&dithered_reader, &dithered, .{ .output = .s24le, .mode = .transcode, .input = s32_source, .dither = .{ .method = .rectangular } }, .{});
+    try std.testing.expectEqualSlices(u8, plain.buffered(), dithered.buffered());
 }
 
 fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {

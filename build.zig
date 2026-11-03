@@ -419,7 +419,7 @@ const ConvertCase = struct {
     stderr_contains: ?[]const u8 = null,
 };
 
-const zffmpeg_usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout mono|stereo] -i <input | -> [-c copy|<encoder>] [-f <format>] <output | ->\n";
+const zffmpeg_usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout mono|stereo] -i <input | -> [-c copy|<encoder>] [-dither_method <method>] [-dither_scale <scale>] [-f <format>] <output | ->\n";
 
 // The paired WAV and AU fixtures hold the same samples, so each is the exact
 // expected output of converting the other.
@@ -507,6 +507,13 @@ const convert_cases = [_]ConvertCase{
     // T23a: -c:a picks the encoder; the samples convert to its storage.
     .{ .name = "24-bit WAV transcoded to 24 bits", .args = &.{"-i"}, .input = "s24_stereo_48k_extensible", .tail = &.{ "-c:a", "pcm_s24le", "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_s24_stereo, .stderr = "" },
     .{ .name = "an encoder the output does not carry", .args = &.{"-i"}, .input = "mono_8k", .tail = &.{ "-c:a", "pcm_s16le", "-f", "au", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
+    // T23a: libswresample's dither options, for the output only. FFmpeg
+    // dithers only when the sample format changes, and ignores them for copy.
+    .{ .name = "dither options before -i", .args = &.{ "-dither_method", "triangular", "-i", "a.wav", "b.wav" }, .exit_code = 1, .stderr_contains = "put this after -i <input>: -dither_method\n" },
+    .{ .name = "an invalid -dither_method", .args = &.{ "-i", "a.wav", "-dither_method", "64", "b.wav" }, .exit_code = 1, .stderr_contains = "invalid -dither_method: 64\n" },
+    .{ .name = "an invalid -dither_scale", .args = &.{ "-i", "a.wav", "-dither_scale", "-1", "b.wav" }, .exit_code = 1, .stderr_contains = "invalid -dither_scale: -1\n" },
+    .{ .name = "dither without a format change", .args = &.{"-i"}, .input = "s24_stereo_48k_extensible", .tail = &.{ "-c:a", "pcm_s24le", "-dither_method", "shibata", "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_s24_stereo, .stderr = "" },
+    .{ .name = "dither ignored by stream copy", .set = .aiff, .args = &.{"-i"}, .input = "aifc_sowt", .tail = &.{ "-c", "copy", "-dither_method", "triangular", "-dither_scale", "2", "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_mono_8k, .stderr = "" },
     .{ .name = "a missing value", .args = &.{ "-i", "a.wav", "-f" }, .exit_code = 1, .stderr_contains = "missing value for: -f\n" },
     .{ .name = "standard output needs -f", .args = &.{ "-i", "a.wav", "-" }, .exit_code = 1, .stderr_contains = "-f is required when writing to standard output\n" },
     .{ .name = "an unsupported -f", .args = &.{ "-i", "a.wav", "-f", "mp3", "-" }, .exit_code = 3, .stderr = "zffmpeg: mp3: unsupported output format\n" },

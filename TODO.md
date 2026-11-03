@@ -25,7 +25,8 @@ with T17b's metadata dictionary), T22a, every AU PCM encoding and
 unknown-length AU, T16, the codec and format registries with FFmpeg's scored
 content probing, and T22, the remaining audio containers (T22a AU encodings,
 T22b AIFF and AIFF-C, T22c raw PCM with FFmpeg's extension fallback, T22d
-CAF demux), are verified. **Next: T23a (sample format conversion). See
+CAF demux), are verified, and so is T23a, sample format conversion with
+libswresample's dither. **Next: T23b (channel layouts). See
 [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as

@@ -31,6 +31,9 @@ format and parameters; FFmpeg must detect a copy named with the format's
 extension as that format, as zffprobe does; FFmpeg's raw muxers copy the
 writer-output fixtures unchanged.
 
+Dither (T23a): zffmpeg's `-dither_method` and `-dither_scale` must give
+FFmpeg's samples for every method, on long inputs in every input container.
+
 Registries (T16): the codec descriptors, decoders and encoders, and the
 formats with their demuxers' and muxers' extensions, MIME types and default codecs, as the
 registry dump prints them, must equal the reference build's own `ffmpeg
@@ -50,6 +53,7 @@ independent source as the committed fixtures.
 import argparse
 import pathlib
 import re
+import struct
 import subprocess
 import sys
 import tempfile
@@ -1023,6 +1027,106 @@ def check_ffmpeg_conversion(args, path, input_args, out, output, copy, work):
         return ["differs from FFmpeg's own conversion"]
     return []
 
+# T23a dither: long generated inputs, so the noise buffer restarts, in every
+# container, whose demuxers read packets of different sizes (FFmpeg converts
+# a packet at a time, and the noise depends on it). Each is (name, container,
+# the codec FFmpeg writes it with, or the raw format, rate, channels).
+DITHER_INPUTS = [
+    ("f32-wav", "wav", "pcm_f32le", 44100, 2),
+    ("s24-aiff", "aiff", "pcm_s24be", 48000, 2),
+    ("s32-au", "au", "pcm_s32be", 8000, 1),
+    ("f64-w64", "w64", "pcm_f64le", 22050, 2),
+    ("f32be-raw", "f32be", None, 37800, 2),
+    ("s32be-caf", "caf", "pcm_s32be", 46000, 1),
+    ("s16-wav", "wav", "pcm_s16le", 44100, 2),
+]
+DITHER_FRAMES = 200000
+DITHER_METHODS = ("rectangular", "triangular", "triangular_hp", "lipshitz", "f_weighted", "modified_e_weighted",
+                  "improved_e_weighted", "shibata", "low_shibata", "high_shibata")
+# The encoders each input is converted to, as raw PCM of the encoder.
+DITHER_ENCODERS = ("pcm_s16le", "pcm_u8", "pcm_s24le", "pcm_s32le")
+
+
+def dither_source(ffmpeg, work, name, container, codec, rate, channels):
+    """Writes one DITHER_INPUTS input and returns its path and input options:
+    a 64-bit LCG's top bits as f32 samples, raw, then put in the container by
+    FFmpeg (or, for CAF, which the reference build cannot write, by hand)."""
+    x, values = 1, []
+    for _ in range(DITHER_FRAMES * channels):
+        x = (x * 6364136223846793005 + 1442695040888963407) % (1 << 64)
+        values.append(((x >> 32) - (1 << 32 if x >> 63 else 0)) / 2147483648.0)
+    raw = work / f"{name}.f32le"
+    raw.write_bytes(struct.pack(f"<{len(values)}f", *values))
+    raw_args = raw_input_args("f32le", (rate, channels))
+    if codec is None:
+        path = work / f"{name}.{container}"
+        process = run(ffmpeg, "-v", "error", "-nostdin", "-y", *raw_args, "-i", raw, "-f", container, path)
+        return path, raw_input_args(container, (rate, channels)), process
+    if container == "caf":
+        # Big-endian s32 PCM: `desc` (flags 0), then `data` with its edit count.
+        reference = work / f"{name}.s32be"
+        process = run(ffmpeg, "-v", "error", "-nostdin", "-y", *raw_args, "-i", raw, "-f", "s32be", reference)
+        data = reference.read_bytes() if reference.exists() else b""
+        desc = struct.pack(">d4sIIIII", rate, b"lpcm", 0, 4 * channels, 1, channels, 32)
+        path = work / f"{name}.caf"
+        path.write_bytes(b"caff" + struct.pack(">HH", 1, 0) + b"desc" + struct.pack(">q", len(desc)) + desc
+                         + b"data" + struct.pack(">qI", len(data) + 4, 0) + data)
+        return path, [], process
+    path = work / f"{name}.{container}"
+    process = run(ffmpeg, "-v", "error", "-nostdin", "-y", *raw_args, "-i", raw, "-bitexact", "-c:a", codec,
+                  "-f", container, path)
+    return path, [], process
+
+
+
+def compare_dither(args, lines, failures):
+    """zffmpeg's `-dither_method` and `-dither_scale` against FFmpeg's (T23a):
+    every method on long inputs in every input container, to every encoder
+    the sample format can narrow to, each written as raw PCM by both, must
+    give the same bytes. FFmpeg dithers only when the sample format changes
+    (not s32 to a 24-bit encoder) and scales the noise for a 24-bit encoder;
+    the noise follows FFmpeg's packet sizes."""
+    lines += [
+        "",
+        "## zffmpeg dither against FFmpeg",
+        "",
+        "| Input | Encoder | Methods and scales | Result |",
+        "| --- | --- | --- | --- |",
+    ]
+    same = total = 0
+    with tempfile.TemporaryDirectory() as tmp:
+        work = pathlib.Path(tmp)
+        for name, container, codec, rate, channels in DITHER_INPUTS:
+            path, input_args, process = dither_source(args.ffmpeg, work, name, container, codec, rate, channels)
+            if process.returncode != 0:
+                failures.append(f"dither {name}: making the input failed: {first_line(text(process.stderr))}")
+                continue
+            for encoder in DITHER_ENCODERS:
+                raw_format = next(fmt for fmt, c in generate.RAW_FORMATS.items() if c == encoder)
+                settings = [(method, None) for method in DITHER_METHODS] + [("triangular", "0.5"), ("shibata", "3"),
+                                                                            ("triangular", "0")]
+                problems = []
+                for method, scale in settings:
+                    options = ["-dither_method", method] + (["-dither_scale", scale] if scale else [])
+                    theirs, ours = work / "ffmpeg.raw", work / "zffmpeg.raw"
+                    process = run(args.ffmpeg, "-v", "error", "-nostdin", "-y", *input_args, "-i", path, *options,
+                                  "-c:a", encoder, "-f", raw_format, theirs)
+                    code, _, err = zffprobe_raw(args.zffmpeg, "-y", *input_args, "-i", path, "-c:a", encoder,
+                                                *options, "-f", raw_format, ours)
+                    total += 1
+                    if process.returncode != 0 or code != 0:
+                        problems.append(f"{method} {scale or 1}: FFmpeg exited {process.returncode}, zffmpeg {code} "
+                                        f"({first_line(text(err))})")
+                    elif theirs.read_bytes() != ours.read_bytes():
+                        problems.append(f"{method} {scale or 1}: the samples differ")
+                    else:
+                        same += 1
+                result = "pass" if not problems else "**FAIL**: " + "; ".join(problems)
+                lines.append(f"| `{name}` | {encoder} | {len(settings)} | {result} |")
+                failures.extend(f"dither {name} to {encoder}: {problem}" for problem in problems)
+    lines += ["", f"Dithered conversions equal to FFmpeg's: {same}/{total}."]
+
+
 def check_carried_tags(args, fixture, path, out, output, copy, work, notes):
     """T21c: a WAV output carries the tags FFmpeg's own conversion carries
     (`ffmpeg -bitexact`, which adds no `encoder` tag), and other outputs none.
@@ -1369,6 +1473,7 @@ def main():
 
     compare_writer(args, lines, failures)
     compare_zffmpeg(args, lines, failures)
+    compare_dither(args, lines, failures)
     compare_ffmpeg_w64(args, lines, failures)
     for container, title, build, _, _ in FORCED_CONTRACTS:
         if container in MUXED_CONTRACTS:

@@ -6,7 +6,8 @@
 //! only) or raw PCM stream (TODO.md T13b, T21b, T22b, T22c, T22d).
 //!
 //!     zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate> | -ar <rate>]
-//!             [-ch_layout mono|stereo | -ac 1|2] -i <input | -> [-c copy|<encoder>] [-f <format>] <output | ->
+//!             [-ch_layout mono|stereo | -ac 1|2] -i <input | -> [-c copy|<encoder>]
+//!             [-dither_method <method>] [-dither_scale <scale>] [-f <format>] <output | ->
 //!
 //! The input container is detected from content as FFmpeg's probing would
 //! (T16), with the file name's extension as FFmpeg's fallback for raw PCM
@@ -18,9 +19,11 @@
 //! FFmpeg's AIFF muxer `.aif`, `.aiff`, `.afc` and `.aifc`); `-`
 //! (standard output) needs `-f`. `-c copy` copies the encoded samples, which
 //! works only when both containers carry the same codec; without it the
-//! samples are decoded and encoded again. Tags before the input's `data` are
-//! carried into a WAV output, as FFmpeg's default `-map_metadata` does
-//! (T21c).
+//! samples are decoded and encoded again. `-dither_method` and
+//! `-dither_scale` after `-i` are libswresample's options, which dither a
+//! conversion to fewer bits as FFmpeg's would (T23a); `-c copy` ignores them,
+//! as FFmpeg does. Tags before the input's `data` are carried into a WAV
+//! output, as FFmpeg's default `-map_metadata` does (T21c).
 //!
 //! Every check that does not need the rest of the input happens before the
 //! output file is opened: the arguments, the input header, the operation
@@ -37,7 +40,7 @@ const status = @import("status.zig");
 const ExitStatus = status.ExitStatus;
 const printError = status.printError;
 
-const usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout mono|stereo] -i <input | -> [-c copy|<encoder>] [-f <format>] <output | ->\n";
+const usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout mono|stereo] -i <input | -> [-c copy|<encoder>] [-dither_method <method>] [-dither_scale <scale>] [-f <format>] <output | ->\n";
 const help = usage ++
     \\
     \\Converts one WAV, Wave64, AU, AIFF, CAF (input only) or raw PCM stream
@@ -52,6 +55,10 @@ const help = usage ++
     \\-c copy keeps the encoded samples and needs the same codec on both sides;
     \\-c <encoder> (such as pcm_s24le) picks the output codec, which the output
     \\must carry. Transcoding converts the sample format as FFmpeg does.
+    \\-dither_method (rectangular, triangular, triangular_hp, lipshitz,
+    \\f_weighted, modified_e_weighted, improved_e_weighted, shibata,
+    \\low_shibata, high_shibata, or FFmpeg's number) and -dither_scale (0 to
+    \\2147483647, default 1) dither the conversion as FFmpeg does.
     \\-y replaces an existing output; without it (or with -n) an existing output
     \\is an error.
     \\Exit codes: 0 success, 1 usage, 2 invalid or truncated media,
@@ -74,6 +81,7 @@ const Command = struct {
     mode: av.convert.Mode,
     /// The `-c` encoder, when it names one rather than `copy`.
     encoder: ?av.pcm.Codec,
+    dither: av.dither.Options,
     overwrite: bool,
 };
 
@@ -145,6 +153,7 @@ fn run(init: std.process.Init) ExitStatus {
         .output = container,
         .mode = command.mode,
         .codec = command.encoder,
+        .dither = command.dither,
         .input = .{ .format = input_container, .raw = raw_params },
         .tags = .{ .gpa = init.gpa, .dictionary = &tags },
     });
@@ -164,6 +173,8 @@ fn parse(args: []const [:0]const u8) Parsed {
     var codec_given = false;
     var copy = false;
     var encoder: ?av.pcm.Codec = null;
+    var dither_method: ?[]const u8 = null;
+    var dither_scale: ?[]const u8 = null;
     var yes = false;
     var no = false;
     var i: usize = 1;
@@ -215,6 +226,15 @@ fn parse(args: []const [:0]const u8) Parsed {
                     encoder = found.codec;
                 }
             }
+        } else if (std.mem.eql(u8, arg, "-dither_method") or std.mem.eql(u8, arg, "-dither_scale")) {
+            // libswresample's options, for the output (T23a); before -i
+            // FFmpeg takes them for the input and ignores them.
+            if (input == null) return .{ .usage = .{ .reason = "input options other than -f and the raw PCM ones are not supported; put this after -i <input>", .arg = arg } };
+            i += 1;
+            if (i == args.len) return .{ .usage = .{ .reason = "missing value for", .arg = arg } };
+            const slot = if (std.mem.eql(u8, arg, "-dither_method")) &dither_method else &dither_scale;
+            if (slot.* != null) return .{ .usage = .{ .reason = "given twice", .arg = arg } };
+            slot.* = args[i];
         } else if (arg.len > 1 and arg[0] == '-') {
             return .{ .usage = .{ .reason = "unknown option", .arg = arg } };
         } else {
@@ -223,6 +243,11 @@ fn parse(args: []const [:0]const u8) Parsed {
         }
     }
     if (yes and no) return .{ .usage = .{ .reason = "-y and -n contradict each other" } };
+    var dither: av.dither.Options = .{};
+    if (dither_method) |text| dither.method = av.dither.methodFromOption(text) catch
+        return .{ .usage = .{ .reason = "invalid -dither_method", .arg = text } };
+    if (dither_scale) |text| dither.scale = av.dither.scaleFromOption(text) catch
+        return .{ .usage = .{ .reason = "invalid -dither_scale", .arg = text } };
     return .{ .command = .{
         .input = input orelse return .{ .usage = .{ .reason = "missing -i <input>" } },
         .output = output orelse return .{ .usage = .{ .reason = "missing output" } },
@@ -233,6 +258,7 @@ fn parse(args: []const [:0]const u8) Parsed {
         .format = format,
         .mode = if (copy) .copy else .transcode,
         .encoder = encoder,
+        .dither = dither,
         .overwrite = yes,
     } };
 }
