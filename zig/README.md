@@ -135,6 +135,9 @@ slowdowns of the default build.
 | `zig/format/wav.zig`, `zig/io/file.zig`, `zig/cli/probe.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. FFmpeg's `wavdec.c`, `wavenc.c`, `riffenc.c` and `ffprobe` were read for behavior only; no code is copied. |
 | `zig/format/au.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. FFmpeg's `au.c` and `pcm.c` were read for behavior only; no code is copied. |
 | `zig/format/detect.zig`, `zig/format/prefix.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. The detection rule is the project's own; FFmpeg's `au_probe` in `au.c` was read only to record where it differs. |
+| `zig/core/samples.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. The size, line and plane rules follow `libavutil/samplefmt.c`; no code is copied. |
+| `zig/testing/reference/samplefmt_vectors.c` | `LGPL-2.1-or-later` (SPDX header) | Original reference tool: it calls the pinned FFmpeg's public `libavutil` API to print the T20a oracle and is not part of the port. |
+| `zig/testing/vectors/samplefmt.txt` | Generated data | Printed by `samplefmt_vectors.c` from the pinned `libavutil`; see the [reference README](testing/reference/README.md). |
 | `zig/core/packet.zig`, `zig/core/frame.zig`, `zig/core/stage.zig`, `zig/testing/delay_stage.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. The send/receive rules follow `libavcodec/avcodec.h`; the fields follow `libavcodec/packet.h` and `libavutil/frame.h`; no code is copied. |
 | `zig/format/convert.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. The operation matrix is TODO.md T13's; no FFmpeg source maps to it directly. |
 | `zig/cli/ffmpeg.zig`, `zig/cli/status.zig`, `zig/testing/zffmpeg_cases.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. FFmpeg's `fftools/ffmpeg_opt.c` (`assert_file_overwrite`) was read for the `-y`/`-n` and same-file behavior only; no code is copied. |

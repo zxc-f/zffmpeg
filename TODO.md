@@ -18,9 +18,9 @@ zigimg are independent clones in ignored `.references/`; see
 T12 is verified: the AU contract and 29 fixtures (T12a), the AU parser and
 writer (T12b) and AU in `zffprobe` with content detection (T12c). T13 is verified too: the
 synchronous conversion pipeline (`av.convert`, T13a) and the `zffmpeg`
-command (T13b). T14a, packets, frames and send/receive stages, is verified.
-**Next: T20a, decoded sample storage; T16 starts with the first third format.
-See [Near-term order](#near-term-order).**
+command (T13b). T14a, packets, frames and send/receive stages, and T20a, decoded sample
+storage, are verified. **Next: T20b, the PCM encodings; T16 starts with the
+first third format. See [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
 [How tasks are completed](#how-tasks-are-completed) describes. Tasks and
@@ -1044,12 +1044,58 @@ names, not as an empty framework.
 - [ ] **T20 — Sample storage and PCM encodings.** Checked when T20a and T20b
   are. Reference: `libavutil/samplefmt.c`, `libavcodec/pcm.c`,
   `pcm_tablegen.h`; `tests/fate/pcm.mak`.
-  - [ ] **T20a — Decoded sample storage.** Needs T14a. Sample formats as
+  - [x] **T20a — Decoded sample storage.** Needs T14a. Sample formats as
     storage (u8, s16, s32, s64, f32 and f64; packed and planar), separate from
     codec identity and from what containers carry.
     Done when buffer sizes, alignment and plane math equal
     `av_samples_get_buffer_size` and related functions on vectors for every
     format.
+
+    ```text
+    ID / parent: T20a / T20
+    State: verified
+    Supported behavior and explicit exclusions: port.md "Decoded sample
+      storage": twelve formats, Layout (get_buffer_size), Buffer
+      (fill_arrays, set_silence, copy, alloc). Excluded: dsd, decoding into
+      the new formats (T20b), conversion between them (T23a).
+    Needs (verified) / lands with / verified after: T14a (verified); alone.
+    Contract and source provenance: port.md "Decoded sample storage",
+      notes.md "Decoded sample storage"; libavutil/samplefmt.c rules.
+      Original.
+    Required fixtures / optional corpus: zig/testing/vectors/samplefmt.txt,
+      12 format and 3516 buffer vectors (76 of them errors) printed by the
+      pinned libavutil through zig/testing/reference/samplefmt_vectors.c;
+      the counts are checked, so a missing or truncated file fails. The
+      FATE samplefmt test's cases are a subset. No optional corpus.
+    Ownership, state transitions and limits: Buffer is a view; Owned holds
+      64-byte aligned bytes and its allocator; buffers below 2^31 bytes.
+    Comparison rule and intentional differences: exact size, linesize and
+      last-plane offset per vector; FFmpeg's EINVAL cases must fail. Line
+      alignments that are not powers of two are rejected (FFmpeg computes
+      them without meaning); negative counts cannot be expressed.
+    Implementation files and test entry points: zig/core/samples.zig,
+      audio.SampleFormat in zig/core/audio.zig; tests in samples.zig.
+    Evidence commit / Linux CI run / reference report: 38020b8 / local
+      Windows runs instead (below) / the generator reproduced the vectors.
+    Required cases: passed 3528 vectors and the unit tests / failed 0 /
+      missing 0.
+    Optional cases: none.
+    Fuzz seeds, budget and result: no parser of untrusted bytes.
+    Remaining work or blocker / next action: none; T20b is next.
+    ```
+
+    Evidence (G5, local Windows runs with Zig 0.17.0 count as completion
+    evidence, by the project owner's decision): implementation commit
+    `38020b8`. `zig build test` passed 73/73 steps in Debug, ReleaseSafe and
+    ReleaseFast (`av` 104 tests); fmt, the cross builds, a Linux type check
+    and `compare.py` (every section) passed. The generator, built with MSYS2
+    clang 23.1.4 against the reference's `libavutil.a`, reproduced the
+    committed vectors byte for byte; CI's reference job repeats that on
+    Linux. Silence, overlapping copies (forward and backward, packed and
+    planar), aligned allocation and `checkAllAllocationFailures` have unit
+    tests. Padding samples to 16 instead of 32, or dropping one vector line,
+    fails the tests. The WAV and AU writers now reject a non-s16 format with
+    `UnsupportedFormat` before writing, with tests.
   - [ ] **T20b — PCM encodings.** Needs T20a. Codec identities and kernels for
     u8, s8, s16/s24/s32/s64 in both byte orders, f32/f64 in both byte orders,
     A-law and µ-law, specialized at compile time over the real formats. Planar

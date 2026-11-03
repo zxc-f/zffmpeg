@@ -22,8 +22,9 @@ and writer](zig/format/au.zig), and `zffprobe`, which chooses WAV or AU by
 [conversion pipeline](#conversion-pipeline) (T13a, `av.convert`) and the
 [`zffmpeg` command](#zffmpeg-command) (T13b) that converts and stream-copies
 between WAV and AU are verified, and the pipeline now runs on
-[packets, frames and send/receive stages](#packets-frames-and-stages) (T14a).
-Decoded sample storage (T20a) is next.
+[packets, frames and send/receive stages](#packets-frames-and-stages) (T14a),
+with [decoded sample storage](#decoded-sample-storage) for every sample format
+(T20a). The PCM encodings (T20b) are next.
 
 The goal is a native Zig multimedia library and tools, built incrementally from
 FFmpeg's functionality. Use idiomatic Zig APIs and explicit resource ownership.
@@ -477,6 +478,23 @@ Zig API. When buffering codecs are introduced, make these behaviors testable:
 These rules belong in stream adapters. A stateless PCM conversion kernel can
 keep its simple slice-in/slice-out API. Start with synchronous execution through
 injected I/O; introduce threading only after state and ownership are correct.
+
+### Decoded sample storage
+
+T20a's [core/samples.zig](zig/core/samples.zig) and `audio.SampleFormat`
+describe how decoded samples are stored, separately from codec identity and
+from what a container carries:
+
+| Case | Behavior |
+| --- | --- |
+| Formats | FFmpeg's twelve storage formats and names: `u8`, `s16`, `s32`, `s64`, `flt`, `dbl` (packed: channels interleaved in one plane) and `u8p`, `s16p`, `s32p`, `s64p`, `fltp`, `dblp` (planar: one plane per channel). `dsd` is not supported. Silence is 0x80 for `u8`/`u8p` and zero otherwise. |
+| Layout | `Layout.init(format, channels, samples, alignment)` gives `linesize` and `size` as `av_samples_get_buffer_size` does. `Alignment.sample_padding` is FFmpeg's `align = 0` (samples rounded up to 32); `.line = n` rounds each line up to the power of two `n`. Plane `i` starts at `i * linesize`. |
+| Bounds | Zero channels or samples, and a line alignment that is not a power of two, are `InvalidArgument`; any buffer reaching 2^31 bytes (FFmpeg's `INT_MAX` check, in its order) is `SizeOverflow`. Counts are unsigned, so FFmpeg's negative inputs cannot be expressed. |
+| Buffers | `Buffer` views a caller's bytes (`av_samples_fill_arrays`, `BufferTooSmall` if short); `setSilence` and `copy` (overlap allowed, as `av_samples_copy`) work on whole sample positions; `Buffer.alloc` returns an `Owned`, 64-byte aligned, silent buffer. |
+| Users so far | The WAV and AU writers, `Frame` and the PCM stages handle packed `s16` only and reject or assert anything else until T20b and T21a/T22a. |
+
+The oracle is FFmpeg itself: [samplefmt_vectors.c](zig/testing/reference/samplefmt_vectors.c)
+calls the pinned `libavutil` and prints [the committed vectors](zig/testing/vectors/samplefmt.txt).
 
 ### Packets, frames and stages
 
@@ -1020,6 +1038,7 @@ has passed TODO.md gates G2–G4 is implemented, and it becomes verified at G5.
 | FFmpeg reference comparison | Verified | [zig/testing/reference](zig/testing/reference/README.md) (T03, T10, T19a, T12): Clang build of the pinned commit with a minimal LGPL configuration (WAV and AU demuxers, s16le and s16be decoders), cached in CI, and `compare.py`. WAV: accepted 12/12 identical in samples and compared metadata, rejected 40/40 with the contract's `zffprobe` status. AU: accepted 9/9 (FFmpeg forced with `-f au`, detection recorded separately), rejected 20/20. FFmpeg reads 9/9 files written by the Zig write driver; `zffprobe` through a pipe equals the file result 81/81; nothing listed as not implemented. Intentional differences recorded. [run 41660265753](https://github.com/zxc-f/zffmpeg/actions/runs/41660265753). T13b adds `zffmpeg`'s output: 63/63 read as expected and 21/21 cross-codec copies rejected before output, first run locally on Windows at `4433337` with the same configuration built by MSYS2 clang. |
 | AU fixture contract | Verified | [AU contract and 29 fixtures](zig/testing/fixtures/au/README.md), T12a: 9 accepted and 20 rejected, with parser acceptance separate from content detection. Reference-only G5 at `d41c5a4`, [run 41579247329](https://github.com/zxc-f/zffmpeg/actions/runs/41579247329), before AU Zig code existed; full evidence stays in TODO.md. This does not verify the parser, writer or probe. |
 | AU + PCM s16be | Verified | [zig/format/au.zig](zig/format/au.zig), exported by `av.au`, and [write driver](zig/testing/write_driver.zig). Original, `LGPL-2.1-or-later`; behavior follows `libavformat/au.c` and `libavcodec/pcm.c` at the pinned revision. Known-length encoding 3, mono/stereo, through the existing PCM kernels; sequential input without seeking, no allocation. T12b's G5 at `043c3c3` ([run 41580174746](https://github.com/zxc-f/zffmpeg/actions/runs/41580174746)): all 29 AU fixtures pass from memory, one-byte reads and files in Debug, ReleaseSafe and ReleaseFast, and FFmpeg reads the 4 AU files the Zig writer produced, byte-identical to the writer-output fixtures; full evidence in TODO.md. Limitations: no unknown-length data, other encodings or metadata; sustained fuzzing not run. Scalar; not optimized. `zffprobe` reports AU since T12c ([run 41660265753](https://github.com/zxc-f/zffmpeg/actions/runs/41660265753)). |
+| Decoded sample storage | Verified | [core/samples.zig](zig/core/samples.zig) and `audio.SampleFormat` (T20a). Original, `LGPL-2.1-or-later`; the rules follow `libavutil/samplefmt.c`. The [decoded sample storage](#decoded-sample-storage) contract; 12 format and 3516 buffer vectors printed by the pinned `libavutil` ([generator](zig/testing/reference/samplefmt_vectors.c), checked in CI's reference job) all match, and allocation passes leak checks and failure injection. G5 on local Windows runs at `38020b8`. Limitations: no `dsd`; nothing decodes into these formats until T20b. |
 | Packets, frames and stages | Verified | [core/packet.zig](zig/core/packet.zig), [core/frame.zig](zig/core/frame.zig), [core/stage.zig](zig/core/stage.zig), `pcm.Decoder`/`pcm.Encoder` in [codec/pcm.zig](zig/codec/pcm.zig) and the test-only [DelayStage](zig/testing/delay_stage.zig) (T14a). Original, `LGPL-2.1-or-later`; the contract follows `libavcodec/avcodec.h`, the fields `packet.h` and `frame.h`. The [packets, frames and stages](#packets-frames-and-stages) contract; every row of TODO.md T14a's table has a test, and the allocating paths (clones, the test stage) pass leak checks and allocation-failure injection at every site. G5 on local Windows runs at `bc8d19e`. Limitations: one interleaved s16 plane, no reference counting or pools (T14b), no side data. |
 | Conversion pipeline | Verified | [zig/format/convert.zig](zig/format/convert.zig), exported as `av.convert` (T13a), with `readData`, `writeData` and `Writer.check` in `wav.zig` and `au.zig`. Original, `LGPL-2.1-or-later`. The [conversion pipeline](#conversion-pipeline) contract: transcode in all four WAV/AU cells, copy within one codec, every check before output, late failures reported, no allocation. G5 on local Windows runs at `988e826` (details in TODO.md T13a). FFmpeg reads its output through T13b. |
 | zffmpeg | Verified | [zig/cli/ffmpeg.zig](zig/cli/ffmpeg.zig) (T13b) with [zig/cli/status.zig](zig/cli/status.zig), shared with zffprobe. Original, `LGPL-2.1-or-later`; `fftools/ffmpeg_opt.c` read for the `-y`/`-n` and same-file behavior. The [zffmpeg command](#zffmpeg-command) contract over `av.convert`. 36 process runs in `build.zig` and the prepared-file cases in [zffmpeg_cases.zig](zig/testing/zffmpeg_cases.zig) pass in Debug, ReleaseSafe and ReleaseFast, and FFmpeg reads all 63 actual outputs (21 accepted fixtures, 3 cells each) with the expected samples and stream; G5 on local Windows runs at `4433337` (details in TODO.md T13b). Limitations: no cancellation source; the write-only standard-input read failure is a POSIX-only case; no other options. |
@@ -1027,8 +1046,8 @@ has passed TODO.md gates G2–G4 is implemented, and it becomes verified at G5.
 The first complete path, WAV with signed 16-bit PCM, is verified on Linux.
 AU with signed 16-bit PCM, including `zffprobe` detection, is verified as well
 (T12), and so are the conversion pipeline and the `zffmpeg` command (T13)
-and the packet, frame and stage types (T14a). Other codecs and containers are
-planned.
+the packet, frame and stage types (T14a) and decoded sample storage (T20a).
+Other codecs and containers are planned.
 
 The authoritative next action is in [TODO.md](TODO.md). Let the first working
 path determine which shared infrastructure is necessary.

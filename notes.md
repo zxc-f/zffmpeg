@@ -177,6 +177,18 @@ port.md's contract table updated, and (after T06) the parser.
 | Partial output on input failure | An exact transfer read that the input cannot fill delivers nothing, so the samples written before a truncation depend on the 4 KiB transfer boundaries. The failure itself is always reported. | `convert.zig`; delivering the readable prefix would need short reads in `readData`. |
 | Rejected-input oracle | Tests expect a rejected input to fail conversion with `detect.probe`'s error, which the fixture contracts already pin, instead of repeating the fixture-to-error mapping. | `convert.zig` tests. |
 
+## Decoded sample storage
+
+| Decision | Current choice and reason | To change it |
+| --- | --- | --- |
+| One enum, FFmpeg's names | `audio.SampleFormat` has a tag per storage format (`flt`, `fltp`, ...), so names print and parse exactly as FFmpeg's and switches stay exhaustive; packed and planar forms are methods. `dsd` is left out: no supported codec produces it. | `core/audio.zig`; add `dsd` with a DSD codec. |
+| FFmpeg's size bound | Buffers stay below 2^31 bytes, checked in FFmpeg's order, so every vector matches; unsigned counts make negative inputs unrepresentable instead of errors. | `core/samples.zig`. |
+| Distinct errors | `InvalidArgument` (zero counts, a bad alignment) and `SizeOverflow`, where FFmpeg returns `EINVAL` for both; the vectors check that both fail. | Same. |
+| `Alignment` union | `.sample_padding` and `.line = n` instead of FFmpeg's `align = 0` sentinel. | Same. |
+| Oracle from libavutil | The vectors come from calling the pinned FFmpeg's functions (a C generator), not from a reimplementation, and CI regenerates and diffs them. The generator is a reference tool; nothing of it enters the port. | `zig/testing/reference/samplefmt_vectors.c`, the reference job. |
+| LF vectors | The generator's output is stored with LF endings (`.gitattributes`), and MinGW's `\r\n` is stripped when generating on Windows, so both platforms give identical bytes. | `.gitattributes`, the reference README. |
+| s16-only users | The WAV and AU writers reject other formats (`UnsupportedFormat`), `Frame.init` rejects them and the PCM stages assert them, so the larger enum cannot reach code that assumes s16. | T20b, T21a and T22a widen each. |
+
 ## Packets, frames and stages
 
 | Decision | Current choice and reason | To change it |

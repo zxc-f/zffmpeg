@@ -29,7 +29,20 @@ zig build -Doptimize=ReleaseSafe install test-tools
 python3 zig/testing/reference/compare.py --ffmpeg .references/ffmpeg-install/bin/ffmpeg --ffprobe .references/ffmpeg-install/bin/ffprobe --zffprobe zig-out/bin/zffprobe --writer zig-out/bin/write-driver --zffmpeg zig-out/bin/zffmpeg
 ```
 
-CI runs the same three steps in the `reference` job of
+The T20a sample-storage vectors come from the same build. The generator is
+an original C program that calls the reference's `libavutil`; its output,
+with LF line endings, must equal the committed file:
+
+```bash
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/samplefmt_vectors.c .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o samplefmt-vectors
+./samplefmt-vectors | diff -u zig/testing/vectors/samplefmt.txt -
+```
+
+On Windows (MSYS2 UCRT64 clang) link with `-lm -lbcrypt` instead of
+`-pthread` and strip the carriage returns MinGW's text output adds
+(`tr -d '\015'`) before comparing.
+
+CI runs the same steps in the `reference` job of
 [ci.yml](../../../.github/workflows/ci.yml) and appends the report to the job
 summary. The installed reference is cached under a key made from the runner
 image, the Clang version line and the hash of `build-ffmpeg.sh`, so changing
