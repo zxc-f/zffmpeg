@@ -46,7 +46,7 @@ pub const Container = enum {
     pub fn carries(container: Container, codec: pcm.Codec) bool {
         return switch (container) {
             .wav, .w64 => wav.carries(codec),
-            .au => codec == .s16be, // until TODO.md T22a
+            .au => au.carries(codec),
         };
     }
 

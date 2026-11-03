@@ -9,7 +9,7 @@
 //! | Input → output     | `transcode`                  | `copy`                                   |
 //! | ------------------ | ---------------------------- | ---------------------------------------- |
 //! | WAV → WAV, AU → AU | yes                          | yes                                      |
-//! | WAV → AU, AU → WAV | yes, through the PCM kernels | `UnsupportedOperation`: needs byte swaps |
+//! | WAV → AU, AU → WAV | yes, through the PCM kernels | A-law and µ-law only; others need byte swaps |
 //!
 //! Rate and channel-layout changes cannot be requested yet (TODO.md T23/T24);
 //! the output always has the input's format.
@@ -190,7 +190,7 @@ pub const Conversion = struct {
         if (!supported) return error.UnsupportedOperation;
         switch (request.output) {
             .wav, .w64 => |container| try wav.Writer.check(summary.output_codec, summary.format, summary.frame_count, wavOptions(limits, container, tags)),
-            .au => try au.Writer.check(summary.format, summary.frame_count, limits.au),
+            .au => try au.Writer.check(summary.output_codec, summary.format, summary.frame_count, limits.au),
         }
         return .{ .input = input, .limits = limits, .summary = summary, .tags = tags };
     }
@@ -206,7 +206,7 @@ pub const Conversion = struct {
                 try c.transfer(wav.Writer, &writer);
             },
             .au => {
-                var writer = au.Writer.begin(out, s.format, s.frame_count, c.limits.au) catch |err| return outputFailure(err);
+                var writer = au.Writer.begin(out, s.output_codec, s.format, s.frame_count, c.limits.au) catch |err| return outputFailure(err);
                 try c.transfer(au.Writer, &writer);
             },
         }

@@ -261,7 +261,7 @@ const probe_cases = [_]ProbeCase{
     .{ .name = "empty AU data", .set = .au, .fixture = "au_empty_data", .exit_code = 0, .stdout = au_empty_data_report, .stderr = "" },
     .{ .name = "malformed AU header", .set = .au, .fixture = "au_offset_too_small", .exit_code = 2, .stderr_contains = ": InvalidAu\n" },
     .{ .name = "non-AU magic goes to WAV", .set = .au, .fixture = "au_bad_magic", .exit_code = 2, .stderr_contains = ": InvalidRiff\n" },
-    .{ .name = "unsupported AU encoding", .set = .au, .fixture = "au_encoding_mulaw", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
+    .{ .name = "unsupported AU encoding", .set = .au, .fixture = "au_encoding_g726", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
     .{ .name = "unknown AU size", .set = .au, .fixture = "au_unknown_size", .exit_code = 3, .stderr_contains = ": UnsupportedStreamingSize\n" },
     .{ .name = "AU rate limit", .set = .au, .fixture = "au_rate_over_limit", .exit_code = 5, .stderr_contains = ": LimitExceeded\n" },
     .{ .name = "truncated AU pipe", .set = .au, .args = &.{"-"}, .stdin_fixture = "au_truncated_data", .exit_code = 2, .stderr = "zffprobe: -: Truncated\n" },
@@ -323,6 +323,8 @@ const au_empty_data = @embedFile("zig/testing/fixtures/au/au_empty_data.au");
 const au_mono_192k = @embedFile("zig/testing/fixtures/au/au_mono_192k_rate_limit.au");
 // mono_8k's samples as the Wave64 writer emits them.
 const w64_mono_8k = @embedFile("zig/testing/fixtures/wav/w64_mono_8k.wav");
+// alaw_mono_8k's payload in AU, as the AU writer emits it.
+const au_alaw_mono_8k = @embedFile("zig/testing/fixtures/au/au_alaw_mono_8k.au");
 // T21c: tags as the writer emits them, so the tagged input converts to itself.
 const wav_info_tags = @embedFile("zig/testing/fixtures/wav/info_tags.wav");
 
@@ -360,7 +362,9 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "tags carried to WAV", .args = &.{"-i"}, .input = "info_tags", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_info_tags, .stderr = "" },
     .{ .name = "tags carried by copy from a pipe", .args = &.{ "-i", "-" }, .stdin_input = "info_tags", .tail = &.{ "-c", "copy", "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_info_tags, .stderr = "" },
     .{ .name = "24-bit transcode is rejected", .args = &.{"-i"}, .input = "s24_stereo_48k_extensible", .tail = &.{ "-f", "au", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
-    .{ .name = "A-law copy to AU is rejected", .args = &.{"-i"}, .input = "alaw_mono_8k", .tail = &.{ "-c", "copy", "-f", "au", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
+    // T22a: AU carries A-law and mu-law too, so they copy between the containers.
+    .{ .name = "A-law copy to AU", .args = &.{"-i"}, .input = "alaw_mono_8k", .tail = &.{ "-c", "copy", "-f", "au", "-" }, .exit_code = 0, .stdout = au_alaw_mono_8k, .stderr = "" },
+    .{ .name = "24-bit copy to AU is rejected", .args = &.{"-i"}, .input = "s24_stereo_48k_extensible", .tail = &.{ "-c", "copy", "-f", "au", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
     .{ .name = "an error after the data", .args = &.{"-i"}, .input = "duplicate_data", .tail = &.{ "-f", "au", "-" }, .exit_code = 2, .stderr_contains = ": InvalidWave\n" },
     .{ .name = "a truncated pipe", .set = .au, .args = &.{ "-i", "-" }, .stdin_input = "au_truncated_data", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stderr = "zffmpeg: -: Truncated\n" },
     .{ .name = "a malformed header", .args = &.{"-i"}, .input = "not_riff", .tail = &.{ "-f", "au", "-" }, .exit_code = 2, .stderr_contains = ": InvalidRiff\n" },

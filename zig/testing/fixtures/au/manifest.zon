@@ -51,6 +51,48 @@
         .expected = .{ .accept = .{ .codec = .pcm_s16be, .channels = 1, .sample_rate = 8000, .samples = .{ .s16 = .{ 0, 1, -1, 32767 } } } },
     },
     .{
+        .name = "au_mulaw_mono_8k",
+        .sha256 = "7a5b3f3ef1e39fd574ec28298181dd055a7ab91c5fd7da8bc034b0b185c7c01d",
+        .expected = .{ .accept = .{ .codec = .pcm_mulaw, .channels = 1, .sample_rate = 8000, .samples = .{ .s16 = .{ 0, -120, 32124, -32124, -31100, 31100, 8, -8 } } } },
+        .writer_output = true,
+    },
+    .{
+        .name = "au_s8_mono_8k",
+        .sha256 = "14c11860cdf9057aa9587e1a1e49cb1a5fc255101242bb726ed7b667237ba2d8",
+        .expected = .{ .accept = .{ .codec = .pcm_s8, .channels = 1, .sample_rate = 8000, .samples = .{ .u8 = .{ 128, 255, 0, 127, 129, 1, 192, 64 } } } },
+        .writer_output = true,
+    },
+    .{
+        .name = "au_s24_stereo",
+        .sha256 = "cfffd626c931fa472fd3e7f2e12a6b88b37d31907a016d21b5efb4be255a564d",
+        .expected = .{ .accept = .{ .codec = .pcm_s24be, .channels = 2, .sample_rate = 8000, .samples = .{ .s32 = .{ 0, 256, -256, 2147483392, -2147483648, 31604736, -167506176, 65536 } } } },
+        .writer_output = true,
+    },
+    .{
+        .name = "au_s32_mono",
+        .sha256 = "c55bdfff5b96f5c27a61ad7d67ff0bcd18d3ae530cdfa06b2c2c7d7d80c2a01f",
+        .expected = .{ .accept = .{ .codec = .pcm_s32be, .channels = 1, .sample_rate = 8000, .samples = .{ .s32 = .{ 0, 1, -1, 2147483647, -2147483648, 123456789, -987654321, 65536 } } } },
+        .writer_output = true,
+    },
+    .{
+        .name = "au_f32_mono",
+        .sha256 = "c79883f0a8c93e0a38f122ba73b82c6d5acea64113f016af91b8a4d3e50c2264",
+        .expected = .{ .accept = .{ .codec = .pcm_f32be, .channels = 1, .sample_rate = 8000, .samples = .{ .flt = .{ 0x0, 0x80000000, 0x3f800000, 0xbf800000, 0x3f000000, 0x7f800000, 0x1, 0x7fc00001 } } } },
+        .writer_output = true,
+    },
+    .{
+        .name = "au_f64_stereo_96k",
+        .sha256 = "c41010d664f522d968190a589f20af0c6e83d71c809f7fb5b95b786dbb8540ce",
+        .expected = .{ .accept = .{ .codec = .pcm_f64be, .channels = 2, .sample_rate = 96000, .samples = .{ .dbl = .{ 0x0, 0x8000000000000000, 0x3ff0000000000000, 0xbff0000000000000, 0x7ff0000000000000, 0x1, 0x7ff8000000000001, 0x3fe0000000000000 } } } },
+        .writer_output = true,
+    },
+    .{
+        .name = "au_alaw_mono_8k",
+        .sha256 = "2b41318fcffacc0e3e0a53a0667e9a59ded8d429098ca188f77dccd5f26cc74e",
+        .expected = .{ .accept = .{ .codec = .pcm_alaw, .channels = 1, .sample_rate = 8000, .samples = .{ .s16 = .{ 8, -8, 32256, -32256, -5504, 5504, -848, 848 } } } },
+        .writer_output = true,
+    },
+    .{
         .name = "au_empty_input",
         .sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         .expected = .{ .reject = .Truncated },
@@ -84,6 +126,19 @@
         .name = "au_unknown_size",
         .sha256 = "0b7436b2373ec60c00ddf1e07a688a2e8052bbaee103cc5ce690c2331fedd9bb",
         .expected = .{ .reject = .UnsupportedStreamingSize },
+        .unknown_length = .{ .accept = .{ .codec = .pcm_s16be, .channels = 1, .sample_rate = 8000, .samples = .{ .s16 = .{ 0, 1, -1, 32767 } } } },
+    },
+    .{
+        .name = "au_unknown_size_mulaw",
+        .sha256 = "7f82a277b90e5afaf516bd4644782e7fbf9c9be729a015470a10227ff93939af",
+        .expected = .{ .reject = .UnsupportedStreamingSize },
+        .unknown_length = .{ .accept = .{ .codec = .pcm_mulaw, .channels = 1, .sample_rate = 8000, .samples = .{ .s16 = .{ 0, 32124, -32124 } } } },
+    },
+    .{
+        .name = "au_unknown_size_partial_frame",
+        .sha256 = "713b7d52707bb6e2c462cc7e5783d322eef4d90a4aec1497f67eba3022c2c15d",
+        .expected = .{ .reject = .UnsupportedStreamingSize },
+        .unknown_length = .{ .reject = .Truncated },
     },
     .{
         .name = "au_data_size_over_limit",
@@ -96,6 +151,11 @@
         .expected = .{ .reject = .InvalidFormat },
     },
     .{
+        .name = "au_s24_data_not_block_aligned",
+        .sha256 = "9a9187a98f5ca69433217d2d52a16f75fd658faf47c58a53b248f9229e75fcf2",
+        .expected = .{ .reject = .InvalidFormat },
+    },
+    .{
         .name = "au_truncated_data",
         .sha256 = "c9b4a2c5c68eb42d5e295dd8a916f7736273c4b2f1b9f5b0564c824ce72c7632",
         .expected = .{ .reject = .Truncated },
@@ -104,11 +164,6 @@
         .name = "au_truncated_mid_sample",
         .sha256 = "bc91cb8379d7a65bb05ee136e9378d85e76c0de31b0d74d7d1ce96b905de84ae",
         .expected = .{ .reject = .Truncated },
-    },
-    .{
-        .name = "au_encoding_mulaw",
-        .sha256 = "af6ca075730bf6240cfd9c273690937be225a66eb37c9a76bcd4ec7958bf6cc7",
-        .expected = .{ .reject = .UnsupportedFormat },
     },
     .{
         .name = "au_encoding_g726",
@@ -142,12 +197,12 @@
     },
     .{
         .name = "au_limit_before_unsupported",
-        .sha256 = "90e4f406442c886e93f1851520b3a7f8c42bf1757ca797c1d5a27e1fce743fbb",
+        .sha256 = "572bd49c00e6a74b04615d07f4f48b42cc7faa5644791c91f8407b1d4cf9b364",
         .expected = .{ .reject = .LimitExceeded },
     },
     .{
         .name = "au_unsupported_before_invalid",
-        .sha256 = "e2bada3e885119c15da31a055e46ea458f07ebc986bb561456b27a388d7df09b",
+        .sha256 = "4d9bf4b697802293982178987c44517b4b87cc67789892ab0672f8d54ccf96b2",
         .expected = .{ .reject = .UnsupportedFormat },
     },
 }

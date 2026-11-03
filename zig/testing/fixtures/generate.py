@@ -171,6 +171,21 @@ def decode_stored(codec, data):
         return [alaw_to_linear(b) for b in data]
     if codec == "pcm_mulaw":
         return [mulaw_to_linear(b) for b in data]
+    # The big-endian and signed 8-bit encodings (AU, T22a). FFmpeg stores s8
+    # as u8, offset by 128.
+    if codec == "pcm_s8":
+        return [b ^ 0x80 for b in data]
+    if codec == "pcm_s16be":
+        return [s for (s,) in struct.iter_unpack(">h", data)]
+    if codec == "pcm_s24be":
+        raws = [int.from_bytes(data[i:i + 3], "big") for i in range(0, len(data), 3)]
+        return [struct.unpack("<i", struct.pack("<I", (raw << 8) & 0xFFFFFFFF))[0] for raw in raws]
+    if codec == "pcm_s32be":
+        return [s for (s,) in struct.iter_unpack(">i", data)]
+    if codec == "pcm_f32be":
+        return [s for (s,) in struct.iter_unpack(">I", data)]
+    if codec == "pcm_f64be":
+        return [s for (s,) in struct.iter_unpack(">Q", data)]
     raise ValueError(codec)
 
 
@@ -895,6 +910,23 @@ AU_UNKNOWN_SIZE = 0xFFFFFFFF
 AU_MAX_DATA = 0x7FFFFFFF
 AU_MAX_ANNOTATION = 1 << 20
 AU_PCM_S16BE = 3
+# The PCM encodings of au.c's tag table (T22a): codec -> (encoding, bytes per
+# sample, storage). 23 to 26 are G.72x, which wait for T31c.
+AU_CODECS = {
+    "pcm_mulaw": (1, 1, "s16"),
+    "pcm_s8": (2, 1, "u8"),
+    "pcm_s16be": (3, 2, "s16"),
+    "pcm_s24be": (4, 3, "s32"),
+    "pcm_s32be": (5, 4, "s32"),
+    "pcm_f32be": (6, 4, "flt"),
+    "pcm_f64be": (7, 8, "dbl"),
+    "pcm_alaw": (27, 1, "s16"),
+}
+
+
+def au_stream(codec, channels, rate, payload):
+    """The accepted stream of an AU data payload in any contract encoding."""
+    return Stream(codec, channels, rate, AU_CODECS[codec][2], decode_stored(codec, payload))
 
 
 def be32(value):
@@ -951,6 +983,34 @@ def build_au_fixtures():
        "Two samples after the declared data are ignored and never read. FFmpeg decodes them.",
        au(pcm_be(MONO[:4])) + pcm_be([7, -7]), 1, 8000, MONO[:4])
 
+    # The other encodings (T22a), each as the writer emits it.
+    def encoded(name, rule, codec, channels, payload, rate=8000):
+        fixture = Fixture(name, "encodings", rule, au(payload, channels=channels, rate=rate,
+                                                      encoding=AU_CODECS[codec][0]),
+                          accept=au_stream(codec, channels, rate, payload), writer_output=True)
+        fx.append(fixture)
+
+    def be_values(fmt, values):
+        return b"".join(struct.pack(fmt, v) for v in values)
+
+    s24_values = [0, 1, -1, 0x7FFFFF, -0x800000, 123456, -654321, 256]
+    encoded("au_mulaw_mono_8k", "Encoding 1, µ-law; decodes to s16. Its negative zero (0x7F) is left out, as "
+            "for WAV: every encoder writes zero as 0xFF.", "pcm_mulaw", 1,
+            bytes([0xFF, 0x70, 0x80, 0x00, 0x01, 0x81, 0xFE, 0x7E]))
+    encoded("au_s8_mono_8k", "Encoding 2, signed 8-bit; stored as u8, offset by 128, as FFmpeg's decoder does.",
+            "pcm_s8", 1, bytes([0x00, 0x7F, 0x80, 0xFF, 0x01, 0x81, 0x40, 0xC0]))
+    encoded("au_s24_stereo", "Encoding 4, 24-bit big-endian; stored as s32 in the top 24 bits.", "pcm_s24be", 2,
+            b"".join(struct.pack(">i", v)[1:] for v in s24_values))
+    encoded("au_s32_mono", "Encoding 5, 32-bit big-endian.", "pcm_s32be", 1,
+            be_values(">i", [0, 1, -1, 0x7FFFFFFF, -0x80000000, 123456789, -987654321, 65536]))
+    encoded("au_f32_mono", "Encoding 6, 32-bit float; every bit kept, NaN payload included.", "pcm_f32be", 1,
+            be_values(">I", [0, 0x80000000, 0x3F800000, 0xBF800000, 0x3F000000, 0x7F800000, 1, 0x7FC00001]))
+    encoded("au_f64_stereo_96k", "Encoding 7, 64-bit float, at 96 kHz.", "pcm_f64be", 2,
+            be_values(">Q", [0, 0x8000000000000000, 0x3FF0000000000000, 0xBFF0000000000000,
+                             0x7FF0000000000000, 1, 0x7FF8000000000001, 0x3FE0000000000000]), rate=96000)
+    encoded("au_alaw_mono_8k", "Encoding 27, A-law; decodes to s16.", "pcm_alaw", 1,
+            bytes([0xD5, 0x55, 0xAA, 0x2A, 0x00, 0x80, 0x7F, 0xFF]))
+
     # Header.
     bad("au_empty_input", "header", "Zero-byte input.", b"", "Truncated")
     bad("au_truncated_header", "header", "Input ends inside the 24-byte header.", canonical[:20], "Truncated")
@@ -966,22 +1026,32 @@ def build_au_fixtures():
         au(annotation=bytes(8), offset=40, size=8), "Truncated")
 
     # Data size.
-    bad("au_unknown_size", "size",
-        "Data size 0xffffffff (unknown length) is deferred to T22a. FFmpeg reads to the end of input.",
-        au(pcm_be(MONO[:4]), size=AU_UNKNOWN_SIZE), "UnsupportedStreamingSize")
+    def unknown(name, rule, data, accept=None, reject=None):
+        fx.append(Fixture(name, "size", rule, data, reject="UnsupportedStreamingSize",
+                          unknown_accept=accept, unknown_reject=reject))
+
+    unknown("au_unknown_size",
+            "Data size 0xffffffff, unknown length, as FFmpeg's muxer writes to a pipe: with `unknown_length` the "
+            "data is the rest of the input (T22a).",
+            au(pcm_be(MONO[:4]), size=AU_UNKNOWN_SIZE), accept=au_stream("pcm_s16be", 1, 8000, pcm_be(MONO[:4])))
+    unknown("au_unknown_size_mulaw", "Unknown length with 3 µ-law frames: any byte count is whole frames.",
+            au(bytes([0xFF, 0x80, 0x00]), size=AU_UNKNOWN_SIZE, encoding=1),
+            accept=au_stream("pcm_mulaw", 1, 8000, bytes([0xFF, 0x80, 0x00])))
+    unknown("au_unknown_size_partial_frame", "Unknown length, stereo, ending after 1.5 frames.",
+            au(pcm_be(STEREO[:3]), channels=2, size=AU_UNKNOWN_SIZE), reject="Truncated")
     bad("au_data_size_over_limit", "limits",
         f"Data size 0x80000000 is above the 0x{AU_MAX_DATA:08x} limit that FFmpeg's signed read also enforces.",
         au(pcm_be(MONO[:4]), size=AU_MAX_DATA + 1), "LimitExceeded")
     bad("au_data_not_block_aligned", "size", "Stereo data size 6 ends inside a frame.",
         au(pcm_be(STEREO[:3]), channels=2), "InvalidFormat")
+    bad("au_s24_data_not_block_aligned", "size", "24-bit mono data size 4: frames follow the encoding's width.",
+        au(bytes(4), encoding=4), "InvalidFormat")
     bad("au_truncated_data", "size", "Data size 16, but input ends after 10 data bytes.",
         au(pcm_be(MONO[:5]), size=16), "Truncated")
     bad("au_truncated_mid_sample", "size", "Data size 8, but input ends inside the third sample.",
         au(pcm_be(MONO[:4])[:5], size=8), "Truncated")
 
     # Encoding, rate and channels.
-    bad("au_encoding_mulaw", "format", "Encoding 1 (\u00b5-law) waits for T22a.",
-        au(bytes(4), encoding=1), "UnsupportedFormat")
     bad("au_encoding_g726", "format", "Encoding 23 (4-bit G.726) waits for T31c.",
         au(bytes(4), encoding=23), "UnsupportedFormat")
     bad("au_encoding_unknown", "format", "Encoding 99 is not an AU encoding.",
@@ -995,11 +1065,12 @@ def build_au_fixtures():
 
     # Precedence: the first violated field in header order wins.
     bad("au_limit_before_unsupported", "precedence",
-        "Data size over the limit and encoding 1: the data size field comes first.",
-        au(bytes(4), encoding=1, size=AU_MAX_DATA + 1), "LimitExceeded")
+        "Data size over the limit and encoding 99: the data size field comes first.",
+        au(bytes(4), encoding=99, size=AU_MAX_DATA + 1), "LimitExceeded")
     bad("au_unsupported_before_invalid", "precedence",
-        "Encoding 6 (float) and sample rate 0: the encoding field comes first.",
-        au(bytes(4), encoding=6, rate=0), "UnsupportedFormat")
+        "Encoding 24 (G.722) and sample rate 0: the encoding field comes first. (Before T22a it used "
+        "encoding 6, now supported.)",
+        au(bytes(4), encoding=24, rate=0), "UnsupportedFormat")
 
     names = [f.name for f in fx]
     assert len(names) == len(set(names)), "duplicate AU fixture names"

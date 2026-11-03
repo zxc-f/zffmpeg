@@ -23,8 +23,8 @@ build="$root/.references/ffmpeg-build"
 # protocols, the WAV, Wave64 and AU demuxers, the PCM decoders and encoders T20b
 # compares (u8, s8, s16/s24/s32/s64 and f32/f64 in both byte orders, A-law and
 # mu-law), the WAV muxer (decoded samples are compared as WAV payloads; T21a),
-# the Wave64 muxer (its files must read in zffprobe; T21b), and the aresample
-# filter. The ffmpeg program
+# the Wave64 and AU muxers (their files must read in zffprobe; T21b, T22a),
+# and the aresample filter. The ffmpeg program
 # selects the few filters it always needs. No GPL, nonfree, external or
 # hardware components.
 pcm_codecs=pcm_u8,pcm_s8,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,pcm_s32be,pcm_s64le,pcm_s64be,pcm_f32le,pcm_f32be,pcm_f64le,pcm_f64be,pcm_alaw,pcm_mulaw
@@ -41,7 +41,7 @@ configure_args=(
     --enable-demuxer=wav,w64,au
     --enable-decoder="$pcm_codecs"
     --enable-encoder="$pcm_codecs"
-    --enable-muxer=wav,w64
+    --enable-muxer=wav,w64,au
     --enable-filter=aresample
 )
 

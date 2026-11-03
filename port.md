@@ -785,7 +785,9 @@ sizes, which are rejected here with named fixtures.
 ### AU contract
 
 T12 adds a second container through the existing PCM kernels: known-length Sun
-AU with signed 16-bit big-endian PCM (encoding 3). The canonical fixture
+AU with signed 16-bit big-endian PCM (encoding 3); T22a widens it to every PCM
+encoding of FFmpeg's AU table and to unknown-length input behind an option.
+The canonical fixture
 contract, with every rule, the error precedence and the differences from
 FFmpeg, is [zig/testing/fixtures/au/README.md](zig/testing/fixtures/au/README.md).
 In summary:
@@ -794,10 +796,10 @@ In summary:
 | --- | --- |
 | Header | Six big-endian `u32` fields: `.snd`, data offset, data size, encoding, sample rate, channels. Input shorter than 24 bytes is `Truncated`; a wrong magic or a data offset below 24 is `InvalidAu`. |
 | Annotation | The `offset − 24` bytes after the header are skipped and ignored, at most 1 MiB (`LimitExceeded`, configurable). |
-| Data size | Known length only: `0xffffffff` is `UnsupportedStreamingSize`; sizes above `0x7fffffff`, which FFmpeg's signed read also rejects, are `LimitExceeded`; it must hold whole frames (`InvalidFormat`); 0 is an empty stream. |
-| Encoding, rate, channels | Encoding 3 only (`UnsupportedFormat`); rate 0 is `InvalidFormat`, above 192 kHz `LimitExceeded`; 0 channels `InvalidFormat`, more than 2 `UnsupportedFormat`. |
+| Data size | `0xffffffff` is `UnsupportedStreamingSize`, unless the `unknown_length` option (T22a) reads the data to the end of the input, in whole frames; sizes above `0x7fffffff`, which FFmpeg's signed read also rejects, are `LimitExceeded`; it must hold whole frames (`InvalidFormat`); 0 is an empty stream. |
+| Encoding, rate, channels | Since T22a µ-law (1), s8 (2), s16/s24/s32 big-endian (3 to 5), f32/f64 big-endian (6, 7) and A-law (27); others, G.72x included, are `UnsupportedFormat`; rate 0 is `InvalidFormat`, above 192 kHz `LimitExceeded`; 0 channels `InvalidFormat`, more than 2 `UnsupportedFormat`. |
 | Data and trailing bytes | Input ending inside the data is `Truncated`; bytes after the data are ignored and never read. |
-| Writer | One canonical 32-byte header (the 24 header bytes and 8 zero annotation bytes, as FFmpeg's AU muxer writes without metadata) with the known data size, checked before output. |
+| Writer | One canonical 32-byte header (the 24 header bytes and 8 zero annotation bytes, as FFmpeg's AU muxer writes without metadata) with the codec's encoding and the known data size, checked before output; FFmpeg's muxer copies every writer-output fixture to the same bytes. |
 
 The errors share the WAV contract's names where the meaning matches, plus
 `InvalidAu` for a malformed AU header. Parser acceptance and automatic format
@@ -813,7 +815,7 @@ matrix synchronously over a borrowed `*std.Io.Reader` and `*std.Io.Writer`:
 
 | Case | Behavior |
 | --- | --- |
-| Request | An output container and a mode: `transcode` (decode, then encode as the output container's s16 codec, `pcm_s16le` for WAV and Wave64 or `pcm_s16be` for AU) or `copy` (move the encoded data bytes unchanged). Copy needs an output container that carries the input codec: any WAV encoding into WAV or Wave64 (T21b), `pcm_s16be` into AU (until T22a); copy between AU and the WAV family is `UnsupportedOperation`. Transcoding needs samples stored as s16 (`pcm_s16le`, `pcm_s16be`, A-law, mu-law); other storage needs sample-format conversion (T23a) and is `UnsupportedOperation`. Rate and layout never change. |
+| Request | An output container and a mode: `transcode` (decode, then encode as the output container's s16 codec, `pcm_s16le` for WAV and Wave64 or `pcm_s16be` for AU) or `copy` (move the encoded data bytes unchanged). Copy needs an output container that carries the input codec: any WAV encoding into WAV or Wave64 (T21b), any AU encoding into AU (T22a), so A-law and mu-law copy between them; any other copy is `UnsupportedOperation`. Transcoding needs samples stored as s16 (`pcm_s16le`, `pcm_s16be`, A-law, mu-law); other storage needs sample-format conversion (T23a) and is `UnsupportedOperation`. Rate and layout never change. |
 | Before output | `Conversion.init` detects the input, reads its header, then checks the request and the output header (`Writer.check`: rate limit, data and RIFF sizes), and writes nothing. The first failure in that order wins, so a malformed input reports its parse error even when the request would also be rejected. |
 | Output | `run` writes the writer's canonical header with the exact frame count, moves whole frames through a 4 KiB transfer buffer, calls the parser's `finish` (errors after the data fail the operation) and then the writer's `finish` (frame count, then flush). |
 | Metadata | Since T21c, with `Request.tags`: the tags before a RIFF or RF64 input's `data` that FFmpeg's command carries by default (the first of each key, without the source-file keys, and when transcoding without the encoding keys) go into a RIFF or RF64 output's `LIST`/`INFO` chunk, as FFmpeg's writer chooses them; zffmpeg always asks for them. Other chunks, AU annotations, and tags after `data` are dropped; Wave64 and AU output carry no tags. Encoded media and timing (rate, layout, frame count) are preserved. |

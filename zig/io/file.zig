@@ -350,7 +350,8 @@ test "the AU writer reproduces its fixtures through every writer buffer size" {
     var buffer: [64]u8 = undefined;
 
     inline for (fixtures.au.all) |fixture| {
-        if (fixture.writer_output) {
+        // The s16be ones: writeFrames takes s16 samples.
+        if (fixture.writer_output and comptime fixture.expected.accept.codec == .pcm_s16be) {
             const stream = fixture.expected.accept;
             const format = try audio.Format.init(stream.sample_rate, stream.channels, .s16);
             const path = fixture.name ++ ".au";
@@ -359,7 +360,7 @@ test "the AU writer reproduces its fixtures through every writer buffer size" {
                     const file = try tmp.dir.createFile(io, path, .{});
                     defer file.close(io);
                     var file_writer = file.writerStreaming(io, buffer[0..capacity]);
-                    var writer = try au.Writer.begin(&file_writer.interface, format, stream.frameCount(), .{});
+                    var writer = try au.Writer.begin(&file_writer.interface, .s16be, format, stream.frameCount(), .{});
                     try writer.writeFrames(stream.samples.s16);
                     try writer.finish();
                 }

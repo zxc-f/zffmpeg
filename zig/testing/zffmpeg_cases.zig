@@ -235,7 +235,7 @@ pub fn main(init: std.process.Init) !u8 {
         var buffer: [4096]u8 = undefined;
         var reader = file.readerStreaming(io, &buffer);
         const info = try av.au.probe(&reader.interface, .{});
-        if (info.frame_count != long_frames) h.fail(case, "{d} frames", .{info.frame_count});
+        if (info.frame_count != long_frames) h.fail(case, "{?d} frames", .{info.frame_count});
     }
 
     return if (h.failures == 0) 0 else 1;

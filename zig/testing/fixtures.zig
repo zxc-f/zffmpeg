@@ -28,13 +28,18 @@ pub const Failure = enum {
 /// `pcm.Codec`, so the manifests never depend on the implementation.
 pub const Codec = enum {
     pcm_u8,
+    pcm_s8,
     pcm_s16le,
     pcm_s16be,
     pcm_s24le,
+    pcm_s24be,
     pcm_s32le,
+    pcm_s32be,
     pcm_s64le,
     pcm_f32le,
+    pcm_f32be,
     pcm_f64le,
+    pcm_f64be,
     pcm_alaw,
     pcm_mulaw,
 };
@@ -170,6 +175,15 @@ pub const au = struct {
         expected: Au.Expected,
         /// The AU writer (T12b) must produce exactly these bytes from `expected.accept`.
         writer_output: bool = false,
+        /// The result with the parser's `unknown_length` option (T22a), where
+        /// it differs from `expected`.
+        unknown_length: ?Au.Expected = null,
+
+        /// The expected result with the `unknown_length` option off or on.
+        pub fn result(fixture: Au.Fixture, unknown_length: bool) Au.Expected {
+            if (unknown_length) return fixture.unknown_length orelse fixture.expected;
+            return fixture.expected;
+        }
     };
 
     pub const all: []const Au.Fixture = @import("fixtures/au/manifest.zon");

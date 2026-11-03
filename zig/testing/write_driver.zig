@@ -137,9 +137,7 @@ fn write(
             try writer.finish();
         },
         .au => {
-            // AU carries only pcm_s16be until TODO.md T22a.
-            if (codec != .s16be) return error.UnsupportedFormat;
-            var writer = try av.au.Writer.begin(&file_writer.interface, format, frames, .{});
+            var writer = try av.au.Writer.begin(&file_writer.interface, codec, format, frames, .{});
             try writer.writeData(encoded);
             try writer.finish();
         },

@@ -448,7 +448,8 @@ def check_zffprobe_au(fixture, args, path):
     code, fields, err = zffprobe(args.zffprobe, path)
     if fixture.accept is not None:
         channels, rate, samples = fixture.accept
-        want = zffprobe_report("au", "pcm_s16be", channels, rate, len(samples) // channels)
+        want = zffprobe_report("au", fixture.accept.codec, channels, rate, len(samples) // channels,
+                               fixture.accept.storage)
         if code != 0 or fields != want:
             return [f"zffprobe exited {code} with {fields or first_line(err)}"], f"exit {code}"
         return [], "exit 0, report matches"
@@ -464,7 +465,7 @@ def check_zffprobe_au(fixture, args, path):
 def compare_au_accepted(fixture, args, path):
     channels, rate, samples = fixture.accept
     frames = len(samples) // channels
-    expected = expected_stream("au", "pcm_s16be", channels, rate, frames)
+    expected = expected_stream("au", fixture.accept.codec, channels, rate, frames, fixture.accept.storage)
     problems, notes = check_stream(args, fixture.name, path, expected, fixture.accept, "au",
                                    KNOWN_AU_DECODE_DIFFERENCES.get(fixture.name),
                                    KNOWN_AU_FIELD_DIFFERENCES)
@@ -639,7 +640,8 @@ def compare_zffmpeg(args, lines, failures):
     ]
     inputs = [(wav_container(f), FIXTURES / "wav" / f"{f.name}.wav", f) for f in generate.build_fixtures() if f.accept]
     inputs += [("au", FIXTURES / "au" / f"{f.name}.au", f) for f in generate.build_au_fixtures() if f.accept]
-    family = {"wav": "riff", "w64": "riff", "au": "au"}
+    # The codecs each output carries; copy needs the input's (T21a, T22a).
+    carried = {"wav": generate.WAV_CODECS, "w64": generate.WAV_CODECS, "au": generate.AU_CODECS}
     read_ok = read_total = rejected_ok = rejected_total = 0
     with tempfile.TemporaryDirectory() as tmp:
         work = pathlib.Path(tmp)
@@ -652,7 +654,7 @@ def compare_zffmpeg(args, lines, failures):
                 options = (["-c", "copy"] if copy else []) + ["-f", output]
                 out = work / f"{fixture.name}-{'copy' if copy else 'transcode'}.{output}"
                 code, _, err = zffprobe_raw(args.zffmpeg, "-i", path, *options, out)
-                supported = family[output] == family[container] if copy else stream.storage == "s16"
+                supported = stream.codec in carried[output] if copy else stream.storage == "s16"
                 if not supported:
                     rejected_total += 1
                     if code == 3 and b"UnsupportedOperation" in err and not out.exists():
@@ -791,6 +793,31 @@ def compare_ffmpeg_w64(args, lines, failures):
     lines += ["", f"FFmpeg-written Wave64 files read as expected: {passed}/{len(fixtures)}."]
 
 
+def compare_ffmpeg_au(args, lines, failures):
+    """FFmpeg's AU muxer against the Zig writer (T22a): FFmpeg copies each AU
+    writer-output fixture into AU, which must give back the same bytes, so
+    both write the same header for every encoding."""
+    fixtures = [f for f in generate.build_au_fixtures() if f.writer_output]
+    same = 0
+    with tempfile.TemporaryDirectory() as tmp:
+        for fixture in fixtures:
+            out = pathlib.Path(tmp) / f"{fixture.name}.au"
+            # Forced, because FFmpeg's probe does not detect an empty AU file.
+            process = run(args.ffmpeg, "-v", "error", "-nostdin", "-f", "au", "-i", FIXTURES / "au" / f"{fixture.name}.au",
+                          "-bitexact", "-c:a", "copy", "-f", "au", out)
+            if process.returncode == 0 and out.read_bytes() == fixture.data:
+                same += 1
+            else:
+                failures.append(f"ffmpeg au {fixture.name}: exited {process.returncode} "
+                                f"({first_line(text(process.stderr)) or 'different bytes'})")
+    lines += [
+        "",
+        "## FFmpeg's AU muxer",
+        "",
+        f"AU writer-output fixtures FFmpeg copies to identical bytes: {same}/{len(fixtures)}.",
+    ]
+
+
 def compare_pipes(args, lines, failures):
     """zffprobe through a pipe must match zffprobe on the file (T12c)."""
     cases = [(FIXTURES / "wav" / f"{f.name}.wav") for f in generate.build_fixtures()]
@@ -823,7 +850,7 @@ def compare_unknown_length(args, lines, failures):
     still rejects is recorded, not checked."""
     lines += [
         "",
-        "## Unknown-length WAV (T21b)",
+        "## Unknown-length WAV and AU (T21b, T22a)",
         "",
         "The result with the `unknown_length` parser option, which the Zig tests check; "
         "zffprobe and zffmpeg do not enable it.",
@@ -831,11 +858,16 @@ def compare_unknown_length(args, lines, failures):
         "| Fixture | With `unknown_length` | FFmpeg | Result |",
         "| --- | --- | --- | --- |",
     ]
-    fixtures = [f for f in generate.build_fixtures() if f.unknown_accept is not None or f.unknown_reject is not None]
-    accepted = [f for f in fixtures if f.unknown_accept is not None]
+    def changes(f):
+        return f.unknown_accept is not None or f.unknown_reject is not None
+
+    fixtures = [("wav", f) for f in generate.build_fixtures() if changes(f)]
+    fixtures += [("au", f) for f in generate.build_au_fixtures() if changes(f)]
+    accepted = [f for _, f in fixtures if f.unknown_accept is not None]
     accepted_ok = 0
-    for fixture in fixtures:
-        path = FIXTURES / "wav" / f"{fixture.name}.wav"
+    for directory, fixture in fixtures:
+        path = FIXTURES / directory / f"{fixture.name}.{directory}"
+        au_file = directory == "au"
         stream = fixture.unknown_accept
         if stream is None:
             lines.append(f"| `{fixture.name}` | `{fixture.unknown_reject}` | {ffmpeg_verdict(args, path)} | recorded |")
@@ -853,9 +885,11 @@ def compare_unknown_length(args, lines, failures):
                          f"| {theirs} ({reason}) | {result} |")
             failures.extend(f"{fixture.name} (unknown_length): {problem}" for problem in problems)
             continue
-        expected = expected_stream(wav_container(fixture), stream.codec, channels, rate, frames, stream.storage)
+        container = "au" if au_file else wav_container(fixture)
+        expected = expected_stream(container, stream.codec, channels, rate, frames, stream.storage)
         del expected["duration_ts"]
-        problems, notes = check_stream(args, fixture.name, path, expected, stream)
+        problems, notes = check_stream(args, fixture.name, path, expected, stream, "au" if au_file else None,
+                                       field_differences=KNOWN_AU_FIELD_DIFFERENCES if au_file else KNOWN_FIELD_DIFFERENCES)
         accepted_ok += not problems
         theirs = "same samples and stream" if not problems else "differs"
         if notes:
@@ -924,6 +958,7 @@ def main():
     compare_writer(args, lines, failures)
     compare_zffmpeg(args, lines, failures)
     compare_ffmpeg_w64(args, lines, failures)
+    compare_ffmpeg_au(args, lines, failures)
     if "au-probe" not in NOT_IMPLEMENTED:
         compare_pipes(args, lines, failures)
     if NOT_IMPLEMENTED:
