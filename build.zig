@@ -26,7 +26,6 @@ const Example = struct {
 /// here explicitly; CI fails when a file in zig/examples/ is missing from this list.
 const examples = [_]Example{
     .{ .name = "io_patterns", .path = "zig/examples/io_patterns.zig" },
-    .{ .name = "pcm_s16", .path = "zig/examples/pcm_s16.zig" },
 };
 
 pub fn build(b: *std.Build) void {
