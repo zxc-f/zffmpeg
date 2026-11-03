@@ -263,6 +263,27 @@ build include the WAV muxer. Its first run, locally on Windows at commit
   s16) rejected before any output: **54/54**.
 - Fixtures whose pipe result equals the file result: **105/105**.
 
+T22c added raw PCM, and the raw PCM demuxers and muxers to the reference
+build, with detection by FFmpeg's extension fallback. The run, locally on
+Windows at commit `3b94b6d` with MSYS2 UCRT64 clang 23.1.4, reported no
+failures:
+
+- Raw PCM fixtures read forced with their parameters: **16/16** accepted and
+  **4/4** rejected (FFmpeg accepts 3, recorded: the partial frames, decoded
+  whole, and the rate above the limit); named copies detected by FFmpeg and
+  zffprobe as their format: **7/7**; FFmpeg's raw muxers copy the writer
+  outputs unchanged: **15/15**.
+- Registries equal to FFmpeg's listings: 16 codecs, 18 formats, 18 demuxers'
+  extensions, 18 muxers.
+- FFmpeg's probe winner equals the recorded one: **223/223** fixtures (44
+  detected by no demuxer, the 20 raw ones among them).
+- Zig-written files FFmpeg reads as expected: **59/59** (15 raw).
+- zffmpeg outputs FFmpeg reads as expected, equal through pipes: **694/694**,
+  raw inputs and the raw `s16le`, `alaw` and `f64be` outputs included, 58
+  lossy A-law transcodes equal to FFmpeg's own encoding; unsupported cells:
+  **734/734**; AU and AIFF outputs equal to FFmpeg's conversion: **134/134**.
+- WAV, AU and AIFF as before; pipes **223/223**.
+
 T22b added AIFF and AIFF-C, and the AIFF demuxer and muxer to the reference
 build; T16 added the registry check. The run, locally on Windows at commit
 `c829e01` with MSYS2 UCRT64 clang 23.1.4, reported no failures:

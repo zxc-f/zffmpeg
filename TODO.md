@@ -23,8 +23,9 @@ T20b, the PCM encodings, and T21, complete WAV (T21a, extensible headers and
 encodings; T21b, RF64/BW64, Sony Wave64 and unknown-length input; T21c, tags,
 with T17b's metadata dictionary), T22a, every AU PCM encoding and
 unknown-length AU, T16, the codec and format registries with FFmpeg's scored
-content probing, and T22b, AIFF and AIFF-C, are verified. **Next: T22c (raw
-PCM), then T22d (CAF). See [Near-term order](#near-term-order).**
+content probing, T22b, AIFF and AIFF-C, and T22c, raw PCM with FFmpeg's
+extension fallback, are verified. **Next: T22d (CAF demux). See
+[Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
 [How tasks are completed](#how-tasks-are-completed) describes. Tasks and
@@ -1016,7 +1017,9 @@ names, not as an empty framework.
   muxers. Mutations each failed: a stage registered with the wrong signature
   and an extension shared by two muxers stop compilation, and a dump with a
   wrong long name or a missing extension fails `compare.py`. The
-  never-chosen rule is tested with a probe-less demuxer.
+  never-chosen rule is tested with a probe-less demuxer. Since T22c (the
+  project owner's choice), FFmpeg's extension hint is ported too: a
+  probe-less demuxer whose extension matches the file name scores 50.
 
 - [ ] **T17 — Options, metadata and diagnostics.** Checked when T17a and T17b
   are.
@@ -1587,9 +1590,71 @@ names, not as an empty framework.
     cannot read its own pipe-written AIFF (`FORM` size 0) either, as
     recorded.
 
-  - [ ] **T22c — Raw PCM demux and mux.** Needs T20b. Explicit parameters only
+  - [x] **T22c — Raw PCM demux and mux.** Needs T20b. Explicit parameters only
     (`-f s16le` and the rest); probing never selects it.
     Done when payloads are byte-exact both ways and probing ignores raw input.
+    Revised (the project owner's choice): as FFmpeg does, a raw format's file
+    extension selects it when no content probe recognizes the stream; content
+    alone still never does.
+
+    ```text
+    ID / parent: T22c / T22
+    State: verified
+    Supported behavior and explicit exclusions: FFmpeg's raw PCM formats for
+      every PCM codec but s64 (FFmpeg has none), read with -sample_rate and
+      -ch_layout (default 44100 Hz mono; zffmpeg also -ar/-ac) and written
+      unchanged; the frame count from a regular file's size or counted from a
+      pipe; detection by FFmpeg's extension fallback (ub, sb, al, ul, and sw
+      for the native byte order). Excluded: layouts beyond mono and stereo,
+      the audio/L16 MIME type, placeholder headers for pipe input (only raw
+      output from a pipe), partial frames (Truncated).
+    Needs (verified) / lands with / verified after: T20b (verified); alone.
+    Contract and source provenance: port.md "Raw PCM contract", "Initial probe
+      output" and "zffmpeg command", zig/testing/fixtures/raw/README.md,
+      notes.md "Raw PCM contract"; pcmdec.c, pcmenc.c, pcm.c and format.c
+      read for behavior. Original code.
+    Required fixtures / optional corpus: 20 raw fixtures (16 accepted with 15
+      writer outputs, 4 rejected), with their parameters. No optional corpus.
+    Ownership, state transitions and limits: no allocation; the parameters
+      are copied; 192 kHz by default.
+    Comparison rule and intentional differences: FFmpeg reads every accepted
+      raw fixture forced with its parameters to the same fields and samples;
+      named copies are detected as their format by FFmpeg and zffprobe;
+      FFmpeg's raw muxers copy the writer outputs unchanged; FFmpeg reads
+      zffmpeg's raw outputs, and its own A-law encoding equals zffmpeg's.
+      Recorded: an empty file has no duration in FFmpeg, partial frames are
+      decoded by it, parameters for other formats only warn in it.
+    Implementation files and test entry points: zig/format/raw.zig,
+      registry.zig, detect.zig (Source, winner), replay.zig, convert.zig,
+      file.zig, both CLIs, status.zig, write_driver.zig, registry_dump.zig,
+      generate.py, compare.py, build-ffmpeg.sh; tests in raw.zig, detect.zig,
+      convert.zig, registry.zig, replay.zig; probe and convert cases in
+      build.zig and zffmpeg_cases.zig (a real pipe, a named file).
+    Evidence commit / Linux CI run / reference report: 3b94b6d / local
+      Windows runs instead (below) / local compare.py run (below).
+    Required cases: passed 16/16 accepted and 4/4 rejected raw fixtures, 7/7
+      named copies, 15/15 FFmpeg raw muxer copies / failed 0 / missing 0.
+    Optional cases: none.
+    Fuzz seeds, budget and result: raw.zig's entry runs every codec with the
+      length known and unknown; run under zig build test. No sustained run.
+    Remaining work or blocker / next action: none; see the introduction.
+    ```
+
+    Evidence (G5, local Windows runs with Zig 0.17.0): commit `3b94b6d`.
+    `zig build test` passed 142/142 steps in Debug, ReleaseSafe and
+    ReleaseFast (`av` 182 tests, 57 `zffprobe` and 67 `zffmpeg` process runs,
+    and the prepared cases, a real pipe and a `.al` file among them); fmt,
+    `generate.py --check`, the four cross builds and Linux and big-endian
+    (powerpc64) type checks passed. The reference, rebuilt with the raw
+    demuxers and muxers, ran `compare.py` with no failures: 16/16 accepted
+    and 4/4 rejected raw fixtures (FFmpeg accepts 3, recorded); 7/7 named
+    copies detected; 15/15 FFmpeg raw muxer copies byte-identical; the
+    registry equal to FFmpeg's 16 codecs, 18 formats, 18 demuxers and 18
+    muxers; 223/223 detection results; 59/59 Zig-written files; 694/694
+    `zffmpeg` outputs (58 lossy A-law cells equal to FFmpeg's own encoding)
+    and 734/734 unsupported cells; 134/134 AU and AIFF outputs equal to
+    FFmpeg's conversion; 223/223 pipe results.
+
   - [ ] **T22d — CAF demux.** Needs T16 and T20b.
     Done when PCM in CAF matches the reference; ALAC in CAF waits for T31b.
 
