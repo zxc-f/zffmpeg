@@ -100,6 +100,7 @@ jobs:
 
       - name: Record the environment and the reference build
         run: |
+          echo "runner image ${ImageOS:-unknown} ${ImageVersion:-unknown}"
           uname -srm
           . /etc/os-release && echo "$PRETTY_NAME"
           echo "runner $(clang --version | head -n 1)"

@@ -4,15 +4,16 @@ This is the execution checklist for [port.md](port.md). The plan explains the
 architecture and compatibility rules; this file records the work to do next.
 The repository tracks project documentation, the minimal Zig package and build
 (the `av` module, documented in [zig/README.md](zig/README.md)), the WAV fixture
-contract ([zig/testing/fixtures](zig/testing/fixtures/README.md)), PCM s16
-kernels and audio/time types in the `av` module, a tested standalone I/O example
-and a Linux CI workflow. FFmpeg and zigimg are
-independent clones in ignored `.references/`; see
-[README.md](README.md#clone-the-reference-repositories) for setup. There is no
-codec/container implementation yet.
+contract ([zig/testing/fixtures](zig/testing/fixtures/README.md)) and the first
+complete path: PCM s16 kernels, audio/time types, a bounded WAV parser and
+known-length writer, file and pipe adapters, and the `zffprobe` tool. Linux CI
+builds and tests it in every mode and compares it with a pinned FFmpeg build
+([zig/testing/reference](zig/testing/reference/README.md)). FFmpeg and zigimg
+are independent clones in ignored `.references/`; see
+[README.md](README.md#clone-the-reference-repositories) for setup.
 
-**Next tasks: T06 — the bounded WAV parser (unblocked by T02 and T05), and T03 —
-the C reference setup, which runs independently. T07 follows T04 and T06.**
+**Next tasks: T11's outstanding native Windows run (deferred for now), then
+T12 — a second supported variant or small container.**
 
 Work through the first WAV/PCM path before expanding the framework. Tasks have
 stable IDs for references. Check an item only when its completion criteria are
@@ -118,10 +119,10 @@ agree with the [first WAV contract](port.md#first-wav-contract).
   `mono_8k`. [run 41550661260](https://github.com/zxc-f/zffmpeg/actions/runs/41550661260): `generate.py --check` passed, and `zig build test`
   passed 12/12 in Debug, ReleaseSafe and ReleaseFast, including the `av`
   fixture tests (manifest consistency, every file embedded and matching its
-  SHA-256). Remaining: no parser consumes the fixtures until T06, and the FFmpeg
-  comparison of accepted fixtures belongs to T03/T10.
+  SHA-256). Remaining at the time: no parser consumed the fixtures and FFmpeg
+  had not compared them; T06 and T10 have since done both.
 
-- [ ] **T03 — Establish the C reference comparison setup.** Use Linux x86-64 in
+- [x] **T03 — Establish the C reference comparison setup.** Use Linux x86-64 in
   a pinned container or WSL environment. Build `.references/ffmpeg` at the
   recorded upstream revision with Clang. Record environment/tool versions,
   tested configure command,
@@ -132,6 +133,22 @@ agree with the [first WAV contract](port.md#first-wav-contract).
   output and normalized metadata comparisons are reproducible. This is an
   explicit Linux reference-test dependency, independent of native Windows Zig
   tests; work can proceed alongside T01/T02/T04/T05.
+  Evidence: [build-ffmpeg.sh](zig/testing/reference/build-ffmpeg.sh) builds the
+  pinned commit out of tree with Clang and a minimal LGPL configuration (file
+  and pipe protocols, WAV demuxer, s16le decoder, encoder and raw muxer,
+  `aresample`; autodetection, asm, network, ffplay and avdevice off), and
+  [compare.py](zig/testing/reference/compare.py) runs the comparisons. CI's
+  `reference` job runs both on GitHub's `ubuntu-24.04` image, prints the image
+  and tool versions, and caches the build under a key from the Clang version
+  and the script. [zig/testing/reference/README.md](zig/testing/reference/README.md)
+  records the environment (Ubuntu clang 18.1.3, GNU Make 4.3, Python 3.12.3,
+  Zig 0.17.0), the configure command, the `ffmpeg`, `ffprobe`, `config.log` and
+  fixture SHA-256 values and the full results. Two separate from-scratch builds,
+  in [run 41557433205](https://github.com/zxc-f/zffmpeg/actions/runs/41557433205)
+  and [run 41557971301](https://github.com/zxc-f/zffmpeg/actions/runs/41557971301),
+  gave the same exact-sample and normalized-metadata results. The environment is
+  GitHub's versioned runner image rather than a container digest; the job
+  prints the image version on every run.
 
 - [x] **T04 — Implement the PCM sample conversion kernels.** Depends on T01 and
   T02. Add typed slice-based signed 16-bit decoding and encoding with explicit
@@ -165,11 +182,13 @@ agree with the [first WAV contract](port.md#first-wav-contract).
   and `i64`/`u32` extremes. The rescale vectors come from an exact rational
   oracle that agrees with a transcription of `av_rescale_rnd` except for the
   two documented differences (overflow error, exact INT64_MIN). Passed in
-  [run 41553566007](https://github.com/zxc-f/zffmpeg/actions/runs/41553566007). A differential run against the built FFmpeg reference awaits T03.
+  [run 41553566007](https://github.com/zxc-f/zffmpeg/actions/runs/41553566007). T10 later compared the WAV path's
+  `time_base` and `duration_ts` with FFmpeg; `rescale` itself has no direct
+  differential run against `av_rescale_rnd`.
 
 ## Second milestone: a complete WAV/PCM path
 
-- [ ] **T06 — Implement one bounded WAV parser.** Depends on T02 and T05. Accept
+- [x] **T06 — Implement one bounded WAV parser.** Depends on T02 and T05. Accept
   `*std.Io.Reader`, initially tested with `Reader.fixed`; read exact fields into
   local arrays instead of casting structs. Implement T02's complete contract,
   including validation after data and contextual EOF/error mapping; test every
@@ -178,8 +197,20 @@ agree with the [first WAV contract](port.md#first-wav-contract).
   entry using `Smith`, plus deterministic fixture regressions; sustained fuzzing
   remains later work. Done when all contract cases pass in Debug, ReleaseSafe
   and ReleaseFast, including empty/short buffers, and the fuzz entry runs.
+  Evidence: [zig/format/wav.zig](zig/format/wav.zig) (`Parser` with
+  `readHeader`, `readSamples` and `finish`; `probe`; `decodeToRaw`; `Limits`).
+  Fields are read with `readSliceAll` into local arrays and every size is
+  checked with explicit arithmetic. Tests check all 52 fixtures against their
+  contract result from `Reader.fixed` and again through `std.testing.Reader`
+  with `artificial_limit = .limited(1)`, probing against decoding, an error
+  found after frames were delivered (`duplicate_data`), configurable limits and
+  the synthesized 2 MiB skip vector (its SHA-256 checked against generate.py).
+  The `std.testing.fuzz` entry builds its input with `Smith` and runs its
+  four-fixture corpus plus the empty input under `zig build test`. First pass:
+  [run 41555852449](https://github.com/zxc-f/zffmpeg/actions/runs/41555852449); in [run 41557971301](https://github.com/zxc-f/zffmpeg/actions/runs/41557971301) the `av` tests passed 40/40 in
+  Debug, ReleaseSafe and ReleaseFast. Sustained fuzzing has not been run.
 
-- [ ] **T07 — Connect the same parser/kernel to file and sequential I/O.** Depends
+- [x] **T07 — Connect the same parser/kernel to file and sequential I/O.** Depends
   on T04 and T06. Use standard-library adapters; include non-seekable readers with
   known chunk sizes and `fmt ` before data. Add file/stream writer adapters for
   T08. Follow the [I/O example](zig/examples/io_patterns.zig): borrow `.interface`
@@ -192,8 +223,21 @@ agree with the [first WAV contract](port.md#first-wav-contract).
   Done when memory, files and sequential input agree, large data streams without
   whole-file allocation, and cleanup/error paths pass. Unknown-length WAV and
   resumable nonblocking parsing remain unsupported; no new scheduler is required.
+  Evidence: [zig/io/file.zig](zig/io/file.zig): borrowed-handle
+  `probeFile`, `decodeFile` and `writeFile`, and path helpers `probePath` and
+  `writePath` that own and close their handle. Readers use `readerStreaming`
+  over the caller's buffer, one adapter per stream, so pipes take the same path
+  and read-ahead is kept. Memory is that buffer plus the parser's fixed 4 KiB,
+  with no allocation. A generic failure is replaced by the adapter's `.err`
+  (for example `NotOpenForReading`, `Canceled`). Tests: every fixture agrees
+  with memory through files with 0-, 1-, 64- and 64 KiB-byte buffers; file
+  decoding equals memory decoding; a 4 MiB stream is written in 4096-sample
+  pieces and read back in 1000-sample pieces; read and write failures report
+  the file's own error; a path helper closes its handle after a parse failure,
+  so the file can be deleted. Pipe input is covered by the `zffprobe` process runs (T09). First
+  pass: [run 41556196435](https://github.com/zxc-f/zffmpeg/actions/runs/41556196435); also [run 41557971301](https://github.com/zxc-f/zffmpeg/actions/runs/41557971301).
 
-- [ ] **T08 — Implement known-length WAV writing.** Code prerequisites: T04,
+- [x] **T08 — Implement known-length WAV writing.** Code prerequisites: T04,
   T05 and T07; T03 is a completion gate. Accept `*std.Io.Writer` plus the expected
   frame count for memory and file/stream output. Emit exact sizes up front with
   a 16-byte tag-1 `fmt `; no seeking or placeholders. Check all sizes with
@@ -201,22 +245,60 @@ agree with the [first WAV contract](port.md#first-wav-contract).
   `finish` validates the frame count and flushes output. Done when under/overrun,
   overflow and write/flush failures are tested and the reference decodes generated
   files to the expected samples/metadata, including empty and high-rate cases.
+  Evidence: `wav.Writer` in [zig/format/wav.zig](zig/format/wav.zig):
+  `begin` checks the rate limit and every 32-bit size, including the RIFF
+  extent, before writing a 44-byte header; `writeFrames` and `finish` enforce
+  the frame count, and `finish` flushes. Tests reproduce the five writer-output
+  fixtures byte for byte (also through files with a 1-byte buffer in
+  `zig/io/file.zig`), and cover too many, too few and incomplete frames, size
+  overflow at the largest frame count, and write and flush failures. FFmpeg
+  decodes those same five files, including `empty_data`, `stereo_96k_tag1` and
+  `mono_192k_rate_limit`, to the expected samples and metadata
+  ([reference results](zig/testing/reference/README.md#writer-output-checked-by-ffmpeg)).
+  FFmpeg has not read writer output produced at run time; that needs a writing
+  tool (T13). First pass: [run 41555852449](https://github.com/zxc-f/zffmpeg/actions/runs/41555852449); reference: [run 41557971301](https://github.com/zxc-f/zffmpeg/actions/runs/41557971301).
 
-- [ ] **T09 — Add the minimal `zffprobe` tool.** Depends on T06 and T07. Use
+- [x] **T09 — Add the minimal `zffprobe` tool.** Depends on T06 and T07. Use
   `main(init: std.process.Init)` and the output schema/status codes in port.md.
   Keep parsing in the library; produce stdout only after complete validation,
   with diagnostics on stderr. Cleanup/flush must precede explicit process exit.
   Done when separate executable runs capture/test both streams and status for
   valid, empty, malformed, unsupported, I/O and resource-limit cases. Do not
   print CLI output inside the unit-test runner.
+  Evidence: [zig/cli/probe.zig](zig/cli/probe.zig) (`main(init:
+  std.process.Init) u8`; parsing stays in `av`; the report is formatted into a
+  fixed buffer and written only after `probe` succeeds; diagnostics are one
+  stderr line with the error name). `build.zig` runs 15 `probe_cases` as
+  separate processes that check stdout, stderr and the exit status: valid mono
+  and stereo (stereo from a pipe), empty data, empty input, a malformed header,
+  an error after the data, a truncated pipe, an unsupported container, an
+  unknown size, the chunk limit, a missing file and a directory (I/O, exit 4),
+  no arguments, too many arguments and help. All passed in Debug, ReleaseSafe
+  and ReleaseFast in [run 41556590842](https://github.com/zxc-f/zffmpeg/actions/runs/41556590842) and [run 41557971301](https://github.com/zxc-f/zffmpeg/actions/runs/41557971301). There is no
+  allocating path, so the out-of-memory status is mapped but not exercised.
 
-- [ ] **T10 — Verify the whole first path.** Depends on T03 and T07–T09. Compare
+- [x] **T10 — Verify the whole first path.** Depends on T03 and T07–T09. Compare
   decoded samples, metadata and timing with the recorded reference; validate
   generated WAV externally as well as by self round trips. Exercise truncated
   headers/data, malformed lengths, partial I/O, resource limits and cleanup on
   failure for allocating paths. Report optional external corpus skips separately;
   missing required fixtures fail the run. Done when results and intentional
   differences are recorded and every supported operation has reproducible evidence.
+  Evidence: [compare.py](zig/testing/reference/compare.py) and the
+  [recorded results](zig/testing/reference/README.md#results). In
+  [run 41557971301](https://github.com/zxc-f/zffmpeg/actions/runs/41557971301) all 12 accepted fixtures decoded to exactly the expected
+  samples in FFmpeg, `ffprobe` agreed on format, codec, sample format, channels,
+  rate, time base and duration, and `zffprobe` printed the expected report. All
+  40 rejected fixtures gave the contract's `zffprobe` status and error name.
+  FFmpeg accepts 24 of them; these and two metadata differences
+  (`channel_layout=unknown`, and no duration for `empty_data`) are recorded as
+  intentional. The writer is validated through the writer-output fixtures
+  (T08). Truncated headers and data, malformed lengths and limits are fixtures;
+  partial I/O is covered by one-byte reads and small file buffers (T06, T07).
+  The WAV path allocates nothing; handle cleanup on failure is tested in T07.
+  No optional external corpus is used, so nothing is skipped; a missing or
+  changed fixture fails both `zig build test` (fixtures are embedded and
+  hash-checked) and `compare.py`.
 
 - [ ] **T11 — Establish the platform and build-mode baseline.** Once T07–T09
   exist, run native Linux and Windows checks in Debug, ReleaseSafe and
@@ -229,6 +311,14 @@ agree with the [first WAV contract](port.md#first-wav-contract).
   from default test execution. Done when both native runs and reference results
   are recorded; missing environments remain outstanding. Verify the exact
   toolchain used in each run.
+  Progress: Linux is done. The `linux` CI job checks `zig version` is 0.17.0,
+  then runs `zig build` in Debug and ReleaseSafe and `zig build test` in Debug,
+  ReleaseSafe and ReleaseFast: 47/47 tests (`av` 40, `io_patterns` 7) and the
+  15 `zffprobe` process runs in each mode in [run 41557971301](https://github.com/zxc-f/zffmpeg/actions/runs/41557971301). A separate,
+  compile-only step builds the library and `zffprobe` for x86_64-windows-gnu,
+  aarch64-linux-musl and aarch64-macos without running them. Reference results
+  are recorded under T03/T10. Remaining: a native Windows run in all three
+  modes, deferred for now; a cross-compile is not that evidence.
 
 The first milestone is useful when kernels work; the second is complete when
 T06–T11 meet their criteria. Update port.md with the supported subset, provenance,
