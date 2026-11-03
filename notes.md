@@ -14,7 +14,7 @@ When you make a new revisable decision, add it here in the same change.
 
 | Decision | Current choice and reason | To change it |
 | --- | --- | --- |
-| Compiler version | Exactly Zig 0.17.0. A comptime check in `build.zig` rejects any other compiler, because the std API moves between releases. | Update `tested_zig_version` in `build.zig`, `.minimum_zig_version` in `build.zig.zon`, `.zig-version`, the CI `version:` and version check, and the docs; validate the new std APIs first ([guide](doc/zig-0.17-guide.md)). |
+| Compiler version | Exactly Zig 0.17.0. A comptime check in `build.zig` rejects any other compiler, because the std API moves between releases. | Update `tested_zig_version` in `build.zig`, `.minimum_zig_version` in `build.zig.zon`, `.zig-version`, the CI `version:` and version check, and the docs; validate the new std APIs first and update the [`zig-0-17` skill](.claude/skills/zig-0-17/SKILL.md), renaming it for the new version. |
 | Module layout | One package, one `av` module rooted at `zig/root.zig`. | Split named modules only for a demonstrated need, such as publishing a subset; keep imports acyclic. |
 | Library artifact | Static `libzffmpeg.a`, named after the package so it does not look like an FFmpeg or Libav library. | `addLibrary` in `build.zig` (name, `.linkage`); [zig/README.md](zig/README.md). |
 | Package identity | Name `zffmpeg`, version `0.0.0`, toolchain-generated fingerprint. | Version can change freely; the fingerprint changes only for a fork that becomes a separate package. |
@@ -140,7 +140,8 @@ port.md's contract table updated, and (after T06) the parser.
 | Decision | Current choice and reason | To change it |
 | --- | --- | --- |
 | Agent guidance | `CLAUDE.md` is canonical; `AGENTS.md` only contains `@CLAUDE.md`. | Move the content back if a tool cannot follow the import. |
-| Style guide precedence | [doc/zig-0.17-guide.md](doc/zig-0.17-guide.md) governs new Zig, but `CLAUDE.md` wins where they differ. | Either file. |
+| Style guide precedence | The [`zig-0-17` skill](.claude/skills/zig-0-17/SKILL.md) and its guide govern new Zig, but `CLAUDE.md` wins where they differ. | Either file. |
+| Zig guide as a skill | The Zig 0.17 guide is a project skill (`.claude/skills/zig-0-17/`) rather than a plain document, so Claude Code loads it on every Zig change; CLAUDE.md requires it. `SKILL.md` keeps the workflow, section map and the only copy of the checklist; `references/guide.md` keeps the full guide, so the always-loaded part stays short. | Move `references/guide.md` back to `doc/` and drop the skill, updating CLAUDE.md, README.md, zig/README.md and this row together. |
 
 ## Planning
 

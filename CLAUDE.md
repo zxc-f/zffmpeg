@@ -20,6 +20,19 @@ and TODO.md lays out the roadmap through T64. When the state changes, update the
 statements in README.md, port.md ("Status and scope"), the TODO.md introduction
 and this file together.
 
+## Writing Zig: use the `zig-0-17` skill
+
+Every time you create or change a `.zig` file (anything under `zig/`, or
+`build.zig`) or `build.zig.zon`, first invoke the project skill `zig-0-17`
+([.claude/skills/zig-0-17/SKILL.md](.claude/skills/zig-0-17/SKILL.md)) and
+follow its workflow: read its reference ([references/guide.md](.claude/skills/zig-0-17/references/guide.md))
+before writing, and run its checklist on every changed hunk before you commit.
+This applies to every change, however small, including tests, examples and
+review fixes, and to subagents that write Zig: tell them to use the skill.
+Once per session is enough to load it; re-read the guide sections a later
+change touches. Agents that cannot load skills read the two files directly.
+Where the skill and this file differ, this file wins.
+
 ## Commands
 
 Toolchain: Zig **0.17.0** exactly. `build.zig` stops with a compile error on any
@@ -103,11 +116,12 @@ package manifest and per-file provenance.
   change together. Add new revisable decisions there in the same change.
 - [doc/zigimg-reference.md](doc/zigimg-reference.md): pinned zigimg analysis,
   the source of the I/O adapter rules below.
-- [doc/zig-0.17-guide.md](doc/zig-0.17-guide.md): how to write Zig 0.17 here:
+- [.claude/skills/zig-0-17/](.claude/skills/zig-0-17/SKILL.md): the project
+  skill for writing Zig 0.17 here. `SKILL.md` holds the workflow, a section
+  map and the checklist to run before sending Zig; `references/guide.md` covers
   `@as` versus real casts, the 0.15/0.16 I/O breaks, containers, removed
-  builtins, formatting, tests, the build graph, and a checklist to run before
-  sending Zig. Follow it for new Zig; where it differs from this file, this
-  file wins.
+  builtins, formatting, tests and the build graph. Use it for every Zig change
+  (see "Writing Zig" above); where it differs from this file, this file wins.
 
 ## References
 
@@ -142,7 +156,8 @@ and existing user changes.
   CI together.
 - Check installed standard-library sources and versioned official documentation
   before adopting build, I/O, or reflection APIs from older examples; the
-  [Zig 0.17 guide](doc/zig-0.17-guide.md) lists the stale patterns to avoid.
+  [`zig-0-17` skill's guide](.claude/skills/zig-0-17/references/guide.md) lists
+  the stale patterns to avoid.
   Resolve disagreements by compiling a minimal check with the pinned toolchain.
 - Start with one package and one named library module, `av`. Use ordinary
   file imports internally. Split named modules only for a demonstrated need,
