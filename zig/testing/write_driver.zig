@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Original file for this project.
-//! Test driver for the FFmpeg comparison (TODO.md T19a, T21a, T21b, T21c). It
+//! Test driver for the FFmpeg comparison (TODO.md T19a, T21a, T21b, T21c, T22b). It
 //! writes one media file from decoded samples with the `av` encoders and
 //! writers, so the reference reads the actual Zig output rather than only
 //! fixtures the writer is tested to reproduce.
 //!
-//!     write-driver <wav|w64|au> <codec> <sample_rate> <channels> <input.raw> <output>
+//!     write-driver <wav|w64|au|aiff> <codec> <sample_rate> <channels> <input.raw> <output>
 //!                  [rf64] [bext] [tag=<key>=<value>]...
 //!
 //! `codec` is an FFmpeg PCM codec name such as `pcm_s24le`. The input holds
@@ -23,10 +23,10 @@
 const std = @import("std");
 const av = @import("av");
 
-const usage = "usage: write-driver <wav|w64|au> <codec> <sample_rate> <channels> <input.raw> <output>" ++
+const usage = "usage: write-driver <wav|w64|au|aiff> <codec> <sample_rate> <channels> <input.raw> <output>" ++
     " [rf64] [bext] [tag=<key>=<value>]...\n";
 
-const Container = enum { wav, w64, au };
+const Container = enum { wav, w64, au, aiff };
 
 /// Inputs are fixture-sized; the bound keeps a wrong argument from reading a
 /// large file into memory.
@@ -141,8 +141,14 @@ fn write(
             try writer.writeData(encoded);
             try writer.finish();
         },
+        .aiff => {
+            var writer = try av.aiff.Writer.begin(&file_writer.interface, codec, format, frames, .{});
+            try writer.writeData(encoded);
+            try writer.finish();
+        },
     }
 }
+
 fn printError(io: std.Io, comptime fmt: []const u8, args: anytype) void {
     var buffer: [256]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writerStreaming(io, &buffer);

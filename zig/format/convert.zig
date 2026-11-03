@@ -1,15 +1,20 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Original file for this project.
-//! Synchronous conversion and stream copy between WAV, Wave64 and AU (TODO.md
-//! T13a, T21b).
+//! Synchronous conversion and stream copy between WAV, Wave64, AU and AIFF
+//! (TODO.md T13a, T21b, T22b).
 //!
 //! The operation matrix (TODO.md T13), where WAV stands for WAV or Wave64 on
 //! either side:
 //!
-//! | Input → output     | `transcode`                  | `copy`                                   |
-//! | ------------------ | ---------------------------- | ---------------------------------------- |
-//! | WAV → WAV, AU → AU | yes                          | yes                                      |
-//! | WAV → AU, AU → WAV | yes, through the PCM kernels | A-law and µ-law only; others need byte swaps |
+//! | Input → output       | `transcode`                  | `copy`                                              |
+//! | -------------------- | ---------------------------- | --------------------------------------------------- |
+//! | into the same family | yes                          | yes                                                 |
+//! | between families     | yes, through the PCM kernels | the codecs both carry, else `UnsupportedOperation` |
+//!
+//! Transcoding needs samples stored as s16 and writes the output container's
+//! s16 codec. Stream copy needs the output to carry the input's codec: WAV and
+//! AU share A-law and µ-law, AU and AIFF the big-endian integer and float
+//! encodings, and WAV and AIFF u8, s16le (`sowt`), A-law and µ-law.
 //!
 //! Rate and channel-layout changes cannot be requested yet (TODO.md T23/T24);
 //! the output always has the input's format.
@@ -29,8 +34,8 @@
 //! bytes unchanged; transcoding sends them through `pcm.Decoder` and
 //! `pcm.Encoder` (the core/stage.zig contract) and writes the encoded packets.
 //! Neither keeps container metadata: the output has the writer's canonical
-//! header, so WAV chunks other than `fmt ` and `data`, and AU annotations, are
-//! dropped.
+//! header, so WAV chunks other than `fmt ` and `data`, AU annotations and AIFF
+//! chunks other than `FVER`, `COMM` and `SSND` are dropped.
 //!
 //! Nothing is allocated. Working memory is fixed, whatever the input length:
 //! a 4 KiB packet buffer, for transcoding 4 KiB each of decoded samples and
@@ -43,6 +48,7 @@ const Packet = @import("../core/packet.zig").Packet;
 const metadata = @import("../core/metadata.zig");
 const wav = @import("wav.zig");
 const au = @import("au.zig");
+const aiff = @import("aiff.zig");
 const detect = @import("detect.zig");
 
 pub const Container = detect.Container;
@@ -78,7 +84,7 @@ pub const Request = struct {
 /// Failures before any output exists: the input header, the request and the
 /// output header. `LimitExceeded` can come from the input's or the output's
 /// limits.
-pub const InitError = detect.Error || wav.HeaderError || au.HeaderError || error{
+pub const InitError = detect.Error || wav.HeaderError || au.HeaderError || aiff.HeaderError || error{
     /// The request is outside the operation matrix: stream copy into a
     /// container that cannot carry the codec, or transcoding samples not
     /// stored as s16 (sample-format conversion waits for TODO.md T23a).
@@ -132,6 +138,7 @@ pub const Conversion = struct {
     const Parser = union(enum) {
         wav: wav.Parser,
         au: au.Parser,
+        aiff: aiff.Parser,
     };
 
     /// Reads the header of the opened `source` (probed, or forced with
@@ -142,6 +149,7 @@ pub const Conversion = struct {
         var input: Parser = switch (source.container) {
             .wav, .w64 => .{ .wav = source.wavParser(limits.wav) },
             .au => .{ .au = .init(source.reader(), limits.au) },
+            .aiff => .{ .aiff = .init(source.reader(), limits.aiff) },
         };
         // The tags as the file stores them, renamed once the header is read.
         var stored: metadata.Dictionary = .empty;
@@ -150,7 +158,7 @@ pub const Conversion = struct {
             std.debug.assert(t.dictionary.count() == 0);
             switch (input) {
                 .wav => |*parser| parser.collectTags(.{ .gpa = t.gpa, .dictionary = &stored }),
-                .au => {},
+                .au, .aiff => {},
             }
         }
         const summary: Summary = switch (input) {
@@ -178,7 +186,7 @@ pub const Conversion = struct {
             // Later tags could not reach the output header; `stored` dies here.
             switch (input) {
                 .wav => |*parser| parser.tags = null,
-                .au => {},
+                .au, .aiff => {},
             }
             var generic = try wav.genericTags(t.gpa, &stored);
             defer generic.deinit(t.gpa);
@@ -195,6 +203,7 @@ pub const Conversion = struct {
         switch (request.output) {
             .wav, .w64 => |container| try wav.Writer.check(summary.output_codec, summary.format, summary.frame_count, wavOptions(limits, container, tags)),
             .au => try au.Writer.check(summary.output_codec, summary.format, summary.frame_count, limits.au),
+            .aiff => try aiff.Writer.check(summary.output_codec, summary.format, summary.frame_count, aiffOptions(limits)),
         }
         return .{ .input = input, .limits = limits, .summary = summary, .tags = tags };
     }
@@ -212,6 +221,10 @@ pub const Conversion = struct {
             .au => {
                 var writer = au.Writer.begin(out, s.output_codec, s.format, s.frame_count, c.limits.au) catch |err| return outputFailure(err);
                 try c.transfer(au.Writer, &writer);
+            },
+            .aiff => {
+                var writer = aiff.Writer.begin(out, s.output_codec, s.format, s.frame_count, aiffOptions(c.limits)) catch |err| return outputFailure(err);
+                try c.transfer(aiff.Writer, &writer);
             },
         }
     }
@@ -405,10 +418,15 @@ fn wavOptions(limits: Limits, output: Container, tags: ?*const metadata.Dictiona
         .variant = switch (output) {
             .wav => .wav,
             .w64 => .w64,
-            .au => unreachable, // the AU writer has its own options
+            .au, .aiff => unreachable, // the AU and AIFF writers have their own options
         },
         .tags = tags,
     };
+}
+
+/// The AIFF writer's options: the rate limit of the AIFF limits.
+fn aiffOptions(limits: Limits) aiff.WriteOptions {
+    return .{ .max_sample_rate = limits.aiff.max_sample_rate };
 }
 
 /// The writer's own failure. `init` already ran the header checks `begin`
@@ -447,6 +465,8 @@ const all_cells = [_]Request{
     .{ .output = .w64, .mode = .copy },
     .{ .output = .au, .mode = .transcode },
     .{ .output = .au, .mode = .copy },
+    .{ .output = .aiff, .mode = .transcode },
+    .{ .output = .aiff, .mode = .copy },
 };
 
 const Decoded = struct {
@@ -467,6 +487,10 @@ fn decodeOutput(container: Container, bytes: []const u8, storage: []i16) !Decode
         .au => {
             var parser: au.Parser = .init(&reader, .{});
             return decodeWith(au.Parser, &parser, storage);
+        },
+        .aiff => {
+            var parser: aiff.Parser = .init(&reader, .{});
+            return decodeWith(aiff.Parser, &parser, storage);
         },
     }
 }
@@ -494,6 +518,7 @@ fn headerLenOf(container: Container, codec: pcm.Codec, format: audio.Format) usi
         .wav => wav.headerLen(codec, format, .riff), // small test outputs: plain RIFF
         .w64 => wav.headerLen(codec, format, .w64),
         .au => au.canonical_header_len,
+        .aiff => aiff.headerLen(codec),
     };
 }
 
@@ -503,6 +528,7 @@ fn padOf(container: Container, data_len: usize) usize {
         .wav => wav.Variant.wav.padAfter(data_len),
         .w64 => wav.Variant.w64.padAfter(data_len),
         .au => 0,
+        .aiff => data_len % 2,
     };
 }
 
@@ -519,14 +545,14 @@ fn rawOf(container: Container, bytes: []const u8, out: []u8) ![]const u8 {
     switch (container) {
         .wav, .w64 => _ = try wav.decodeToRaw(&reader, &writer, .{}),
         .au => _ = try au.decodeToRaw(&reader, &writer, .{}),
+        .aiff => _ = try aiff.decodeToRaw(&reader, &writer, .{}),
     }
     return writer.buffered();
 }
 
-/// Runs every matrix cell on one accepted fixture. WAV and Wave64 carry the
-/// same codecs and AU none of theirs, so copy works only within the WAV
-/// family or AU, and transcoding only from samples stored as s16 (other
-/// storage needs T23a). An input probing does not detect (`detected` false)
+/// Runs every matrix cell on one accepted fixture. Copy works only into a
+/// container that carries the input's codec, and transcoding only from
+/// samples stored as s16 (other storage needs T23a). An input probing does not detect (`detected` false)
 /// is forced, as `-f` would.
 fn expectEveryCell(input: Container, detected: bool, bytes: []const u8, comptime stream: fixtures.Stream, writer_output: bool) !void {
     var expected_buffer: [1024]u8 = undefined;
@@ -588,6 +614,38 @@ test "every accepted fixture gives its samples in every supported cell, and copy
             try expectEveryCell(.au, fixture.detected != null, fixtures.au.bytes(fixture.name), fixture.expected.accept, fixture.writer_output);
         }
     }
+    inline for (fixtures.aiff.all) |fixture| {
+        if (fixture.expected == .accept) {
+            expectEveryCell(.aiff, fixture.detected != null, fixtures.aiff.bytes(fixture.name), fixture.expected.accept, fixture.writer_output) catch |err| {
+                std.debug.print("fixture {s}\n", .{fixture.name});
+                return err;
+            };
+        }
+    }
+}
+
+test "stream copy between families keeps the codecs both carry, as FFmpeg's muxers tag them" {
+    // s16le WAV copies into AIFF-C `sowt` and back; s32be, f64be and µ-law
+    // move between AU and AIFF.
+    const cases = [_]struct { input: []const u8, output: Container, expected: []const u8 }{
+        .{ .input = fixtures.bytes("mono_8k"), .output = .aiff, .expected = fixtures.aiff.bytes("aifc_sowt") },
+        .{ .input = fixtures.aiff.bytes("aifc_sowt"), .output = .wav, .expected = fixtures.bytes("mono_8k") },
+        .{ .input = fixtures.au.bytes("au_s32_mono"), .output = .aiff, .expected = fixtures.aiff.bytes("aiff_s32_mono") },
+        .{ .input = fixtures.aiff.bytes("aifc_fl64_stereo_96k"), .output = .au, .expected = fixtures.au.bytes("au_f64_stereo_96k") },
+        .{ .input = fixtures.aiff.bytes("aifc_ulaw"), .output = .au, .expected = fixtures.au.bytes("au_mulaw_mono_8k") },
+    };
+    for (cases) |case| {
+        var reader: std.Io.Reader = .fixed(case.input);
+        var buffer: [1024]u8 = undefined;
+        var out: std.Io.Writer = .fixed(&buffer);
+        _ = try convert(&reader, &out, .{ .output = case.output, .mode = .copy }, .{});
+        try std.testing.expectEqualSlices(u8, case.expected, out.buffered());
+    }
+    // Plain AIFF's s16be has no WAV codec.
+    var reader: std.Io.Reader = .fixed(fixtures.aiff.bytes("aiff_mono_8k"));
+    var buffer: [1024]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&buffer);
+    try std.testing.expectError(error.UnsupportedOperation, convert(&reader, &out, .{ .output = .wav, .mode = .copy }, .{}));
 }
 
 test "the input is read as contiguous, timestamped packets of whole frames" {
@@ -627,6 +685,7 @@ test "copy keeps the encoded data and timing but not the container's metadata" {
         .{ .container = .wav, .bytes = fixtures.bytes("unknown_chunks") },
         .{ .container = .w64, .bytes = fixtures.bytes("w64_unknown_chunks") },
         .{ .container = .au, .bytes = fixtures.au.bytes("au_annotation_text") },
+        .{ .container = .aiff, .bytes = fixtures.aiff.bytes("aiff_other_chunks") },
     };
     for (cases) |case| {
         var copy_reader: std.Io.Reader = .fixed(case.bytes);
@@ -683,6 +742,14 @@ test "every rejected fixture fails with the error probing reports" {
             };
         }
     }
+    inline for (fixtures.aiff.all) |fixture| {
+        if (fixture.expected == .reject) {
+            expectProbeError(fixtures.aiff.bytes(fixture.name), .aiff) catch |err| {
+                std.debug.print("fixture {s}\n", .{fixture.name});
+                return err;
+            };
+        }
+    }
 }
 
 /// Converts `input` with tags carried and returns the output's tags as the
@@ -698,7 +765,7 @@ fn convertWithTags(gpa: std.mem.Allocator, input: []const u8, request: Request, 
     const written = out.buffered();
     var read_back: metadata.Dictionary = .empty;
     errdefer read_back.deinit(gpa);
-    if (request.output != .au) {
+    if (request.output == .wav or request.output == .w64) {
         var stored: metadata.Dictionary = .empty;
         defer stored.deinit(gpa);
         var parser_reader: std.Io.Reader = .fixed(written);
@@ -731,11 +798,12 @@ test "tags are carried into WAV output as FFmpeg's writer would, and only there"
         try std.testing.expectEqualStrings("date", tags.items()[1].key);
         try std.testing.expectEqualStrings("Recorder", tags.get("encoded_by") orelse return error.TestExpectedValue);
     }
-    // Tags after the input's data, and Wave64 and AU outputs, carry none.
+    // Tags after the input's data, and Wave64, AU and AIFF outputs, carry none.
     const none = [_]struct { name: []const u8, output: Container }{
         .{ .name = "info_after_data", .output = .wav },
         .{ .name = "info_tags", .output = .w64 },
         .{ .name = "info_tags", .output = .au },
+        .{ .name = "info_tags", .output = .aiff },
     };
     inline for (none) |case| {
         var tags, _ = try convertWithTags(gpa, fixtures.bytes(case.name), .{ .output = case.output, .mode = .transcode }, &buffer);
@@ -779,7 +847,7 @@ test "unknown-length input is refused before any output, because the writers nee
     var limits: Limits = .{};
     limits.wav.unknown_length = true;
     for ([_]Mode{ .transcode, .copy }) |mode| {
-        for ([_]Container{ .wav, .au }) |output| {
+        for ([_]Container{ .wav, .au, .aiff }) |output| {
             var reader: std.Io.Reader = .fixed(fixtures.bytes("unknown_length_pipe"));
             var buffer: [1024]u8 = undefined;
             var out: std.Io.Writer = .fixed(&buffer);
@@ -866,10 +934,11 @@ test "file adapters with empty, tiny and larger buffers give the memory result" 
     const inputs = [_]struct { name: []const u8, bytes: []const u8 }{
         .{ .name = "in.wav", .bytes = fixtures.bytes("stereo_44k1") },
         .{ .name = "in.au", .bytes = fixtures.au.bytes("au_annotation_text") },
+        .{ .name = "in.aiff", .bytes = fixtures.aiff.bytes("aiff_other_chunks") },
     };
     for (inputs) |input| {
         try tmp.dir.writeFile(io, .{ .sub_path = input.name, .data = input.bytes });
-        for ([_]Request{ .{ .output = .wav, .mode = .transcode }, .{ .output = .au, .mode = .transcode } }) |request| {
+        for ([_]Request{ .{ .output = .wav, .mode = .transcode }, .{ .output = .au, .mode = .transcode }, .{ .output = .aiff, .mode = .transcode } }) |request| {
             var memory: std.Io.Reader = .fixed(input.bytes);
             var expected_buffer: [1024]u8 = undefined;
             var expected: std.Io.Writer = .fixed(&expected_buffer);
@@ -1022,5 +1091,7 @@ test "fuzz: conversion agrees with probing on arbitrary input" {
         fixtures.au.bytes("au_truncated_data"),
         fixtures.bytes("s24_stereo_48k_extensible"),
         fixtures.bytes("alaw_mono_8k"),
+        fixtures.aiff.bytes("aifc_sowt"),
+        fixtures.aiff.bytes("aiff_odd_data"),
     } });
 }

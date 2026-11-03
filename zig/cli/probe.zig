@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Original file for this project.
-//! zffprobe: validates one WAV, Wave64 or AU stream and reports it as
+//! zffprobe: validates one WAV, Wave64, AU or AIFF stream and reports it as
 //! `key=value` lines.
 //!
-//!     zffprobe [-f wav|w64|au] <file.wav | file.w64 | file.au | ->
+//!     zffprobe [-f wav|w64|au|aiff] <file | ->
 //!
 //! The container is detected from content, not the file name, as FFmpeg's
 //! probing would (`av.detect`, T16); `-f` forces it, as `ffprobe -f` does.
@@ -21,10 +21,10 @@ const status = @import("status.zig");
 const ExitStatus = status.ExitStatus;
 const printError = status.printError;
 
-const usage = "usage: zffprobe [-f wav|w64|au] <file.wav | file.w64 | file.au | ->\n";
+const usage = "usage: zffprobe [-f wav|w64|au|aiff] <file | ->\n";
 const help = usage ++
     \\
-    \\Validates a WAV, Wave64 or AU stream (standard input with -) and prints its
+    \\Validates a WAV, Wave64, AU or AIFF stream (standard input with -) and prints its
     \\stream parameters as key=value lines. The format is detected from content,
     \\or forced with -f. Exit codes: 0 success, 1 usage,
     \\2 invalid or truncated media, 3 unsupported media, 4 I/O failure,

@@ -29,7 +29,7 @@ const examples = [_]Example{
 };
 
 /// The fixture directories: zig/testing/fixtures/wav/ and zig/testing/fixtures/au/.
-const FixtureSet = enum { wav, au };
+const FixtureSet = enum { wav, au, aiff };
 
 /// A zffprobe process run with its expected exit code and output.
 const ProbeCase = struct {
@@ -50,7 +50,7 @@ const ProbeCase = struct {
     stderr_contains: ?[]const u8 = null,
 };
 
-const usage_line = "usage: zffprobe [-f wav|w64|au] <file.wav | file.w64 | file.au | ->\n";
+const usage_line = "usage: zffprobe [-f wav|w64|au|aiff] <file | ->\n";
 
 const mono_8k_report =
     \\format=wav
@@ -126,6 +126,32 @@ const au_empty_data_report =
     \\sample_rate=8000
     \\nb_samples=0
     \\duration_num=0
+    \\duration_den=8000
+    \\
+;
+
+const aiff_mono_8k_report =
+    \\format=aiff
+    \\codec=pcm_s16be
+    \\sample_fmt=s16
+    \\channels=1
+    \\channel_layout=mono
+    \\sample_rate=8000
+    \\nb_samples=8
+    \\duration_num=8
+    \\duration_den=8000
+    \\
+;
+
+const aifc_fl32_report =
+    \\format=aiff
+    \\codec=pcm_f32be
+    \\sample_fmt=flt
+    \\channels=1
+    \\channel_layout=mono
+    \\sample_rate=8000
+    \\nb_samples=8
+    \\duration_num=8
     \\duration_den=8000
     \\
 ;
@@ -285,6 +311,15 @@ const probe_cases = [_]ProbeCase{
     // T21c: tags follow the stream lines.
     .{ .name = "bext and INFO tags", .fixture = "bext_tags", .exit_code = 0, .stdout = bext_tags_report, .stderr = "" },
     .{ .name = "INFO tag values from a pipe", .args = &.{"-"}, .stdin_fixture = "info_values", .exit_code = 0, .stdout = info_values_report, .stderr = "" },
+    // T22b: AIFF and AIFF-C, detected from content.
+    .{ .name = "AIFF", .set = .aiff, .fixture = "aiff_mono_8k", .exit_code = 0, .stdout = aiff_mono_8k_report, .stderr = "" },
+    .{ .name = "AIFF-C float from a pipe", .set = .aiff, .args = &.{"-"}, .stdin_fixture = "aifc_fl32", .exit_code = 0, .stdout = aifc_fl32_report, .stderr = "" },
+    .{ .name = "a FORM size below 4 is not detected", .set = .aiff, .fixture = "aiff_form_size_small", .exit_code = 3, .stderr_contains = ": UnknownFormat\n" },
+    .{ .name = "a FORM size below 4, forced", .set = .aiff, .args = &.{ "-f", "aiff" }, .fixture = "aiff_form_size_small", .exit_code = 2, .stderr_contains = ": InvalidAiff\n" },
+    .{ .name = "SSND before COMM", .set = .aiff, .fixture = "aiff_ssnd_before_comm", .exit_code = 2, .stderr_contains = ": InvalidAiff\n" },
+    .{ .name = "compressed AIFF-C", .set = .aiff, .fixture = "aifc_unknown_type", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
+    .{ .name = "AIFF rate limit", .set = .aiff, .fixture = "aiff_rate_over_limit", .exit_code = 5, .stderr_contains = ": LimitExceeded\n" },
+    .{ .name = "truncated AIFF pipe", .set = .aiff, .args = &.{"-"}, .stdin_fixture = "aiff_truncated_data", .exit_code = 2, .stderr = "zffprobe: -: Truncated\n" },
 };
 
 /// A zffmpeg process run: `args`, then the input fixture's path (or standard
@@ -314,7 +349,7 @@ const ConvertCase = struct {
     stderr_contains: ?[]const u8 = null,
 };
 
-const zffmpeg_usage = "usage: zffmpeg [-y | -n] [-f wav|w64|au] -i <input | -> [-c copy] [-f wav|w64|au] <output | ->\n";
+const zffmpeg_usage = "usage: zffmpeg [-y | -n] [-f wav|w64|au|aiff] -i <input | -> [-c copy] [-f wav|w64|au|aiff] <output | ->\n";
 
 // The paired WAV and AU fixtures hold the same samples, so each is the exact
 // expected output of converting the other.
@@ -334,6 +369,11 @@ const w64_mono_8k = @embedFile("zig/testing/fixtures/wav/w64_mono_8k.wav");
 const au_alaw_mono_8k = @embedFile("zig/testing/fixtures/au/au_alaw_mono_8k.au");
 // T21c: tags as the writer emits them, so the tagged input converts to itself.
 const wav_info_tags = @embedFile("zig/testing/fixtures/wav/info_tags.wav");
+// T22b: the paired WAV and AU samples as the AIFF writer emits them.
+const aiff_mono_8k = @embedFile("zig/testing/fixtures/aiff/aiff_mono_8k.aiff");
+const aiff_stereo_44k1 = @embedFile("zig/testing/fixtures/aiff/aiff_stereo_44k1.aiff");
+// mono_8k's s16le samples, stream-copied into AIFF-C `sowt`.
+const aifc_sowt = @embedFile("zig/testing/fixtures/aiff/aifc_sowt.aiff");
 
 /// T13b: every cell of the operation matrix (files and pipes, transcode and
 /// copy), the output format from -f or the extension, late and early media
@@ -395,6 +435,17 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "a missing value", .args = &.{ "-i", "a.wav", "-f" }, .exit_code = 1, .stderr_contains = "missing value for: -f\n" },
     .{ .name = "standard output needs -f", .args = &.{ "-i", "a.wav", "-" }, .exit_code = 1, .stderr_contains = "-f is required when writing to standard output\n" },
     .{ .name = "an unsupported -f", .args = &.{ "-i", "a.wav", "-f", "mp3", "-" }, .exit_code = 3, .stderr = "zffmpeg: mp3: unsupported output format\n" },
+    // T22b: AIFF in both directions; copy needs a codec both containers carry.
+    .{ .name = "WAV to AIFF", .args = &.{"-i"}, .input = "mono_8k", .tail = &.{ "-f", "aiff", "-" }, .exit_code = 0, .stdout = aiff_mono_8k, .stderr = "" },
+    .{ .name = "WAV copy to AIFF-C from a pipe", .args = &.{ "-i", "-" }, .stdin_input = "mono_8k", .tail = &.{ "-c", "copy", "-f", "aiff", "-" }, .exit_code = 0, .stdout = aifc_sowt, .stderr = "" },
+    .{ .name = "AIFF to WAV", .set = .aiff, .args = &.{"-i"}, .input = "aiff_stereo_44k1", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_stereo_44k1, .stderr = "" },
+    .{ .name = "AIFF-C copy to WAV", .set = .aiff, .args = &.{"-i"}, .input = "aifc_sowt", .tail = &.{ "-c", "copy", "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_mono_8k, .stderr = "" },
+    .{ .name = "AU copy to AIFF", .set = .au, .args = &.{"-i"}, .input = "au_stereo_44k1", .tail = &.{ "-c", "copy", "-f", "aiff", "-" }, .exit_code = 0, .stdout = aiff_stereo_44k1, .stderr = "" },
+    .{ .name = "AIFF to AU from a pipe", .set = .aiff, .args = &.{ "-i", "-" }, .stdin_input = "aiff_mono_8k", .tail = &.{ "-f", "au", "-" }, .exit_code = 0, .stdout = au_mono_8k, .stderr = "" },
+    .{ .name = "AIFF from the .aif extension", .args = &.{"-i"}, .input = "mono_8k", .output_file = "out.aif", .output_bytes = aiff_mono_8k, .exit_code = 0, .stderr = "" },
+    .{ .name = "AIFF from an uppercase .AIFC extension", .set = .au, .args = &.{"-i"}, .input = "au_mono_8k", .tail = &.{ "-c", "copy" }, .output_file = "OUT.AIFC", .output_bytes = aiff_mono_8k, .exit_code = 0, .stderr = "" },
+    .{ .name = "plain AIFF copy to WAV is rejected", .set = .aiff, .args = &.{"-i"}, .input = "aiff_mono_8k", .tail = &.{ "-c", "copy", "-f", "wav", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
+    .{ .name = "a non-AIFF input forced as AIFF", .args = &.{ "-f", "aiff", "-i" }, .input = "mono_8k", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stderr_contains = ": InvalidAiff\n" },
 };
 
 pub fn build(b: *std.Build) void {

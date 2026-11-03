@@ -2,15 +2,16 @@
 // Original file for this project.
 // fftools/ffmpeg_opt.c at the pinned reference revision was read for the -y/-n
 // and same-file behavior; see port.md "zffmpeg command" for the differences.
-//! zffmpeg: converts or stream-copies one WAV, Wave64 or AU stream (TODO.md
-//! T13b, T21b).
+//! zffmpeg: converts or stream-copies one WAV, Wave64, AU or AIFF stream
+//! (TODO.md T13b, T21b, T22b).
 //!
-//!     zffmpeg [-y | -n] [-f wav|w64|au] -i <input | -> [-c copy] [-f wav|w64|au] <output | ->
+//!     zffmpeg [-y | -n] [-f wav|w64|au|aiff] -i <input | -> [-c copy] [-f wav|w64|au|aiff] <output | ->
 //!
 //! The input container is detected from content as FFmpeg's probing would
 //! (T16), or forced with a `-f` before `-i`, as in FFmpeg, where an option
 //! before `-i` applies to the input. The output container is the `-f` after
-//! `-i`, or else the output name's `.wav`, `.w64` or `.au` extension; `-`
+//! `-i`, or else the output name's extension (`.wav`, `.w64`, `.au`, or as
+//! FFmpeg's AIFF muxer `.aif`, `.aiff`, `.afc` and `.aifc`); `-`
 //! (standard output) needs `-f`. `-c copy` copies the encoded samples, which
 //! works only when both containers carry the same codec; without it the
 //! samples are decoded and encoded again. Tags before the input's `data` are
@@ -32,13 +33,13 @@ const status = @import("status.zig");
 const ExitStatus = status.ExitStatus;
 const printError = status.printError;
 
-const usage = "usage: zffmpeg [-y | -n] [-f wav|w64|au] -i <input | -> [-c copy] [-f wav|w64|au] <output | ->\n";
+const usage = "usage: zffmpeg [-y | -n] [-f wav|w64|au|aiff] -i <input | -> [-c copy] [-f wav|w64|au|aiff] <output | ->\n";
 const help = usage ++
     \\
-    \\Converts one WAV, Wave64 or AU stream (standard input or output with -). The
-    \\input container is detected from content, or forced with -f before -i. The
-    \\output container is the -f after -i, or the output name's .wav, .w64 or .au
-    \\extension.
+    \\Converts one WAV, Wave64, AU or AIFF stream (standard input or output with
+    \\-). The input container is detected from content, or forced with -f before
+    \\-i. The output container is the -f after -i, or the output name's .wav,
+    \\.w64, .au, .aif, .aiff, .afc or .aifc extension.
     \\-c copy keeps the encoded samples and needs the same codec on both sides.
     \\-y replaces an existing output; without it (or with -n) an existing output
     \\is an error.
@@ -104,7 +105,7 @@ fn run(init: std.process.Init) ExitStatus {
             return .unsupported;
         },
         error.UnknownExtension => {
-            printError(io, "zffmpeg: {s}: cannot choose an output format from the name; use -f wav or -f au\n", .{command.output});
+            printError(io, "zffmpeg: {s}: cannot choose an output format from the name; use -f wav, w64, au or aiff\n", .{command.output});
             return .unsupported;
         },
     };
@@ -196,6 +197,11 @@ fn outputContainer(command: Command) error{ FormatRequired, UnknownFormat, Unkno
     if (std.ascii.eqlIgnoreCase(extension, ".wav")) return .wav;
     if (std.ascii.eqlIgnoreCase(extension, ".w64")) return .w64;
     if (std.ascii.eqlIgnoreCase(extension, ".au")) return .au;
+    // The extensions FFmpeg's AIFF muxer declares.
+    for ([_][]const u8{ ".aif", ".aiff", ".afc", ".aifc" }) |aiff_extension| {
+        if (std.ascii.eqlIgnoreCase(extension, aiff_extension)) return .aiff;
+    }
+
     return error.UnknownExtension;
 }
 

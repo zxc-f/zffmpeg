@@ -10,7 +10,7 @@ binaries are never committed.
 | Path | Role |
 | --- | --- |
 | [build-ffmpeg.sh](build-ffmpeg.sh) | Clones or checks out `.references/ffmpeg` at the pinned commit, builds it out of tree in `.references/ffmpeg-build` and installs it to the given prefix. It records the configure arguments, commit, compiler and `config.log` in `<prefix>/share/zffmpeg-reference/`. |
-| [compare.py](compare.py) | Runs FFmpeg's `ffprobe` and `ffmpeg` and our `zffprobe` on every [WAV fixture](../fixtures/README.md) and [AU fixture](../fixtures/au/README.md), has FFmpeg read the files the Zig [write driver](../write_driver.zig) and `zffmpeg` produce, checks `zffprobe` through a pipe, prints a Markdown report and exits with status 1 on any failure. Python 3, standard library only. |
+| [compare.py](compare.py) | Runs FFmpeg's `ffprobe` and `ffmpeg` and our `zffprobe` on every [WAV fixture](../fixtures/README.md), [AU fixture](../fixtures/au/README.md) and [AIFF fixture](../fixtures/aiff/README.md), has FFmpeg read the files the Zig [write driver](../write_driver.zig) and `zffmpeg` produce, checks `zffprobe` through a pipe, prints a Markdown report and exits with status 1 on any failure. Python 3, standard library only. |
 
 ## Reproduce
 
@@ -65,9 +65,9 @@ with the install prefix and:
 ```text
 --cc=clang --disable-everything --disable-autodetect --disable-doc
 --disable-network --disable-x86asm --disable-ffplay --disable-avdevice
---enable-protocol=file,pipe --enable-demuxer=wav,w64,au
+--enable-protocol=file,pipe --enable-demuxer=wav,w64,au,aiff
 --enable-decoder=$pcm_codecs --enable-encoder=$pcm_codecs
---enable-muxer=wav,w64,au --enable-filter=aresample
+--enable-muxer=wav,w64,au,aiff --enable-filter=aresample
 
 pcm_codecs=pcm_u8,pcm_s8,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,
   pcm_s32be,pcm_s64le,pcm_s64be,pcm_f32le,pcm_f32be,pcm_f64le,pcm_f64be,
@@ -75,13 +75,14 @@ pcm_codecs=pcm_u8,pcm_s8,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,
 ```
 
 Everything is disabled and then only what the comparison needs is enabled: the
-file and pipe protocols, the WAV, Wave64 and AU demuxers (T12a added AU,
-T21b Wave64), the PCM
+file and pipe protocols, the WAV, Wave64, AU and AIFF demuxers (T12a added AU,
+T21b Wave64, T22b AIFF), the PCM
 decoders and encoders T20b compares (T20b widened them from s16 alone), the
 WAV muxer, through which `compare.py` takes FFmpeg's decoded samples in each
 stream's storage format (T21a; it replaced the raw s16le muxer), the Wave64
 muxer, whose files `zffprobe` and `zffmpeg` must read (T21b), the AU muxer,
-whose copies of the AU writer-output fixtures must be byte-identical (T22a), and the
+whose copies of the AU writer-output fixtures must be byte-identical (T22a), the
+AIFF muxer, likewise for AIFF (T22b), and the
 `aresample` filter for the
 `ffmpeg` program's audio filter graph. The program itself selects the few other
 filters it always needs. There are no GPL, nonfree, external-library or

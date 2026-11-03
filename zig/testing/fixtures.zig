@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Original file for this project.
-//! The WAV fixture contract (TODO.md T02) and the AU fixture contract (T12a)
-//! as typed test data.
+//! The WAV fixture contract (TODO.md T02), the AU fixture contract (T12a) and
+//! the AIFF fixture contract (T22b) as typed test data.
 //!
-//! `all` is imported at compile time from fixtures/manifest.zon, and `au.all`
-//! from fixtures/au/manifest.zon; fixtures/generate.py writes both. `bytes` and
-//! `au.bytes` embed a fixture file, so a missing file fails the build. The rules,
-//! decisions and error precedence are documented in fixtures/README.md and
-//! fixtures/au/README.md.
+//! `all` is imported at compile time from fixtures/manifest.zon, `au.all` from
+//! fixtures/au/manifest.zon and `aiff.all` from fixtures/aiff/manifest.zon;
+//! fixtures/generate.py writes them. `bytes`, `au.bytes` and `aiff.bytes`
+//! embed a fixture file, so a missing file fails the build. The rules,
+//! decisions and error precedence are documented in fixtures/README.md,
+//! fixtures/au/README.md and fixtures/aiff/README.md.
 
 const std = @import("std");
 
@@ -136,7 +137,7 @@ pub const Fixture = struct {
 pub const WriterHeader = enum { riff, rf64, w64 };
 
 /// The formats content probing can choose (T16), by FFmpeg's names.
-pub const Container = enum { wav, w64, au };
+pub const Container = enum { wav, w64, au, aiff };
 
 /// One tag as bytes: values may hold any byte but NUL.
 pub const Tag = struct {
@@ -199,6 +200,47 @@ pub const au = struct {
     /// The bytes of fixtures/au/<name>.au, embedded at compile time.
     pub fn bytes(comptime name: []const u8) []const u8 {
         return @embedFile("fixtures/au/" ++ name ++ ".au");
+    }
+};
+
+/// The AIFF contract (port.md "AIFF contract"): known-length AIFF and AIFF-C
+/// with the PCM encodings of FFmpeg's AIFF table. It shares `Stream` with the
+/// WAV contract.
+pub const aiff = struct {
+    // As in `au`, the WAV contract's names are in scope here too.
+    const Aiff = @This();
+
+    /// Errors of the AIFF contract, named exactly as the AIFF parser's errors.
+    pub const Failure = enum {
+        InvalidAiff,
+        InvalidFormat,
+        Truncated,
+        UnsupportedFormat,
+        LimitExceeded,
+    };
+
+    pub const Expected = union(enum) {
+        accept: Stream,
+        reject: Aiff.Failure,
+    };
+
+    pub const Fixture = struct {
+        /// The file is fixtures/aiff/<name>.aiff.
+        name: []const u8,
+        /// Lowercase hexadecimal SHA-256 of the file.
+        sha256: []const u8,
+        expected: Aiff.Expected,
+        /// The format FFmpeg's content probing picks, or null for none (T16).
+        detected: ?Container,
+        /// The AIFF writer must produce exactly these bytes from `expected.accept`.
+        writer_output: bool = false,
+    };
+
+    pub const all: []const Aiff.Fixture = @import("fixtures/aiff/manifest.zon");
+
+    /// The bytes of fixtures/aiff/<name>.aiff, embedded at compile time.
+    pub fn bytes(comptime name: []const u8) []const u8 {
+        return @embedFile("fixtures/aiff/" ++ name ++ ".aiff");
     }
 };
 
@@ -272,23 +314,29 @@ test "manifest names are unique and expectations are consistent" {
         @setEvalBranchQuota(200_000);
         expectConsistent(wav_contract);
         expectConsistent(au);
+        expectConsistent(aiff);
     }
 }
 
 test "every fixture file is present and matches its recorded SHA-256" {
     try expectHashes(wav_contract);
     try expectHashes(au);
+    try expectHashes(aiff);
 }
 
-test "AU fixture names do not collide with WAV fixture names" {
+test "fixture names do not collide across contracts" {
     comptime {
-        @setEvalBranchQuota(200_000);
-        for (au.all) |au_fixture| {
-            for (all) |wav_fixture| {
-                if (std.mem.eql(u8, au_fixture.name, wav_fixture.name)) {
-                    @compileError("fixture name used by both contracts: " ++ au_fixture.name);
-                }
-            }
+        @setEvalBranchQuota(400_000);
+        expectDistinct(au, wav_contract);
+        expectDistinct(aiff, wav_contract);
+        expectDistinct(aiff, au);
+    }
+}
+
+fn expectDistinct(comptime A: type, comptime B: type) void {
+    for (A.all) |a| {
+        for (B.all) |b| {
+            if (std.mem.eql(u8, a.name, b.name)) @compileError("fixture name used by two contracts: " ++ a.name);
         }
     }
 }

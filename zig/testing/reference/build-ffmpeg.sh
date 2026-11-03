@@ -20,10 +20,11 @@ src="$root/.references/ffmpeg"
 build="$root/.references/ffmpeg-build"
 
 # Every component is disabled, then only these are enabled: the file and pipe
-# protocols, the WAV, Wave64 and AU demuxers, the PCM decoders and encoders T20b
+# protocols, the WAV, Wave64, AU and AIFF demuxers, the PCM decoders and encoders T20b
 # compares (u8, s8, s16/s24/s32/s64 and f32/f64 in both byte orders, A-law and
 # mu-law), the WAV muxer (decoded samples are compared as WAV payloads; T21a),
-# the Wave64 and AU muxers (their files must read in zffprobe; T21b, T22a),
+# the Wave64, AU and AIFF muxers (their files must read in zffprobe; T21b,
+# T22a, T22b),
 # and the aresample filter. The ffmpeg program
 # selects the few filters it always needs. No GPL, nonfree, external or
 # hardware components.
@@ -38,10 +39,10 @@ configure_args=(
     --disable-ffplay
     --disable-avdevice
     --enable-protocol=file,pipe
-    --enable-demuxer=wav,w64,au
+    --enable-demuxer=wav,w64,au,aiff
     --enable-decoder="$pcm_codecs"
     --enable-encoder="$pcm_codecs"
-    --enable-muxer=wav,w64,au
+    --enable-muxer=wav,w64,au,aiff
     --enable-filter=aresample
 )
 

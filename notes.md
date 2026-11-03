@@ -172,6 +172,18 @@ port.md's contract table updated, and (after T06) the parser.
 | Probe buffer | The first 2048 bytes (FFmpeg's first probe size), replayed to the parser through `format/replay.zig`'s `Replay` reader, which serves them and then the source with no buffer of its own, so any source buffer size works. FFmpeg probes again with more data while the best score is at most 25; every registered probe scores 0, 99 or 100 within 41 bytes, so that loop is not ported, and the registry checks each probe's byte count at compile time. | `detect.zig`; a probe that can score low (MP3, T26) needs the retry loop and a larger replay buffer. |
 | Forced layouts | `-f wav` reads only RIFF/RF64/BW64 and `-f w64` only Wave64 (`wav.Parser.initVariant`), as FFmpeg's separate demuxers do. | `wav.zig`. |
 
+## AIFF contract
+
+| Decision | Current choice and reason | To change it |
+| --- | --- | --- |
+| Sequential reading (T22b) | `COMM` must come before `SSND`, and the declared `FORM` size bounds every chunk: the parser never seeks, like the WAV and AU parsers, so pipes and files behave the same. FFmpeg reads `COMM` after `SSND` only by seeking back on a seekable file. | `aiff.zig`, `aiff_ssnd_before_comm`; a seekable path would need a second reading mode. |
+| Frame count | `COMM`'s frame count must equal the whole frames in `SSND` (`InvalidFormat`); FFmpeg decodes the `SSND` bytes whatever `COMM` says. Equal counts keep the reported duration and the decoded length the same, as for the other contracts. | `aiff_frames_mismatch` and the AIFF README. |
+| Sample size | Only 8, 16, 24 and 32 bits; FFmpeg rounds other sizes up. Odd sizes would need the WAV contract's rule on padding bits too. | `aiff_bits12`; the AIFF contract. |
+| Encodings | Every PCM type of FFmpeg's `ff_codec_aiff_tags`, matched case-insensitively as FFmpeg's second pass does; the writer picks the first tag per codec, so s16le copies into AIFF-C `sowt` and u8 into `raw `, as FFmpeg's muxer does. Compressed types (`ima4`, `MAC3`, `GSM `, G.72x, QDM2, ...) are `UnsupportedFormat` until their decoders land. | `codecForCompression` and `compressionFor` in `aiff.zig`, `AIFF_CODECS` in `generate.py`. |
+| Tags | `NAME`, `AUTH`, `(c) `, `ANNO` and `ID3 ` are skipped, and the writer writes none, so zffmpeg carries no tags into or out of AIFF. FFmpeg reads and writes the first four as title, author, copyright and comment. | A later subtask: `aiff.zig` with `metadata`, `convert.zig`'s `carriedTags` path. |
+| Unknown length | Not supported: a `FORM` size below 4 is `InvalidAiff` and is not detected. FFmpeg writes zero sizes to a pipe, and its own demuxer rejects that file the same way, so there is nothing to interoperate with. | The AIFF README's decisions. |
+| Writer header | FFmpeg's seekable output without metadata, byte for byte (plain AIFF for `NONE`, AIFF-C with `FVER` otherwise), so FFmpeg's `-bitexact` copy of each writer-output fixture is identical. | `generate.py` (`canonical_aiff`) and the AIFF writer. |
+
 ## Conversion pipeline
 
 | Decision | Current choice and reason | To change it |

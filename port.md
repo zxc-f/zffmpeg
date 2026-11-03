@@ -810,6 +810,27 @@ AU file whose data size is 0, although its parser reads it. Our detection
 (T12c) checks only the `.snd` magic, so it detects that file; a stream without
 the magic goes to the WAV parser instead ([detection rules](zig/testing/fixtures/au/README.md#content-detection)).
 
+### AIFF contract
+
+T22b adds AIFF and AIFF-C through the same PCM kernels: known-length files
+with the PCM encodings of FFmpeg's AIFF table. The canonical fixture contract,
+with every rule, the error precedence and the differences from FFmpeg, is
+[zig/testing/fixtures/aiff/README.md](zig/testing/fixtures/aiff/README.md). In
+summary:
+
+| Case | Behavior |
+| --- | --- |
+| Structure | One big-endian `FORM` chunk of type `AIFF` or `AIFC` holding chunks with pad bytes after odd sizes; its declared size bounds every chunk (`InvalidAiff`), and bytes after it are never read. Read sequentially, so `COMM` must precede `SSND` (`InvalidAiff`), which FFmpeg also needs on a pipe. |
+| `COMM` | Once; channels (0 `InvalidFormat`, above 2 `UnsupportedFormat`), the frame count, the sample size and the 80-bit extended rate, converted with FFmpeg's exponent range and half-up rounding (0 or out of range `InvalidFormat`, above 192 kHz `LimitExceeded`). In AIFF-C version 1 with room for it, the compression type picks the codec, case-insensitively: `NONE` and `twos` by sample size, `raw `, `sowt`, `fl32`, `fl64`, `alaw`, `ulaw`, `in24`, `in32`; otherwise the sample size (8, 16, 24 or 32) does. Anything else is `UnsupportedFormat`. |
+| `SSND` | Its data offset is skipped; the samples must be whole frames, exactly as many as `COMM` declares (`InvalidFormat`). |
+| Other chunks | Skipped, `NAME`, `ANNO` and the other tag chunks included; at most 4096 chunk headers. |
+| Writer | The header FFmpeg's AIFF muxer writes on seekable output without metadata: plain AIFF for s8 and s16/s24/s32 big-endian, AIFF-C (`FVER`, a 24-byte `COMM` with the compression type) for the others, exact sizes up front and a pad byte after odd data; FFmpeg's muxer copies every writer-output fixture to the same bytes. |
+
+The errors share the other contracts' names, plus `InvalidAiff` for a
+malformed structure. FFmpeg's probe detects a file that starts with `FORM`, a
+size of at least 4 and `AIFF` or `AIFC`; a smaller size, which FFmpeg's own
+pipe output has, is detected by no demuxer and rejected when forced.
+
 ### Conversion pipeline
 
 T13a's [`av.convert`](zig/format/convert.zig) runs TODO.md T13's operation
@@ -817,10 +838,10 @@ matrix synchronously over a borrowed `*std.Io.Reader` and `*std.Io.Writer`:
 
 | Case | Behavior |
 | --- | --- |
-| Request | An output container and a mode: `transcode` (decode, then encode as the output container's s16 codec, `pcm_s16le` for WAV and Wave64 or `pcm_s16be` for AU) or `copy` (move the encoded data bytes unchanged). Copy needs an output container that carries the input codec: any WAV encoding into WAV or Wave64 (T21b), any AU encoding into AU (T22a), so A-law and mu-law copy between them; any other copy is `UnsupportedOperation`. Transcoding needs samples stored as s16 (`pcm_s16le`, `pcm_s16be`, A-law, mu-law); other storage needs sample-format conversion (T23a) and is `UnsupportedOperation`. Rate and layout never change. |
+| Request | An output container and a mode: `transcode` (decode, then encode as the output container's s16 codec, `pcm_s16le` for WAV and Wave64 or `pcm_s16be` for AU and AIFF) or `copy` (move the encoded data bytes unchanged). Copy needs an output container that carries the input codec: any WAV encoding into WAV or Wave64 (T21b), any AU encoding into AU (T22a), any AIFF encoding into AIFF (T22b), so A-law and mu-law copy between all three, the big-endian encodings between AU and AIFF, and u8 and s16le between WAV and AIFF (as AIFF-C `raw ` and `sowt`, the tags FFmpeg's muxer picks); any other copy is `UnsupportedOperation`. Transcoding needs samples stored as s16 (`pcm_s16le`, `pcm_s16be`, A-law, mu-law); other storage needs sample-format conversion (T23a) and is `UnsupportedOperation`. Rate and layout never change. |
 | Before output | `Conversion.init` detects the input, reads its header, then checks the request and the output header (`Writer.check`: rate limit, data and RIFF sizes), and writes nothing. The first failure in that order wins, so a malformed input reports its parse error even when the request would also be rejected. |
 | Output | `run` writes the writer's canonical header with the exact frame count, moves whole frames through a 4 KiB transfer buffer, calls the parser's `finish` (errors after the data fail the operation) and then the writer's `finish` (frame count, then flush). |
-| Metadata | Since T21c, with `Request.tags`: the tags before a RIFF or RF64 input's `data` that FFmpeg's command carries by default (the first of each key, without the source-file keys, and when transcoding without the encoding keys) go into a RIFF or RF64 output's `LIST`/`INFO` chunk, as FFmpeg's writer chooses them; zffmpeg always asks for them. Other chunks, AU annotations, and tags after `data` are dropped; Wave64 and AU output carry no tags. Encoded media and timing (rate, layout, frame count) are preserved. |
+| Metadata | Since T21c, with `Request.tags`: the tags before a RIFF or RF64 input's `data` that FFmpeg's command carries by default (the first of each key, without the source-file keys, and when transcoding without the encoding keys) go into a RIFF or RF64 output's `LIST`/`INFO` chunk, as FFmpeg's writer chooses them; zffmpeg always asks for them. Other chunks, AU annotations, and tags after `data` are dropped; Wave64, AU and AIFF output carry no tags. Encoded media and timing (rate, layout, frame count) are preserved. |
 | Failure | A failure after output started is still a failure; output is not atomic. The samples written before an input failure depend on transfer boundaries: an exact read the input cannot fill delivers nothing. |
 | Resources | No allocation; fixed working memory whatever the length. Errors are `InitError` (detection and parser errors, writer header errors, `UnsupportedOperation`) and `RunError` (parser errors and `WriteFailed`). |
 
@@ -847,8 +868,9 @@ stable report separate from T51's future FFprobe-compatible mode.
 T09's `zffprobe` reports stable UTF-8 `key=value` lines, in this order:
 `format`, `codec`, `sample_fmt`, `channels`, `channel_layout`, `sample_rate`,
 `nb_samples`, `duration_num`, `duration_den`. Use `wav`, `w64` (Sony Wave64,
-T21b) or `au` (T12c), the stream's FFmpeg codec name (`pcm_s16le`,
-`pcm_s24le`, `pcm_alaw`, ... for WAV since T21a; `pcm_s16be` for AU), its
+T21b), `au` (T12c) or `aiff` (AIFF and AIFF-C, T22b), the stream's FFmpeg codec
+name (`pcm_s16le`, `pcm_s24le`, `pcm_alaw`, ... for WAV since T21a;
+`pcm_s16be`, `pcm_f32be`, ... for AU and AIFF), its
 storage format as FFmpeg's `sample_fmt` (`s16`, `s32` for 24- and 32-bit,
 `u8`, `s64`, `flt`, `dbl`), and `mono`/`stereo` as canonical strings.
 `nb_samples` counts sample frames (samples per channel); duration is
@@ -869,12 +891,13 @@ Tag chunks count toward the retained-bytes limit (exit code 5).
 The container is detected from content, not the file name, with FFmpeg's
 winner (T16, `zig/format/detect.zig`; the project owner's choice): each
 registered demuxer's probe, ported from FFmpeg's (`wav_probe`, `w64_probe`,
-`au_probe`), scores the first 2048 bytes from 0 to 100; the highest nonzero
+`au_probe`, `aiff_probe`), scores the first 2048 bytes from 0 to 100; the highest nonzero
 score wins and a tie at the highest means none, as in `format.c`. A stream no
 demuxer recognizes is `UnknownFormat`, exit code 3, as FFmpeg's "Invalid data
 found when processing input": among them input shorter than a probe needs
-(33 bytes for WAV, 41 for Wave64, 24 for AU) and an AU file whose data size
-is 0. `-f wav|w64|au` forces the format, as `ffprobe -f` does, and the
+(33 bytes for WAV, 41 for Wave64, 24 for AU, 12 for AIFF), an AU file whose
+data size is 0 and an AIFF file whose `FORM` size is below 4.
+`-f wav|w64|au|aiff` forces the format, as `ffprobe -f` does, and the
 forced WAV and Wave64 parsers accept only their own layout. The bytes probing
 read are replayed to the chosen parser, so standard input loses none. A
 malformed header of a detected or forced format is the parser's error, such
@@ -892,13 +915,14 @@ T13b's [`zffmpeg`](zig/cli/ffmpeg.zig) is a thin command over the
 [conversion pipeline](#conversion-pipeline):
 
 ```text
-zffmpeg [-y | -n] [-f wav|w64|au] -i <input | -> [-c copy] [-f wav|w64|au] <output | ->
+zffmpeg [-y | -n] [-f wav|w64|au|aiff] -i <input | -> [-c copy] [-f wav|w64|au|aiff] <output | ->
 ```
 
 | Case | Behavior |
 | --- | --- |
-| Options | Exactly one `-i`. `-c copy` (or `-c:a copy`) asks for stream copy; any other codec value is a usage error, and without `-c` the samples are transcoded. `-f wav`, `-f w64` (Sony Wave64, since T21b) or `-f au` names the output container. In FFmpeg an option before `-i` applies to the input: since T16 a `-f` there forces the input format (detection otherwise picks FFmpeg's winner, and an undetected input is `UnknownFormat`), and any other option before `-i` is rejected rather than read as an output option. Nothing may follow the output. Repeated or unknown options are usage errors. |
-| Output container | `-f`, else the output name's extension, `.wav`, `.w64` or `.au` without regard to case (as FFmpeg's `av_match_ext`). `-` (standard output) needs `-f`. An unknown `-f` value or extension is status 3. |
+| Options | Exactly one `-i`. `-c copy` (or `-c:a copy`) asks for stream copy; any other codec value is a usage error, and without `-c` the samples are transcoded. `-f wav`, `-f w64` (Sony Wave64, since T21b), `-f au` or `-f aiff` (since T22b) names the output container. In FFmpeg an option before `-i` applies to the input: since T16 a `-f` there forces the input format (detection otherwise picks FFmpeg's winner, and an undetected input is `UnknownFormat`), and any other option before `-i` is rejected rather than read as an output option. Nothing may follow the output. Repeated or unknown options are usage errors. |
+| Output container | `-f`, else the output name's extension, `.wav`, `.w64`, `.au`, or `.aif`, `.aiff`, `.afc` and `.aifc` (the extensions of FFmpeg's AIFF muxer), without regard to case (as FFmpeg's `av_match_ext`).
+ `-` (standard output) needs `-f`. An unknown `-f` value or extension is status 3. |
 | Preflight | Before the output file is opened: the arguments, the input (opened, detected, header read), the operation matrix, the output header (`Writer.check`), then the same-file check. A command rejected here leaves an existing output untouched and creates none. |
 | Existing output | Refused (status 1, `PathAlreadyExists`) unless `-y`; `-n` makes the default explicit, and `-y -n` together is a usage error. The file is created exclusively, so there is no gap between a check and the creation. FFmpeg instead asks on an interactive terminal; zffmpeg never prompts. |
 | Same file | An output that is the input file is refused (status 1), compared by file identity (`Stat.inode`), so `./in.wav` for `in.wav` and a standard input redirected from the output are caught. FFmpeg compares the names only. Without a device number, two files on different volumes with the same index also count as the same: a refusal, never a lost input. |

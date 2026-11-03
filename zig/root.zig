@@ -23,6 +23,8 @@
 //!   known-length writing for the WAV PCM encodings (`format/wav.zig`).
 //! - `au`: bounded Sun AU parsing and known-length writing for s16 big-endian
 //!   PCM (`format/au.zig`).
+//! - `aiff`: bounded AIFF and AIFF-C parsing and known-length writing for
+//!   their PCM encodings (`format/aiff.zig`).
 //! - `detect`: content detection with FFmpeg's winner, or a forced format,
 //!   replaying the bytes it read to the chosen parser (`format/detect.zig`,
 //!   `format/replay.zig`).
@@ -44,6 +46,7 @@ pub const stage = @import("core/stage.zig");
 pub const metadata = @import("core/metadata.zig");
 pub const wav = @import("format/wav.zig");
 pub const au = @import("format/au.zig");
+pub const aiff = @import("format/aiff.zig");
 pub const detect = @import("format/detect.zig");
 pub const convert = @import("format/convert.zig");
 pub const file = @import("io/file.zig");
@@ -60,6 +63,7 @@ test {
     _ = @import("core/metadata.zig");
     _ = @import("format/wav.zig");
     _ = @import("format/au.zig");
+    _ = @import("format/aiff.zig");
     _ = @import("format/detect.zig");
     _ = @import("format/replay.zig");
     _ = @import("format/convert.zig");

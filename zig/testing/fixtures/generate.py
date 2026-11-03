@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LGPL-2.1-or-later
 # Original file for this project.
-"""Generate the fixtures for the WAV contract (TODO.md T02) and the AU contract (T12a).
+"""Generate the fixtures for the WAV (TODO.md T02), AU (T12a) and AIFF (T22b) contracts.
 
 Every fixture is defined below and built byte by byte with the Python standard
 library, independently of the Zig implementation. From those lists this script
@@ -13,6 +13,9 @@ writes:
 * au/<name>.au         the AU fixture files
 * au/manifest.zon      AU expected results, imported by zig/testing/fixtures.zig
 * au/README.md         the AU table between the GENERATED markers
+* aiff/<name>.aiff     the AIFF and AIFF-C fixture files (T22b)
+* aiff/manifest.zon    AIFF expected results
+* aiff/README.md       the AIFF table between the GENERATED markers
 
 Usage, from the repository root:
 
@@ -34,6 +37,9 @@ README = HERE / "README.md"
 AU_DIR = HERE / "au"
 AU_MANIFEST = AU_DIR / "manifest.zon"
 AU_README = AU_DIR / "README.md"
+AIFF_DIR = HERE / "aiff"
+AIFF_MANIFEST = AIFF_DIR / "manifest.zon"
+AIFF_README = AIFF_DIR / "README.md"
 TABLE_BEGIN = "<!-- BEGIN GENERATED FIXTURE TABLE: edit generate.py, then run it -->\n"
 TABLE_END = "<!-- END GENERATED FIXTURE TABLE -->\n"
 
@@ -1077,6 +1083,208 @@ def build_au_fixtures():
     return fx
 
 
+# --- AIFF fixtures (T22b) ----------------------------------------------------
+
+AIFF_ERRORS = (
+    "InvalidAiff",
+    "InvalidFormat",
+    "Truncated",
+    "UnsupportedFormat",
+    "LimitExceeded",
+)
+AIFC_VERSION1 = 0xA2805140
+# The writer's encodings: codec -> (compression type, sample size, storage).
+# "NONE" is plain AIFF; the others are AIFF-C, as FFmpeg's ff_codec_aiff_tags
+# picks them (first match per codec).
+AIFF_CODECS = {
+    "pcm_s8": (b"NONE", 8, "u8"),
+    "pcm_s16be": (b"NONE", 16, "s16"),
+    "pcm_s24be": (b"NONE", 24, "s32"),
+    "pcm_s32be": (b"NONE", 32, "s32"),
+    "pcm_u8": (b"raw ", 8, "u8"),
+    "pcm_s16le": (b"sowt", 16, "s16"),
+    "pcm_f32be": (b"fl32", 32, "flt"),
+    "pcm_f64be": (b"fl64", 64, "dbl"),
+    "pcm_alaw": (b"alaw", 8, "s16"),
+    "pcm_mulaw": (b"ulaw", 8, "s16"),
+}
+
+
+def be16(value):
+    return struct.pack(">H", value)
+
+
+def ieee_extended(rate):
+    """The 80-bit extended form of a positive integer rate."""
+    top = rate.bit_length() - 1
+    return be16(16383 + top) + struct.pack(">Q", rate << (63 - top))
+
+
+def iff_chunk(chunk_id, body, size=None, pad=True):
+    """A big-endian IFF chunk. `size` overrides the declared size; odd bodies get a pad byte."""
+    assert len(chunk_id) == 4
+    out = chunk_id + be32(len(body) if size is None else size) + body
+    if pad and len(body) % 2:
+        out += b"\0"
+    return out
+
+
+def comm_chunk(channels=1, frames=4, bits=16, rate=8000, compression=None, rate_bytes=None, size=None):
+    body = be16(channels) + be32(frames) + be16(bits) + (rate_bytes or ieee_extended(rate))
+    if compression is not None:
+        body += compression + b"\0\0"  # an empty Pascal-string name and its pad
+    return iff_chunk(b"COMM", body, size=size)
+
+
+def ssnd_chunk(data, offset=0, size=None, pad=True):
+    return iff_chunk(b"SSND", be32(offset) + be32(0) + bytes(offset) + data, size=size, pad=pad)
+
+
+def form(*chunks, form_type=b"AIFF", size=None, size_delta=0):
+    """A FORM file. `size` overrides the FORM size; `size_delta` adjusts the computed one."""
+    rest = form_type + b"".join(chunks)
+    declared = len(rest) + size_delta if size is None else size
+    return b"FORM" + be32(declared) + rest
+
+
+def canonical_aiff(codec, channels, rate, data):
+    """The writer's output: plain AIFF for the NONE encodings, else AIFF-C with
+    FVER, a 24-byte COMM holding the compression type, then SSND."""
+    compression, bits, _ = AIFF_CODECS[codec]
+    frames = len(data) // (channels * bits // 8)
+    if compression == b"NONE":
+        return form(comm_chunk(channels, frames, bits, rate), ssnd_chunk(data))
+    return form(iff_chunk(b"FVER", be32(AIFC_VERSION1)), comm_chunk(channels, frames, bits, rate, compression),
+                ssnd_chunk(data), form_type=b"AIFC")
+
+
+def aiff_stream(codec, channels, rate, payload):
+    return Stream(codec, channels, rate, AIFF_CODECS[codec][2], decode_stored(codec, payload))
+
+
+def build_aiff_fixtures():
+    fx = []
+
+    def ok(name, group, rule, data, codec, channels, rate, payload, writer_output=False):
+        fx.append(Fixture(name, group, rule, data, accept=aiff_stream(codec, channels, rate, payload),
+                          writer_output=writer_output))
+
+    def bad(name, group, rule, data, error):
+        assert error in AIFF_ERRORS, error
+        fx.append(Fixture(name, group, rule, data, reject=error))
+
+    def be_values(fmt, values):
+        return b"".join(struct.pack(fmt, v) for v in values)
+
+    s16 = be_values(">h", MONO)
+    stereo = be_values(">h", STEREO)
+    s24 = b"".join(struct.pack(">i", v)[1:] for v in [0, 1, -1, 0x7FFFFF, -0x800000, 123456, -654321, 256])
+    f32 = be_values(">I", [0, 0x80000000, 0x3F800000, 0xBF800000, 0x3F000000, 0x7F800000, 1, 0x7FC00001])
+    f64 = be_values(">Q", [0, 0x8000000000000000, 0x3FF0000000000000, 0xBFF0000000000000,
+                           0x7FF0000000000000, 1, 0x7FF8000000000001, 0x3FE0000000000000])
+    alaw = bytes([0xD5, 0x55, 0xAA, 0x2A, 0x00, 0x80, 0x7F, 0xFF])
+    mulaw = bytes([0xFF, 0x70, 0x80, 0x00, 0x01, 0x81, 0xFE, 0x7E])
+
+    # Writer output: every encoding as FFmpeg's muxer writes it.
+    for name, codec, channels, rate, payload, rule in [
+        ("aiff_mono_8k", "pcm_s16be", 1, 8000, s16, "Plain AIFF, 16-bit mono: FORM, an 18-byte COMM, SSND."),
+        ("aiff_stereo_44k1", "pcm_s16be", 2, 44100, stereo, "16-bit stereo at 44.1 kHz."),
+        ("aiff_s8_mono", "pcm_s8", 1, 8000, bytes([0x00, 0x7F, 0x80, 0xFF, 0x01, 0x81, 0x40, 0xC0]),
+         "8-bit samples are signed in AIFF; stored as u8, offset by 128."),
+        ("aiff_s24_stereo", "pcm_s24be", 2, 48000, s24, "24-bit stereo at 48 kHz; stored as s32."),
+        ("aiff_s32_mono", "pcm_s32be", 1, 8000,
+         be_values(">i", [0, 1, -1, 0x7FFFFFFF, -0x80000000, 123456789, -987654321, 65536]), "32-bit mono."),
+        ("aiff_empty", "pcm_s16be", 1, 8000, b"", "No frames: SSND holds only its offset and block size."),
+        ("aifc_u8_raw", "pcm_u8", 1, 8000, bytes([0x00, 0x80, 0xFF, 0x7F, 0x01, 0x81, 0x40, 0xC0]),
+         "AIFF-C `raw `: unsigned 8-bit, with FVER and a 24-byte COMM."),
+        ("aifc_sowt", "pcm_s16le", 1, 8000, pcm(MONO), "AIFF-C `sowt`: 16-bit little-endian."),
+        ("aifc_fl32", "pcm_f32be", 1, 8000, f32, "AIFF-C `fl32`: 32-bit float; every bit kept."),
+        ("aifc_fl64_stereo_96k", "pcm_f64be", 2, 96000, f64, "AIFF-C `fl64` at 96 kHz."),
+        ("aifc_alaw", "pcm_alaw", 1, 8000, alaw, "AIFF-C `alaw`, COMM sample size 8; decodes to s16."),
+        ("aifc_ulaw", "pcm_mulaw", 1, 8000, mulaw,
+         "AIFF-C `ulaw`; its negative zero (0x7F) is left out, as for WAV and AU."),
+    ]:
+        ok(name, "writer", rule, canonical_aiff(codec, channels, rate, payload), codec, channels, rate, payload,
+           writer_output=True)
+
+    comm = comm_chunk()
+    four = s16[:8]
+    # Other accepted layouts.
+    ok("aifc_none_twos", "accepted", "AIFF-C `twos` with 24-bit samples: the codec follows the sample size.",
+       form(iff_chunk(b"FVER", be32(AIFC_VERSION1)), comm_chunk(bits=24, compression=b"twos"), ssnd_chunk(s24[:12]),
+            form_type=b"AIFC"), "pcm_s24be", 1, 8000, s24[:12])
+    ok("aifc_uppercase_type", "accepted", "`FL32` matches `fl32`: types compare case-insensitively, as in FFmpeg.",
+       form(iff_chunk(b"FVER", be32(AIFC_VERSION1)), comm_chunk(bits=32, compression=b"FL32"), ssnd_chunk(f32[:16]),
+            form_type=b"AIFC"), "pcm_f32be", 1, 8000, f32[:16])
+    ok("aifc_in24", "accepted", "AIFF-C `in24` is 24-bit big-endian, whatever the sample size says.",
+       form(iff_chunk(b"FVER", be32(AIFC_VERSION1)), comm_chunk(bits=16, compression=b"in24"), ssnd_chunk(s24[:12]),
+            form_type=b"AIFC"), "pcm_s24be", 1, 8000, s24[:12])
+    ok("aifc_short_comm", "accepted", "AIFF-C with an 18-byte COMM, no room for a type: read as plain AIFF.",
+       form(comm, ssnd_chunk(four), form_type=b"AIFC"), "pcm_s16be", 1, 8000, four)
+    ok("aifc_without_fver_version", "accepted",
+       "An FVER that is not version 1 makes COMM carry no type: its `fl32` is ignored and 32 bits read as s32.",
+       form(iff_chunk(b"FVER", be32(0)), comm_chunk(bits=32, compression=b"fl32"), ssnd_chunk(f32[:16]),
+            form_type=b"AIFC"), "pcm_s32be", 1, 8000, f32[:16])
+    ok("aiff_ssnd_offset", "accepted", "SSND with a data offset of 4: the 4 bytes before the samples are skipped.",
+       form(comm, ssnd_chunk(four, offset=4)), "pcm_s16be", 1, 8000, four)
+    ok("aiff_other_chunks", "accepted",
+       "NAME, an odd-sized ANNO and a chunk after SSND are skipped with their pad bytes.",
+       form(iff_chunk(b"NAME", b"Title"), comm, iff_chunk(b"ANNO", b"odd"), ssnd_chunk(four), iff_chunk(b"APPL", b"x")),
+       "pcm_s16be", 1, 8000, four)
+    ok("aiff_odd_data", "accepted", "Three s8 frames: SSND is odd and a pad byte follows it.",
+       form(comm_chunk(frames=3, bits=8), ssnd_chunk(b"\x01\x02\x03")), "pcm_s8", 1, 8000, b"\x01\x02\x03",
+       writer_output=True)
+    ok("aiff_rate_fraction", "accepted", "An 80-bit rate of 8000.5 Hz rounds half up to 8001, as FFmpeg's does.",
+       form(comm_chunk(rate_bytes=bytes.fromhex("400bfa04000000000000")), ssnd_chunk(four)),
+       "pcm_s16be", 1, 8001, four)
+
+    # Rejected.
+    bad("aiff_empty_input", "header", "No bytes at all.", b"", "Truncated")
+    bad("aiff_not_form", "header", "The file starts with `RIFF`, not `FORM`.",
+        b"RIFF" + form(comm, ssnd_chunk(four))[4:], "InvalidAiff")
+    bad("aiff_bad_form_type", "header", "FORM type `WAVE`.", form(comm, ssnd_chunk(four), form_type=b"WAVE"), "InvalidAiff")
+    bad("aiff_form_size_small", "header", "FORM size 2 cannot hold the form type.", form(comm, size=2), "InvalidAiff")
+    bad("aiff_truncated_header", "header", "Input ends inside the 12-byte FORM header.", form(comm)[:10], "Truncated")
+    bad("aiff_missing_ssnd", "order", "COMM, but no SSND within the FORM extent.", form(comm), "InvalidAiff")
+    bad("aiff_ssnd_before_comm", "order",
+        "SSND before COMM: a sequential reader cannot know the format. FFmpeg reads it from a seekable file.",
+        form(ssnd_chunk(four), comm), "InvalidAiff")
+    bad("aiff_duplicate_comm", "order", "Two COMM chunks.", form(comm, comm, ssnd_chunk(four)), "InvalidAiff")
+    bad("aiff_comm_short", "comm", "A COMM chunk declaring 16 bytes.",
+        form(iff_chunk(b"COMM", comm[8:24]), ssnd_chunk(four)), "InvalidFormat")
+    bad("aiff_truncated_comm", "comm", "Input ends inside COMM.", form(comm, ssnd_chunk(four))[:24], "Truncated")
+    bad("aiff_channels0", "comm", "Zero channels.", form(comm_chunk(channels=0), ssnd_chunk(b"")), "InvalidFormat")
+    bad("aiff_channels3", "comm", "Three channels.", form(comm_chunk(channels=3, frames=2), ssnd_chunk(s16[:12])),
+        "UnsupportedFormat")
+    bad("aiff_rate_zero", "comm", "An 80-bit rate of 0.", form(comm_chunk(rate_bytes=bytes(10)), ssnd_chunk(four)),
+        "InvalidFormat")
+    bad("aiff_rate_exponent", "comm", "An 80-bit rate whose exponent needs a shift beyond 63.",
+        form(comm_chunk(rate_bytes=bytes.fromhex("7fff8000000000000000")), ssnd_chunk(four)), "InvalidFormat")
+    bad("aiff_rate_over_limit", "comm", f"Sample rate {MAX_RATE + 1} Hz, above the default limit.",
+        form(comm_chunk(rate=MAX_RATE + 1), ssnd_chunk(four)), "LimitExceeded")
+    bad("aiff_bits12", "comm", "12-bit samples: whole bytes only. FFmpeg rounds them up to 16.",
+        form(comm_chunk(bits=12), ssnd_chunk(four)), "UnsupportedFormat")
+    bad("aifc_unknown_type", "comm", "AIFF-C type `ima4` (IMA ADPCM) is not a contract encoding.",
+        form(iff_chunk(b"FVER", be32(AIFC_VERSION1)), comm_chunk(compression=b"ima4"), ssnd_chunk(four),
+             form_type=b"AIFC"), "UnsupportedFormat")
+    bad("aiff_frames_mismatch", "sound", "COMM declares 5 frames, SSND holds 4. FFmpeg decodes the 4.",
+        form(comm_chunk(frames=5), ssnd_chunk(four)), "InvalidFormat")
+    bad("aiff_data_not_block_aligned", "sound", "Stereo 16-bit data of 6 bytes.",
+        form(comm_chunk(channels=2, frames=1), ssnd_chunk(stereo[:6])), "InvalidFormat")
+    bad("aiff_ssnd_short", "sound", "An SSND declaring 4 bytes, less than its offset and block size.",
+        form(comm, iff_chunk(b"SSND", be32(0)), ssnd_chunk(four)), "InvalidAiff")
+    bad("aiff_ssnd_offset_too_big", "sound", "A data offset past the end of SSND.",
+        form(comm, iff_chunk(b"SSND", be32(100) + be32(0) + four)), "InvalidAiff")
+    bad("aiff_chunk_exceeds_form", "bounds", "SSND declares more bytes than the FORM extent has left.",
+        form(comm, ssnd_chunk(four, size=200)), "InvalidAiff")
+    bad("aiff_truncated_data", "bounds", "Input ends inside the samples.",
+        form(comm, ssnd_chunk(four))[:-3], "Truncated")
+
+    names = [f.name for f in fx]
+    assert len(names) == len(set(names)), "duplicate AIFF fixture names"
+    return fx
+
+
 # --- outputs ---------------------------------------------------------------
 
 
@@ -1103,12 +1311,12 @@ def render_expected(accept, reject):
 def ffmpeg_detect(data):
     """The format FFmpeg's content probing picks for `data`, or None (T16).
 
-    An independent reading of the probes in wavdec.c (wav_probe, w64_probe) and
-    au.c (au_probe) and of format.c's choice: the highest nonzero score wins, a
+    An independent reading of the probes in wavdec.c (wav_probe, w64_probe),
+    au.c (au_probe) and aiffdec.c (aiff_probe) and of format.c's choice: the highest nonzero score wins, a
     tie at the highest means none. The first probe buffer holds 2048 bytes, and
     these probes never ask for more."""
     head = data[:2048]
-    scores = {"wav": 0, "w64": 0, "au": 0}
+    scores = {"wav": 0, "w64": 0, "au": 0, "aiff": 0}
     if len(head) > 32 and head[8:12] == b"WAVE":
         if head[:4] in (b"RIFF", b"RIFX"):
             scores["wav"] = 99
@@ -1118,6 +1326,10 @@ def ffmpeg_detect(data):
         scores["w64"] = 100
     if len(head) >= 24 and head[:4] == b".snd" and all(head[i:i + 4] != bytes(4) for i in range(4, 24, 4)):
         scores["au"] = 100
+    # aiffdec.c reads 12 bytes of the zero-padded probe buffer.
+    padded = head + bytes(12)
+    if padded[:4] == b"FORM" and struct.unpack(">I", padded[4:8])[0] >= 4 and padded[8:12] in (b"AIFF", b"AIFC"):
+        scores["aiff"] = 100
     best = max(scores.values())
     winners = [name for name, score in scores.items() if score == best]
     return winners[0] if best > 0 and len(winners) == 1 else None
@@ -1208,7 +1420,7 @@ def render_readme(path, table):
     return (text[:begin] + table + text[end:]).encode()
 
 
-def outputs(fixtures, au_fixtures):
+def outputs(fixtures, au_fixtures, aiff_fixtures):
     files = {WAV_DIR / f"{f.name}.wav": f.data for f in fixtures}
     files[MANIFEST] = render_manifest(
         fixtures, "// Each entry names wav/<name>.wav; see README.md for the rules and decisions.")
@@ -1217,6 +1429,10 @@ def outputs(fixtures, au_fixtures):
     files[AU_MANIFEST] = render_manifest(
         au_fixtures, "// Each entry names au/<name>.au; see au/README.md for the rules and decisions.")
     files[AU_README] = render_readme(AU_README, render_table(au_fixtures))
+    files.update({AIFF_DIR / f"{f.name}.aiff": f.data for f in aiff_fixtures})
+    files[AIFF_MANIFEST] = render_manifest(
+        aiff_fixtures, "// Each entry names aiff/<name>.aiff; see aiff/README.md for the rules and decisions.")
+    files[AIFF_README] = render_readme(AIFF_README, render_table(aiff_fixtures))
     return files
 
 
@@ -1227,9 +1443,10 @@ def main():
 
     fixtures = build_fixtures()
     au_fixtures = build_au_fixtures()
-    expected = outputs(fixtures, au_fixtures)
+    aiff_fixtures = build_aiff_fixtures()
+    expected = outputs(fixtures, au_fixtures, aiff_fixtures)
     stale = [path for path, content in expected.items() if not path.exists() or path.read_bytes() != content]
-    extra = sorted((set(WAV_DIR.glob("*.wav")) | set(AU_DIR.glob("*.au"))) - set(expected))
+    extra = sorted((set(WAV_DIR.glob("*.wav")) | set(AU_DIR.glob("*.au")) | set(AIFF_DIR.glob("*.aiff"))) - set(expected))
 
     if args.check:
         for path in stale:
@@ -1239,16 +1456,17 @@ def main():
         if stale or extra:
             print("run: python3 zig/testing/fixtures/generate.py", file=sys.stderr)
             return 1
-        print(f"{len(fixtures)} WAV and {len(au_fixtures)} AU fixtures, manifests and README tables are current")
+        print(f"{len(fixtures)} WAV, {len(au_fixtures)} AU and {len(aiff_fixtures)} AIFF fixtures, manifests and README tables are current")
         return 0
 
     WAV_DIR.mkdir(exist_ok=True)
     AU_DIR.mkdir(exist_ok=True)
+    AIFF_DIR.mkdir(exist_ok=True)
     for path in extra:
         path.unlink()
     for path in stale:
         path.write_bytes(expected[path])
-    print(f"wrote {len(stale)} file(s), removed {len(extra)}; {len(fixtures)} WAV and {len(au_fixtures)} AU fixtures")
+    print(f"wrote {len(stale)} file(s), removed {len(extra)}; {len(fixtures)} WAV, {len(au_fixtures)} AU and {len(aiff_fixtures)} AIFF fixtures")
     return 0
 
 

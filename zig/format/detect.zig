@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Original file for this project; not translated from FFmpeg source.
 // libavformat/format.c (probe_input_format_internal, av_probe_input_buffer2),
-// wavdec.c, au.c and w64 at the pinned reference revision describe the
+// wavdec.c, au.c and aiffdec.c at the pinned reference revision describe the
 // scoring followed here.
 //! Format detection (TODO.md T12c, T16): the registered demuxers' content
 //! probes, scored as FFmpeg scores them, so each stream gets FFmpeg's winner.
@@ -28,6 +28,7 @@ const pcm = @import("../codec/pcm.zig");
 const metadata = @import("../core/metadata.zig");
 const wav = @import("wav.zig");
 const au = @import("au.zig");
+const aiff = @import("aiff.zig");
 const Replay = @import("replay.zig").Replay;
 
 pub const Container = enum {
@@ -35,6 +36,8 @@ pub const Container = enum {
     /// Sony Wave64, read and written by format/wav.zig.
     w64,
     au,
+    /// AIFF and AIFF-C.
+    aiff,
 
     /// The container name in probe output, as FFmpeg's `format_name`.
     pub fn name(container: Container) []const u8 {
@@ -54,6 +57,7 @@ pub const Container = enum {
         return switch (container) {
             .wav, .w64 => wav.carries(codec),
             .au => au.carries(codec),
+            .aiff => aiff.carries(codec),
         };
     }
 
@@ -61,14 +65,14 @@ pub const Container = enum {
     pub fn s16Codec(container: Container) pcm.Codec {
         return switch (container) {
             .wav, .w64 => .s16le,
-            .au => .s16be,
+            .au, .aiff => .s16be,
         };
     }
 };
 
-/// The WAV and AU contract errors, which share their common names, and
+/// The WAV, AU and AIFF contract errors, which share their common names, and
 /// `UnknownFormat` for a stream no demuxer recognizes.
-pub const Error = wav.Error || au.Error || error{
+pub const Error = wav.Error || au.Error || aiff.Error || error{
     /// No demuxer's probe scored the stream, as FFmpeg's "Invalid data found
     /// when processing input"; force a format to parse it anyway.
     UnknownFormat,
@@ -77,6 +81,7 @@ pub const Error = wav.Error || au.Error || error{
 pub const Limits = struct {
     wav: wav.Limits = .{},
     au: au.Limits = .{},
+    aiff: aiff.Limits = .{},
 };
 
 /// FFmpeg's first probe size (`PROBE_BUF_MIN`).
@@ -97,6 +102,7 @@ const Demuxer = struct {
 /// The registered demuxers, in FFmpeg's registration order (which matters
 /// only for ties, and none of these can tie).
 const demuxers = [_]Demuxer{
+    .{ .container = .aiff, .probe = aiffProbe, .probe_bytes = 12 },
     .{ .container = .au, .probe = auProbe, .probe_bytes = 24 },
     .{ .container = .w64, .probe = w64Probe, .probe_bytes = 41 },
     .{ .container = .wav, .probe = wavProbe, .probe_bytes = 33 },
@@ -143,6 +149,15 @@ fn auProbe(head: []const u8) u8 {
     while (field < 24) : (field += 4) {
         if (std.mem.allEqual(u8, head[field..][0..4], 0)) return 0;
     }
+    return max_score;
+}
+
+/// `aiff_probe` in aiffdec.c: `FORM`, a big-endian size of at least 4, then
+/// `AIFF` or `AIFC`. FFmpeg's zero padding makes shorter input fail.
+fn aiffProbe(head: []const u8) u8 {
+    if (head.len < 12 or !std.mem.eql(u8, head[0..4], "FORM")) return 0;
+    if (std.mem.readInt(u32, head[4..8], .big) < 4) return 0;
+    if (!std.mem.eql(u8, head[8..12], "AIFF") and !std.mem.eql(u8, head[8..12], "AIFC")) return 0;
     return max_score;
 }
 
@@ -198,7 +213,7 @@ pub const Input = struct {
         const variant: wav.Variant = switch (input.container) {
             .wav => .wav,
             .w64 => .w64,
-            .au => unreachable, // the caller dispatches on the container
+            .au, .aiff => unreachable, // the caller dispatches on the container
         };
         return .initVariant(input.reader(), limits, variant);
     }
@@ -258,6 +273,12 @@ pub fn probeWith(reader: *std.Io.Reader, limits: Limits, options: Options) Error
             const info = try parser.readHeader();
             try parser.finish();
             return .{ .container = .au, .codec = info.codec, .format = info.format, .frame_count = info.frame_count };
+        },
+        .aiff => {
+            var parser: aiff.Parser = .init(input.reader(), limits.aiff);
+            const info = try parser.readHeader();
+            try parser.finish();
+            return .{ .container = .aiff, .codec = info.codec, .format = info.format, .frame_count = info.frame_count };
         },
     }
 }
@@ -319,6 +340,17 @@ test "detection gives every AU fixture FFmpeg's winner and then the parser's res
     }
 }
 
+test "detection gives every AIFF fixture FFmpeg's winner and then the parser's result" {
+    inline for (fixtures.aiff.all) |fixture| {
+        const bytes = fixtures.aiff.bytes(fixture.name);
+        var direct: std.Io.Reader = .fixed(bytes);
+        expectDetection(fixture.detected, bytes, aiff.probe(&direct, .{})) catch |err| {
+            std.debug.print("fixture {s}\n", .{fixture.name});
+            return err;
+        };
+    }
+}
+
 test "the probes need FFmpeg's minimum lengths and nonzero AU fields" {
     // A 33-byte RIFF/WAVE start is detected, 32 bytes are not.
     const wav_head = fixtures.bytes("mono_8k");
@@ -337,6 +369,12 @@ test "the probes need FFmpeg's minimum lengths and nonzero AU fields" {
     try std.testing.expectEqual(Container.au, probeHead(fixtures.au.bytes("au_mono_8k")[0..24]));
     try std.testing.expectEqual(null, probeHead(fixtures.au.bytes("au_mono_8k")[0..23]));
     try std.testing.expectEqual(null, probeHead(fixtures.au.bytes("au_empty_data")));
+    // AIFF: 12 bytes, a FORM size of at least 4, and AIFF or AIFC.
+    var aiff_head = fixtures.aiff.bytes("aifc_sowt")[0..12].*;
+    try std.testing.expectEqual(Container.aiff, probeHead(&aiff_head));
+    try std.testing.expectEqual(null, probeHead(aiff_head[0..11]));
+    std.mem.writeInt(u32, aiff_head[4..8], 3, .big);
+    try std.testing.expectEqual(null, probeHead(&aiff_head));
     try std.testing.expectEqual(null, probeHead(""));
 }
 
@@ -352,6 +390,10 @@ test "a forced format parses what probing would not detect, and only that format
     try std.testing.expectError(error.InvalidRiff, probeWith(&wav_as_w64, .{}, .{ .format = .w64 }));
     var wav_as_au: std.Io.Reader = .fixed(fixtures.bytes("mono_8k"));
     try std.testing.expectError(error.InvalidAu, probeWith(&wav_as_au, .{}, .{ .format = .au }));
+    var au_as_aiff: std.Io.Reader = .fixed(fixtures.au.bytes("au_mono_8k"));
+    try std.testing.expectError(error.InvalidAiff, probeWith(&au_as_aiff, .{}, .{ .format = .aiff }));
+    var small_form: std.Io.Reader = .fixed(fixtures.aiff.bytes("aiff_form_size_small"));
+    try std.testing.expectError(error.UnknownFormat, probe(&small_form, .{}));
 }
 
 test "detection reports the container and passes limits to its parser" {
@@ -365,6 +407,12 @@ test "detection reports the container and passes limits to its parser" {
     try std.testing.expectError(error.LimitExceeded, probe(&wav_fast, .{ .wav = .{ .max_sample_rate = 191_999 } }));
     var wave64: std.Io.Reader = .fixed(fixtures.bytes("w64_mono_8k"));
     try std.testing.expectEqual(Container.w64, (try probe(&wave64, .{})).container);
+    var aifc: std.Io.Reader = .fixed(fixtures.aiff.bytes("aifc_fl32"));
+    const probed_aifc = try probe(&aifc, .{});
+    try std.testing.expectEqual(Container.aiff, probed_aifc.container);
+    try std.testing.expectEqualStrings("pcm_f32be", probed_aifc.codec.name());
+    var aiff_fast: std.Io.Reader = .fixed(fixtures.aiff.bytes("aiff_mono_8k"));
+    try std.testing.expectError(error.LimitExceeded, probe(&aiff_fast, .{ .aiff = .{ .max_sample_rate = 7999 } }));
 }
 
 fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
@@ -379,6 +427,7 @@ fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
     var direct: std.Io.Reader = .fixed(bytes);
     if (probeHead(bytes)) |container| switch (container) {
         .au => try expectSameResult(au.probe(&direct, .{}), got, .au),
+        .aiff => try expectSameResult(aiff.probe(&direct, .{}), got, .aiff),
         .wav, .w64 => try expectSameResult(wav.probe(&direct, .{}), got, container),
     } else try std.testing.expectError(error.UnknownFormat, got);
 }
@@ -390,6 +439,8 @@ test "fuzz: detection agrees with the direct parser on arbitrary input" {
         fixtures.au.bytes("au_annotation_odd_length"),
         fixtures.bytes("w64_alaw_mono_8k"),
         fixtures.bytes("rf64"),
+        fixtures.aiff.bytes("aifc_sowt"),
+        fixtures.aiff.bytes("aiff_other_chunks"),
     } });
 }
 
