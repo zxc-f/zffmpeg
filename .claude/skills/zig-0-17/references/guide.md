@@ -625,6 +625,19 @@ mutated"), not a warning.
 Variables do not shadow. The language reference forbids it. Do not reuse `i`,
 `n`, or `buf` in an inner block under the same name.
 
+Declarations behave alike across nested containers. A namespace struct may
+declare `Fixture` when the file around it declares `Fixture` too, but an
+unqualified `Fixture` inside it is then a compile error ("ambiguous
+reference"). Qualify it through the inner container:
+
+```zig
+pub const au = struct {
+    const Au = @This();
+    pub const Fixture = struct { name: []const u8 };
+    pub const all: []const Au.Fixture = &.{};
+};
+```
+
 Do not return the address of a local. Since 0.16 that is a compile error for
 the trivial case, and it is still a bug when hidden behind a field.
 

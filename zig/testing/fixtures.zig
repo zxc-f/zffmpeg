@@ -56,6 +56,10 @@ pub fn bytes(comptime name: []const u8) []const u8 {
 /// The AU contract (port.md "AU contract"): known-length Sun AU with signed
 /// 16-bit big-endian PCM. It shares `Stream` with the WAV contract.
 pub const au = struct {
+    // Inside this namespace the WAV contract's `Failure`, `Expected`, `Fixture`
+    // and `all` are also in scope, so references to the AU ones are qualified.
+    const Au = @This();
+
     /// Errors of the AU contract, named exactly as the AU parser's errors.
     pub const Failure = enum {
         InvalidAu,
@@ -68,7 +72,7 @@ pub const au = struct {
 
     pub const Expected = union(enum) {
         accept: Stream,
-        reject: Failure,
+        reject: Au.Failure,
     };
 
     pub const Fixture = struct {
@@ -76,12 +80,12 @@ pub const au = struct {
         name: []const u8,
         /// Lowercase hexadecimal SHA-256 of the file.
         sha256: []const u8,
-        expected: Expected,
+        expected: Au.Expected,
         /// The AU writer (T12b) must produce exactly these bytes from `expected.accept`.
         writer_output: bool = false,
     };
 
-    pub const all: []const Fixture = @import("fixtures/au/manifest.zon");
+    pub const all: []const Au.Fixture = @import("fixtures/au/manifest.zon");
 
     /// The bytes of fixtures/au/<name>.au, embedded at compile time.
     pub fn bytes(comptime name: []const u8) []const u8 {
