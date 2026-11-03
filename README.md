@@ -9,7 +9,7 @@ file and pipe adapters), and the `zffprobe` tool detects WAV or AU from the
 content, validates the file and reports its stream. Both are checked against
 52 WAV and 29 AU fixtures and against a pinned FFmpeg build in CI (Linux). The
 library's synchronous WAV/AU conversion and stream-copy pipeline (T13a) is
-implemented; the `zffmpeg` command follows in T13b. [TODO.md](TODO.md) holds the completion
+verified; the `zffmpeg` command follows in T13b. [TODO.md](TODO.md) holds the completion
 evidence and the roadmap. Development is verified on Linux only. The compiler
 is **Zig 0.17.0**, enforced by the build.
 

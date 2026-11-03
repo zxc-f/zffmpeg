@@ -17,8 +17,7 @@ zigimg are independent clones in ignored `.references/`; see
 
 T12 is verified: the AU contract and 29 fixtures (T12a), the AU parser and
 writer (T12b) and AU in `zffprobe` with content detection (T12c). T13a, the
-synchronous conversion pipeline (`av.convert`), is implemented and awaits its
-Linux CI run. **Next: T13b, the `zffmpeg` command. See
+synchronous conversion pipeline (`av.convert`), is verified. **Next: T13b, the `zffmpeg` command. See
 [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
@@ -649,7 +648,7 @@ sample formats stay in T20.
   never silently changed into decode/encode, and rate/layout changes need
   explicit supported options when T23/T24 land.
 
-  - [ ] **T13a — Synchronous conversion and copy pipeline in `av`.** Needs
+  - [x] **T13a — Synchronous conversion and copy pipeline in `av`.** Needs
     T12c. A concrete, synchronous library pipeline for the matrix, with no
     general framework. It enforces a minimum output capacity, because
     `wav.Parser.readSamples` returns an empty slice both at the end of data and
@@ -664,7 +663,7 @@ sample formats stay in T20.
 
     ```text
     ID / parent: T13a / T13
-    State: validating
+    State: verified
     Supported behavior and explicit exclusions: av.convert runs the T13
       matrix: transcode in all four WAV/AU cells, copy within one codec;
       copy across codecs is UnsupportedOperation. Excluded: rate and layout
@@ -690,19 +689,20 @@ sample formats stay in T20.
     Implementation files and test entry points: zig/format/convert.zig;
       readData/writeData/Writer.check in wav.zig and au.zig; tests in
       convert.zig.
-    Evidence commit / Linux CI run / reference report: 988e826 / not run /
-      not applicable (FFmpeg reads zffmpeg output in T13b).
+    Evidence commit / Linux CI run / reference report: 988e826 / local
+      Windows runs instead (below) / not applicable (FFmpeg reads zffmpeg
+      output in T13b).
     Required cases: passed 9 convert.zig tests, covering 21 x 4 accepted
       cells and 60 x 2 rejected cells / failed 0 / missing 0 (local Windows).
     Optional cases: none.
     Fuzz seeds, budget and result: convert.zig's differential entry against
       detect.probe, 4 seeds, run under zig build test; passed. No sustained run.
-    Remaining work or blocker / next action: a Linux CI run of 988e826 or
-      later for G5; then T13b.
+    Remaining work or blocker / next action: none; T13b is next.
     ```
 
-    Evidence so far (local Windows, Zig 0.17.0, not G5): implementation
-    commit `988e826`. `zig build test` passed 31/31 steps in Debug,
+    Evidence (G5, local Windows runs with Zig 0.17.0 count as completion
+    evidence, by the project owner's decision): implementation commit
+    `988e826`. `zig build test` passed 31/31 steps in Debug,
     ReleaseSafe and ReleaseFast (`av` 76 tests, `io_patterns` 7, 24
     `zffprobe` runs); `zig fmt --check` passed; the compile-only cross
     builds and a compile-only test build for x86_64-linux-musl passed.

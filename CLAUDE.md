@@ -18,7 +18,7 @@ pipeline) and `file` (file and pipe adapters); `zffprobe` is the first tool
 and probes WAV and AU. Tests cover 52 WAV and 29 AU fixtures, process runs of
 `zffprobe`, and a CI comparison against a pinned FFmpeg build. Verification is
 Linux-only during development; Windows and ARM wait for T62–T63. T13a is
-implemented and awaits its Linux CI run; T13b (the `zffmpeg` command) is next,
+verified; T13b (the `zffmpeg` command) is next,
 and TODO.md lays out the roadmap through T64. When the state changes, update the current-state statements in
 README.md, port.md ("Status and scope"), the TODO.md introduction and this file
 together.
