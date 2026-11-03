@@ -19,6 +19,7 @@
 const std = @import("std");
 const audio = @import("../core/audio.zig");
 const pcm = @import("../codec/pcm.zig");
+const Prefix = @import("prefix.zig").Prefix;
 
 /// Contract errors (see the fixture README), plus `IoFailure` for a failing
 /// reader. File adapters in zig/io/file.zig replace `IoFailure` with the cause.
@@ -66,6 +67,8 @@ const ChunkHeader = struct {
 pub const Parser = struct {
     reader: *std.Io.Reader,
     limits: Limits,
+    /// Bytes content detection already read; they come before the reader's.
+    prefix: Prefix = .{},
     /// Bytes of the declared RIFF extent not yet consumed.
     extent_left: u32 = 0,
     chunks: u32 = 0,
@@ -78,6 +81,12 @@ pub const Parser = struct {
 
     pub fn init(reader: *std.Io.Reader, limits: Limits) Parser {
         return .{ .reader = reader, .limits = limits };
+    }
+
+    /// Like `init`, for a stream whose first bytes content detection already
+    /// read (format/detect.zig). The parser reads them first.
+    pub fn initPrefixed(reader: *std.Io.Reader, limits: Limits, prefix: Prefix) Parser {
+        return .{ .reader = reader, .limits = limits, .prefix = prefix };
     }
 
     /// Reads the RIFF header and every chunk up to the start of `data`.
@@ -200,6 +209,8 @@ pub const Parser = struct {
     }
 
     fn beginData(p: *Parser, size: u32) Error!Info {
+        // Data is read straight from the reader; the prefix was consumed first.
+        std.debug.assert(p.prefix.pending().len == 0);
         const format = p.format orelse return error.InvalidWave;
         if (size == std.math.maxInt(u32)) return error.UnsupportedStreamingSize;
         const frame_bytes = format.bytesPerFrame();
@@ -227,9 +238,11 @@ pub const Parser = struct {
         if (size > p.extent_left) return error.InvalidRiff;
     }
 
+    /// Every header and chunk field goes through here, so the first read takes
+    /// any detection prefix; later reads find it empty.
     fn readArray(p: *Parser, comptime n: usize) Error![n]u8 {
         var bytes: [n]u8 = undefined;
-        p.reader.readSliceAll(&bytes) catch |err| return mapRead(err);
+        p.prefix.readAll(p.reader, &bytes) catch |err| return mapRead(err);
         return bytes;
     }
 };

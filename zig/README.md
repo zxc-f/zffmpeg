@@ -72,9 +72,10 @@ not a test run. Windows and ARM runs wait for TODO.md T62–T63.
   only compiling them. Tests must not write to stdout, which the build runner
   uses to talk to the test runner. The step also runs `zffprobe` as a separate
   process for each entry in `probe_cases` in `build.zig`, checking stdout,
-  stderr and the exit status; one case pipes a fixture through standard input
-  to cover non-seekable input. It also compiles the write driver, so a break
-  shows in every mode.
+  stderr and the exit status, for WAV and AU fixtures; `set` picks the
+  fixture directory. Cases that pipe a fixture through standard input cover
+  non-seekable input and content detection without a file name. It also
+  compiles the write driver, so a break shows in every mode.
 - **`test-tools` step:** installs `zig-out/bin/write-driver`, built from
   [testing/write_driver.zig](testing/write_driver.zig). It writes a media file
   from raw samples with the `av` writers, so the FFmpeg comparison reads actual
@@ -125,6 +126,7 @@ slowdowns of the default build.
 | `build.zig`, `build.zig.zon`, `zig/root.zig` | `LGPL-2.1-or-later` (SPDX header) | Original project files. The build structure follows the Zig 0.17 build-system guide and port.md; no code is copied. |
 | `zig/format/wav.zig`, `zig/io/file.zig`, `zig/cli/probe.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. FFmpeg's `wavdec.c`, `wavenc.c`, `riffenc.c` and `ffprobe` were read for behavior only; no code is copied. |
 | `zig/format/au.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. FFmpeg's `au.c` and `pcm.c` were read for behavior only; no code is copied. |
+| `zig/format/detect.zig`, `zig/format/prefix.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. The detection rule is the project's own; FFmpeg's `au_probe` in `au.c` was read only to record where it differs. |
 | `zig/testing/reference/build-ffmpeg.sh`, `compare.py` | `LGPL-2.1-or-later` (SPDX header) | Original scripts; they build and run the separate, unmodified FFmpeg reference. |
 | `zig/codec/pcm.zig`, `zig/core/audio.zig`, `zig/core/time.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. Behavior follows FFmpeg's `libavcodec/pcm.c`, `libavutil/mathematics.c`, `channel_layout.h` and `samplefmt.c` at the pinned revision; no code is copied. |
 | `zig/testing/fixtures.zig`, `zig/testing/fixtures/generate.py`, `zig/testing/write_driver.zig` | `LGPL-2.1-or-later` (SPDX header) | Original project files. |

@@ -41,6 +41,7 @@ import generate  # noqa: E402
 # zffprobe exit status for each contract error (port.md "Initial probe output").
 EXIT_STATUS = {
     "InvalidRiff": 2,
+    "InvalidAu": 2,
     "InvalidWave": 2,
     "InvalidFormat": 2,
     "Truncated": 2,
@@ -53,8 +54,12 @@ LAYOUT = {1: "mono", 2: "stereo"}
 # Checks whose Zig code has not landed yet (TODO.md "Coverage and comparison
 # rules"). Each is reported as not implemented, never as a pass or a skip; the
 # subtask that owns it deletes its entry here, which makes the check mandatory.
-NOT_IMPLEMENTED = {
-    "au-probe": "T12c: zffprobe on every AU fixture, and on every fixture through a pipe",
+NOT_IMPLEMENTED = {}
+
+# zffprobe detects AU by its `.snd` magic and sends anything else to the WAV
+# parser, so an AU fixture without that magic reports the WAV parser's error.
+ZFFPROBE_AU_DETECTION = {
+    "au_bad_magic": "InvalidRiff",
 }
 
 # Understood differences in FFmpeg's metadata for accepted fixtures, matched on
@@ -131,6 +136,13 @@ def detected_format(binary, path):
 def zffprobe(binary, path):
     process = run(binary, path)
     return process.returncode, key_values(text(process.stdout)), text(process.stderr)
+
+
+def zffprobe_raw(binary, *args, data=None):
+    """Exit status, stdout and stderr; with `data`, standard input is a pipe."""
+    process = subprocess.run([str(part) for part in (binary, *args)], input=data,
+                             capture_output=True, timeout=120)
+    return process.returncode, process.stdout, process.stderr
 
 
 def first_line(message):
@@ -266,6 +278,38 @@ def check_stream(args, fixture_name, path, expected, samples, input_format=None,
     return problems, notes
 
 
+def zffprobe_report(container, codec, channels, rate, frames):
+    return {
+        "format": container,
+        "codec": codec,
+        "sample_fmt": "s16",
+        "channels": str(channels),
+        "channel_layout": LAYOUT[channels],
+        "sample_rate": str(rate),
+        "nb_samples": str(frames),
+        "duration_num": str(frames),
+        "duration_den": str(rate),
+    }
+
+
+def check_zffprobe_au(fixture, args, path):
+    """zffprobe on one AU fixture (T12c); returns (problems, summary)."""
+    code, fields, err = zffprobe(args.zffprobe, path)
+    if fixture.accept is not None:
+        channels, rate, samples = fixture.accept
+        want = zffprobe_report("au", "pcm_s16be", channels, rate, len(samples) // channels)
+        if code != 0 or fields != want:
+            return [f"zffprobe exited {code} with {fields or first_line(err)}"], f"exit {code}"
+        return [], "exit 0, report matches"
+    error = ZFFPROBE_AU_DETECTION.get(fixture.name, fixture.reject)
+    status = EXIT_STATUS[error]
+    if code != status or not err.endswith(f": {error}"):
+        return [f"zffprobe exited {code} ({err}), expected {status} with {error}"], f"exit {code}"
+    if error != fixture.reject:
+        return [], f"exit {code}, `{error}` (not AU by content)"
+    return [], f"exit {code}"
+
+
 def compare_au_accepted(fixture, args, path):
     channels, rate, samples = fixture.accept
     frames = len(samples) // channels
@@ -316,7 +360,7 @@ def compare_au(args, lines, failures):
         "| --- | --- | --- | --- | --- | --- |",
     ]
     fixtures = generate.build_au_fixtures()
-    accepted_ok = ffmpeg_accepts_rejected = 0
+    accepted_ok = rejected_ok = ffmpeg_accepts_rejected = 0
     for fixture in fixtures:
         path = FIXTURES / "au" / f"{fixture.name}.au"
         if not path.exists():
@@ -327,23 +371,34 @@ def compare_au(args, lines, failures):
             continue
         if fixture.accept is not None:
             problems, expected, theirs, detection = compare_au_accepted(fixture, args, path)
-            accepted_ok += not problems
         else:
             problems, expected, theirs, detection = compare_au_rejected(fixture, args, path)
             ffmpeg_accepts_rejected += theirs.startswith("accepts")
-        ours = "not implemented (T12c)" if "au-probe" in NOT_IMPLEMENTED else "checked"
+        if "au-probe" in NOT_IMPLEMENTED:
+            ours = "not implemented (T12c)"
+        else:
+            probe_problems, ours = check_zffprobe_au(fixture, args, path)
+            problems = problems + probe_problems
+        if fixture.accept is not None:
+            accepted_ok += not problems
+        else:
+            rejected_ok += not problems
         result = "pass" if not problems else "**FAIL**: " + "; ".join(problems)
         lines.append(f"| `{fixture.name}` | {expected} | {theirs} | {detection} | {ours} | {result} |")
         failures.extend(f"{fixture.name}: {problem}" for problem in problems)
 
     accepted = sum(1 for fixture in fixtures if fixture.accept is not None)
     rejected = len(fixtures) - accepted
-    lines += [
-        "",
-        f"Accepted AU fixtures FFmpeg reads as expected: {accepted_ok}/{accepted}.",
-        f"Rejected AU fixtures that FFmpeg accepts with `-f au` (intentional differences): "
-        f"{ffmpeg_accepts_rejected}/{rejected}.",
-    ]
+    if "au-probe" in NOT_IMPLEMENTED:
+        lines += ["", f"Accepted AU fixtures FFmpeg reads as expected: {accepted_ok}/{accepted}."]
+    else:
+        lines += [
+            "",
+            f"Accepted AU fixtures FFmpeg and zffprobe read as expected: {accepted_ok}/{accepted}.",
+            f"Rejected AU fixtures with zffprobe's expected status and error: {rejected_ok}/{rejected}.",
+        ]
+    lines.append(f"Rejected AU fixtures that FFmpeg accepts with `-f au` (intentional differences): "
+                 f"{ffmpeg_accepts_rejected}/{rejected}.")
 
 
 def compare_writer(args, lines, failures):
@@ -395,6 +450,28 @@ def compare_writer(args, lines, failures):
             passed += not problems
             failures.extend(f"writer {fixture.name}: {problem}" for problem in problems)
     lines += ["", f"Zig-written files FFmpeg reads as expected: {passed}/{len(streams)}."]
+
+
+def compare_pipes(args, lines, failures):
+    """zffprobe through a pipe must match zffprobe on the file (T12c)."""
+    cases = [(FIXTURES / "wav" / f"{f.name}.wav") for f in generate.build_fixtures()]
+    cases += [(FIXTURES / "au" / f"{f.name}.au") for f in generate.build_au_fixtures()]
+    same = 0
+    for path in cases:
+        file_code, file_out, file_err = zffprobe_raw(args.zffprobe, path)
+        pipe_code, pipe_out, pipe_err = zffprobe_raw(args.zffprobe, "-", data=path.read_bytes())
+        expected_err = file_err.replace(f"zffprobe: {path}: ".encode(), b"zffprobe: -: ")
+        if (pipe_code, pipe_out, pipe_err) == (file_code, file_out, expected_err):
+            same += 1
+        else:
+            failures.append(f"{path.name}: through a pipe zffprobe exited {pipe_code} "
+                            f"({text(pipe_err) or 'no error'}), from the file {file_code} ({text(file_err) or 'no error'})")
+    lines += [
+        "",
+        "## zffprobe through a pipe",
+        "",
+        f"Fixtures whose pipe result (status, report and error) equals the file result: {same}/{len(cases)}.",
+    ]
 
 
 def main():
@@ -450,6 +527,8 @@ def main():
     ]
     compare_au(args, lines, failures)
     compare_writer(args, lines, failures)
+    if "au-probe" not in NOT_IMPLEMENTED:
+        compare_pipes(args, lines, failures)
     if NOT_IMPLEMENTED:
         lines += ["", "## Not implemented", ""]
         lines += [f"- `{key}`: {note}" for key, note in NOT_IMPLEMENTED.items()]

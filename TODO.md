@@ -5,19 +5,19 @@ architecture and compatibility rules; this file records the work to do, from
 the finished first path to a port that covers most of what FFmpeg's users
 need. The repository tracks project documentation, the minimal Zig package and
 build (the `av` module, documented in [zig/README.md](zig/README.md)), the WAV
-fixture contract ([zig/testing/fixtures](zig/testing/fixtures/README.md)) and
-the first complete path: PCM s16 kernels, audio/time types, a bounded WAV
-parser and known-length writer, file and pipe adapters, and the `zffprobe`
-tool. Linux CI builds and tests it in every mode and compares it with a pinned
+and AU fixture contracts ([zig/testing/fixtures](zig/testing/fixtures/README.md))
+and two complete paths: PCM s16 kernels, audio/time types, bounded WAV and AU
+parsers and known-length writers, file and pipe adapters, content detection
+and the `zffprobe` tool. Linux CI builds and tests it in every mode and compares it with a pinned
 FFmpeg build ([zig/testing/reference](zig/testing/reference/README.md)).
 Development is verified on Linux only; see the
 [platform policy](#platform-policy-linux-only-during-development). FFmpeg and
 zigimg are independent clones in ignored `.references/`; see
 [README.md](README.md#clone-the-reference-repositories) for setup.
 
-The AU contract and 29 fixtures are verified (T12a). The AU parser and writer
-are implemented; their T12b verification remains unchecked.
-**Next: complete T12b's evidence, then T12c and T13a–T13b. See
+T12 is verified: the AU contract and 29 fixtures (T12a), the AU parser and
+writer (T12b) and AU in `zffprobe` with content detection (T12c). **Next:
+T13a–T13b, the synchronous conversion pipeline and the `zffmpeg` command. See
 [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
@@ -489,10 +489,13 @@ decoded audio model unchanged; the pinned `libavformat/au.c` maps AU encoding 3
 to `PCM_S16BE`. Remaining AU encodings, AIFF and raw PCM stay in T22; more
 sample formats stay in T20.
 
-- [ ] **T12 — Known-length AU with signed 16-bit big-endian PCM.** Checked when
+- [x] **T12 — Known-length AU with signed 16-bit big-endian PCM.** Checked when
   T12a–T12c are. Reference: `libavformat/au.c`, `pcmdec.c`, `rawenc.c`. Keep
   the three subtasks' evidence distinct, so a passing reference-only run is
   never mistaken for a verified AU implementation.
+  Evidence: T12a at `d41c5a4` ([run 41579247329](https://github.com/zxc-f/zffmpeg/actions/runs/41579247329)), T12b at `043c3c3`
+  ([run 41580174746](https://github.com/zxc-f/zffmpeg/actions/runs/41580174746)) and T12c at `3bbdcf9` ([run 41660265753](https://github.com/zxc-f/zffmpeg/actions/runs/41660265753)), each
+  recorded below.
   - [x] **T12a — AU contract and fixtures.** Needs T10. Lands with T19a.
     Write the contract (port.md, plus a fixture README) before parser code:
     `.snd` magic; encoding 3 only; mono or stereo; the sample-rate limit; a
@@ -532,7 +535,7 @@ sample formats stay in T20.
     implemented. The first run, [run 41579021646](https://github.com/zxc-f/zffmpeg/actions/runs/41579021646), failed to compile
     `fixtures.zig` (an ambiguous reference inside the `au` namespace), fixed
     in `d41c5a4`.
-  - [ ] **T12b — AU parser and writer.** Needs T12a. An allocation-free
+  - [x] **T12b — AU parser and writer.** Needs T12a. An allocation-free
     `zig/format/au.zig` over `*std.Io.Reader` and `*std.Io.Writer`, reusing the
     PCM, audio and time code, plus the AU output path of T19a's test driver.
     Size overflow is detected before any output; read and write finalization,
@@ -543,12 +546,29 @@ sample formats stay in T20.
     decodes the driver's actual AU output to the expected samples and timing.
     That direct reference check becomes mandatory here; T12b cannot reach G5
     without it.
-    Implementation: `a226665` adds `zig/format/au.zig`, the `av.au` export
-    and the write-driver AU path; `043c3c3` adds file-adapter tests with tiny
-    buffers. This records code presence only. Keep unchecked until the required
-    checks, reference result and Linux CI run for the verified commit are
-    recorded here under G5.
-  - [ ] **T12c — AU in zffprobe with a bounded probe prefix.** Needs T12b.
+    Evidence (G5): [zig/format/au.zig](zig/format/au.zig), exported as
+    `av.au`, and the AU output of [write_driver.zig](zig/testing/write_driver.zig),
+    implemented at `a226665`; `043c3c3` adds the file-adapter tests. Required
+    cases: all 29 AU fixtures give their contract result from memory, from
+    one-byte reads and from real files with reader buffers of 0, 1 and 64
+    bytes and 64 KiB, including the samples delivered before a failure; the
+    writer reproduces the 4 writer-output fixtures in memory and through file
+    writers with 0-, 1- and 64-byte buffers; FFmpeg reads all 4 AU files the
+    driver wrote, byte-identical to those fixtures, with the expected samples
+    and stream. Other `au.zig` tests cover probing, raw decoding, configurable
+    limits, an annotation at the 1 MiB limit, the largest data size from a
+    header alone, frame-count and size errors before any output, write and
+    flush failures and a failing reader. Neither the parser nor the writer
+    allocates, so allocation-failure injection does not apply; cancellation
+    reaches them only as a reader or writer failure. In [run 41580174746](https://github.com/zxc-f/zffmpeg/actions/runs/41580174746) at
+    `043c3c3`, `zig build test` passed 64/64 in Debug, ReleaseSafe and
+    ReleaseFast (`av` 57) and the reference report listed 9/9 Zig-written
+    files as read correctly; [run 41579516649](https://github.com/zxc-f/zffmpeg/actions/runs/41579516649) at `a226665` passed the
+    same before the file-adapter tests. Fuzz: the `std.testing.fuzz` entry
+    runs its four-fixture corpus under `zig build test`; sustained fuzzing
+    has not been run. The `zffprobe` AU check stayed listed as not
+    implemented, for T12c.
+  - [x] **T12c — AU in zffprobe with a bounded probe prefix.** Needs T12b.
     Content detection of WAV and AU over a bounded prefix that is retained and
     replayed, so non-seekable input loses no bytes. Extract only the adapter
     pieces that AU proves common.
@@ -556,6 +576,60 @@ sample formats stay in T20.
     the replayed prefix loses no bytes, existing WAV reports are unchanged,
     and T19a's full WAV and AU probe comparison, over files and pipes, is
     mandatory and passes.
+
+    ```text
+    ID / parent: T12c / T12
+    State: verified
+    Supported behavior and explicit exclusions: zffprobe and av.detect choose
+      the container from the first 4 bytes: `.snd` is AU, anything else goes
+      to the WAV parser. AU reports format=au, codec=pcm_s16be. Excluded:
+      file-name hints, scored probing and a third format (T16, T26a).
+    Needs (verified) / lands with / verified after: T12b (verified); alone.
+    Contract and source provenance: port.md "Initial probe output", the AU
+      fixture README's "Content detection", notes.md "Content detection" and
+      "Detection prefix". Original code; FFmpeg's au_probe read only to
+      record the difference.
+    Required fixtures / optional corpus: the 52 WAV and 29 AU fixtures,
+      through detection, as files and through pipes. No optional corpus.
+    Ownership, state transitions and limits: detection reads at most 4 bytes
+      into a Prefix the chosen parser owns; its first header read consumes
+      them. No allocation; each parser keeps its own limits.
+    Comparison rule and intentional differences: zffprobe's report, status
+      and error per fixture; a pipe gives the file's result. au_bad_magic
+      reports InvalidRiff (not AU by content); au_empty_data is detected,
+      unlike FFmpeg's content probe.
+    Implementation files and test entry points: zig/format/detect.zig,
+      zig/format/prefix.zig, Parser.initPrefixed in wav.zig and au.zig,
+      zig/io/file.zig, zig/cli/probe.zig; tests in those files; 9 AU
+      probe_cases in build.zig; check_zffprobe_au and compare_pipes in
+      compare.py.
+    Evidence commit / Linux CI run / reference report: 3bbdcf9 / run
+      41660265753 / that run's reference job (below).
+    Required cases: passed 162 (81 fixtures as files, 81 through pipes) /
+      failed 0 / missing 0.
+    Optional cases: none.
+    Fuzz seeds, budget and result: detect.zig's differential entry, 4 seeds,
+      run under `zig build test` in every mode; passed. No sustained run.
+    Remaining work or blocker / next action: none; T13a is next.
+    ```
+
+    Evidence (G5): implementation commit `3bbdcf9`, [run 41660265753](https://github.com/zxc-f/zffmpeg/actions/runs/41660265753).
+    [zig/format/detect.zig](zig/format/detect.zig) chooses the container and
+    [zig/format/prefix.zig](zig/format/prefix.zig) replays the bytes it read;
+    the file adapters' `probeFile` and `probePath` and `zffprobe` use them.
+    `zig build test` passed 74/74 in Debug, ReleaseSafe and ReleaseFast (`av`
+    67, `io_patterns` 7) together with all 24 `zffprobe` process runs: the 15
+    WAV cases, with the WAV reports unchanged, and 9 AU cases, 2 of them
+    through a pipe. The replayed prefix loses no bytes: `detect.zig` checks
+    every WAV and AU fixture through detection against the direct parser from
+    one-byte reads, `file.zig` checks every AU fixture through `probePath` with
+    buffers of 0, 1 and 64 bytes and 64 KiB, and the fuzz entry checks the same
+    agreement on generated input. In the reference job `zffprobe` matched the
+    contract for all 52 WAV fixtures (12 accepted, 40 rejected) and all 29 AU
+    fixtures (9 accepted, 20 rejected, `au_bad_magic` reporting `InvalidRiff`
+    through detection), its pipe result equalled its file result for 81/81,
+    FFmpeg read 9/9 Zig-written files, and no check was listed as not
+    implemented ([reference results](zig/testing/reference/README.md#results)).
 
 - [ ] **T13 — A minimal `zffmpeg` for conversion and stream copy.** Checked
   when T13a and T13b are. The operation matrix:

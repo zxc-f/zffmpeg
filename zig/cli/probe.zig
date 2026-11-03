@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Original file for this project.
-//! zffprobe: validates one WAV stream and reports it as `key=value` lines.
+//! zffprobe: validates one WAV or AU stream and reports it as `key=value` lines.
 //!
-//!     zffprobe <file.wav | ->
+//!     zffprobe <file.wav | file.au | ->
 //!
+//! The container is detected from content, not the file name (`av.detect`).
 //! `-` reads standard input, which may be a pipe. The report goes to stdout
 //! only after the whole stream validates; diagnostics go to stderr. The output
 //! schema and exit codes are documented in port.md ("Initial probe output"):
@@ -15,10 +16,10 @@
 const std = @import("std");
 const av = @import("av");
 
-const usage = "usage: zffprobe <file.wav | ->\n";
+const usage = "usage: zffprobe <file.wav | file.au | ->\n";
 const help = usage ++
     \\
-    \\Validates a WAV stream (standard input with -) and prints its stream
+    \\Validates a WAV or AU stream (standard input with -) and prints its stream
     \\parameters as key=value lines. Exit codes: 0 success, 1 usage,
     \\2 invalid or truncated media, 3 unsupported media, 4 I/O failure,
     \\5 resource limit, 6 cancellation.
@@ -76,11 +77,11 @@ fn run(init: std.process.Init) ExitStatus {
     return writeStdout(io, report.buffered());
 }
 
-fn writeReport(out: *std.Io.Writer, info: av.wav.Info) std.Io.Writer.Error!void {
+fn writeReport(out: *std.Io.Writer, info: av.detect.Probed) std.Io.Writer.Error!void {
     const format = info.format;
     try out.print(
-        \\format=wav
-        \\codec=pcm_s16le
+        \\format={s}
+        \\codec={s}
         \\sample_fmt={s}
         \\channels={d}
         \\channel_layout={s}
@@ -90,6 +91,8 @@ fn writeReport(out: *std.Io.Writer, info: av.wav.Info) std.Io.Writer.Error!void 
         \\duration_den={d}
         \\
     , .{
+        info.container.name(),
+        info.container.codecName(),
         format.sample_format.name(),
         format.channelCount(),
         format.layout.name(),
@@ -104,7 +107,7 @@ fn writeReport(out: *std.Io.Writer, info: av.wav.Info) std.Io.Writer.Error!void 
 /// in `ProbeError` is an I/O failure.
 fn exitStatus(err: ProbeError) ExitStatus {
     return switch (err) {
-        error.InvalidRiff, error.InvalidWave, error.InvalidFormat, error.Truncated => .invalid,
+        error.InvalidRiff, error.InvalidWave, error.InvalidAu, error.InvalidFormat, error.Truncated => .invalid,
         error.UnsupportedFormat, error.UnsupportedStreamingSize => .unsupported,
         error.LimitExceeded,
         error.SystemResources,
