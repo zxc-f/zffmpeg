@@ -14,8 +14,11 @@ and CI compares them with a pinned FFmpeg build
 ([zig/testing/reference](zig/testing/reference/README.md)). This standalone
 repository tracks the port's own files. FFmpeg in `.references/ffmpeg` remains
 the behavioral reference. Verification is Linux-only during development;
-Windows and ARM wait for the platform milestone (TODO.md T62–T63). T12a, the
-contract for AU with signed 16-bit big-endian PCM, is next.
+Windows and ARM wait for the platform milestone (TODO.md T62–T63). The AU
+contract and its 29 fixtures are verified (T12a); the [AU parser and
+writer](zig/format/au.zig) are implemented, with T12b verification still
+unchecked. Complete that evidence before AU probing (T12c) and the conversion
+pipeline (T13).
 
 The goal is a native Zig multimedia library and tools, built incrementally from
 FFmpeg's functionality. Use idiomatic Zig APIs and explicit resource ownership.
@@ -33,6 +36,22 @@ files and Git histories are not committed to this project or included as submodu
 Use [zigimg](https://github.com/zigimg/zigimg.git) as a Zig implementation reference.
 The [pinned source analysis](doc/zigimg-reference.md) records verified I/O,
 ownership, build and testing patterns, including the parts requiring adaptation.
+
+## Document authority
+
+| Document | Owns |
+| --- | --- |
+| This file | Architecture, supported behavior, resource rules and the capability ledger. |
+| Fixture READMEs | Named inputs, expected results, error precedence and intentional differences for each contract. |
+| [TODO.md](TODO.md) | Stable task IDs, dependencies, gates G0–G5, required coverage, evidence, platform policy and the not-planned list. |
+| [notes.md](notes.md) | Revisable decisions, their reasons and the files that must change together. |
+| [CLAUDE.md](CLAUDE.md) | Agent workflow and implementation guidance, subordinate to the behavioral contracts. |
+
+TODO.md is authoritative for whether a task is done; a summary elsewhere adds
+no evidence. Resolve conflicting behavior or policy before implementation and
+update the affected contract, task, fixtures and notes in the same change.
+Silence in one document does not authorize widening a subset or dropping a
+check. Keep detailed task status in TODO.md instead of another checklist.
 
 ## Design goal: less machinery, clear behavior
 
@@ -58,6 +77,10 @@ Apply these decisions throughout the port:
 3. **Keep one implementation of each algorithm.** Specialize by sample type,
    bit depth or byte order where that removes duplication. Keep channel counts,
    dimensions and stream data at runtime unless measurement justifies otherwise.
+   A second implementation needs a recorded purpose, a comparison oracle and a
+   retention or retirement condition. T58's optimized alternatives retain the
+   scalar implementation as their oracle. T24 ports one resampler, swresample's
+   native algorithm, rather than preserving parallel legacy APIs.
 4. **Represent valid states directly.** Use slices, optionals, enums, tagged
    unions and error unions. Give codecs their own small state and options types.
    Share a contract only after working implementations reveal what it needs.
@@ -73,6 +96,32 @@ kernel; a new codec should have local state and a small registration change; an
 option should have one typed default and one description of its constraints.
 Track runtime cost, allocations, build time and binary size when these choices
 affect them. Smaller source alone is not a sufficient success criterion.
+
+### Supported scope and policy
+
+The supported subset determines the parsing surface the project maintains.
+Supporting every historical file is not a goal. G0 names accepted behavior and
+explicit exclusions; widening either requires updated contracts, fixtures and
+reference comparisons. FFmpeg accepting a file is evidence to examine, not an
+instruction to relax a bound or add recovery. Keep intentional differences
+narrow and testable. Failed experiments may be removed through a recorded scope
+decision; their existence alone is no reason to retain them.
+
+The [not-planned list](TODO.md#not-planned) is a scope decision. Adding an
+external dependency or an excluded capability requires revising that decision
+and its affected tasks, not treating it as incidental implementation work.
+Build-time component selection (T55) must let consumers omit unused parsers
+from the binary. This reduces exposure; it does not replace validation or an
+application's process isolation and privilege separation for untrusted media.
+
+Zig helps express bounds, errors and cleanup, but does not prove a codec safe
+or correct. ReleaseFast does not supply the safe modes' runtime checks, and
+Zig has no borrow checker. Explicit size checks, ownership tests and a bounded
+fuzz entry are required before G5; T60 adds sustained campaigns. Neither a
+passing unit suite nor a language choice establishes a security or performance
+claim. Codec mathematics, timing and independent reference checks remain work
+for every capability. The reasons for these choices live in
+[notes.md](notes.md#port-design-policy).
 
 ## Inspected baseline
 
@@ -270,7 +319,8 @@ I/O should not know about formats or codecs.
 
 1. Pass `std.mem.Allocator` explicitly where allocation happens. Make successful
    ownership transfers and cleanup on failure visible through `defer` and
-   `errdefer`; no hidden process-wide allocator or mutable registration state.
+   `errdefer`; no hidden process-wide allocator, global diagnostic sink or
+   mutable registration state. Diagnostics are an explicit dependency (T17a).
 2. Prefer caller-provided slices for kernels; add owned buffers where storage
    must outlive the call. Separate borrowed views from owned buffers. Document
    view invalidation on the next read/decode, retained references, and whether
@@ -288,12 +338,17 @@ I/O should not know about formats or codecs.
    `TimeBase` can coexist with a more general rational type.
 5. For buffering codecs, keep stream states explicit: need input, have output,
    drained, and seek/reset. Reserve errors for failures; never merge end of stream,
-   truncation, unsupported features and I/O failures into one result.
+   truncation, unsupported features, malformed input, resource limits, I/O
+   failures and cancellation into one result. Public media operations use
+   domain error sets in error unions, rather than negative errno or `anyerror`.
 6. Keep parsing independent of files. Use a single `*std.Io.Reader` WAV parser
    tested through `Reader.fixed(bytes)` before attaching file adapters. PCM
    kernels remain slice-based. Express seek support and cancellation explicitly.
 7. Bound allocations, probe sizes, nesting, image dimensions and buffered data
    from untrusted inputs. Check arithmetic before indexing and allocating.
+   Allocation failure must be injected at each allocation site before G5.
+   Express ownership distinctions in types where possible; document and test
+   lifetimes that the type system cannot enforce.
 
 ### Verified Zig 0.17 I/O choices
 
@@ -409,6 +464,10 @@ Zig API. When buffering codecs are introduced, make these behaviors testable:
   Represent missing timestamps explicitly; preserve valid negative timestamps.
   Derive PCM timing from integer sample counts and its sample-rate time base,
   rather than repeatedly rounding floating-point durations.
+  Derive other timing from the supported container tables or codec rules. If a
+  value cannot be derived, keep it missing (`null`); do not heuristically repair
+  malformed timing or invent a duration. T15's explicit rounding, wrap handling
+  and smoothing operate on known timing under a written contract.
 
 These rules belong in stream adapters. A stateless PCM conversion kernel can
 keep its simple slice-in/slice-out API. Start with synchronous execution through
@@ -576,6 +635,12 @@ need ABI bindings, but those bindings should stay in the relevant adapter rather
 than pulling C codec implementations into the native processing path. Preserve
 standard target/optimization options and a minimal reproducible configuration.
 
+Keep host probing and system-library discovery out of the default build unless
+each addition has a recorded decision here and in notes.md. T55 extends the
+explicit component catalog; it must not introduce a configure-like shell layer
+or a second inventory. Measure build time when changing selection machinery;
+an unexplained slowdown of plain `zig build` is a defect to investigate.
+
 Do not recursively scan sources to auto-register components. Do not read the
 filesystem at language comptime. Use build-generated Zig/options files and
 `@embedFile` for declared inputs. Do not copy all FFmpeg configuration switches
@@ -593,7 +658,7 @@ Progress is measured by working, tested behavior, not by translated file counts.
 | 3 — reuse proven by another path | Add a second supported variant or small container, then minimal zffmpeg conversion/stream-copy; extract common interfaces from working paths. | Shared kernels replace duplication; callers can still use direct APIs; documented runtime selection and ownership; drain/reset tests for paths that buffer. |
 | 4 — next lossless slice | Select one deliverable, such as a defined FLAC decode subset. Scope image formats and transforms separately. | Independent vectors and selected FATE-equivalent regressions; exact lossless content and defined timing. |
 | 5 — next compressed slice | Select one end-to-end path based on needs, such as MP3 demux/decode; scope AAC, H.264 and MP4/Matroska separately. | Document the chosen profiles, parser/demux dependencies, seek/error/drain behavior and reference comparisons. |
-| 6 — optimization/platforms | SIMD, threading, hardware and devices; broader CLI/API adapters. | Scalar comparisons, benchmarks, CPU fallback checks, platform integration tests and explicit compatibility claims. |
+| 6 — optimization/platforms | SIMD, threading, native platform verification and broader CLI/API adapters. Hardware and devices stay on the not-planned list unless a separate scope decision adds them. | Scalar comparisons, benchmarks, CPU fallback checks, platform integration tests and explicit compatibility claims. |
 
 [TODO.md](TODO.md#roadmap-to-a-nearly-complete-port) breaks phases 3–6 into
 milestones 4–12 (T14–T64), with dependencies, upstream references and
@@ -669,6 +734,24 @@ The errors share the WAV contract's names where the meaning matches, plus
 `InvalidAu` for a malformed AU header. Parser acceptance and automatic format
 detection are observable separately: FFmpeg's content probe does not detect an
 AU file whose data size is 0, although its parser reads it.
+
+### CLI policy
+
+Keep commands thin callers of library operations with a written input/output
+matrix (T13, extended by T53). Validate unsupported format/codec combinations
+and contradictory options before creating an output file or emitting media.
+Do not silently substitute a supported operation for the requested one.
+
+Changes to sample rate, channel layout, pixel format or timestamps must be
+exposed as named options with documented defaults and tested rules. Automatic
+filter negotiation follows those rules; it is not permission for a CLI to
+invent a conversion or repair malformed timing. T17a checks supported option
+strings against FFmpeg's accepted and rejected forms.
+
+Preflight cannot discover every stream error. A late parse error, cancellation,
+write error or final flush failure still fails the operation after partial
+output; each command defines cleanup and overwrite behavior. Keep zffprobe's
+stable report separate from T51's future FFprobe-compatible mode.
 
 ### Initial probe output
 
@@ -755,8 +838,8 @@ particularly stricter malformed-input handling and unsupported features.
   complete. Cross-compilation alone does not validate OS behavior, but CI
   compiles Windows and AArch64 targets to catch Linux-only APIs early.
 
-Use Debug and ReleaseSafe during implementation; exercise optimized builds with
-malformed inputs before release. Explicit parser checks must work when runtime
+Use Debug, ReleaseSafe and ReleaseFast for parser and size-check verification
+before G5, including malformed inputs. Explicit checks must work when runtime
 safety is disabled. Add compile checks for every supported generic specialization
 and selected/disabled feature combination as those options appear. Lazy analysis
 can otherwise leave an uninstantiated variant unchecked.
@@ -774,6 +857,11 @@ allocations and output equivalence on representative inputs. Reuse scratch
 storage and batch work before introducing complicated dispatch or threading.
 SIMD changes need tail, alignment and CPU fallback tests. Keep the scalar path
 available as a correctness reference; claim improvements only from measurements.
+T57 records comparisons with both the C-only oracle and a separate asm-enabled
+FFmpeg benchmark build, including their configurations. A win against the C-only
+oracle alone does not establish a win against optimized FFmpeg. T58 requires
+both a measured gain and scalar equivalence (or a float tolerance declared
+before the run); no kernel is called faster than FFmpeg without that evidence.
 
 [tests/Makefile](https://github.com/FFmpeg/FFmpeg/blob/5d5a38a7e46be296eab75982c0986054f731e19e/tests/Makefile) distinguishes tests that need external samples;
 [tests/fate/pcm.mak](https://github.com/FFmpeg/FFmpeg/blob/5d5a38a7e46be296eab75982c0986054f731e19e/tests/fate/pcm.mak) is a useful PCM coverage map.
@@ -865,10 +953,13 @@ has passed TODO.md gates G2–G4 is implemented, and it becomes verified at G5.
 | WAV + PCM s16le | Verified | [zig/format/wav.zig](zig/format/wav.zig) (bounded parser, `probe`, `decodeToRaw`, known-length `Writer`; T06, T08) and [zig/io/file.zig](zig/io/file.zig) (file and pipe adapters; T07). Original, `LGPL-2.1-or-later`; behavior follows `libavformat/wavdec.c`, `wavenc.c`, `riffdec.c` and `riffenc.c` at the pinned commit, with the stricter [first WAV contract](#first-wav-contract). Supported: little-endian RIFF/WAVE, 16- or 18-byte tag-1 `fmt `, signed 16-bit mono or stereo up to 192 kHz, known sizes, sequential input without seeking, no allocation. All 52 fixtures pass from memory, one-byte reads and files in Debug, ReleaseSafe and ReleaseFast, and FFmpeg decodes the same samples for every accepted fixture, including the writer-output files ([reference results](zig/testing/reference/README.md#results), [run 41557971301](https://github.com/zxc-f/zffmpeg/actions/runs/41557971301)). Limitations: no unknown-length, RF64/W64/RIFX, extensible or other sample formats; no seeking or resumable parsing; sustained fuzzing not run; native Windows not run. Scalar; not optimized. |
 | zffprobe | Verified | [zig/cli/probe.zig](zig/cli/probe.zig) (T09). Original, `LGPL-2.1-or-later`. Prints the [probe output](#initial-probe-output) for one WAV file or standard input, with exit codes 0–6. 15 process runs check stdout, stderr and the status in Debug, ReleaseSafe and ReleaseFast, and the reference comparison runs it on every fixture ([run 41557971301](https://github.com/zxc-f/zffmpeg/actions/runs/41557971301)). Our own output format, not ffprobe's. |
 | FFmpeg reference comparison | Verified | [zig/testing/reference](zig/testing/reference/README.md) (T03, T10): Clang build of the pinned commit with a minimal LGPL configuration, cached in CI, and `compare.py`. Accepted fixtures 12/12 identical in samples and compared metadata; rejected fixtures 40/40 with the contract's `zffprobe` status; intentional differences recorded. [run 41557971301](https://github.com/zxc-f/zffmpeg/actions/runs/41557971301). |
+| AU fixture contract | Verified | [AU contract and 29 fixtures](zig/testing/fixtures/au/README.md), T12a: 9 accepted and 20 rejected, with parser acceptance separate from content detection. Reference-only G5 at `d41c5a4`, [run 41579247329](https://github.com/zxc-f/zffmpeg/actions/runs/41579247329), before AU Zig code existed; full evidence stays in TODO.md. This does not verify the parser, writer or probe. |
+| AU + PCM s16be | Implemented | [zig/format/au.zig](zig/format/au.zig), exported by `av.au`, and [write driver](zig/testing/write_driver.zig). Original, `LGPL-2.1-or-later`; behavior follows `libavformat/au.c` and `libavcodec/pcm.c` at the pinned revision. Known-length encoding 3, mono/stereo, through the existing PCM kernels. Implementation at `a226665`, file-adapter tests at `043c3c3`; T12b remains unchecked pending its G5 evidence, including FFmpeg decoding actual writer output. AU probe integration is T12c. |
 | zffmpeg | Planned | Conversion and stream-copy tool (T13). |
 
-The first complete path, WAV with signed 16-bit PCM, is verified on Linux. Every
-other codec, container and tool remains planned.
+The first complete path, WAV with signed 16-bit PCM, is verified on Linux.
+AU's contract is verified and its parser/writer are implemented; T12b and T12c
+remain unchecked. Other codecs, containers and the conversion tool are planned.
 
 The authoritative next action is in [TODO.md](TODO.md). Let the first working
 path determine which shared infrastructure is necessary.

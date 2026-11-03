@@ -15,8 +15,10 @@ Development is verified on Linux only; see the
 zigimg are independent clones in ignored `.references/`; see
 [README.md](README.md#clone-the-reference-repositories) for setup.
 
-**Next: T12a, the AU contract and fixtures, with T19a's comparison support;
-then T12b–T12c and T13a–T13b. See [Near-term order](#near-term-order).**
+The AU contract and 29 fixtures are verified (T12a). The AU parser and writer
+are implemented; their T12b verification remains unchecked.
+**Next: complete T12b's evidence, then T12c and T13a–T13b. See
+[Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
 [How tasks are completed](#how-tasks-are-completed) describes. Tasks and
@@ -28,6 +30,15 @@ implemented or verified; do not duplicate this detailed checklist there.
 Implementation decisions and fixture expectations must agree with the
 subtask's written contract; for WAV, the
 [first WAV contract](port.md#first-wav-contract).
+
+Follow [document authority](port.md#document-authority) and
+[supported-scope policy](port.md#supported-scope-and-policy) when changing the
+plan. This file owns task status and evidence; port.md owns architecture and
+behavior. Revise a scope, limit, error policy or required check in the affected
+contract, task, fixtures and notes.md together. FFmpeg accepting a sample does
+not by itself widen the supported subset. A second algorithm implementation
+needs a recorded purpose, comparison oracle and retention or retirement
+condition; T58 always retains its scalar oracle.
 
 ## Platform policy: Linux only during development
 
@@ -91,7 +102,7 @@ IDs and commits; read them with this mapping:
 
 | Gate | Artifact or behavior | Exit condition |
 | --- | --- | --- |
-| G0 ready | The subtask's progress card: exact subset, prerequisites, upstream source map, limits, errors and ownership. | Every need is verified or lands in the same change. |
+| G0 ready | The subtask's progress card: exact subset and exclusions, prerequisites, upstream source map, limits, errors and ownership; any policy revision is recorded in notes.md. | Every need is verified or lands in the same change; affected contracts agree with the scope. |
 | G1 oracle | Independent vectors, reference commands and results, fixture hashes, the declared comparison rule. | Expected outputs exist before implementation; required and optional coverage are listed separately. |
 | G2 scalar implementation | Small concrete Zig types, local state, checked parsing, explicit allocator and I/O. | Unit vectors pass; new test files are reachable from `zig/root.zig`; new examples are registered in `build.zig`. |
 | G3 failure behavior | Truncation, malformed input, limit boundaries, one-byte input, output and flush failures, cancellation, allocation-failure injection, a bounded fuzz smoke run. | Each relevant case has an assertion and passes in ReleaseFast. Buffering stages also pass drain, reset and backpressure tests. |
@@ -532,6 +543,11 @@ sample formats stay in T20.
     decodes the driver's actual AU output to the expected samples and timing.
     That direct reference check becomes mandatory here; T12b cannot reach G5
     without it.
+    Implementation: `a226665` adds `zig/format/au.zig`, the `av.au` export
+    and the write-driver AU path; `043c3c3` adds file-adapter tests with tiny
+    buffers. This records code presence only. Keep unchecked until the required
+    checks, reference result and Linux CI run for the verified commit are
+    recorded here under G5.
   - [ ] **T12c — AU in zffprobe with a bounded probe prefix.** Needs T12b.
     Content detection of WAV and AU over a bounded prefix that is retained and
     replayed, so non-seekable input loses no bytes. Extract only the adapter
@@ -553,7 +569,10 @@ sample formats stay in T20.
   | Rate or channel-layout change | Deferred to T23/T24 | Unsupported |
 
   Stream copy preserves encoded media and timing, not container headers or
-  unsupported metadata chunks; test that distinction.
+  unsupported metadata chunks; test that distinction. Apply
+  [CLI policy](port.md#cli-policy): a cross-endian copy request is rejected,
+  never silently changed into decode/encode, and rate/layout changes need
+  explicit supported options when T23/T24 land.
 
   - [ ] **T13a — Synchronous conversion and copy pipeline in `av`.** Needs
     T12c. A concrete, synchronous library pipeline for the matrix, with no
@@ -570,11 +589,13 @@ sample formats stay in T20.
   - [ ] **T13b — The `zffmpeg` command.** Needs T13a. A thin `zig/cli/`
     command: arguments, files, standard input and output, the policy for an
     existing output and for input and output being the same file, cleanup of
-    partial output, and exit codes.
+    partial output, and exit codes. Reject contradictory options and unsupported
+    matrix cells before creating an output file or emitting media.
     Done when process cases cover the whole matrix, read, write and flush
     errors, late parse errors, cancellation and the overwrite policy, and
     FFmpeg reads every actual `zffmpeg` output through T19a with matching
-    samples, parameters and timing.
+    samples, parameters and timing. Commands rejected during preflight leave
+    an existing output untouched and create no new output.
 
 ### Near-term order
 
@@ -660,8 +681,11 @@ names, not as an empty framework.
   A general signed `Rational` with reduction and float-to-rational conversion
   for CLI input; comparisons across time bases; wrap-around helpers for 33-bit
   MPEG timestamps; audio timestamp smoothing as `av_rescale_delta` does it.
+  Derive time only from supported container/codec rules and known inputs;
+  preserve negative timestamps and keep unavailable values `null`. Smoothing
+  and wrap handling do not authorize guessing durations for malformed streams.
   Done when vectors from an exact rational oracle, including `i64` extremes,
-  pass in every build mode.
+  missing values and negative timestamps, pass in every build mode.
 
 - [ ] **T16 — Codec and format descriptors, registries and probing.** Needs
   T13b. Start with the first subtask that adds a third format (T22b, T22d or
@@ -1387,9 +1411,13 @@ fixtures, committed when small and redistributable or fetched by pinned hash.
   - [ ] **T53a — Inputs, outputs and stream selection.** Needs T13b, T16 and
     T17a. Several inputs and outputs, `-map` and default stream selection,
     `-c` and `-c copy`, `-f`, and codec and format options.
+    Extend T13's preflight rules and port.md's CLI policy. Every default or
+    negotiation that changes media has a named option, documented behavior and
+    process coverage; contradictory options and unsupported combinations fail
+    before any output file is created.
     Done when an extended operation matrix (from T13) produces output the
     reference judges equivalent by frame hashes, and option errors match
-    documented messages.
+    documented messages without creating or modifying outputs.
   - [ ] **T53b — Filters on the command line.** Needs T25b and T53a; `-vf`
     also needs T41a. `-af`, `-vf` and `-filter_complex`.
     Done under the same rule.
@@ -1418,9 +1446,12 @@ fixtures, committed when small and redistributable or fetched by pinned hash.
   `_deps`), `allcodecs.c`, `allformats.c`.
   Build options that select codecs, formats and filters through the
   compile-time registries, with dependency checks, leaving disabled components
-  out of the binary.
+  out of the binary. This lets consumers limit the parsers exposed to untrusted
+  media. Use one component catalog, without a configure-like shell layer or
+  automatic host-library discovery; any host probe needs a recorded decision.
   Done when CI builds a minimal and a full configuration and a disabled
-  component is absent from both the registry and the binary.
+  component is absent from both the registry and the binary. Record build time
+  and binary size for both configurations and investigate unexplained increases.
 
 - [ ] **T56 — Optional C ABI adapter.** Needs T54. Only when a consumer needs
   it, and not counted in completion totals. A C-callable subset in
@@ -1441,7 +1472,10 @@ optimization, concurrency, fuzz duration and corpus breadth.
   `zig build bench` in ReleaseFast for kernels and end-to-end decoding and
   encoding: throughput, peak memory and allocation counts, measured against the
   C-only reference and an asm-enabled FFmpeg build kept only for benchmarks,
-  and recorded per commit.
+  and recorded per commit with the inputs, target and build configurations.
+  Report comparisons with each reference separately; a gain against the C-only
+  oracle is not a claim of beating optimized FFmpeg. Performance claims require
+  these measurements; optimized kernels also need T58's scalar comparison.
   Done when every implemented codec has a recorded baseline and regressions are
   reported, without failing CI until the numbers are stable.
 
@@ -1517,7 +1551,10 @@ subtasks must be verified) when the milestone is selected.
 
 ## Not planned
 
-These stay out unless a recorded decision adds them:
+These stay out unless a recorded decision adds them. This is a scope boundary,
+not an implicit backlog: an implementation dependency does not add an excluded
+feature. Revise notes.md, port.md's scope and the affected tasks together before
+including one.
 
 - External, GPL or nonfree libraries and wrappers around them (x264, x265,
   libvpx, libdav1d, libaom, LAME, fdk-aac, libopus, OpenSSL and the like).

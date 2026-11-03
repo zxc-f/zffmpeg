@@ -110,6 +110,14 @@ The build has no C sources, no `link_libc`, no system libraries, no
 that contains no `.references/` directory, so the reference FFmpeg tree and a
 C compiler play no part in the native build.
 
+As build-time component selection arrives (TODO.md T55), keep one explicit
+catalog with checked dependencies and omit disabled components from both the
+registry and binary. It controls the parsers a consumer ships. Host probes or
+system-library discovery require a recorded decision in port.md and notes.md;
+do not grow a configure-like shell layer around `build.zig`. Record build time
+and binary size when changing selection machinery, and investigate unexplained
+slowdowns of the default build.
+
 ## Provenance
 
 | File | License | Origin |

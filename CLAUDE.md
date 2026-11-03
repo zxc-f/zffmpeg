@@ -11,14 +11,17 @@ multimedia functionality. Implement algorithms and APIs in Zig; compiling FFmpeg
 `zig cc`, translating headers, or wrapping libav* does not constitute the port.
 
 Current state: the first WAV/PCM path is complete. The `av` module (rooted at
-`zig/root.zig`) exports `pcm`, `audio`, `time`, `wav` (bounded parser and
-known-length writer) and `file` (file and pipe adapters); `zffprobe` is the
-first tool. Tests cover 52 fixtures, process runs of `zffprobe`, and a CI
-comparison against a pinned FFmpeg build. Verification is Linux-only during
-development; Windows and ARM wait for T62–T63. T12a (the AU contract) is next,
-and TODO.md lays out the roadmap through T64. When the state changes, update the current-state
-statements in README.md, port.md ("Status and scope"), the TODO.md introduction
-and this file together.
+`zig/root.zig`) exports `pcm`, `audio`, `time`, `wav` and `au` (bounded parsers
+and known-length writers), and `file` (file and pipe adapters); `zffprobe` is
+the first tool and currently probes WAV. The WAV path covers 52 fixtures,
+process runs of `zffprobe`, and a CI comparison against a pinned FFmpeg build.
+Verification is Linux-only during
+development; Windows and ARM wait for T62–T63. T12a (the AU contract and 29
+fixtures) is verified; the AU parser and writer are implemented but T12b's G5
+verification remains unchecked. Next complete T12b, then T12c and T13;
+TODO.md lays out the roadmap through T64. When the state changes, update the
+current-state statements in README.md, port.md ("Status and scope"), the TODO.md
+introduction and this file together.
 
 ## Writing Zig: use the `zig-0-17` skill
 
@@ -81,6 +84,12 @@ When adding code:
 package manifest and per-file provenance.
 
 ## Where decisions live
+
+Follow [port.md's document authority](port.md#document-authority): contracts
+govern behavior and TODO.md governs task status and evidence. This file is
+agent guidance; reconcile any disagreement with a contract in the same change.
+Record a scope or policy revision in notes.md and update the affected contract,
+task and fixtures together. Silence in one document does not widen support.
 
 - [README.md](README.md): setup, pinned reference clone commands, runnable commands.
 - [zig/README.md](zig/README.md): build graph, version policy, manifest, provenance.
@@ -168,12 +177,21 @@ and existing user changes.
   dependencies; add one only with a recorded decision in port.md.
 - Keep the public Zig API small, typed, and independent of C struct layouts.
   Add any C ABI compatibility later as a separate adapter.
+- Keep one implementation of an algorithm; a second needs a recorded purpose,
+  comparison oracle and retention or retirement condition. Optimized kernels
+  retain their scalar oracle. Give each codec local state; shared infrastructure
+  starts with the consumer named in TODO.md.
 - Pass allocators and I/O dependencies explicitly. Document whether slices and
   frames are borrowed, owned, shared, or transferred, and their lifetimes.
 - `std.Io` belongs at OS boundaries; memory parsing needs only Reader/Writer
   interfaces, and allocation-free kernels need neither an allocator nor I/O.
 - Distinguish malformed input, unsupported functionality, end of stream, and
   backpressure. Preserve timestamp, rounding, draining, and seek semantics.
+- Follow [supported-scope policy](port.md#supported-scope-and-policy) and
+  [CLI policy](port.md#cli-policy): derive time from supported timing rules,
+  preserve missing values, reject unsupported operations before creating output,
+  and expose media-changing defaults as named, documented options. Late parse,
+  write or flush failures remain failures even after partial output.
 - Implement portable scalar behavior first. Add SIMD or architecture-specific
   kernels only with comparisons against the scalar implementation.
 

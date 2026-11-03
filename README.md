@@ -1,22 +1,32 @@
 # zffmpeg
 
 A native Zig multimedia library and tools, developed incrementally from FFmpeg's
-documented behavior and algorithms. The first planned path is signed 16-bit PCM
-in WAV, followed by a small probe tool.
+documented behavior and algorithms, one supported capability at a time.
 
 Current state: the first complete path works. The `av` library reads and writes
 signed 16-bit PCM WAV (bounded parser, known-length writer, file and pipe
 adapters), and the `zffprobe` tool validates a WAV file and reports its stream.
 Both are checked against 52 fixtures and against a pinned FFmpeg build in CI
-(Linux). Other codecs, containers and a conversion tool are still planned;
-[TODO.md](TODO.md) lays out the roadmap. Development is verified on Linux
-only. The compiler is **Zig 0.17.0**, enforced by the build.
+(Linux). The AU contract and its 29 fixtures are verified (T12a); the AU parser
+and writer are implemented, with T12b verification still pending. AU probing
+and a conversion tool follow in T12c and T13; [TODO.md](TODO.md) holds their
+completion evidence and the roadmap. Development is verified on Linux only.
+The compiler is **Zig 0.17.0**, enforced by the build.
+
+Compatibility follows explicit subsets, limits and error contracts. A file
+accepted by FFmpeg may be deliberately rejected here; widening support requires
+a contract and fixture change. A language port alone establishes neither safety
+nor speed: parser checks must work in ReleaseFast, and performance claims need
+measurements. See the [design policy](port.md#supported-scope-and-policy) and
+the [unplanned features](TODO.md#not-planned).
 
 ## Project files
 
-- [port.md](port.md): architecture, supported-subset contracts and verification plan.
+- [port.md](port.md): architecture, supported-subset contracts, design policy and
+  verification plan; also defines [which document owns each decision](port.md#document-authority).
 - [TODO.md](TODO.md): ordered tasks and completion evidence.
-- [notes.md](notes.md): revisable decisions, each with what to change together.
+- [notes.md](notes.md): revisable decisions and their rationale, each with what
+  to change together.
 - [CLAUDE.md](CLAUDE.md): repository guidance for development; [AGENTS.md](AGENTS.md)
   contains only `@CLAUDE.md` so other agents load the same file.
 - [doc/zigimg-reference.md](doc/zigimg-reference.md): pinned zigimg source analysis.
@@ -28,6 +38,8 @@ only. The compiler is **Zig 0.17.0**, enforced by the build.
 - [zig/root.zig](zig/root.zig): root of the `av` library module.
 - [zig/testing/fixtures/README.md](zig/testing/fixtures/README.md): the WAV fixture
   contract (52 fixtures, expected results, decisions, error precedence).
+- [zig/testing/fixtures/au/README.md](zig/testing/fixtures/au/README.md): the AU
+  fixture contract (29 fixtures, parser and detection expectations kept separate).
 - [zig/testing/reference/README.md](zig/testing/reference/README.md): the pinned
   FFmpeg reference build and the recorded comparison results.
 - [zig/format/wav.zig](zig/format/wav.zig), [zig/io/file.zig](zig/io/file.zig),

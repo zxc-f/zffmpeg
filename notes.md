@@ -1,14 +1,45 @@
 # Revisable decisions
 
-Project choices that could reasonably change later. None of them is a fact
-about FFmpeg or Zig; each was picked to keep the first WAV/PCM path small,
-strict and testable. Every entry names where the choice lives, so a change can
-update all of those places together and re-run the affected checks.
+Project choices that could reasonably change later. The choices are project
+policy, informed by the reference behavior and evidence linked below. They keep
+each supported path small, strict and testable. Every entry names where the
+choice lives, so a change can update those places together and re-run the
+affected checks.
 
-Authoritative details stay where they are: the WAV contract in
-[port.md](port.md#first-wav-contract), its fixtures and precedence in the
-[fixture README](zig/testing/fixtures/README.md), tasks in [TODO.md](TODO.md).
+Authoritative details stay where they are: the WAV and AU contracts in
+[port.md](port.md#first-wav-contract), their fixtures and precedence in the
+[WAV](zig/testing/fixtures/README.md) and
+[AU](zig/testing/fixtures/au/README.md) fixture READMEs, tasks in [TODO.md](TODO.md).
 When you make a new revisable decision, add it here in the same change.
+
+## Port design policy
+
+The design review of 2026-11-03 supplied reasons for rules that must remain
+visible as the port grows. These decisions live in the architecture and task
+contracts; this section preserves their rationale without duplicating the
+checklist or its status.
+
+| Decision | Current choice and reason | To change it |
+| --- | --- | --- |
+| Supported surface | Explicit accepted subsets and exclusions. Every additional parser and recovery rule adds maintenance and untrusted-input paths; accepting everything FFmpeg accepts is not a goal. Failed experiments may be removed. | port.md "Supported scope and policy", the affected TODO.md G0 contract, fixture generator/README and reference differences. Excluded features also require revising "Not planned". |
+| Checks and isolation | Check sizes before use in every mode; require named fixtures and a bounded fuzz entry before G5. Component selection should omit unused parsers. A Zig implementation is not a security boundary; applications retain responsibility for process isolation and privileges. | port.md's scope and resource rules, TODO.md coverage rules, T55 and T60. Record the changed bounds and evidence; a unit pass is not a sustained fuzz campaign. |
+| Ownership and diagnostics | Types distinguish ownership where possible; APIs document remaining lifetimes and test failure cleanup. Allocators, I/O and diagnostic sinks are explicit dependencies. Copying an owner is not cloning it. | port.md "Core API and resource rules" and "Streaming state, ownership and time", TODO.md T14/T17a and the affected APIs and tests. |
+| Algorithm duplication | Keep one implementation, specialized only for real variation. A second needs a purpose, comparison oracle and retention or retirement condition. Optimized kernels retain scalar; T24 has one native resampler. Shared contexts must not force unrelated codecs into one state model. | port.md's design goal, the consuming task and its tests; T58 for optimized variants. Follow each infrastructure task's Start-with note. |
+| Time policy | Derive time from supported container/codec rules and integer counts; keep unavailable values null and preserve negative timestamps. Explicit rescaling, wrap handling and smoothing do not imply heuristic repair of broken streams. | port.md's time rules, TODO.md T15/T52 and affected timing vectors; update comparison normalization without hiding missing or negative values. |
+| CLI policy | Library operation matrices govern commands. Reject unsupported combinations before creating output; media-changing defaults are named, documented options. Late parsing, writing and flushing errors remain failures after partial output. | port.md "CLI policy", TODO.md T13/T17a/T53 and process cases, including overwrite and cleanup behavior. T51's compatibility mode stays separate from the stable probe report. |
+| Performance claims | Language choice establishes no speed advantage. Compare against both the C-only oracle and an asm-enabled FFmpeg benchmark build; keep their identities and results separate. SIMD also needs scalar equivalence and a measured gain. | port.md "Verification strategy", TODO.md T57/T58 and benchmark reports. Declare float tolerances before measuring; do not widen them to pass. |
+
+Historical sources explain these choices, rather than establish the port's
+current safety or completion. The
+[2014 Google fuzzing report](https://security.googleblog.com/2014/01/ffmpeg-and-thousand-fixes.html)
+records recurring bounds, pointer, cleanup and initialization failures and
+recommends privilege separation. FFmpeg's pinned
+[undefined-behavior note](https://github.com/FFmpeg/FFmpeg/blob/5d5a38a7e46be296eab75982c0986054f731e19e/doc/undefined.txt)
+explains why signed overflow remains unsafe even on invalid input, and the
+[send/receive contract](https://github.com/FFmpeg/FFmpeg/blob/5d5a38a7e46be296eab75982c0986054f731e19e/libavcodec/avcodec.h)
+requires explicit progress, draining and reset behavior. The response here is
+checked arithmetic and tested contracts; Zig alone supplies neither ownership
+proof nor codec correctness.
 
 ## Toolchain and build
 
@@ -20,6 +51,7 @@ When you make a new revisable decision, add it here in the same change.
 | Package identity | Name `zffmpeg`, version `0.0.0`, toolchain-generated fingerprint. | Version can change freely; the fingerprint changes only for a fork that becomes a separate package. |
 | Package contents | `.paths` lists `build.zig`, `build.zig.zon`, `zig/`, `LICENSE`, `README.md`. `zig/` includes test fixtures and `generate.py`. | Narrow `.paths` if packaging should exclude test data; never use `""`. |
 | Dependencies | None: no package dependencies, C sources, libc or translate-c. | Add one only with a recorded decision in port.md; a C library never counts as ported functionality. |
+| Build policy | `build.zig` and one explicit component catalog as selection grows (T55). No configure-like shell layer or automatic host-library discovery; preserve predictable build time and keep the reference build separate. | Record each host probe or system-library addition in port.md and here; update zig/README.md and T55, with build-time and binary-size measurements. |
 | Example registration | Examples are listed explicitly in `build.zig`; CI fails on an unregistered `zig/examples/*.zig`. | Keep explicit; the CI guard can go if examples move into the `av` test tree. |
 | Test filter | `-Dtest-filter` applies to every test artifact. | `build.zig` option. |
 
@@ -152,6 +184,7 @@ port.md's contract table updated, and (after T06) the parser.
 | Decision | Current choice and reason | To change it |
 | --- | --- | --- |
 | Agent guidance | `CLAUDE.md` is canonical; `AGENTS.md` only contains `@CLAUDE.md`. | Move the content back if a tool cannot follow the import. |
+| Document authority | port.md owns architecture and behavior; fixture READMEs own detailed expectations; TODO.md owns tasks and evidence; this file owns revisable decisions. Agent guidance follows the contracts. Summaries add no completion evidence. | port.md "Document authority", CLAUDE.md and TODO.md together. Resolve conflicting rules before implementation; update the affected contract, task, fixtures and decision in one change. |
 | Style guide precedence | The [`zig-0-17` skill](.claude/skills/zig-0-17/SKILL.md) and its guide govern new Zig, but `CLAUDE.md` wins where they differ. | Either file. |
 | Zig guide as a skill | The Zig 0.17 guide is a project skill (`.claude/skills/zig-0-17/`) rather than a plain document, so Claude Code loads it on every Zig change; CLAUDE.md requires it. `SKILL.md` keeps the workflow, section map and the only copy of the checklist; `references/guide.md` keeps the full guide, so the always-loaded part stays short. | Move `references/guide.md` back to `doc/` and drop the skill, updating CLAUDE.md, README.md, zig/README.md and this row together. |
 
