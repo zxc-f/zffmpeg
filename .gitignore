@@ -7,3 +7,4 @@ zig-out/
 
 # Cross-compiled outputs from CI.
 zig-out-*/
+__pycache__/
