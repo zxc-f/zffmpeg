@@ -171,6 +171,22 @@ pub fn build(b: *std.Build) void {
     if (test_filters.len == 0) {
         for (probe_cases) |case| addProbeCase(b, test_step, probe, case);
     }
+
+    // Test tools for the FFmpeg comparison (zig/testing/reference/compare.py),
+    // kept out of the default install. `zig build test-tools` installs them in
+    // zig-out/bin; `zig build test` compiles them, so a break shows in every mode.
+    const write_driver = b.addExecutable(.{
+        .name = "write-driver",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("zig/testing/write_driver.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "av", .module = av }},
+        }),
+    });
+    const test_tools = b.step("test-tools", "Install the test tools that compare.py runs");
+    test_tools.dependOn(&b.addInstallArtifact(write_driver, .{}).step);
+    test_step.dependOn(&write_driver.step);
 }
 
 fn addProbeCase(b: *std.Build, test_step: *std.Build.Step, probe: *std.Build.Step.Compile, case: ProbeCase) void {

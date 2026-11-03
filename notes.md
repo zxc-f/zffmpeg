@@ -118,6 +118,18 @@ port.md's contract table updated, and (after T06) the parser.
 | Known FFmpeg differences | `compare.py` accepts exactly two metadata differences on accepted fixtures: `channel_layout=unknown` (a plain WAV header has no channel mask) and `duration_ts=N/A` for `empty_data` (FFmpeg reads data size 0 as unknown length). Any other value fails. FFmpeg's verdict on rejected fixtures is recorded, not checked. | `KNOWN_FIELD_DIFFERENCES` and `KNOWN_FIXTURE_DIFFERENCES` in `compare.py`, and the reference README. |
 | Writer verification | FFmpeg decodes the writer-output fixtures, and the writer is tested to produce those exact bytes; that pair stands in for FFmpeg decoding writer output directly. | Add a writer CLI (T13) to feed its output to FFmpeg directly. |
 
+## AU contract and the write driver
+
+| Decision | Current choice and reason | To change it |
+| --- | --- | --- |
+| Writer header | 32 bytes: the 24 header bytes and 8 zero annotation bytes, which is what FFmpeg's AU muxer writes without metadata, with the known data size. Matching it makes our output comparable byte for byte with FFmpeg's seekable output. | `generate.py` (the writer-output fixtures) and the AU writer in T12b; a 24-byte header is also valid. |
+| Data size bound | At most `0x7fffffff`: FFmpeg reads the field as signed and rejects larger sizes, so files we accept or write stay readable by it. Larger sizes are `LimitExceeded`. | The AU contract in `au/README.md` and the fixtures `au_data_size_over_limit`, `au_limit_before_unsupported`. |
+| Annotation | Skipped and ignored, at most 1 MiB (configurable); FFmpeg parses it as metadata, which we do not report yet. | The AU contract; report it when metadata lands (T17b). |
+| Data offset below 24 | `InvalidAu`, although FFmpeg ignores it. | `au_offset_too_small`. |
+| Trailing bytes | Ignored and never read, like bytes after a WAV RIFF extent; FFmpeg decodes them. | `au_trailing_bytes_after_data` and its known decode difference in `compare.py`. |
+| Write driver | A test tool (`zig/testing/write_driver.zig`) installed by `zig build test-tools`, not by the default install: it exists so FFmpeg reads actual Zig output. It reads raw s16le input, at most 1 MiB. | `build.zig`, the CI reference job and `compare.py --writer`. |
+| Not-implemented checks | `compare.py`'s `NOT_IMPLEMENTED` lists checks whose Zig code has not landed; the report shows them separately from passes and skips, and the owning subtask deletes its entry. | `zig/testing/reference/compare.py`. |
+
 ## Probe output
 
 | Decision | Current choice and reason | To change it |

@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LGPL-2.1-or-later
 # Original file for this project.
-"""Generate the WAV fixtures for the first WAV contract (TODO.md T02).
+"""Generate the fixtures for the WAV contract (TODO.md T02) and the AU contract (T12a).
 
-Every fixture is defined in FIXTURES below and built byte by byte with the
-Python standard library, independently of the Zig implementation. From that one
-list this script writes:
+Every fixture is defined below and built byte by byte with the Python standard
+library, independently of the Zig implementation. From those lists this script
+writes:
 
-* wav/<name>.wav       the fixture files
-* manifest.zon         expected results, imported by zig/testing/fixtures.zig
-* README.md            the table between the GENERATED markers
+* wav/<name>.wav       the WAV fixture files
+* manifest.zon         WAV expected results, imported by zig/testing/fixtures.zig
+* README.md            the WAV table between the GENERATED markers
+* au/<name>.au         the AU fixture files
+* au/manifest.zon      AU expected results, imported by zig/testing/fixtures.zig
+* au/README.md         the AU table between the GENERATED markers
 
 Usage, from the repository root:
 
@@ -28,6 +31,9 @@ HERE = pathlib.Path(__file__).resolve().parent
 WAV_DIR = HERE / "wav"
 MANIFEST = HERE / "manifest.zon"
 README = HERE / "README.md"
+AU_DIR = HERE / "au"
+AU_MANIFEST = AU_DIR / "manifest.zon"
+AU_README = AU_DIR / "README.md"
 TABLE_BEGIN = "<!-- BEGIN GENERATED FIXTURE TABLE: edit generate.py, then run it -->\n"
 TABLE_END = "<!-- END GENERATED FIXTURE TABLE -->\n"
 
@@ -308,6 +314,138 @@ def large_skip_vector():
     return riff(fmt_chunk(), chunk(b"LIST", bytes(2 * 1024 * 1024)), data_chunk(MONO[:4]))
 
 
+# --- AU fixtures (T12a) ----------------------------------------------------
+
+# Contract errors from port.md ("AU contract"), mirrored by `au.Failure` in
+# zig/testing/fixtures.zig.
+AU_ERRORS = (
+    "InvalidAu",
+    "InvalidFormat",
+    "Truncated",
+    "UnsupportedFormat",
+    "UnsupportedStreamingSize",
+    "LimitExceeded",
+)
+
+AU_HEADER_LEN = 24
+# The writer's header: the 24 header bytes, then 8 zero annotation bytes, which
+# is what FFmpeg's AU muxer writes when there is no metadata.
+AU_CANONICAL_ANNOTATION = bytes(8)
+AU_UNKNOWN_SIZE = 0xFFFFFFFF
+AU_MAX_DATA = 0x7FFFFFFF
+AU_MAX_ANNOTATION = 1 << 20
+AU_PCM_S16BE = 3
+
+
+def be32(value):
+    return struct.pack(">I", value)
+
+
+def pcm_be(samples):
+    return b"".join(struct.pack(">h", s) for s in samples)
+
+
+def au(data=b"", channels=1, rate=8000, encoding=AU_PCM_S16BE,
+       annotation=AU_CANONICAL_ANNOTATION, offset=None, size=None):
+    """An AU file. `offset` and `size` override the declared header size and data size."""
+    declared_offset = AU_HEADER_LEN + len(annotation) if offset is None else offset
+    declared_size = len(data) if size is None else size
+    header = b".snd" + be32(declared_offset) + be32(declared_size) + be32(encoding) + be32(rate) + be32(channels)
+    return header + annotation + data
+
+
+def build_au_fixtures():
+    canonical = au(pcm_be(MONO))
+    fx = []
+
+    def ok(name, group, rule, data, channels, rate, samples, writer_output=False):
+        fx.append(accepted(name, group, rule, data, channels, rate, samples, writer_output))
+
+    def bad(name, group, rule, data, error):
+        assert error in AU_ERRORS, error
+        fx.append(Fixture(name, group, rule, data, reject=error))
+
+    # Accepted.
+    ok("au_mono_8k", "accepted",
+       "Canonical writer output: 24-byte header, 8 zero annotation bytes, encoding 3, 8 kHz mono.",
+       canonical, 1, 8000, MONO, writer_output=True)
+    ok("au_stereo_44k1", "accepted", "Canonical stereo at 44.1 kHz; samples interleave left/right.",
+       au(pcm_be(STEREO), channels=2, rate=44100), 2, 44100, STEREO, writer_output=True)
+    ok("au_mono_192k_rate_limit", "accepted", "Sample rate exactly at the 192,000 Hz limit.",
+       au(pcm_be(MONO[:4]), rate=MAX_RATE), 1, MAX_RATE, MONO[:4], writer_output=True)
+    ok("au_empty_data", "accepted",
+       "Data size 0 is an empty stream. FFmpeg's content probe needs a nonzero data size, so it does "
+       "not detect this file; forced with `-f au` it reads it.",
+       au(), 1, 8000, [], writer_output=True)
+    ok("au_header_24", "accepted", "Data offset 24: the minimal header, with no annotation.",
+       au(pcm_be(MONO[:4]), annotation=b""), 1, 8000, MONO[:4])
+    ok("au_annotation_text", "accepted",
+       "A 16-byte text annotation (offset 40) is skipped and ignored; FFmpeg reads it as metadata.",
+       au(pcm_be(MONO[:4]), annotation=b"title=AU test\0\0\0"), 1, 8000, MONO[:4])
+    ok("au_annotation_odd_length", "accepted",
+       "A 5-byte annotation (offset 29): the data offset needs no alignment.",
+       au(pcm_be(MONO[:4]), annotation=b"note\0"), 1, 8000, MONO[:4])
+    ok("au_one_frame_stereo", "accepted", "One stereo frame holding both extrema, at 48 kHz.",
+       au(pcm_be([32767, -32768]), channels=2, rate=48000), 2, 48000, [32767, -32768])
+    ok("au_trailing_bytes_after_data", "accepted",
+       "Two samples after the declared data are ignored and never read. FFmpeg decodes them.",
+       au(pcm_be(MONO[:4])) + pcm_be([7, -7]), 1, 8000, MONO[:4])
+
+    # Header.
+    bad("au_empty_input", "header", "Zero-byte input.", b"", "Truncated")
+    bad("au_truncated_header", "header", "Input ends inside the 24-byte header.", canonical[:20], "Truncated")
+    bad("au_bad_magic", "header", "Magic `.sne` instead of `.snd`.", b".sne" + canonical[4:], "InvalidAu")
+    bad("au_offset_too_small", "header",
+        "Data offset 16 is below the 24-byte header. FFmpeg ignores it and reads data from byte 24.",
+        au(pcm_be(MONO[:4]), annotation=b"", offset=16), "InvalidAu")
+    bad("au_annotation_over_limit", "limits",
+        f"Data offset {AU_HEADER_LEN + AU_MAX_ANNOTATION + 1} declares one byte more than the "
+        f"{AU_MAX_ANNOTATION:,}-byte annotation limit; rejected from the header, before any annotation is read.",
+        au(pcm_be(MONO[:4]), annotation=b"", offset=AU_HEADER_LEN + AU_MAX_ANNOTATION + 1), "LimitExceeded")
+    bad("au_truncated_annotation", "header", "Data offset 40, but input ends after 8 annotation bytes.",
+        au(annotation=bytes(8), offset=40, size=8), "Truncated")
+
+    # Data size.
+    bad("au_unknown_size", "size",
+        "Data size 0xffffffff (unknown length) is deferred to T22a. FFmpeg reads to the end of input.",
+        au(pcm_be(MONO[:4]), size=AU_UNKNOWN_SIZE), "UnsupportedStreamingSize")
+    bad("au_data_size_over_limit", "limits",
+        f"Data size 0x80000000 is above the 0x{AU_MAX_DATA:08x} limit that FFmpeg's signed read also enforces.",
+        au(pcm_be(MONO[:4]), size=AU_MAX_DATA + 1), "LimitExceeded")
+    bad("au_data_not_block_aligned", "size", "Stereo data size 6 ends inside a frame.",
+        au(pcm_be(STEREO[:3]), channels=2), "InvalidFormat")
+    bad("au_truncated_data", "size", "Data size 16, but input ends after 10 data bytes.",
+        au(pcm_be(MONO[:5]), size=16), "Truncated")
+    bad("au_truncated_mid_sample", "size", "Data size 8, but input ends inside the third sample.",
+        au(pcm_be(MONO[:4])[:5], size=8), "Truncated")
+
+    # Encoding, rate and channels.
+    bad("au_encoding_mulaw", "format", "Encoding 1 (\u00b5-law) waits for T22a.",
+        au(bytes(4), encoding=1), "UnsupportedFormat")
+    bad("au_encoding_g726", "format", "Encoding 23 (4-bit G.726) waits for T31c.",
+        au(bytes(4), encoding=23), "UnsupportedFormat")
+    bad("au_encoding_unknown", "format", "Encoding 99 is not an AU encoding.",
+        au(bytes(4), encoding=99), "UnsupportedFormat")
+    bad("au_rate_zero", "format", "Sample rate 0.", au(pcm_be(MONO[:4]), rate=0), "InvalidFormat")
+    bad("au_rate_over_limit", "limits", f"Sample rate {MAX_RATE + 1}, one above the limit.",
+        au(pcm_be(MONO[:4]), rate=MAX_RATE + 1), "LimitExceeded")
+    bad("au_channels_zero", "format", "Zero channels.", au(pcm_be(MONO[:4]), channels=0), "InvalidFormat")
+    bad("au_channels3", "format", "Three channels: only mono and stereo are supported.",
+        au(pcm_be(MONO[:6]), channels=3), "UnsupportedFormat")
+
+    # Precedence: the first violated field in header order wins.
+    bad("au_limit_before_unsupported", "precedence",
+        "Data size over the limit and encoding 1: the data size field comes first.",
+        au(bytes(4), encoding=1, size=AU_MAX_DATA + 1), "LimitExceeded")
+    bad("au_unsupported_before_invalid", "precedence",
+        "Encoding 6 (float) and sample rate 0: the encoding field comes first.",
+        au(bytes(4), encoding=6, rate=0), "UnsupportedFormat")
+
+    names = [f.name for f in fx]
+    assert len(names) == len(set(names)), "duplicate AU fixture names"
+    return fx
+
+
 # --- outputs ---------------------------------------------------------------
 
 
@@ -315,10 +453,10 @@ def sha256(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def render_manifest(fixtures):
+def render_manifest(fixtures, entry_note):
     lines = [
         "// Generated by zig/testing/fixtures/generate.py from its FIXTURES list; do not edit.",
-        "// Each entry names wav/<name>.wav; see README.md for the rules and decisions.",
+        entry_note,
         ".{",
     ]
     for f in fixtures:
@@ -351,7 +489,7 @@ def describe(f):
     return f"reject: `{f.reject}`"
 
 
-def render_table(fixtures):
+def render_table(fixtures, extra_rows=()):
     rows = [
         TABLE_BEGIN,
         "| Fixture | Group | Bytes | Expected | Rule | SHA-256 |\n",
@@ -359,28 +497,37 @@ def render_table(fixtures):
     ]
     for f in fixtures:
         rows.append(f"| `{f.name}` | {f.group} | {len(f.data)} | {describe(f)} | {f.rule} | `{sha256(f.data)}` |\n")
+    rows.extend(extra_rows)
+    rows.append(TABLE_END)
+    return "".join(rows)
+
+
+def large_skip_row():
     large = large_skip_vector()
-    rows.append(
+    return (
         f"| `large_skip_2mib` (synthesized, not committed) | accepted | {len(large)} | accept: mono, 8000 Hz, 4 frames "
         f"| A 2 MiB `LIST` chunk before `data` is skipped; skipped bytes do not count toward the 1 MiB retained "
         f"limit. Build it in the test: `fmt ` as in `mono_8k`, then `LIST` with 2,097,152 zero bytes, then `data` "
         f"with the first 4 `mono_8k` samples. | `{sha256(large)}` |\n"
     )
-    rows.append(TABLE_END)
-    return "".join(rows)
 
 
-def render_readme(fixtures):
-    text = README.read_bytes().decode()
+def render_readme(path, table):
+    text = path.read_bytes().decode()
     begin = text.index(TABLE_BEGIN)
     end = text.index(TABLE_END) + len(TABLE_END)
-    return (text[:begin] + render_table(fixtures) + text[end:]).encode()
+    return (text[:begin] + table + text[end:]).encode()
 
 
-def outputs(fixtures):
+def outputs(fixtures, au_fixtures):
     files = {WAV_DIR / f"{f.name}.wav": f.data for f in fixtures}
-    files[MANIFEST] = render_manifest(fixtures)
-    files[README] = render_readme(fixtures)
+    files[MANIFEST] = render_manifest(
+        fixtures, "// Each entry names wav/<name>.wav; see README.md for the rules and decisions.")
+    files[README] = render_readme(README, render_table(fixtures, [large_skip_row()]))
+    files.update({AU_DIR / f"{f.name}.au": f.data for f in au_fixtures})
+    files[AU_MANIFEST] = render_manifest(
+        au_fixtures, "// Each entry names au/<name>.au; see au/README.md for the rules and decisions.")
+    files[AU_README] = render_readme(AU_README, render_table(au_fixtures))
     return files
 
 
@@ -390,9 +537,10 @@ def main():
     args = parser.parse_args()
 
     fixtures = build_fixtures()
-    expected = outputs(fixtures)
+    au_fixtures = build_au_fixtures()
+    expected = outputs(fixtures, au_fixtures)
     stale = [path for path, content in expected.items() if not path.exists() or path.read_bytes() != content]
-    extra = sorted(set(WAV_DIR.glob("*.wav")) - set(expected))
+    extra = sorted((set(WAV_DIR.glob("*.wav")) | set(AU_DIR.glob("*.au"))) - set(expected))
 
     if args.check:
         for path in stale:
@@ -402,15 +550,16 @@ def main():
         if stale or extra:
             print("run: python3 zig/testing/fixtures/generate.py", file=sys.stderr)
             return 1
-        print(f"{len(fixtures)} fixtures, manifest and README table are current")
+        print(f"{len(fixtures)} WAV and {len(au_fixtures)} AU fixtures, manifests and README tables are current")
         return 0
 
     WAV_DIR.mkdir(exist_ok=True)
+    AU_DIR.mkdir(exist_ok=True)
     for path in extra:
         path.unlink()
     for path in stale:
         path.write_bytes(expected[path])
-    print(f"wrote {len(stale)} file(s), removed {len(extra)}; {len(fixtures)} fixtures")
+    print(f"wrote {len(stale)} file(s), removed {len(extra)}; {len(fixtures)} WAV and {len(au_fixtures)} AU fixtures")
     return 0
 
 

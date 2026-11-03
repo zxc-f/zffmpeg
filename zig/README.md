@@ -34,6 +34,7 @@ zig build test -Doptimize=ReleaseSafe
 zig build test -Doptimize=ReleaseFast        # safety checks off; required for parser/size code
 zig build test -Dtest-filter="truncation"    # only tests whose names contain the text
 zig build test --summary all                 # list every step and its test counts
+zig build test-tools                         # install the write driver that compare.py runs
 zig fmt --check build.zig build.zig.zon zig/
 ```
 
@@ -43,9 +44,9 @@ with no matching tests runs zero tests and passes. A filtered run skips the
 `zig-out/` and `.zig-cache/`, both ignored by Git. A single example also still
 runs on its own with `zig test zig/examples/<name>.zig`.
 
-Python 3 (standard library only) is needed only to regenerate the WAV fixtures
-with `python3 zig/testing/fixtures/generate.py`; building and testing do not
-need it.
+Python 3 (standard library only) is needed only to regenerate the WAV and AU
+fixtures with `python3 zig/testing/fixtures/generate.py`; building and testing
+do not need it.
 
 The [Linux CI workflow](../.github/workflows/ci.yml) has two jobs. `linux` runs
 the version check, formatting, the fixture `--check`, a compile-only cross build
@@ -72,14 +73,20 @@ not a test run. Windows and ARM runs wait for TODO.md T62–T63.
   uses to talk to the test runner. The step also runs `zffprobe` as a separate
   process for each entry in `probe_cases` in `build.zig`, checking stdout,
   stderr and the exit status; one case pipes a fixture through standard input
-  to cover non-seekable input.
+  to cover non-seekable input. It also compiles the write driver, so a break
+  shows in every mode.
+- **`test-tools` step:** installs `zig-out/bin/write-driver`, built from
+  [testing/write_driver.zig](testing/write_driver.zig). It writes a media file
+  from raw samples with the `av` writers, so the FFmpeg comparison reads actual
+  Zig output (TODO.md T19a). It is a test tool, not part of the default install.
 - **Examples are registered explicitly** in the `examples` list in `build.zig`.
   CI fails when a file in `examples/` is missing from that list.
 - **Tests inside `av`:** Zig analyzes lazily, so a file's tests run only when
   `root.zig` references that file from a `test` block. Add the reference with
   each new file. `root.zig` already references `testing/fixtures.zig`, which
-  imports `testing/fixtures/manifest.zon` and embeds every fixture, so a missing
-  or changed fixture fails `zig build test`.
+  imports `testing/fixtures/manifest.zon` and `testing/fixtures/au/manifest.zon`
+  and embeds every fixture, so a missing or changed fixture fails
+  `zig build test`.
 - **Targets:** `-Dtarget` and `-Doptimize` come from `standardTargetOptions` and
   `standardOptimizeOption`. The test step runs on the host; cross-target
   compilation needs its own step and is not native-run evidence.
@@ -111,8 +118,9 @@ C compiler play no part in the native build.
 | `zig/format/wav.zig`, `zig/io/file.zig`, `zig/cli/probe.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. FFmpeg's `wavdec.c`, `wavenc.c`, `riffenc.c` and `ffprobe` were read for behavior only; no code is copied. |
 | `zig/testing/reference/build-ffmpeg.sh`, `compare.py` | `LGPL-2.1-or-later` (SPDX header) | Original scripts; they build and run the separate, unmodified FFmpeg reference. |
 | `zig/codec/pcm.zig`, `zig/core/audio.zig`, `zig/core/time.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. Behavior follows FFmpeg's `libavcodec/pcm.c`, `libavutil/mathematics.c`, `channel_layout.h` and `samplefmt.c` at the pinned revision; no code is copied. |
-| `zig/testing/fixtures.zig`, `zig/testing/fixtures/generate.py` | `LGPL-2.1-or-later` (SPDX header) | Original project files. |
+| `zig/testing/fixtures.zig`, `zig/testing/fixtures/generate.py`, `zig/testing/write_driver.zig` | `LGPL-2.1-or-later` (SPDX header) | Original project files. |
 | `zig/testing/fixtures/wav/*.wav`, `manifest.zon` | Generated data | Written by `generate.py`; see the [fixture README](testing/fixtures/README.md#provenance). |
+| `zig/testing/fixtures/au/*.au`, `au/manifest.zon` | Generated data | Written by `generate.py`; see the [AU fixture README](testing/fixtures/au/README.md#provenance). |
 | `.zig-version` | Not applicable | A one-line version marker. |
 | `zig/README.md` | Project documentation | Original. |
 | `zig/examples/*.zig` | `LGPL-2.1-or-later` (SPDX header) | Original examples; see their headers. |

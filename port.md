@@ -648,6 +648,28 @@ keeps tag 1 for the supported rate range; compare samples and metadata with
 FFmpeg, not byte-identical headers. A decoded field match is the compatibility
 goal. Preserve separate fixtures for these intentional differences.
 
+### AU contract
+
+T12 adds a second container through the existing PCM kernels: known-length Sun
+AU with signed 16-bit big-endian PCM (encoding 3). The canonical fixture
+contract, with every rule, the error precedence and the differences from
+FFmpeg, is [zig/testing/fixtures/au/README.md](zig/testing/fixtures/au/README.md).
+In summary:
+
+| Case | Behavior |
+| --- | --- |
+| Header | Six big-endian `u32` fields: `.snd`, data offset, data size, encoding, sample rate, channels. Input shorter than 24 bytes is `Truncated`; a wrong magic or a data offset below 24 is `InvalidAu`. |
+| Annotation | The `offset − 24` bytes after the header are skipped and ignored, at most 1 MiB (`LimitExceeded`, configurable). |
+| Data size | Known length only: `0xffffffff` is `UnsupportedStreamingSize`; sizes above `0x7fffffff`, which FFmpeg's signed read also rejects, are `LimitExceeded`; it must hold whole frames (`InvalidFormat`); 0 is an empty stream. |
+| Encoding, rate, channels | Encoding 3 only (`UnsupportedFormat`); rate 0 is `InvalidFormat`, above 192 kHz `LimitExceeded`; 0 channels `InvalidFormat`, more than 2 `UnsupportedFormat`. |
+| Data and trailing bytes | Input ending inside the data is `Truncated`; bytes after the data are ignored and never read. |
+| Writer | One canonical 32-byte header (the 24 header bytes and 8 zero annotation bytes, as FFmpeg's AU muxer writes without metadata) with the known data size, checked before output. |
+
+The errors share the WAV contract's names where the meaning matches, plus
+`InvalidAu` for a malformed AU header. Parser acceptance and automatic format
+detection are observable separately: FFmpeg's content probe does not detect an
+AU file whose data size is 0, although its parser reads it.
+
 ### Initial probe output
 
 T09's `zffprobe` reports stable UTF-8 `key=value` lines, in this order:

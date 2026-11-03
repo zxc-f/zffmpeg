@@ -20,9 +20,10 @@ src="$root/.references/ffmpeg"
 build="$root/.references/ffmpeg-build"
 
 # Every component is disabled, then only these are enabled: the file and pipe
-# protocols, the WAV demuxer, the s16le PCM decoder and encoder, the raw s16le
-# muxer, and the aresample filter. The ffmpeg program selects the few filters
-# it always needs. No GPL, nonfree, external or hardware components.
+# protocols, the WAV and AU demuxers, the s16le and s16be PCM decoders, the
+# s16le PCM encoder, the raw s16le muxer, and the aresample filter. The ffmpeg
+# program selects the few filters it always needs. No GPL, nonfree, external
+# or hardware components.
 configure_args=(
     --cc=clang
     --disable-everything
@@ -33,8 +34,8 @@ configure_args=(
     --disable-ffplay
     --disable-avdevice
     --enable-protocol=file,pipe
-    --enable-demuxer=wav
-    --enable-decoder=pcm_s16le
+    --enable-demuxer=wav,au
+    --enable-decoder=pcm_s16le,pcm_s16be
     --enable-encoder=pcm_s16le
     --enable-muxer=pcm_s16le
     --enable-filter=aresample

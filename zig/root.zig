@@ -30,6 +30,6 @@ test {
     _ = @import("core/time.zig");
     _ = @import("format/wav.zig");
     _ = @import("io/file.zig");
-    // Test-only files: the WAV fixture contract and its integrity checks.
+    // Test-only files: the WAV and AU fixture contracts and their integrity checks.
     _ = @import("testing/fixtures.zig");
 }
