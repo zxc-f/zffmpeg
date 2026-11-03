@@ -8,3 +8,8 @@
 //!
 //! Zig analyzes files lazily, so tests run only in files this module imports.
 //! When a file with tests is added, reference it from a `test` block here.
+
+test {
+    // Test-only files: the WAV fixture contract and its integrity checks.
+    _ = @import("testing/fixtures.zig");
+}
