@@ -1,5 +1,5 @@
-# Linux-only checks for the Zig package. Native Windows CI is deferred; see
-# TODO.md (T11).
+# Linux checks for the Zig package and the FFmpeg reference comparison. Native
+# Windows CI is deferred; other targets are compiled but not run (TODO.md T11).
 name: CI
 
 on:
@@ -64,3 +64,61 @@ jobs:
 
       - name: Test (ReleaseFast)
         run: zig build test -Doptimize=ReleaseFast --summary all
+
+      # Compile-only: cross builds are not native-run evidence.
+      - name: Cross-compile without running
+        run: |
+          for target in x86_64-windows-gnu aarch64-linux-musl aarch64-macos; do
+            zig build -Dtarget="$target" -Doptimize=ReleaseSafe -p "zig-out-$target" --summary all
+          done
+
+  reference:
+    name: FFmpeg reference (Linux, Clang)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+
+      - name: Record the environment
+        run: |
+          uname -srm
+          . /etc/os-release && echo "$PRETTY_NAME"
+          clang --version | head -n 1
+          make --version | head -n 1
+          python3 --version
+          echo "zig $(zig version)"
+
+      - name: Restore the FFmpeg reference build
+        id: ffmpeg-cache
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: .references/ffmpeg-install
+          key: ffmpeg-reference-ubuntu-24.04-${{ hashFiles('zig/testing/reference/build-ffmpeg.sh') }}
+
+      - name: Build the FFmpeg reference (T03)
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        run: bash zig/testing/reference/build-ffmpeg.sh .references/ffmpeg-install
+
+      - name: Record the reference build
+        run: |
+          prefix=.references/ffmpeg-install
+          "$prefix/bin/ffmpeg" -hide_banner -version
+          echo "commit $(cat "$prefix/share/zffmpeg-reference/commit.txt")"
+          sha256sum "$prefix/bin/ffmpeg" "$prefix/bin/ffprobe" "$prefix/share/zffmpeg-reference/config.log"
+          echo "fixtures $(cat zig/testing/fixtures/wav/*.wav | sha256sum)"
+
+      - name: Build zffprobe
+        run: zig build -Doptimize=ReleaseSafe
+
+      - name: Compare with the reference (T10)
+        run: |
+          python3 zig/testing/reference/compare.py \
+            --ffmpeg .references/ffmpeg-install/bin/ffmpeg \
+            --ffprobe .references/ffmpeg-install/bin/ffprobe \
+            --zffprobe zig-out/bin/zffprobe \
+            --report reference-report.md
+          cat reference-report.md >> "$GITHUB_STEP_SUMMARY"
