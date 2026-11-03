@@ -4,15 +4,15 @@ This is the execution checklist for [port.md](port.md). The plan explains the
 architecture and compatibility rules; this file records the work to do next.
 The repository tracks project documentation, the minimal Zig package and build
 (the `av` module, documented in [zig/README.md](zig/README.md)), the WAV fixture
-contract ([zig/testing/fixtures](zig/testing/fixtures/README.md)), two tested
-standalone Zig examples and a Linux CI workflow. FFmpeg and zigimg are
+contract ([zig/testing/fixtures](zig/testing/fixtures/README.md)), PCM s16
+kernels and audio/time types in the `av` module, a tested standalone I/O example
+and a Linux CI workflow. FFmpeg and zigimg are
 independent clones in ignored `.references/`; see
 [README.md](README.md#clone-the-reference-repositories) for setup. There is no
 codec/container implementation yet.
 
-**Next tasks: T04 — PCM sample conversion kernels, T05 — audio/time types (both
-unblocked by T01 and T02), and T03 — the C reference setup, which runs
-independently.**
+**Next tasks: T06 — the bounded WAV parser (unblocked by T02 and T05), and T03 —
+the C reference setup, which runs independently. T07 follows T04 and T06.**
 
 Work through the first WAV/PCM path before expanding the framework. Tasks have
 stable IDs for references. Check an item only when its completion criteria are
@@ -35,8 +35,7 @@ agree with the [first WAV contract](port.md#first-wav-contract).
   Evidence: [CLAUDE.md](CLAUDE.md) (formerly AGENTS.md) and [port.md](port.md).
 - [x] Validate the illustrative PCM kernel with Zig 0.17.0.
   Evidence: both documentation-example tests and formatting passed; this is not
-  an implemented codec. The kernel now lives in [pcm_s16.zig](zig/examples/pcm_s16.zig)
-  and runs in Linux CI. See [the example](port.md#example-one-pcm-kernel-two-byte-orders).
+  an implemented codec. T04 later promoted it to [zig/codec/pcm.zig](zig/codec/pcm.zig). See [the example](port.md#example-one-pcm-kernel-two-byte-orders).
 - [x] Clone and inspect zigimg as a Zig implementation reference.
   Evidence: [pinned analysis](doc/zigimg-reference.md), commit `083d0304840a3f5fd547c2e2005148a18886c401`;
   its focused I/O suite passed 15/15 tests with Zig 0.17.0.
@@ -140,7 +139,7 @@ agree with the [first WAV contract](port.md#first-wav-contract).
   retain a scalar implementation and document ownership/overlap rules. Done
   when independent vectors cover signed extrema, empty input, incomplete
   samples, insufficient output and the documented failure-mutation behavior.
-  Promote the kernel/tests from [pcm_s16.zig](zig/examples/pcm_s16.zig) into
+  Promote the kernel/tests from `zig/examples/pcm_s16.zig` into
   `zig/codec/pcm.zig` and update the port.md source link; record applicable
   per-file license/provenance.
 

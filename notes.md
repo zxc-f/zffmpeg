@@ -78,6 +78,21 @@ port.md's contract table updated, and (after T06) the parser.
 | Header format | Always a 16-byte tag-1 `fmt `, including above 48 kHz where FFmpeg writes WAVE_FORMAT_EXTENSIBLE. Compare decoded samples and metadata with FFmpeg, not header bytes. | Writer-output fixtures (`stereo_96k_tag1`, `mono_192k_rate_limit`) and T08. |
 | Known length | The frame count is required up front; exact sizes are written with no seeking or placeholder sizes. | T08; streaming output would need seekable writers or placeholder patching. |
 
+## PCM, audio and time types
+
+| Decision | Current choice and reason | To change it |
+| --- | --- | --- |
+| Public API shape | `zig/root.zig` exports flat namespaces `av.pcm`, `av.audio` and `av.time`. | Reorganize before external users depend on the names. |
+| PCM kernel API | `decodeS16` / `encodeS16` over caller slices, byte order as a `comptime` parameter (both orders exist). Scalar only; no SIMD yet. | Add SIMD kernels only with comparisons against the scalar ones (port.md). |
+| Kernel failures | A failing call writes nothing; input and output must not overlap, asserted only in Debug and ReleaseSafe. | `zig/codec/pcm.zig` docs and tests. |
+| Rounding | Callers always pass a `Rounding`; there is no implicit default. FFmpeg's `av_rescale_q` uses `nearest`. | Add a defaulting helper in `zig/core/time.zig` if call sites repeat `.nearest`. |
+| Rescale edge cases | Exact `i128` arithmetic. Overflow is `error.Overflow` (FFmpeg returns INT64_MIN) and `minInt(i64)` rescales exactly (FFmpeg treats it as -INT64_MAX). | `rescale` and its tests; T03/T10 differential checks should expect these two differences. |
+| Time-base range | `TimeBase` has positive `u32` fields, unlike FFmpeg's signed `int` `AVRational`; negative or zero time bases are rejected. | Widen the fields if a format needs time bases beyond `u32`. |
+| Missing timestamps | `?i64` (`null`), never a sentinel such as `AV_NOPTS_VALUE`. | Every API that carries timestamps. |
+| Channel layouts | Only `mono` (front center, as in FFmpeg) and `stereo` (front left, front right). Other counts are `UnsupportedChannelCount`. | Add layouts with their channel order when a format needs them. |
+| Sample-rate policy | `audio.Format` accepts any nonzero `u32` rate; the 192 kHz cap is WAV-parser policy. | Keep limits in the parser's configurable options. |
+| Example promotion | The former `zig/examples/pcm_s16.zig` was moved into `zig/codec/pcm.zig`; examples now cover only I/O patterns. | Re-add examples only for patterns not shown by library code. |
+
 ## Probe output
 
 | Decision | Current choice and reason | To change it |
