@@ -67,7 +67,7 @@ with the install prefix and:
 --disable-network --disable-x86asm --disable-ffplay --disable-avdevice
 --enable-protocol=file,pipe --enable-demuxer=wav,au
 --enable-decoder=$pcm_codecs --enable-encoder=$pcm_codecs
---enable-muxer=pcm_s16le --enable-filter=aresample
+--enable-muxer=wav --enable-filter=aresample
 
 pcm_codecs=pcm_u8,pcm_s8,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,
   pcm_s32be,pcm_s64le,pcm_s64be,pcm_f32le,pcm_f32be,pcm_f64le,pcm_f64be,
@@ -77,7 +77,9 @@ pcm_codecs=pcm_u8,pcm_s8,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,
 Everything is disabled and then only what the comparison needs is enabled: the
 file and pipe protocols, the WAV and AU demuxers (T12a added AU), the PCM
 decoders and encoders T20b compares (T20b widened them from s16 alone), the
-raw s16le muxer for `-f s16le` output, and the `aresample` filter for the
+WAV muxer, through which `compare.py` takes FFmpeg's decoded samples in each
+stream's storage format (T21a; it replaced the raw s16le muxer), and the
+`aresample` filter for the
 `ffmpeg` program's audio filter graph. The program itself selects the few other
 filters it always needs. There are no GPL, nonfree, external-library or
 hardware components, and autodetection is off. `--disable-x86asm` keeps the C
@@ -120,12 +122,13 @@ not from the Zig code or from FFmpeg. `compare.py` first checks that every
 fixture file exists and matches `generate.py`; a missing or changed fixture
 fails the run. No optional external corpus is used, so nothing is skipped.
 
-- **Accepted WAV fixtures.** `ffprobe` must report `format_name=wav`,
-  `codec_name=pcm_s16le`, `sample_fmt=s16` and the expected `channels`,
-  `channel_layout`, `sample_rate`, `time_base` (`1/rate`) and `duration_ts`
-  (frames). `ffmpeg -f s16le` must decode exactly the expected samples, compared
-  byte for byte. `zffprobe` must exit 0 with exactly the expected nine-line
-  report.
+- **Accepted WAV fixtures.** `ffprobe` must report `format_name=wav`, the
+  fixture's `codec_name` and storage `sample_fmt` (`s32` for 24-bit, as FFmpeg
+  stores it), and the expected `channels`, `channel_layout`, `sample_rate`,
+  `time_base` (`1/rate`) and `duration_ts` (frames). `ffmpeg` must decode
+  exactly the expected samples in that storage format (written with
+  `-c:a pcm_<storage>le -f wav`, compared byte for byte, float bits included).
+  `zffprobe` must exit 0 with exactly the expected nine-line report.
 - **Rejected WAV fixtures.** `zffprobe` must exit with the contract's status and end
   its diagnostic with the contract's error name. FFmpeg's own verdict is
   recorded but not checked, because the contract is deliberately stricter.
@@ -140,7 +143,8 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   sends a file without the `.snd` magic to the WAV parser (`au_bad_magic`
   reports `InvalidRiff`).
 - **Zig-written files.** The write driver writes every WAV and AU
-  writer-output stream from raw samples. Each file must equal its fixture byte
+  writer-output stream from raw samples, in its codec (T21a: every WAV
+  encoding, plain and extensible). Each file must equal its fixture byte
   for byte, and FFmpeg must decode it to the expected samples and stream.
 - **zffmpeg (T13b).** Every accepted WAV and AU fixture is converted in each
   supported cell of the operation matrix (transcode to WAV, transcode to AU,
@@ -184,6 +188,25 @@ section above gave the same counts, and:
   (21 accepted fixtures in 3 cells each).
 - Copies across codecs rejected before any output: **21/21**.
 
+T21a widened the WAV contract to every WAV PCM encoding and made the reference
+build include the WAV muxer. Its first run, locally on Windows at commit
+`2cf3a3f` with MSYS2 UCRT64 clang 23.1.4, reported:
+
+- Accepted WAV fixtures matching FFmpeg and zffprobe: **27/27** (u8, s16,
+  s24, s32, s64, f32, f64, A-law and mu-law, plain and extensible).
+- Rejected WAV fixtures with the contract's zffprobe status: **49/49**; FFmpeg
+  accepts 29/49 (recorded, not checked), among them `fmt_bits12`,
+  `fmt_alaw_bits16`, `fmt_s24_block_align_mismatch`,
+  `extensible_valid_bits_mismatch` and `extensible_mask_mismatch`.
+- AU: **9/9** and **20/20**, unchanged.
+- Zig-written files FFmpeg reads as expected: **17/17** (13 WAV, every
+  encoding; 4 AU), each equal to its fixture. Extensible outputs report
+  `mono`/`stereo` exactly: the channel mask is written.
+- zffmpeg outputs FFmpeg reads as expected, equal through pipes: **90/90**;
+  unsupported cells (copy across containers, transcoding samples not stored as
+  s16) rejected before any output: **54/54**.
+- Fixtures whose pipe result equals the file result: **105/105**.
+
 T20b enabled every PCM decoder and encoder it compares. Rebuilt that way,
 locally on Windows with MSYS2 UCRT64 clang 23.1.4, the comparison gave the
 same counts everywhere except FFmpeg's recorded verdicts: it now accepts
@@ -193,6 +216,11 @@ verdicts are recorded, not checked; every check still passed. The T20a and
 T20b vector generators reproduced their committed files.
 
 ### Accepted WAV fixtures
+
+This table records run 41660265753, before T21a. Since T21a, `fmt_extensible`,
+`fmt_float32` and `fmt_bits24` are accepted and 24 fixtures were added; the
+fixture README lists them all, and `compare.py --report` writes the current
+per-fixture table (results above).
 
 FFmpeg decodes the same samples as the contract for every accepted fixture, and
 `ffprobe` agrees on every compared field except the known differences below.
@@ -247,6 +275,11 @@ that its own writer would emit as WAVE_FORMAT_EXTENSIBLE. The same metadata
 differences as for the fixtures apply.
 
 ### Rejected WAV fixtures
+
+This table records run 41660265753, before T21a. Since T21a, `fmt_extensible`,
+`fmt_float32` and `fmt_bits24` are accepted and 24 fixtures were added; the
+fixture README lists them all, and `compare.py --report` writes the current
+per-fixture table (results above).
 
 `zffprobe` gave the contract's status and error name for all 40. FFmpeg's
 verdict, recorded for reference:

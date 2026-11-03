@@ -4,7 +4,8 @@ A native Zig multimedia library and tools, developed incrementally from FFmpeg's
 documented behavior and algorithms, one supported capability at a time.
 
 Current state: two complete paths work. The `av` library reads and writes
-signed 16-bit PCM in WAV and in Sun AU (bounded parsers, known-length writers,
+every WAV PCM encoding (u8, 16- to 64-bit integers, float, A-law, mu-law, plain
+or WAVE_FORMAT_EXTENSIBLE) and signed 16-bit PCM in Sun AU (bounded parsers, known-length writers,
 file and pipe adapters), and the `zffprobe` tool detects WAV or AU from the
 content, validates the file and reports its stream. Both are checked against
 52 WAV and 29 AU fixtures and against a pinned FFmpeg build in CI (Linux). The

@@ -10,7 +10,8 @@ This standalone repository is becoming a native Zig implementation of FFmpeg's
 multimedia functionality. Implement algorithms and APIs in Zig; compiling FFmpeg's C with
 `zig cc`, translating headers, or wrapping libav* does not constitute the port.
 
-Current state: the WAV and AU PCM paths are complete (T01–T12). The `av`
+Current state: the WAV and AU PCM paths are complete (T01–T12), WAV with every
+PCM encoding, plain or extensible (T21a). The `av`
 module (rooted at `zig/root.zig`) exports `pcm` (the PCM encodings,
 kernels and s16 decoder/encoder stages), `audio`, `time`, `samples` (decoded sample storage
 for every sample format), `packet`, `frame`, `stage` (the send/receive
@@ -23,9 +24,9 @@ between them. Tests cover 52 WAV and 29 AU fixtures, process runs of both
 tools, and a CI comparison against a pinned FFmpeg build that also reads
 every `zffmpeg` output. Verification is Linux-only during development; Windows
 and ARM wait for T62–T63. T13, T14a (packets, frames and stages), T20a
-(decoded sample storage) and T20b (the PCM encodings) are verified; T21a (WAV
-extensible headers and encodings) is next, and TODO.md lays out the roadmap
-through T64. When the state changes, update the current-state statements in
+(decoded sample storage), T20b (the PCM encodings) and T21a (WAV extensible
+headers and encodings) are verified; T21b (RF64, Wave64, unknown length) is
+next, and TODO.md lays out the roadmap through T64. When the state changes, update the current-state statements in
 README.md, port.md ("Status and scope"), the TODO.md introduction and this file
 together.
 

@@ -19,9 +19,9 @@ T12 is verified: the AU contract and 29 fixtures (T12a), the AU parser and
 writer (T12b) and AU in `zffprobe` with content detection (T12c). T13 is verified too: the
 synchronous conversion pipeline (`av.convert`, T13a) and the `zffmpeg`
 command (T13b). T14a, packets, frames and send/receive stages, T20a, decoded sample storage,
-and T20b, the PCM encodings, are verified. **Next: T21a, WAV's extensible
-headers and encodings; T16 starts with the first third format. See
-[Near-term order](#near-term-order).**
+T20b, the PCM encodings, and T21a, WAV's extensible headers and encodings,
+are verified. **Next: T21b, RF64/BW64, Wave64 and unknown-length WAV; T16
+starts with the first third format. See [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
 [How tasks are completed](#how-tasks-are-completed) describes. Tasks and
@@ -1160,7 +1160,7 @@ names, not as an empty framework.
   s16le, s24le, s32le or s64le; tag 3 to f32le or f64le; tag 6 A-law; tag 7
   µ-law; and the same as extensible subformats. Big-endian and planar PCM are
   not WAV encodings; RIFX stays rejected unless a decision adds it.
-  - [ ] **T21a — Extensible headers and the WAV encodings.** Needs T20b.
+  - [x] **T21a — Extensible headers and the WAV encodings.** Needs T20b.
     WAVE_FORMAT_EXTENSIBLE (channel masks, subformat GUIDs) and the encodings
     above; the writer chooses extensible where `riffenc.c` does. Revise the
     [first WAV contract](port.md#first-wav-contract) and its fixtures through
@@ -1168,6 +1168,61 @@ names, not as an empty framework.
     accepted, and remaining intentional differences stay.
     Done when every encoding in the table demuxes and muxes against the
     reference, and the formerly rejected fixtures match FFmpeg's output.
+
+    ```text
+    ID / parent: T21a / T21
+    State: verified
+    Supported behavior and explicit exclusions: the WAV encodings (tag 1 at
+      8/16/24/32/64 bits, tag 3 at 32/64, A-law, mu-law), plain or extensible,
+      mono or stereo, read and written; zffprobe reports them; zffmpeg copies
+      them within WAV. Excluded: odd bit depths, partial valid bits, other
+      channel masks (T23b), RF64/W64/unknown length (T21b), metadata (T21c),
+      transcoding samples not stored as s16 (T23a).
+    Needs (verified) / lands with / verified after: T20b (verified); alone.
+    Contract and source provenance: port.md "First WAV contract" (revised),
+      zig/testing/fixtures/README.md (encodings, decisions, precedence),
+      notes.md "WAV contract" and "Writer"; riffdec.c, riffenc.c, wavenc.c
+      read for behavior. Original code.
+    Required fixtures / optional corpus: the 76 WAV fixtures (27 accepted,
+      13 writer outputs, 49 rejected); the three formerly rejected ones are
+      now accepted. No optional corpus.
+    Ownership, state transitions and limits: unchanged: no allocation,
+      sequential, the same chunk and rate limits.
+    Comparison rule and intentional differences: FFmpeg decodes every
+      accepted fixture and every Zig-written file to the same storage-format
+      samples (bit for bit, floats included) and stream fields, with
+      channel_layout=unknown only for plain headers; FFmpeg's verdicts on
+      rejected fixtures are recorded.
+    Implementation files and test entry points: zig/format/wav.zig (parser,
+      writer, headerLen), detect.zig (codec), convert.zig (matrix),
+      probe.zig, write_driver.zig, generate.py, compare.py; tests in wav.zig,
+      convert.zig, file.zig; probe and convert cases in build.zig.
+    Evidence commit / Linux CI run / reference report: 2cf3a3f / local
+      Windows runs instead (below) / local compare.py run (below).
+    Required cases: passed 76/76 WAV fixtures and 17/17 writer files
+      against FFmpeg / failed 0 / missing 0.
+    Optional cases: none.
+    Fuzz seeds, budget and result: wav.zig's and convert.zig's entries gained
+      s24, f64 and A-law seeds; run under zig build test. No sustained run.
+    Remaining work or blocker / next action: none; T21b is next.
+    ```
+
+    Evidence (G5, local Windows runs with Zig 0.17.0 count as completion
+    evidence, by the project owner's decision): implementation commit
+    `2cf3a3f`. `zig build test` passed 80/80 steps in Debug, ReleaseSafe and
+    ReleaseFast (`av` 113 tests, 28 `zffprobe` and 39 `zffmpeg` process
+    runs); fmt, `generate.py --check`, the cross builds and a Linux type
+    check passed. The reference, rebuilt with the WAV muxer, ran `compare.py`:
+    27/27 accepted WAV fixtures (all nine encodings, plain and extensible)
+    decode in FFmpeg to the expected storage-format samples and fields, and
+    `zffprobe` reports each; the formerly rejected `fmt_extensible`,
+    `fmt_float32` and `fmt_bits24` among them; 49/49 rejected fixtures give
+    the contract's status; FFmpeg reads 17/17 files the write driver wrote
+    (13 WAV across every encoding, each equal to its writer-output fixture);
+    90/90 `zffmpeg` outputs read correctly and 54/54 unsupported cells fail
+    before output; 105/105 pipe results equal the file results. Writing the
+    µ-law fixture found that its negative zero cannot be writer output; the
+    fixture leaves it out, as recorded.
   - [ ] **T21b — RF64/BW64, Wave64 and unknown-length input.** Needs T21a.
     `ds64` reading and writing past 4 GiB, Sony Wave64, and unknown-length
     input read to the end of the stream behind an option.
