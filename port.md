@@ -2,17 +2,18 @@
 
 ## Status and scope
 
-Initialized on 2026-11-02. Current deliverables are the design, checklist, the
-minimal Zig package and build ([build.zig](build.zig), the `av` module rooted at
-[zig/root.zig](zig/root.zig), documented in [zig/README.md](zig/README.md)), the
-`av` module's first features ([PCM s16 kernels](zig/codec/pcm.zig) and
-[audio](zig/core/audio.zig) and [time](zig/core/time.zig) types), a tested
-standalone [I/O example](zig/examples/io_patterns.zig) and a Linux CI workflow. This
-standalone repository tracks the port's own files. FFmpeg in `.references/ffmpeg`
-remains the behavioral reference. The first WAV contract has named fixtures with
-expected results ([zig/testing/fixtures](zig/testing/fixtures/README.md)). There
-is no container parser or writer and no command-line tool yet; WAV support starts
-with T06.
+Initialized on 2026-11-02. The first complete path, signed 16-bit PCM in WAV,
+works: the `av` module ([build.zig](build.zig), rooted at
+[zig/root.zig](zig/root.zig), documented in [zig/README.md](zig/README.md)) has
+[PCM s16 kernels](zig/codec/pcm.zig), [audio](zig/core/audio.zig) and
+[time](zig/core/time.zig) types, a bounded [WAV parser and known-length
+writer](zig/format/wav.zig) and [file and pipe adapters](zig/io/file.zig), and
+[zffprobe](zig/cli/probe.zig) is the first tool. The first WAV contract has named
+fixtures with expected results ([zig/testing/fixtures](zig/testing/fixtures/README.md)),
+and CI compares them with a pinned FFmpeg build
+([zig/testing/reference](zig/testing/reference/README.md)). This standalone
+repository tracks the port's own files. FFmpeg in `.references/ffmpeg` remains
+the behavioral reference. Native Windows runs are outstanding (T11); T12 is next.
 
 The goal is a native Zig multimedia library and tools, built incrementally from
 FFmpeg's functionality. Use idiomatic Zig APIs and explicit resource ownership.
@@ -189,17 +190,16 @@ zig/
     time.zig                 # existing: time bases and FFmpeg-compatible rescaling
     audio.zig                # existing: layouts, sample/stream formats, borrowed samples
   io/                        # thin adapters over standard-library I/O
-    file.zig
+    file.zig                 # existing: file and pipe adapters for the WAV path
   codec/
     pcm.zig                  # existing: s16 kernels; grow a directory when needed
   format/
-    wav.zig                  # bounded RIFF chunks, PCM stream metadata and I/O
+    wav.zig                  # existing: bounded parser and known-length writer
   cli/
-    probe.zig                # first tool: zffprobe
+    probe.zig                # existing: first tool, zffprobe
   testing/                   # native tests; FFmpeg tests stay in its clone
     fixtures.zig             # existing: typed fixture manifest and integrity tests
-    integration.zig
-    differential.zig
+    reference/               # existing: FFmpeg reference build and comparison scripts
     fixtures/                # existing: tiny fixtures; README.md is their contract
 ```
 
@@ -682,20 +682,22 @@ well as the source revision. Save reference commands, executable/input hashes
 and expected results so comparisons are reproducible. Clang is a reference-build
 choice; the Zig implementation does not require translating Clang's output.
 
-T03 establishes a Linux x86-64 reference recipe (pinned container or WSL plus
-recorded Clang/tool versions) in `zig/testing/reference/README.md`, building the
-pinned `.references/ffmpeg` clone. Validate a minimal configuration enabling
-WAV/PCM, raw s16le output, file/pipe protocols and
-the CLI/filter dependencies needed by the comparison commands. Record the
-working configure command and config log; do not present an untested command
-copied from a review as a reproducible build. Compare exact decoded samples and
-normalized fields from reference `ffprobe` output, not its whole JSON verbatim.
+T03 established the Linux x86-64 reference recipe in
+[zig/testing/reference](zig/testing/reference/README.md): `build-ffmpeg.sh`
+builds the pinned `.references/ffmpeg` clone with Clang and a minimal LGPL
+configuration (WAV/PCM, raw s16le output, file/pipe protocols and the filters
+the `ffmpeg` program needs), and CI's `reference` job runs it in a pinned
+GitHub-hosted Ubuntu image, recording the tool versions, configure command,
+`config.log` and binary hashes. `compare.py` compares exact decoded samples and
+normalized `ffprobe` fields, not whole output verbatim. Keep that recipe as the
+only reference build; do not present an untested command as reproducible.
 
 The reference FFmpeg [.forgejo workflow](https://github.com/FFmpeg/FFmpeg/blob/5d5a38a7e46be296eab75982c0986054f731e19e/.forgejo/workflows/test.yml) primarily uses
 Linux runners and also executes Windows binaries through Wine. Its broad FATE
 configuration enables GPL/nonfree components. This project instead uses a
 dedicated minimal GitHub Actions [Linux workflow](.github/workflows/ci.yml),
-which currently checks the standalone examples and grows with T01 and T11.
+which builds and tests the package in every mode and runs the reference
+comparison.
 Native Windows CI is deferred; until a Windows job exists, Windows evidence
 comes only from recorded local runs. Neither Wine nor a cross-compile
 substitutes for a native run.
@@ -825,15 +827,17 @@ Only mark a feature verified after its acceptance evidence exists.
 | Project guidance and architecture | Implemented | `CLAUDE.md` (imported by `AGENTS.md`) and this file. |
 | Standalone Zig I/O example | Verified | Original [source](zig/examples/io_patterns.zig); formatting and 6/6 tests per mode in Debug, ReleaseSafe and ReleaseFast on native Windows, Zig 0.17.0. A seventh test, for the file adapter's retained `.err`, was added later; all 7 tests passed per mode in [Linux CI run 41544372319](https://github.com/zxc-f/zffmpeg/actions/runs/41544372319), Zig 0.17.0, but have not been rerun on Windows. Individual fields only; no media parser, allocations or optimization claims. Provenance and reference evidence: [zigimg analysis](doc/zigimg-reference.md). |
 | PCM s16 kernels | Verified | [zig/codec/pcm.zig](zig/codec/pcm.zig), promoted from the former `zig/examples/pcm_s16.zig` example (T04). Original, `LGPL-2.1-or-later`; behavior follows `libavcodec/pcm.c`. Exhaustive `i16` round trip and fixture cross-check passed in [run 41553566007](https://github.com/zxc-f/zffmpeg/actions/runs/41553566007). Scalar only. |
-| Linux CI | Implemented | [Workflow](.github/workflows/ci.yml) on `ubuntu-24.04` requires `zig version` 0.17.0, checks `zig fmt` on `build.zig`, `build.zig.zon` and `zig/` and that every example is registered in `build.zig`, runs `zig build` in Debug and ReleaseSafe and `zig build test` in Debug, ReleaseSafe and ReleaseFast. First example-only pass: [run 41544372319](https://github.com/zxc-f/zffmpeg/actions/runs/41544372319); first build/test pass: [run 41548960006](https://github.com/zxc-f/zffmpeg/actions/runs/41548960006). Native Windows CI is deferred. |
+| Linux CI | Implemented | [Workflow](.github/workflows/ci.yml) on `ubuntu-24.04`. The `linux` job requires `zig version` 0.17.0, checks `zig fmt` on `build.zig`, `build.zig.zon` and `zig/`, that the fixtures are current and that every example is registered, runs `zig build` in Debug and ReleaseSafe and `zig build test` (unit tests and `zffprobe` process runs) in Debug, ReleaseSafe and ReleaseFast, and cross-compiles for x86_64-windows-gnu, aarch64-linux-musl and aarch64-macos without running. The `reference` job builds the pinned FFmpeg and runs the comparison (see the FFmpeg reference row). First example-only pass: [run 41544372319](https://github.com/zxc-f/zffmpeg/actions/runs/41544372319); first build/test pass: [run 41548960006](https://github.com/zxc-f/zffmpeg/actions/runs/41548960006); both jobs: [run 41557971301](https://github.com/zxc-f/zffmpeg/actions/runs/41557971301). Native Windows CI is deferred (T11). |
 | Zig toolchain/build/package | Verified | [build.zig](build.zig) (exact Zig 0.17.0 check, `av` module, `libzffmpeg.a`, test step for `av` and each example), [build.zig.zon](build.zig.zon) (toolchain-generated fingerprint, `.paths` allowlist, no dependencies), [zig/README.md](zig/README.md). Original `LGPL-2.1-or-later` files. `zig build` passed in Debug and ReleaseSafe and `zig build test` passed 9/9 in Debug, ReleaseSafe and ReleaseFast in [run 41548960006](https://github.com/zxc-f/zffmpeg/actions/runs/41548960006); failure propagation shown in [run 41548611661](https://github.com/zxc-f/zffmpeg/actions/runs/41548611661). Linux only; no C build dependency. |
-| Audio and time types | Verified | [zig/core/audio.zig](zig/core/audio.zig) and [zig/core/time.zig](zig/core/time.zig) (T05). Original, `LGPL-2.1-or-later`; rescaling follows `av_rescale_q_rnd` except for overflow and INT64_MIN (see [notes.md](notes.md)). Verified in [run 41553566007](https://github.com/zxc-f/zffmpeg/actions/runs/41553566007) against oracle-derived vectors; FFmpeg differential pending T03. |
-| WAV fixture contract | Implemented | [zig/testing/fixtures](zig/testing/fixtures/README.md): 52 fixtures generated independently of the Zig code by `generate.py` (original, `LGPL-2.1-or-later`), with expected results, boundary decisions and error precedence; integrity-tested by [fixtures.zig](zig/testing/fixtures.zig) in [run 41550661260](https://github.com/zxc-f/zffmpeg/actions/runs/41550661260). Verified against a parser in T06. |
-| WAV + PCM s16le | Planned | First complete multimedia path, scoped above. |
-| zffprobe / zffmpeg | Planned | Add after the corresponding library path works. |
+| Audio and time types | Verified | [zig/core/audio.zig](zig/core/audio.zig) and [zig/core/time.zig](zig/core/time.zig) (T05). Original, `LGPL-2.1-or-later`; rescaling follows `av_rescale_q_rnd` except for overflow and INT64_MIN (see [notes.md](notes.md)). Verified in [run 41553566007](https://github.com/zxc-f/zffmpeg/actions/runs/41553566007) against oracle-derived vectors. T10 compared the WAV path's time base and duration with FFmpeg; `rescale` has no direct FFmpeg differential. |
+| WAV fixture contract | Verified | [zig/testing/fixtures](zig/testing/fixtures/README.md): 52 fixtures generated independently of the Zig code by `generate.py` (original, `LGPL-2.1-or-later`), with expected results, boundary decisions and error precedence; integrity-tested by [fixtures.zig](zig/testing/fixtures.zig) in [run 41550661260](https://github.com/zxc-f/zffmpeg/actions/runs/41550661260). The parser (T06) and FFmpeg (T10) agree with every expected result. |
+| WAV + PCM s16le | Verified | [zig/format/wav.zig](zig/format/wav.zig) (bounded parser, `probe`, `decodeToRaw`, known-length `Writer`; T06, T08) and [zig/io/file.zig](zig/io/file.zig) (file and pipe adapters; T07). Original, `LGPL-2.1-or-later`; behavior follows `libavformat/wavdec.c`, `wavenc.c`, `riffdec.c` and `riffenc.c` at the pinned commit, with the stricter [first WAV contract](#first-wav-contract). Supported: little-endian RIFF/WAVE, 16- or 18-byte tag-1 `fmt `, signed 16-bit mono or stereo up to 192 kHz, known sizes, sequential input without seeking, no allocation. All 52 fixtures pass from memory, one-byte reads and files in Debug, ReleaseSafe and ReleaseFast, and FFmpeg decodes the same samples for every accepted fixture, including the writer-output files ([reference results](zig/testing/reference/README.md#results), [run 41557971301](https://github.com/zxc-f/zffmpeg/actions/runs/41557971301)). Limitations: no unknown-length, RF64/W64/RIFX, extensible or other sample formats; no seeking or resumable parsing; sustained fuzzing not run; native Windows not run. Scalar; not optimized. |
+| zffprobe | Verified | [zig/cli/probe.zig](zig/cli/probe.zig) (T09). Original, `LGPL-2.1-or-later`. Prints the [probe output](#initial-probe-output) for one WAV file or standard input, with exit codes 0–6. 15 process runs check stdout, stderr and the status in Debug, ReleaseSafe and ReleaseFast, and the reference comparison runs it on every fixture ([run 41557971301](https://github.com/zxc-f/zffmpeg/actions/runs/41557971301)). Our own output format, not ffprobe's. |
+| FFmpeg reference comparison | Verified | [zig/testing/reference](zig/testing/reference/README.md) (T03, T10): Clang build of the pinned commit with a minimal LGPL configuration, cached in CI, and `compare.py`. Accepted fixtures 12/12 identical in samples and compared metadata; rejected fixtures 40/40 with the contract's `zffprobe` status; intentional differences recorded. [run 41557971301](https://github.com/zxc-f/zffmpeg/actions/runs/41557971301). |
+| zffmpeg | Planned | Conversion and stream-copy tool (T13). |
 
-The examples validate design patterns; native codec/container implementation is
-still planned.
+The first complete path, WAV with signed 16-bit PCM, is verified on Linux. Every
+other codec, container and tool remains planned.
 
 The authoritative next action is in [TODO.md](TODO.md). Let the first working
 path determine which shared infrastructure is necessary.

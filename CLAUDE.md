@@ -10,11 +10,12 @@ This standalone repository is becoming a native Zig implementation of FFmpeg's
 multimedia functionality. Implement algorithms and APIs in Zig; compiling FFmpeg's C with
 `zig cc`, translating headers, or wrapping libav* does not constitute the port.
 
-Current state: the minimal Zig package and build; the `av` module rooted at
-`zig/root.zig` exporting `pcm` (s16 kernels), `audio` and `time`; the WAV fixture
-contract with 52 fixtures; a tested standalone I/O example; and a Linux CI
-workflow. No container parser, writer or CLI yet. The next tasks are T06 (the
-WAV parser) and T03 (the reference build). When the state changes, update the current-state
+Current state: the first WAV/PCM path is complete. The `av` module (rooted at
+`zig/root.zig`) exports `pcm`, `audio`, `time`, `wav` (bounded parser and
+known-length writer) and `file` (file and pipe adapters); `zffprobe` is the
+first tool. Tests cover 52 fixtures, process runs of `zffprobe`, and a CI
+comparison against a pinned FFmpeg build. Native Windows runs are still
+outstanding (T11); T12 is next. When the state changes, update the current-state
 statements in README.md, port.md ("Status and scope"), the TODO.md introduction
 and this file together.
 
@@ -32,6 +33,7 @@ zig build test -Doptimize=ReleaseSafe
 zig build test -Doptimize=ReleaseFast        # safety off; required for parser/size code
 zig build test -Dtest-filter="truncation"    # only tests whose names contain the text
 zig build test --summary all                 # per-artifact test counts
+zig build probe -- file.wav                  # run zffprobe (`-` reads stdin)
 zig fmt --check build.zig build.zig.zon zig/
 zig test zig/examples/io_patterns.zig        # one standalone example, without the build
 python3 zig/testing/fixtures/generate.py --check   # WAV fixtures are current (Python 3, stdlib only)
@@ -54,6 +56,10 @@ When adding code:
 - Export only supported features from `zig/root.zig`.
 - Change WAV fixtures only in `zig/testing/fixtures/generate.py`, then rerun it;
   never edit the generated `.wav` files, `manifest.zon` or the README table.
+- Test CLI behavior by adding a `probe_cases` entry in `build.zig` (a separate
+  process run that checks stdout, stderr and the exit status), never by
+  printing from a unit test.
+- Keep parsing in `av`; `zig/cli/` only handles arguments, files and output.
 
 [zig/README.md](zig/README.md) documents the build graph, version policy,
 package manifest and per-file provenance.
@@ -62,6 +68,9 @@ package manifest and per-file provenance.
 
 - [README.md](README.md): setup, pinned reference clone commands, runnable commands.
 - [zig/README.md](zig/README.md): build graph, version policy, manifest, provenance.
+- [zig/testing/reference/README.md](zig/testing/reference/README.md): how the
+  pinned FFmpeg reference is built and the recorded comparison results.
+  `compare.py` there is the T10 differential check; CI runs it.
 - [zig/testing/fixtures/README.md](zig/testing/fixtures/README.md): the WAV
   fixture contract: every fixture's expected result, the boundary decisions and
   the error precedence the parser must follow. `zig/testing/fixtures.zig`

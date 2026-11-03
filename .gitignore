@@ -4,3 +4,6 @@
 # Local Zig build and test output, wherever zig runs.
 .zig-cache/
 zig-out/
+
+# Cross-compiled outputs from CI.
+zig-out-*/
