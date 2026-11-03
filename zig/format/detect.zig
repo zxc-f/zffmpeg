@@ -18,6 +18,7 @@
 const std = @import("std");
 const audio = @import("../core/audio.zig");
 const pcm = @import("../codec/pcm.zig");
+const metadata = @import("../core/metadata.zig");
 const wav = @import("wav.zig");
 const au = @import("au.zig");
 const prefix = @import("prefix.zig");
@@ -101,12 +102,31 @@ pub fn detect(reader: *std.Io.Reader) error{IoFailure}!Detected {
 /// Detects the container, then validates the whole stream without decoding
 /// its samples.
 pub fn probe(reader: *std.Io.Reader, limits: Limits) Error!Probed {
+    return probeWithTags(reader, limits, null);
+}
+
+/// Like `probe`, and with `tags` also adds the stream's tags to the empty
+/// `tags.dictionary`, under FFmpeg's names (`wav.genericTags`). Only RIFF
+/// and RF64 streams carry tags so far. On failure the dictionary may hold
+/// some of them.
+pub fn probeWithTags(reader: *std.Io.Reader, limits: Limits, tags: ?wav.Tags) Error!Probed {
     const detected = try detect(reader);
     switch (detected.container) {
         .wav, .w64 => {
             var parser: wav.Parser = .initPrefixed(reader, limits.wav, detected.prefix);
+            var stored: metadata.Dictionary = .empty;
+            defer if (tags) |t| stored.deinit(t.gpa);
+            if (tags) |t| {
+                std.debug.assert(t.dictionary.count() == 0);
+                parser.collectTags(.{ .gpa = t.gpa, .dictionary = &stored });
+            }
             const info = try parser.readHeader();
             try parser.finish();
+            if (tags) |t| {
+                const generic = try wav.genericTags(t.gpa, &stored);
+                t.dictionary.deinit(t.gpa);
+                t.dictionary.* = generic;
+            }
             std.debug.assert(Container.ofWav(info.variant) == detected.container);
             return .{ .container = detected.container, .codec = info.codec, .format = info.format, .frame_count = info.frame_count };
         },

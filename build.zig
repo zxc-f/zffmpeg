@@ -182,6 +182,48 @@ const w64_mono_8k_report =
     \\
 ;
 
+// T21c: the stream lines, then one escaped tag line per tag in FFmpeg's order.
+const bext_tags_report =
+    \\format=wav
+    \\codec=pcm_s16le
+    \\sample_fmt=s16
+    \\channels=1
+    \\channel_layout=mono
+    \\sample_rate=8000
+    \\nb_samples=4
+    \\duration_num=4
+    \\duration_den=8000
+    \\tag:comment=Same note
+    \\tag:encoded_by=Recorder
+    \\tag:originator_reference=REF123
+    \\tag:date=2024-05-06
+    \\tag:creation_time=07:08:09
+    \\tag:time_reference=48000
+    \\tag:umid=0x060A2B3401010101010101010101010101010101010101010101010101010101
+    \\tag:coding_history=A=PCM,F=8000\r\n
+    \\tag:encoded_by=Tech
+    \\
+;
+
+const info_values_report =
+    \\format=wav
+    \\codec=pcm_s16le
+    \\sample_fmt=s16
+    \\channels=1
+    \\channel_layout=mono
+    \\sample_rate=8000
+    \\nb_samples=4
+    \\duration_num=4
+    \\duration_den=8000
+    \\tag:genre=Pop
+    \\tag:IKEY=a
+    \\tag:ISBJ=
+    \\tag:title=lower
+    \\tag:IENG=Engineer
+    \\tag:IA=v
+    \\
+;
+
 const w64_alaw_report =
     \\format=w64
     \\codec=pcm_alaw
@@ -233,6 +275,9 @@ const probe_cases = [_]ProbeCase{
     .{ .name = "Wave64 A-law from a pipe", .args = &.{"-"}, .stdin_fixture = "w64_alaw_mono_8k", .exit_code = 0, .stdout = w64_alaw_report, .stderr = "" },
     .{ .name = "a truncated Wave64 header", .fixture = "w64_truncated_chunk_header", .exit_code = 2, .stderr_contains = ": Truncated\n" },
     .{ .name = "unknown Wave64 sizes", .fixture = "w64_unknown_length_pipe", .exit_code = 3, .stderr_contains = ": UnsupportedStreamingSize\n" },
+    // T21c: tags follow the stream lines.
+    .{ .name = "bext and INFO tags", .fixture = "bext_tags", .exit_code = 0, .stdout = bext_tags_report, .stderr = "" },
+    .{ .name = "INFO tag values from a pipe", .args = &.{"-"}, .stdin_fixture = "info_values", .exit_code = 0, .stdout = info_values_report, .stderr = "" },
 };
 
 /// A zffmpeg process run: `args`, then the input fixture's path (or standard

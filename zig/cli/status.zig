@@ -32,6 +32,7 @@ pub fn of(err: Error) ExitStatus {
         error.UnsupportedFormat, error.UnsupportedStreamingSize, error.UnsupportedOperation => .unsupported,
         error.LimitExceeded,
         error.SizeOverflow,
+        error.OutOfMemory,
         error.SystemResources,
         error.ProcessFdQuotaExceeded,
         error.SystemFdQuotaExceeded,

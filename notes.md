@@ -238,6 +238,17 @@ port.md's contract table updated, and (after T06) the parser.
 | Output schema | Our own `key=value` lines in a fixed order, not FFprobe-compatible output; FFprobe compatibility is a separate future mode. | port.md "Initial probe output", T09 tests. |
 | Duration | Unreduced in the stream's time base: `duration_num = nb_samples`, `duration_den = sample_rate`. | port.md and T09; a reduced fraction or decimal seconds would change every expected output. |
 | Exit codes | 0 success/help, 1 usage, 2 invalid/truncated, 3 unsupported, 4 I/O, 5 resource limit, 6 cancellation. | port.md and T09. |
+| Tag lines | Since T21c, the project owner's choice: after the nine stream lines, one `tag:<key>=<value>` line per tag, under ffprobe's names, in its order and with its duplicates, so the lines compare one to one with ffprobe's format tags; untagged streams print exactly the old report. Backslash, LF and CR are escaped (`\\`, `\n`, `\r`) to keep one tag per line; ffprobe's default writer prints them raw. | `writeReport` in `zig/cli/probe.zig`, port.md "Initial probe output", the tag probe cases, `zffprobe_tags` in `compare.py`. |
+
+## Metadata dictionary and WAV tags
+
+| Decision | Current choice and reason | To change it |
+| --- | --- | --- |
+| Dictionary model (T17b) | `metadata.Dictionary`: unmanaged, owning copies, ASCII case-insensitive keys, NUL rejected (`InvalidTag`) because FFmpeg's tags are C strings. One explicit `Duplicates` policy per `av_dict_set` flag combination the port uses (`replace`, `keep`, `keep_distinct`), with FFmpeg's entry order, confirmed against the reference `libavutil`, so tags print in ffprobe's order. A failed `put` leaves the dictionary unchanged. | `core/metadata.zig` and its tests; the tag fixtures' expected order. |
+| Stored and generic names | The parser stores tags under the file's keys (`INAM`, `description`) with FFmpeg's demuxer semantics; `wav.genericTags` renames them as `wavdec.c` does at the end of the header. Renaming during parsing cannot reproduce FFmpeg's result when a repeated key replaces an earlier tag. | `wav.zig`; the `info_duplicates` and `bext_tags` fixtures. |
+| Tolerant tag content | Malformed INFO content ends that list's tags; the stream stays valid, as in FFmpeg, which ignores the error. FFmpeg's recovery from a missing pad byte is ported because real writers omit it. Tag reading never changes a verdict, except through the retained-bytes limit and allocation failure. A `bext` shorter than 602 bytes gives no tags instead of FFmpeg's read into the next chunk. | `parseInfo`, `readBext`; fixture README "Tags". |
+| Opt-in collection | Tags are collected only when the caller asks (`Parser.collectTags`), so the parser stays allocation-free otherwise and its other callers keep their fixed memory. | `wav.Parser`, `detect.probeWithTags`, `file.probeFile`. |
+| Wave64 tags | None: FFmpeg reads only Wave64's `summarylist`, which waits for a need. | `otherChunk` in `wav.zig`. |
 
 ## I/O and API
 

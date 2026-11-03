@@ -270,6 +270,37 @@ def canonical_w64(codec, channels, rate, data):
     return w64(*chunks)
 
 
+# Tags (T21c): LIST/INFO subchunks and the bext chunk (EBU Tech 3285).
+
+
+def info_list(*subchunks, list_type=b"INFO"):
+    """A LIST chunk of the given type holding `subchunks` (already built)."""
+    return chunk(b"LIST", list_type + b"".join(subchunks))
+
+
+def info_tag(code, value, terminate=True, pad=True):
+    """One INFO subchunk: `value` plus a NUL terminator, as writers store it."""
+    return chunk(code, value + (b"\0" if terminate else b""), pad=pad)
+
+
+def bext_chunk(description=b"", originator=b"", originator_reference=b"", date=b"", time=b"",
+               time_reference=0, version=1, umid=bytes(64), coding_history=b""):
+    """A bext chunk: the 602 fixed bytes, then the coding history."""
+    def field(value, size):
+        assert len(value) <= size
+        return value + bytes(size - len(value))
+    body = (field(description, 256) + field(originator, 32) + field(originator_reference, 32)
+            + field(date, 10) + field(time, 8) + struct.pack("<QH", time_reference, version)
+            + field(umid, 64) + bytes(190))
+    assert len(body) == 602
+    return chunk(b"bext", body + coding_history)
+
+
+def tagged_wav(*before_data, after_data=(), samples=MONO[:4]):
+    """A 16-bit mono 8 kHz WAV with chunks between `fmt ` and `data`, and after it."""
+    return riff(fmt_chunk(), *before_data, data_chunk(samples), *after_data)
+
+
 def extensible_fmt(channels=1, rate=8000, bits=16, sub_tag=1, valid=None, mask=None,
                    cb_size=22, block_align=None, subformat=None):
     """A 40-byte WAVE_FORMAT_EXTENSIBLE `fmt ` body; every field can be overridden."""
@@ -310,6 +341,9 @@ class Fixture:
     # The result with the parser's `unknown_length` option (T21b), where it differs.
     unknown_accept: Stream = None
     unknown_reject: str = None
+    # The tags an accepted stream reports (T21c): (key, value) byte pairs under
+    # FFmpeg's names and in its order, written by hand.
+    tags: list = dataclasses.field(default_factory=list)
 
 
 def streaming(name, group, rule, data, accept=None, reject=None):
@@ -450,6 +484,78 @@ def build_fixtures():
                                riff(chunk(b"fmt ", extensible_fmt(channels=2, bits=24, valid=0)),
                                     chunk(b"data", s24_bytes)),
                                "pcm_s24le", 2, 8000, s24_bytes))
+
+    # Tags (T21c): LIST/INFO and bext, read as FFmpeg's demuxer does and
+    # reported under its names. The expected tags are written by hand.
+    def tagged(name, rule, data, tags, samples=MONO[:4]):
+        fixture = accepted(name, "tags", rule, data, 1, 8000, samples)
+        fixture.tags = tags
+        return fixture
+
+    fx.append(tagged("info_tags",
+                     "A LIST/INFO chunk between `fmt ` and `data`, NUL-terminated values in the order FFmpeg's "
+                     "writer uses; the codes report as FFmpeg's names.",
+                     tagged_wav(info_list(info_tag(b"IART", b"Artist"), info_tag(b"ICMT", b"A comment"),
+                                          info_tag(b"ICRD", b"2024"), info_tag(b"IGNR", b"Speech"),
+                                          info_tag(b"INAM", b"Title"))),
+                     [(b"artist", b"Artist"), (b"comment", b"A comment"), (b"date", b"2024"),
+                      (b"genre", b"Speech"), (b"title", b"Title")]))
+    fx.append(tagged("info_after_data",
+                     "A lowercase `list` INFO chunk after `data`: read with the trailing chunks.",
+                     tagged_wav(after_data=[chunk(b"list", b"INFO" + info_tag(b"INAM", b"Late"))]),
+                     [(b"title", b"Late")]))
+    fx.append(tagged("info_duplicates",
+                     "INAM twice: the second replaces the first, which moves the last tag into its place; "
+                     "IPRT and ITRK both report as `track`.",
+                     tagged_wav(info_list(info_tag(b"INAM", b"First"), info_tag(b"IPRT", b"1"),
+                                          info_tag(b"ITRK", b"2"), info_tag(b"INAM", b"Second"))),
+                     [(b"track", b"2"), (b"track", b"1"), (b"title", b"Second")]))
+    fx.append(tagged("info_values",
+                     "An unterminated odd value with its pad, an embedded NUL, an empty value, a lowercase "
+                     "code, an unknown code, an all-zero code (skipped) and a code cut at its NUL.",
+                     tagged_wav(info_list(info_tag(b"IGNR", b"Pop", terminate=False), info_tag(b"IKEY", b"a\0b"),
+                                          chunk(b"ISBJ", b""), info_tag(b"inam", b"lower"),
+                                          info_tag(b"IENG", b"Engineer"), chunk(bytes(4), b"zz"),
+                                          info_tag(b"IA\0X", b"v"))),
+                     [(b"genre", b"Pop"), (b"IKEY", b"a"), (b"ISBJ", b""), (b"title", b"lower"),
+                      (b"IENG", b"Engineer"), (b"IA", b"v")]))
+    fx.append(tagged("info_missing_pad",
+                     "A 3-byte value without its pad byte: the next header is one byte early, which "
+                     "FFmpeg's reader recovers from by reading it again one byte back.",
+                     tagged_wav(info_list(info_tag(b"IART", b"ab", pad=False), info_tag(b"INAM", b"Name"))),
+                     [(b"artist", b"ab"), (b"title", b"Name")]))
+    fx.append(tagged("info_malformed",
+                     "A subchunk declaring 200 bytes in a shorter list ends the list; the tag before it is "
+                     "kept and the stream is valid.",
+                     tagged_wav(info_list(info_tag(b"INAM", b"Kept"), chunk(b"IART", b"x", size=200))),
+                     [(b"title", b"Kept")]))
+    fx.append(tagged("list_adtl", "A LIST of type `adtl` (cue labels) is skipped: no tags.",
+                     tagged_wav(info_list(chunk(b"labl", b"abcd"), list_type=b"adtl")), []))
+    basic_umid = bytes.fromhex("060a2b34") + b"\x01" * 28
+    fx.append(tagged("bext_tags",
+                     "A version 1 bext with every text field, a basic UMID and a coding history, then INFO: "
+                     "ICMT equals the description, so only one `comment` remains.",
+                     tagged_wav(bext_chunk(description=b"Same note", originator=b"Recorder",
+                                           originator_reference=b"REF123", date=b"2024-05-06", time=b"07:08:09",
+                                           time_reference=48000, umid=basic_umid + bytes(32),
+                                           coding_history=b"A=PCM,F=8000\r\n"),
+                                info_list(info_tag(b"ICMT", b"Same note"), info_tag(b"ITCH", b"Tech"))),
+                     [(b"comment", b"Same note"), (b"encoded_by", b"Recorder"), (b"originator_reference", b"REF123"),
+                      (b"date", b"2024-05-06"), (b"creation_time", b"07:08:09"), (b"time_reference", b"48000"),
+                      (b"umid", b"0x060A2B34" + b"01" * 28),
+                      (b"coding_history", b"A=PCM,F=8000\r\n"), (b"encoded_by", b"Tech")]))
+    fx.append(tagged("bext_version0",
+                     "A version 0 bext with empty text: only the time reference, even 0, is reported; the "
+                     "UMID bytes are ignored before version 1.",
+                     tagged_wav(bext_chunk(version=0, umid=b"\x01" * 64)), [(b"time_reference", b"0")]))
+    fx.append(tagged("bext_extended_umid", "A 64-byte (extended) UMID: all eight parts are reported.",
+                     tagged_wav(bext_chunk(umid=bytes(range(1, 65)))),
+                     [(b"time_reference", b"0"), (b"umid", b"0x" + bytes(range(1, 65)).hex().upper().encode())]))
+    rf64_tag_data = pcm(MONO[:4])
+    fx.append(tagged("rf64_info", "RF64 carries LIST/INFO like RIFF.",
+                     rf64_wav(fmt_chunk(), info_list(info_tag(b"INAM", b"Big")),
+                              chunk(b"data", rf64_tag_data, size=0xFFFFFFFF), data_size=len(rf64_tag_data), frames=4),
+                     [(b"title", b"Big")]))
 
     # RIFF header.
     fx.append(rejected("empty_input", "riff header", "No bytes at all.", b"", "Truncated"))
@@ -888,6 +994,12 @@ def sha256(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def zig_string(data):
+    """A Zig string literal for arbitrary bytes."""
+    escapes = {0x22: '\\"', 0x5C: "\\\\", 0x0A: "\\n", 0x0D: "\\r", 0x09: "\\t"}
+    return '"' + "".join(escapes.get(b) or (chr(b) if 0x20 <= b < 0x7F else f"\\x{b:02x}") for b in data) + '"'
+
+
 def render_expected(accept, reject):
     if accept is None:
         return f".{{ .reject = .{reject} }}"
@@ -915,6 +1027,11 @@ def render_manifest(fixtures, entry_note):
             lines.append(f"        .writer_header = .{f.writer_header},")
         if f.unknown_accept is not None or f.unknown_reject is not None:
             lines.append(f"        .unknown_length = {render_expected(f.unknown_accept, f.unknown_reject)},")
+        if f.tags:
+            lines.append("        .tags = .{")
+            for key, value in f.tags:
+                lines.append(f"            .{{ .key = {zig_string(key)}, .value = {zig_string(value)} }},")
+            lines.append("        },")
         lines.append("    },")
     lines.append("}")
     return ("\n".join(lines) + "\n").encode()
@@ -934,6 +1051,8 @@ def describe_result(accept, reject):
 
 def describe(f):
     text = describe_result(f.accept, f.reject) + ("; writer output" if f.writer_output else "")
+    if f.tags:
+        text += f"; {len(f.tags)} tag{'s' if len(f.tags) != 1 else ''}"
     if f.unknown_accept is not None or f.unknown_reject is not None:
         text += f"; with `unknown_length`, {describe_result(f.unknown_accept, f.unknown_reject)}"
     return text

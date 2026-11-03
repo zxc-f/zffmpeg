@@ -17,6 +17,8 @@
 //!   with explicit `clone`d ownership (`core/packet.zig`, `core/frame.zig`).
 //! - `stage`: the send/receive contract of buffering stages, which
 //!   `pcm.Decoder` and `pcm.Encoder` follow (`core/stage.zig`).
+//! - `metadata`: the tag dictionary, ordered with owned storage and FFmpeg's
+//!   duplicate-key policies (`core/metadata.zig`).
 //! - `wav`: bounded RIFF/WAVE, RF64/BW64 and Sony Wave64 parsing and
 //!   known-length writing for the WAV PCM encodings (`format/wav.zig`).
 //! - `au`: bounded Sun AU parsing and known-length writing for s16 big-endian
@@ -38,6 +40,7 @@ pub const samples = @import("core/samples.zig");
 pub const packet = @import("core/packet.zig");
 pub const frame = @import("core/frame.zig");
 pub const stage = @import("core/stage.zig");
+pub const metadata = @import("core/metadata.zig");
 pub const wav = @import("format/wav.zig");
 pub const au = @import("format/au.zig");
 pub const detect = @import("format/detect.zig");
@@ -53,6 +56,7 @@ test {
     _ = @import("core/packet.zig");
     _ = @import("core/frame.zig");
     _ = @import("core/stage.zig");
+    _ = @import("core/metadata.zig");
     _ = @import("format/wav.zig");
     _ = @import("format/au.zig");
     _ = @import("format/detect.zig");

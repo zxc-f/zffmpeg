@@ -747,7 +747,8 @@ evidence.
 | Bounds | Account for chunk headers, bodies and odd-size padding inside `riff_size + 8`. Never read beyond that extent. Known input size permits early truncation checks; otherwise detect it during consumption. A chunk (including `data`) whose declared size runs past the extent is `InvalidRiff`; so is an extent that leaves fewer than 8 bytes for a chunk header. A final odd-sized chunk whose pad byte lies outside the extent is complete; a pad byte inside the extent but missing from the input is `Truncated`, as is any input shorter than the extent. |
 | Unknown chunks | Skip bounded contents and padding. Continue validation after `data` to the RIFF end so later duplicates/truncated chunks are detected. Ignore bytes outside the declared RIFF extent. |
 | Completion | Header discovery is not full-file validation. Success requires consuming/validating the declared extent. Errors found after emitting audio are reported; callers must not assume atomic output. |
-| Resource defaults | At most 4,096 chunks and 1 MiB of retained non-audio bytes (headers and chunk contents the parser keeps in memory); a 64 KiB streaming work buffer. Skipped chunk bodies and padding are bounded by the chunk-count limit and the RIFF extent, not by the byte limit, so large `LIST`, `id3 ` or `iXML` chunks remain readable. Data streams within RIFF's checked 32-bit length limits, without whole-file allocation. Expose configurable policy limits. |
+| Tags | Since T21c, opt-in: `LIST`/`INFO` and `bext` chunks of RIFF and RF64 streams, before or after `data`, read as FFmpeg's demuxer reads them and reported under its names and in its order (`wav.genericTags`), into a caller's `metadata.Dictionary`. Malformed tag content ends that list's tags without failing the stream; collecting never changes a verdict except through the retained-bytes limit and allocation failure. The rules are in the [fixture README](zig/testing/fixtures/README.md#decisions). |
+| Resource defaults | At most 4,096 chunks and 1 MiB of retained non-audio bytes (headers and chunk contents the parser keeps in memory; since T21c the tag chunks read while collecting tags, `Limits.max_retained_bytes`); a 64 KiB streaming work buffer. Skipped chunk bodies and padding are bounded by the chunk-count limit and the RIFF extent, not by the byte limit, so large `LIST`, `id3 ` or `iXML` chunks remain readable. Data streams within RIFF's checked 32-bit length limits, without whole-file allocation. Expose configurable policy limits. |
 | Output | Known frame count up front; the `fmt ` FFmpeg's `riffenc.c` chooses (plain 16-byte tag 1 for PCM, 18-byte for float, A-law and mu-law, WAVE_FORMAT_EXTENSIBLE above 48 kHz or above 16 bits except float), a `fact` chunk for every encoding but tag 1, and exact RIFF/data sizes with the pad byte of odd data. Validate the total RIFF size, not just `data`; reject overflows and encodings WAV cannot carry before the header. No seeking or placeholder sizes. `finish` verifies the exact frame count and flushes. |
 
 T07 includes sequential non-seekable input with known sizes and the ordering above.
@@ -852,6 +853,13 @@ rounding or fraction reduction. Empty data reports `duration_num=0` and the
 stream's sample rate as `duration_den`. A frame count the library leaves unknown
 (`unknown_length`, which zffprobe does not enable) prints `N/A` for the three
 count fields, as ffprobe does. Emit the report only after validation.
+
+Since T21c the nine lines are followed by one `tag:<key>=<value>` line per
+tag, in the order and under the names ffprobe reports them (its format tags),
+duplicates included; a stream without tags prints the nine lines alone. Keys
+and values are written as stored, except that a backslash, line feed and
+carriage return become `\\`, `\n` and `\r`, so each tag stays on one line.
+Tag chunks count toward the retained-bytes limit (exit code 5).
 
 The container is detected from content, not the file name (T12c,
 `zig/format/detect.zig`): a stream that starts with `.snd` is AU, and anything

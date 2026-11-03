@@ -34,11 +34,12 @@ pub const ReadError = detect.Error || std.Io.File.Reader.Error;
 pub const DecodeError = wav.DecodeError || std.Io.File.Reader.Error;
 pub const WriteError = wav.WriteError || std.Io.File.Writer.Error;
 
-/// Detects the container (WAV or AU) of the stream in a borrowed file and
-/// validates the stream without decoding samples.
-pub fn probeFile(io: std.Io, file: std.Io.File, buffer: []u8, limits: detect.Limits) ReadError!detect.Probed {
+/// Detects the container (WAV, Wave64 or AU) of the stream in a borrowed file
+/// and validates the stream without decoding samples. With `tags`, its tags
+/// are added to the empty dictionary too (`detect.probeWithTags`).
+pub fn probeFile(io: std.Io, file: std.Io.File, buffer: []u8, limits: detect.Limits, tags: ?wav.Tags) ReadError!detect.Probed {
     var reader = file.readerStreaming(io, buffer);
-    return detect.probe(&reader.interface, limits) catch |err| return withReadCause(err, &reader);
+    return detect.probeWithTags(&reader.interface, limits, tags) catch |err| return withReadCause(err, &reader);
 }
 
 /// Opens `sub_path` in `dir`, detects and validates its stream and closes it.
@@ -48,10 +49,11 @@ pub fn probePath(
     sub_path: []const u8,
     buffer: []u8,
     limits: detect.Limits,
+    tags: ?wav.Tags,
 ) (ReadError || std.Io.File.OpenError)!detect.Probed {
     const file = try dir.openFile(io, sub_path, .{});
     defer file.close(io);
-    return probeFile(io, file, buffer, limits);
+    return probeFile(io, file, buffer, limits, tags);
 }
 
 /// Decodes the WAV stream in a borrowed file and writes its samples to `out`
@@ -148,7 +150,7 @@ test "files agree with memory for every fixture and buffer size" {
         const expected = wav.probe(&memory, .{});
 
         for ([_]usize{ 0, 1, 64, default_buffer_len }) |capacity| {
-            const result = probePath(io, tmp.dir, fixture.name ++ ".wav", buffer[0..capacity], .{});
+            const result = probePath(io, tmp.dir, fixture.name ++ ".wav", buffer[0..capacity], .{}, null);
             if (expected) |info| {
                 const got = try result;
                 try std.testing.expectEqual(info.frame_count, got.frame_count);
@@ -174,7 +176,7 @@ test "AU files agree with memory for every fixture and buffer size" {
         const expected = detect.probe(&memory, .{});
 
         for ([_]usize{ 0, 1, 64, default_buffer_len }) |capacity| {
-            const result = probePath(io, tmp.dir, path, buffer[0..capacity], .{});
+            const result = probePath(io, tmp.dir, path, buffer[0..capacity], .{}, null);
             if (expected) |info| {
                 const got = try result;
                 try std.testing.expectEqual(info.container, got.container);
@@ -268,7 +270,7 @@ test "a failing read reports the file's own error" {
     const file = try tmp.dir.createFile(io, "write-only.wav", .{});
     defer file.close(io);
     var buffer: [64]u8 = undefined;
-    const err = if (probeFile(io, file, &buffer, .{})) |_| return error.TestExpectedError else |e| e;
+    const err = if (probeFile(io, file, &buffer, .{}, null)) |_| return error.TestExpectedError else |e| e;
     try std.testing.expect(err != error.IoFailure);
     if (builtin.os.tag == .linux) try std.testing.expectEqual(error.NotOpenForReading, err);
 }
@@ -278,9 +280,9 @@ test "path helpers report missing files and release handles on failure" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var buffer: [64]u8 = undefined;
-    try std.testing.expectError(error.FileNotFound, probePath(io, tmp.dir, "missing.wav", &buffer, .{}));
+    try std.testing.expectError(error.FileNotFound, probePath(io, tmp.dir, "missing.wav", &buffer, .{}, null));
     try writeFixture(io, tmp.dir, "not_riff");
-    try std.testing.expectError(error.InvalidRiff, probePath(io, tmp.dir, "not_riff.wav", &buffer, .{}));
+    try std.testing.expectError(error.InvalidRiff, probePath(io, tmp.dir, "not_riff.wav", &buffer, .{}, null));
     // The handle was closed, so the file can be removed.
     try tmp.dir.deleteFile(io, "not_riff.wav");
 }

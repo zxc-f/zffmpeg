@@ -30,11 +30,13 @@
 const std = @import("std");
 const audio = @import("../core/audio.zig");
 const samples_storage = @import("../core/samples.zig");
+const metadata = @import("../core/metadata.zig");
 const pcm = @import("../codec/pcm.zig");
 const Prefix = @import("prefix.zig").Prefix;
 
 /// Contract errors (see the fixture README), plus `IoFailure` for a failing
-/// reader. File adapters in zig/io/file.zig replace `IoFailure` with the cause.
+/// reader and `OutOfMemory`, which only collecting tags can return. File
+/// adapters in zig/io/file.zig replace `IoFailure` with the cause.
 pub const Error = error{
     InvalidRiff,
     InvalidWave,
@@ -44,6 +46,7 @@ pub const Error = error{
     UnsupportedStreamingSize,
     LimitExceeded,
     IoFailure,
+    OutOfMemory,
 };
 
 /// Configurable parser policy: limits, where exceeding one is
@@ -52,6 +55,10 @@ pub const Limits = struct {
     max_sample_rate: u32 = 192_000,
     /// Counts every chunk header inside the RIFF extent, `fmt ` and `data` included.
     max_chunks: u32 = 4096,
+    /// Bytes of tag chunks (`LIST`/`INFO` and `bext` bodies) read into memory
+    /// while collecting tags, over the whole stream. Skipped chunks never
+    /// count, so without `Parser.collectTags` the limit never applies.
+    max_retained_bytes: u32 = 1 << 20,
     /// Accept the unknown-size sentinels streaming writers leave (T21b),
     /// rather than rejecting them as `UnsupportedStreamingSize`. A plain RIFF
     /// size of 0 or 0xFFFFFFFF makes the extent the rest of the stream, which
@@ -72,6 +79,19 @@ pub const Info = struct {
     /// RIFF (or RF64/BW64), or Wave64.
     variant: Variant,
 };
+
+/// Where a parser puts the tags it reads (T21c): the `LIST`/`INFO` and `bext`
+/// chunks of RIFF and RF64 streams, before or after `data`, under the keys the
+/// file uses (`INAM`, `description`, ...) and in FFmpeg's demuxer order.
+/// `genericTags` gives the names FFmpeg reports. Wave64 streams carry none:
+/// FFmpeg reads only their `summarylist`, which is not supported.
+pub const Tags = struct {
+    gpa: std.mem.Allocator,
+    dictionary: *metadata.Dictionary,
+};
+
+/// Bytes of a `bext` chunk before its coding history (EBU Tech 3285).
+const bext_fixed_len = 602;
 
 /// Size of the header the writer emits for 16-bit PCM up to 48 kHz: RIFF
 /// header, 16-byte `fmt ` chunk and `data` chunk header. `headerLen` gives it
@@ -217,6 +237,10 @@ pub const Parser = struct {
     data_pad: u8 = 0,
     /// Set by the first bytes `readHeader` reads.
     variant: Variant = .wav,
+    /// Set by `collectTags`.
+    tags: ?Tags = null,
+    /// Bytes of tag chunks read into memory so far (`Limits.max_retained_bytes`).
+    retained: u64 = 0,
     state: State = .header,
 
     const State = enum { header, data, done };
@@ -229,6 +253,17 @@ pub const Parser = struct {
     /// read (format/detect.zig). The parser reads them first.
     pub fn initPrefixed(reader: *std.Io.Reader, limits: Limits, prefix: Prefix) Parser {
         return .{ .reader = reader, .limits = limits, .prefix = prefix };
+    }
+
+    /// Makes `readHeader` and `finish` add the stream's tags to
+    /// `tags.dictionary` (see `Tags`), allocating with `tags.gpa`. Call it
+    /// before `readHeader`. Tags after `data` arrive only with `finish`.
+    /// Collecting never changes whether a stream is valid, except that the
+    /// tag chunks then count toward `Limits.max_retained_bytes` and
+    /// allocation can fail.
+    pub fn collectTags(p: *Parser, tags: Tags) void {
+        std.debug.assert(p.state == .header);
+        p.tags = tags;
     }
 
     /// Reads the RIFF (or RF64/BW64, or Wave64) header and every chunk up to
@@ -250,7 +285,7 @@ pub const Parser = struct {
             } else if (std.mem.eql(u8, &header.id, "data")) {
                 return p.beginData(header);
             } else {
-                try p.skipChunk(header.size);
+                try p.otherChunk(header);
             }
         }
     }
@@ -360,7 +395,7 @@ pub const Parser = struct {
             if (std.mem.eql(u8, &header.id, "fmt ") or std.mem.eql(u8, &header.id, "data")) {
                 return error.InvalidWave;
             }
-            try p.skipChunk(header.size);
+            try p.otherChunk(header);
         }
         p.state = .done;
     }
@@ -490,6 +525,65 @@ pub const Parser = struct {
         return .{ .codec = p.codec, .format = format, .frame_count = size / p.frame_bytes, .variant = p.variant };
     }
 
+    /// A chunk other than `fmt ` and `data`: tags when collecting them from a
+    /// RIFF stream, else skipped.
+    fn otherChunk(p: *Parser, header: ChunkHeader) Error!void {
+        if (p.tags) |tags| if (p.variant == .wav) {
+            // wavdec.c accepts both spellings of LIST.
+            if (std.mem.eql(u8, &header.id, "LIST") or std.mem.eql(u8, &header.id, "list")) {
+                return p.readList(tags, header.size);
+            }
+            if (std.mem.eql(u8, &header.id, "bext")) return p.readBext(tags, header.size);
+        };
+        return p.skipChunk(header.size);
+    }
+
+    /// A `LIST` chunk: an `INFO` list is read into memory and parsed; any other
+    /// list type, or a chunk too short for one, is skipped.
+    fn readList(p: *Parser, tags: Tags, size: u64) Error!void {
+        if (size < 4) return p.skipChunk(size);
+        try p.checkExtent(size);
+        const list_type = try p.readArray(4);
+        p.consumeExtent(4);
+        if (!std.mem.eql(u8, &list_type, "INFO")) {
+            p.reader.discardAll64(size - 4) catch |err| return mapRead(err);
+            p.consumeExtent(size - 4);
+            return p.skipPad(p.variant.padAfter(size));
+        }
+        // The buffer starts with the list type, which FFmpeg's recovery
+        // from a missing pad byte can read back into (parseInfo).
+        const list = try p.retain(tags, size);
+        defer tags.gpa.free(list);
+        list[0..4].* = list_type;
+        p.reader.readSliceAll(list[4..]) catch |err| return mapRead(err);
+        p.consumeExtent(size - 4);
+        try p.skipPad(p.variant.padAfter(size));
+        try parseInfo(tags, list);
+    }
+
+    /// A `bext` chunk. One shorter than its 602 fixed bytes is skipped without
+    /// tags; FFmpeg would read the fields from the bytes after it.
+    fn readBext(p: *Parser, tags: Tags, size: u64) Error!void {
+        if (size < bext_fixed_len) return p.skipChunk(size);
+        try p.checkExtent(size);
+        const body = try p.retain(tags, size);
+        defer tags.gpa.free(body);
+        p.reader.readSliceAll(body) catch |err| return mapRead(err);
+        p.consumeExtent(size);
+        try p.skipPad(p.variant.padAfter(size));
+        try parseBext(tags, body);
+    }
+
+    /// Counts `size` bytes against the retained limit and allocates them.
+    fn retain(p: *Parser, tags: Tags, size: u64) Error![]u8 {
+        const total = std.math.add(u64, p.retained, size) catch return error.LimitExceeded;
+        if (total > p.limits.max_retained_bytes) return error.LimitExceeded;
+        p.retained = total;
+        // At most max_retained_bytes, a u32.
+        const len: usize = @intCast(size);
+        return tags.gpa.alloc(u8, len);
+    }
+
     fn skipChunk(p: *Parser, size: u64) Error!void {
         try p.checkExtent(size);
         p.reader.discardAll64(size) catch |err| return mapRead(err);
@@ -569,6 +663,148 @@ fn mapRead(err: std.Io.Reader.Error) Error {
         error.EndOfStream => error.Truncated,
         error.ReadFailed => error.IoFailure,
     };
+}
+
+/// The tags of a buffered `LIST`/`INFO` chunk, as `riffdec.c`'s
+/// `ff_read_riff_info` reads them. `list` starts with the `INFO` type. Each
+/// subchunk is a 4-byte code (the key, up to its first NUL) and a value read
+/// with its pad byte and cut at its first NUL; an all-zero code is skipped, and
+/// a repeated code replaces the earlier one. Malformed content ends the list,
+/// keeping the tags before it, as FFmpeg ignores the error. Unlike FFmpeg, a
+/// value is never read past the end of the list.
+fn parseInfo(tags: Tags, list: []const u8) error{OutOfMemory}!void {
+    const end = list.len;
+    var cur: usize = 4;
+    while (end >= 8 and cur <= end - 8) {
+        var start = cur;
+        var size = std.mem.readInt(u32, list[start + 4 ..][0..4], .little);
+        if (!infoFits(size, cur, end)) {
+            // FFmpeg's recovery: an odd value whose pad byte is missing puts
+            // the next header one byte earlier. cur is at least 4.
+            start = cur - 1;
+            size = std.mem.readInt(u32, list[start + 4 ..][0..4], .little);
+            if (!infoFits(size, cur, end)) return;
+        }
+        const code = list[start..][0..4];
+        // infoFits bounds size by the list length, so these fit in usize.
+        const padded: usize = size + size % 2;
+        const value_start = start + 8;
+        cur = value_start + padded;
+        if (std.mem.allEqual(u8, code, 0)) continue;
+        const value = list[value_start..@min(cur, end)];
+        try putTag(tags, untilNul(code), untilNul(value));
+    }
+}
+
+/// FFmpeg's bound, which compares the size with the header's start rather
+/// than its end.
+fn infoFits(size: u32, header_start: usize, end: usize) bool {
+    return size != std.math.maxInt(u32) and size <= end - header_start;
+}
+
+/// The tags of a buffered `bext` chunk of at least 602 bytes, as `wavdec.c`'s
+/// `wav_parse_bext_tag` sets them: the five text fields when not empty, the
+/// time reference in decimal, the UMID in hexadecimal when version 1 or later
+/// has a nonzero one, and the coding history when present.
+fn parseBext(tags: Tags, body: []const u8) error{OutOfMemory}!void {
+    std.debug.assert(body.len >= bext_fixed_len);
+    const fields = [_]struct { key: []const u8, len: usize }{
+        .{ .key = "description", .len = 256 },
+        .{ .key = "originator", .len = 32 },
+        .{ .key = "originator_reference", .len = 32 },
+        .{ .key = "origination_date", .len = 10 },
+        .{ .key = "origination_time", .len = 8 },
+    };
+    var at: usize = 0;
+    for (fields) |field| {
+        const text = untilNul(body[at..][0..field.len]);
+        if (text.len > 0) try putTag(tags, field.key, text);
+        at += field.len;
+    }
+    var text_buffer: [2 + 8 * 16]u8 = undefined;
+    const time_reference = std.mem.readInt(u64, body[338..346], .little);
+    // 20 decimal digits fit.
+    try putTag(tags, "time_reference", std.fmt.bufPrint(&text_buffer, "{d}", .{time_reference}) catch unreachable);
+    const version = std.mem.readInt(u16, body[346..348], .little);
+    if (version >= 1) {
+        var parts: [8]u64 = undefined;
+        for (&parts, 0..) |*part, i| part.* = std.mem.readInt(u64, body[348 + 8 * i ..][0..8], .big);
+        if (!std.mem.allEqual(u64, &parts, 0)) {
+            // SMPTE 330M: a basic UMID is 32 bytes, an extended one 64.
+            const basic = std.mem.allEqual(u64, parts[4..], 0);
+            var w: std.Io.Writer = .fixed(&text_buffer);
+            w.writeAll("0x") catch unreachable;
+            for (parts[0..if (basic) 4 else 8]) |part| w.print("{X:0>16}", .{part}) catch unreachable;
+            try putTag(tags, "umid", w.buffered());
+        }
+    }
+    if (body.len > bext_fixed_len) try putTag(tags, "coding_history", untilNul(body[bext_fixed_len..]));
+}
+
+fn untilNul(bytes: []const u8) []const u8 {
+    return bytes[0 .. std.mem.findScalar(u8, bytes, 0) orelse bytes.len];
+}
+
+/// `av_dict_set` without flags: a key already present is replaced.
+fn putTag(tags: Tags, key: []const u8, value: []const u8) error{OutOfMemory}!void {
+    tags.dictionary.put(tags.gpa, key, value, .replace) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.InvalidTag => unreachable, // every key and value is cut at its first NUL
+    };
+}
+
+const Rename = struct { native: []const u8, generic: []const u8 };
+
+/// `wav_metadata_conv` in wavdec.c.
+const bext_names = [_]Rename{
+    .{ .native = "description", .generic = "comment" },
+    .{ .native = "originator", .generic = "encoded_by" },
+    .{ .native = "origination_date", .generic = "date" },
+    .{ .native = "origination_time", .generic = "creation_time" },
+};
+
+/// `ff_riff_info_conv` in riff.c. `track` has two codes; the writer uses the
+/// first, `IPRT`, as FFmpeg's does.
+const info_names = [_]Rename{
+    .{ .native = "IART", .generic = "artist" },
+    .{ .native = "ICMT", .generic = "comment" },
+    .{ .native = "ICOP", .generic = "copyright" },
+    .{ .native = "ICRD", .generic = "date" },
+    .{ .native = "IGNR", .generic = "genre" },
+    .{ .native = "ILNG", .generic = "language" },
+    .{ .native = "INAM", .generic = "title" },
+    .{ .native = "IPRD", .generic = "album" },
+    .{ .native = "IPRT", .generic = "track" },
+    .{ .native = "ITRK", .generic = "track" },
+    .{ .native = "ISFT", .generic = "encoder" },
+    .{ .native = "ISMP", .generic = "timecode" },
+    .{ .native = "ITCH", .generic = "encoded_by" },
+};
+
+/// The tags `Parser.collectTags` stored, under the names FFmpeg reports, in
+/// its order: `wavdec.c` renames the `bext` fields, then the INFO codes, each
+/// pass keeping a duplicate key only with a different value. Other keys pass
+/// unchanged.
+pub fn genericTags(gpa: std.mem.Allocator, stored: *const metadata.Dictionary) std.mem.Allocator.Error!metadata.Dictionary {
+    var bext_renamed = try renameTags(gpa, stored, &bext_names);
+    defer bext_renamed.deinit(gpa);
+    return renameTags(gpa, &bext_renamed, &info_names);
+}
+
+/// `ff_metadata_conv` from native to generic names (`metadata.c`).
+fn renameTags(gpa: std.mem.Allocator, from: *const metadata.Dictionary, names: []const Rename) std.mem.Allocator.Error!metadata.Dictionary {
+    var to: metadata.Dictionary = .empty;
+    errdefer to.deinit(gpa);
+    for (from.items()) |entry| {
+        const key = for (names) |name| {
+            if (std.ascii.eqlIgnoreCase(entry.key, name.native)) break name.generic;
+        } else entry.key;
+        to.put(gpa, key, entry.value, .keep_distinct) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidTag => unreachable, // the entries of a dictionary hold no NUL
+        };
+    }
+    return to;
 }
 
 /// Short reads end at the end of the stream; the caller decides what that means.
@@ -963,6 +1199,7 @@ test "every fixture gives the same result from one-byte reads" {
 }
 
 test "probing validates without decoding and agrees with decoding" {
+    @setEvalBranchQuota(10_000);
     inline for (fixtures.all) |fixture| {
         inline for (.{ false, true }) |unknown_length| {
             var reader: std.Io.Reader = .fixed(fixtures.bytes(fixture.name));
@@ -979,6 +1216,115 @@ test "probing validates without decoding and agrees with decoding" {
             }
         }
     }
+}
+
+/// Reads a whole stream through the parser, data included.
+fn readAll(parser: *Parser) Error!void {
+    _ = try parser.readHeader();
+    var buffer: [256]u8 = undefined;
+    while ((try parser.readData(&buffer)).len != 0) {}
+    try parser.finish();
+}
+
+fn expectTags(expected: []const fixtures.Tag, got: *const metadata.Dictionary) !void {
+    try std.testing.expectEqual(expected.len, got.count());
+    for (expected, got.items()) |want, entry| {
+        try std.testing.expectEqualStrings(want.key, entry.key);
+        try std.testing.expectEqualStrings(want.value, entry.value);
+    }
+}
+
+/// Parses one fixture with tags collected: the result is the contract's, and
+/// an accepted stream reports the manifest's tags under FFmpeg's names.
+fn expectFixtureTags(comptime fixture: fixtures.Fixture, reader: *std.Io.Reader) !void {
+    const gpa = std.testing.allocator;
+    var stored: metadata.Dictionary = .empty;
+    defer stored.deinit(gpa);
+    var parser: Parser = .init(reader, .{});
+    parser.collectTags(.{ .gpa = gpa, .dictionary = &stored });
+    const result = readAll(&parser);
+    errdefer std.debug.print("fixture {s}, tags collected\n", .{fixture.name});
+    switch (fixture.expected) {
+        .accept => {
+            try result;
+            var generic = try genericTags(gpa, &stored);
+            defer generic.deinit(gpa);
+            try expectTags(fixture.tags, &generic);
+        },
+        .reject => |failure| try std.testing.expectError(expectedError(failure), result),
+    }
+}
+
+test "collecting tags keeps every fixture's result and gives the manifest's tags" {
+    var tagged: usize = 0;
+    inline for (fixtures.all) |fixture| {
+        var reader: std.Io.Reader = .fixed(fixtures.bytes(fixture.name));
+        try expectFixtureTags(fixture, &reader);
+        var buffer: [1]u8 = undefined;
+        var source: std.testing.Reader = .init(&buffer, &.{.{ .buffer = fixtures.bytes(fixture.name) }});
+        source.artificial_limit = .limited(1);
+        try expectFixtureTags(fixture, &source.interface);
+        if (fixture.tags.len > 0) tagged += 1;
+    }
+    try std.testing.expect(tagged >= 10);
+}
+
+test "tag chunks count toward the retained limit only when tags are collected" {
+    const gpa = std.testing.allocator;
+    const bytes = fixtures.bytes("bext_tags");
+    // The bext body (616 bytes) and the INFO list (4 + 18 + 14 bytes).
+    const retained = 616 + 36;
+    for ([_]u32{ retained - 1, retained }) |limit| {
+        var stored: metadata.Dictionary = .empty;
+        defer stored.deinit(gpa);
+        var reader: std.Io.Reader = .fixed(bytes);
+        var parser: Parser = .init(&reader, .{ .max_retained_bytes = limit });
+        parser.collectTags(.{ .gpa = gpa, .dictionary = &stored });
+        if (limit < retained) {
+            try std.testing.expectError(error.LimitExceeded, readAll(&parser));
+        } else {
+            try readAll(&parser);
+        }
+    }
+    var reader: std.Io.Reader = .fixed(bytes);
+    _ = try probe(&reader, .{ .max_retained_bytes = 0 });
+}
+
+fn collectUnderFailures(gpa: std.mem.Allocator, bytes: []const u8) !void {
+    var stored: metadata.Dictionary = .empty;
+    defer stored.deinit(gpa);
+    var reader: std.Io.Reader = .fixed(bytes);
+    var parser: Parser = .init(&reader, .{});
+    parser.collectTags(.{ .gpa = gpa, .dictionary = &stored });
+    try readAll(&parser);
+    var generic = try genericTags(gpa, &stored);
+    defer generic.deinit(gpa);
+}
+
+test "an allocation failure while collecting tags is reported and leaks nothing" {
+    inline for (.{ "bext_tags", "info_values", "info_duplicates" }) |name| {
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, collectUnderFailures, .{fixtures.bytes(name)});
+    }
+}
+
+test "a bext chunk shorter than its fixed fields gives no tags" {
+    const gpa = std.testing.allocator;
+    // mono_8k with a 100-byte bext between `fmt ` and `data`.
+    const mono_8k = comptime fixtures.bytes("mono_8k");
+    var bytes: [mono_8k.len + 108]u8 = undefined;
+    @memcpy(bytes[0..36], mono_8k[0..36]);
+    @memcpy(bytes[36..40], "bext");
+    std.mem.writeInt(u32, bytes[40..44], 100, .little);
+    @memset(bytes[44..144], 'x');
+    @memcpy(bytes[144..], mono_8k[36..]);
+    std.mem.writeInt(u32, bytes[4..8], bytes.len - 8, .little);
+    var stored: metadata.Dictionary = .empty;
+    defer stored.deinit(gpa);
+    var reader: std.Io.Reader = .fixed(&bytes);
+    var parser: Parser = .init(&reader, .{});
+    parser.collectTags(.{ .gpa = gpa, .dictionary = &stored });
+    try readAll(&parser);
+    try std.testing.expectEqual(0, stored.count());
 }
 
 test "unknown length: a count when the data size is known, none when it is not" {

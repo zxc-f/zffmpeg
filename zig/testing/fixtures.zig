@@ -99,6 +99,9 @@ pub const Fixture = struct {
     /// The result with the parser's `unknown_length` option (T21b), where it
     /// differs from `expected`.
     unknown_length: ?Expected = null,
+    /// The tags an accepted stream reports (T21c), under FFmpeg's names and
+    /// in its order, written by hand from the fixture's chunks.
+    tags: []const Tag = &.{},
 
     /// The expected result with the `unknown_length` option off or on.
     pub fn result(fixture: Fixture, unknown_length: bool) Expected {
@@ -113,6 +116,12 @@ pub const Fixture = struct {
 };
 
 pub const WriterHeader = enum { riff, rf64, w64 };
+
+/// One tag as bytes: values may hold any byte but NUL.
+pub const Tag = struct {
+    key: []const u8,
+    value: []const u8,
+};
 
 pub const all: []const Fixture = @import("fixtures/manifest.zon");
 
@@ -180,6 +189,9 @@ fn expectConsistent(comptime Contract: type) void {
         if (@hasField(@TypeOf(fixture), "writer_header")) {
             if (fixture.writer_header != .riff and !fixture.writer_output) {
                 @compileError("a writer header needs writer output: " ++ fixture.name);
+            }
+            if (fixture.tags.len > 0 and fixture.expected != .accept) {
+                @compileError("only accepted fixtures report tags: " ++ fixture.name);
             }
         }
         if (@hasField(@TypeOf(fixture), "unknown_length")) {

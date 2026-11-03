@@ -167,8 +167,71 @@ def detected_format(binary, path):
 
 
 def zffprobe(binary, path):
+    """Exit status, the stream fields (without the tag lines) and stderr."""
     process = run(binary, path)
-    return process.returncode, key_values(text(process.stdout)), text(process.stderr)
+    stream_lines = b"\n".join(line for line in process.stdout.split(b"\n") if not line.startswith(b"tag:"))
+    return process.returncode, key_values(text(stream_lines)), text(process.stderr)
+
+
+def unescape(data, escapes):
+    """Undoes backslash escapes: `escapes` maps the byte after a backslash to its meaning."""
+    out, i = bytearray(), 0
+    while i < len(data):
+        if data[i] == 0x5C and i + 1 < len(data) and data[i + 1] in escapes:
+            out.append(escapes[data[i + 1]])
+            i += 2
+        else:
+            out.append(data[i])
+            i += 1
+    return bytes(out)
+
+
+ZFFPROBE_ESCAPES = {0x5C: 0x5C, ord("n"): 0x0A, ord("r"): 0x0D}
+# ffprobe's `c` escaping in the compact writer, with `|` as the separator.
+FFPROBE_C_ESCAPES = {0x5C: 0x5C, ord("n"): 0x0A, ord("r"): 0x0D, ord("b"): 0x08, ord("f"): 0x0C, ord("|"): ord("|")}
+
+
+def zffprobe_tags(binary, path):
+    """zffprobe's `tag:<key>=<value>` lines (T21c) as (key, value) byte pairs, in order."""
+    process = run(binary, path)
+    tags = []
+    for line in process.stdout.split(b"\n"):
+        if line.startswith(b"tag:"):
+            key, _, value = line[len(b"tag:"):].partition(b"=")
+            tags.append((unescape(key, ZFFPROBE_ESCAPES), unescape(value, ZFFPROBE_ESCAPES)))
+    return tags
+
+
+def ffprobe_tags(binary, path, input_format=None):
+    """ffprobe's format tags as (key, value) byte pairs, in order. The compact
+    writer with `c` escaping keeps every tag on one line, newlines included."""
+    process = run(binary, "-v", "error", "-show_entries", "format_tags", "-of", "compact=p=0:escape=c",
+                  *forced(input_format), path)
+    line = process.stdout.rstrip(b"\r\n")
+    items, current, i = [], bytearray(), 0
+    while i < len(line):
+        if line[i] == 0x5C and i + 1 < len(line):
+            current += line[i:i + 2]
+            i += 2
+        elif line[i] == ord("|"):
+            items.append(bytes(current))
+            current = bytearray()
+            i += 1
+        else:
+            current.append(line[i])
+            i += 1
+    if current:
+        items.append(bytes(current))
+    tags = []
+    for item in items:
+        if item.startswith(b"tag:"):
+            key, _, value = item[len(b"tag:"):].partition(b"=")
+            tags.append((unescape(key, FFPROBE_C_ESCAPES), unescape(value, FFPROBE_C_ESCAPES)))
+    return tags
+
+
+def tags_text(tags):
+    return ", ".join(f"{k.decode(errors='replace')}={v.decode(errors='replace')!r}" for k, v in tags) or "none"
 
 
 def zffprobe_raw(binary, *args, data=None):
@@ -270,7 +333,18 @@ def compare_accepted(fixture, args, path):
     if code != 0 or fields != z_expected:
         problems.append(f"zffprobe exited {code} with {fields or first_line(err)}")
 
+    # Tags (T21c): FFmpeg's and zffprobe's must both equal the hand-written ones.
+    want_tags = fixture.tags
+    their_tags = ffprobe_tags(args.ffprobe, path)
+    if their_tags != want_tags:
+        problems.append(f"ffprobe tags {tags_text(their_tags)}, expected {tags_text(want_tags)}")
+    our_tags = zffprobe_tags(args.zffprobe, path)
+    if our_tags != want_tags:
+        problems.append(f"zffprobe tags {tags_text(our_tags)}, expected {tags_text(want_tags)}")
+
     verdict = "same samples and stream" if not problems else "differs"
+    if want_tags and not problems:
+        verdict += f", and the same {len(want_tags)} tag{'s' if len(want_tags) != 1 else ''}"
     if notes:
         verdict += "; " + "; ".join(notes)
     encoding = "" if stream.codec == "pcm_s16le" else f", `{stream.codec}`"

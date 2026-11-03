@@ -49,23 +49,55 @@ fn run(init: std.process.Init) ExitStatus {
         return .usage;
     }
     const path = args[1];
+    const gpa = init.gpa;
+    var tags: av.metadata.Dictionary = .empty;
+    defer tags.deinit(gpa);
+    const tag_sink: av.wav.Tags = .{ .gpa = gpa, .dictionary = &tags };
     var buffer: [av.file.default_buffer_len]u8 = undefined;
     const result = if (std.mem.eql(u8, path, "-"))
-        av.file.probeFile(io, std.Io.File.stdin(), &buffer, .{})
+        av.file.probeFile(io, std.Io.File.stdin(), &buffer, .{}, tag_sink)
     else
-        av.file.probePath(io, std.Io.Dir.cwd(), path, &buffer, .{});
+        av.file.probePath(io, std.Io.Dir.cwd(), path, &buffer, .{}, tag_sink);
     const info = result catch |err| {
         printError(io, "zffprobe: {s}: {t}\n", .{ path, err });
         return status.of(err);
     };
 
-    var report_buffer: [512]u8 = undefined;
-    var report: std.Io.Writer = .fixed(&report_buffer);
-    writeReport(&report, info) catch unreachable; // nine short lines fit in 512 bytes
-    return status.writeStdout(io, "zffprobe", report.buffered());
+    var report: std.Io.Writer.Allocating = .init(gpa);
+    defer report.deinit();
+    // The allocating writer fails only when it cannot grow.
+    writeReport(&report.writer, info, &tags) catch {
+        printError(io, "zffprobe: out of memory\n", .{});
+        return .limit;
+    };
+    return status.writeStdout(io, "zffprobe", report.writer.buffered());
 }
 
-fn writeReport(out: *std.Io.Writer, info: av.detect.Probed) std.Io.Writer.Error!void {
+/// The nine stream lines, then one `tag:<key>=<value>` line per tag in order
+/// (T21c). Keys and values are written as stored, except that a backslash,
+/// line feed and carriage return become `\\`, `\n` and `\r`, so each tag stays
+/// on one line.
+fn writeReport(out: *std.Io.Writer, info: av.detect.Probed, tags: *const av.metadata.Dictionary) std.Io.Writer.Error!void {
+    try writeStream(out, info);
+    for (tags.items()) |tag| {
+        try out.writeAll("tag:");
+        try writeEscaped(out, tag.key);
+        try out.writeByte('=');
+        try writeEscaped(out, tag.value);
+        try out.writeByte('\n');
+    }
+}
+
+fn writeEscaped(out: *std.Io.Writer, bytes: []const u8) std.Io.Writer.Error!void {
+    for (bytes) |byte| switch (byte) {
+        '\\' => try out.writeAll("\\\\"),
+        '\n' => try out.writeAll("\\n"),
+        '\r' => try out.writeAll("\\r"),
+        else => try out.writeByte(byte),
+    };
+}
+
+fn writeStream(out: *std.Io.Writer, info: av.detect.Probed) std.Io.Writer.Error!void {
     const format = info.format;
     try out.print(
         \\format={s}
