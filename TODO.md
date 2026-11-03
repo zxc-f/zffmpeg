@@ -18,8 +18,9 @@ zigimg are independent clones in ignored `.references/`; see
 T12 is verified: the AU contract and 29 fixtures (T12a), the AU parser and
 writer (T12b) and AU in `zffprobe` with content detection (T12c). T13 is verified too: the
 synchronous conversion pipeline (`av.convert`, T13a) and the `zffmpeg`
-command (T13b). **Next: T14a, packet and frame ownership, and T16, dispatch
-extraction. See [Near-term order](#near-term-order).**
+command (T13b). T14a, packets, frames and send/receive stages, is verified.
+**Next: T20a, decoded sample storage; T16 starts with the first third format.
+See [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
 [How tasks are completed](#how-tasks-are-completed) describes. Tasks and
@@ -838,7 +839,7 @@ names, not as an empty framework.
 - [ ] **T14 — Packets, frames and shared buffers.** Reference:
   `libavcodec/packet.c`, `libavutil/frame.c`, `libavutil/buffer.c`,
   `libavcodec/avcodec.h` (the send/receive contract).
-  - [ ] **T14a — Packet and frame ownership with a real consumer.** Needs T13b.
+  - [x] **T14a — Packet and frame ownership with a real consumer.** Needs T13b.
     Move the T13 pipeline onto a `Packet` (payload, pts, dts, duration, stream
     index, key and discard flags, owned or borrowed data) and an audio `Frame`
     (format, layout, sample count, planes, pts), with decoder and encoder
@@ -857,6 +858,64 @@ names, not as an empty framework.
     | Seek or reset | Buffered output and timing state are dropped and the stage restarts cleanly; reset is not drain. |
     | No progress | Queues are bounded; each synchronous iteration consumes input, emits output or changes state, or returns a defined wait or error. |
     | Cancellation, limit or I/O failure | Owned resources and retained references are released, the failure is reported, and whether the instance can be reset or must be destroyed is defined. |
+
+    ```text
+    ID / parent: T14a / T14
+    State: verified
+    Supported behavior and explicit exclusions: port.md "Packets, frames and
+      stages": Packet and audio Frame views with clone-to-Owned retention,
+      the send/receive stage contract, pcm.Decoder and pcm.Encoder, and
+      av.convert on timestamped packets. Excluded: planar and other sample
+      storage (T20a), reference counting and pools (T14b), side data,
+      threads.
+    Needs (verified) / lands with / verified after: T13b (verified); alone.
+    Contract and source provenance: port.md "Packets, frames and stages",
+      notes.md "Packets, frames and stages"; the send/receive rules of
+      libavcodec/avcodec.h, the fields of packet.h and frame.h. Original.
+    Required fixtures / optional corpus: the table above, row by row, plus
+      the existing conversion fixtures and the FFmpeg comparison.
+    Ownership, state transitions and limits: views never own; Owned values
+      hold a copy and their allocator; PCM stages hold one item in caller
+      storage; DelayStage's queue is bounded at init (capacity > delay).
+    Comparison rule and intentional differences: contract tests per row;
+      conversion output unchanged (process cases' exact bytes, FFmpeg
+      63/63). finishInput is idempotent, unlike a decoder's second flush.
+    Implementation files and test entry points: zig/core/packet.zig,
+      frame.zig, stage.zig; Decoder/Encoder in zig/codec/pcm.zig;
+      zig/testing/delay_stage.zig; Transcoder and readPacket in
+      zig/format/convert.zig.
+    Evidence commit / Linux CI run / reference report: bc8d19e / local
+      Windows runs instead (below) / local compare.py run (below).
+    Required cases: passed every row / failed 0 / missing 0.
+    Optional cases: none.
+    Fuzz seeds, budget and result: no new parser; convert.zig's differential
+      fuzz entry runs over the packet pipeline under zig build test.
+    Remaining work or blocker / next action: none; T20a is next.
+    ```
+
+    Evidence (G5, local Windows runs with Zig 0.17.0 count as completion
+    evidence, by the project owner's decision): implementation commit
+    `bc8d19e`. `zig build test` passed 73/73 steps in Debug, ReleaseSafe and
+    ReleaseFast (`av` 96 tests, every `zffprobe` and `zffmpeg` process case);
+    `zig fmt --check`, the cross builds and a Linux type check of the tests
+    passed; `compare.py` passed every section, FFmpeg reading 63/63 `zffmpeg`
+    outputs. Rows: backpressure and retry in `DelayStage`'s "rejected input
+    stays with the caller" and the PCM decoder and encoder backpressure tests;
+    accepted input in "accepted input is copied" (copy) and the PCM stages
+    (read during `send`, not retained); output lifetime and retention in "an
+    output is valid until the next call, and a clone keeps it longer" and the
+    `Packet`/`Frame` clone tests; end of input in "draining emits delayed
+    output once" and the decoder's drain test; reset in "reset drops buffered
+    input and timing" and the decoder's reset; progress in the randomized
+    "every call makes progress" test (200 configurations, each finishing in
+    bounded steps with nothing lost); failure in "allocation failure at every
+    site leaks nothing" (`checkAllAllocationFailures` over the test stage, and
+    over both clones), "a failed send consumes nothing and leaves the stage
+    usable" and the PCM stages' failure tests. A conversion's I/O failure
+    releases nothing it owns because the stages own nothing; any stage can be
+    `reset` after a failed send, and `DelayStage.deinit` releases every
+    retained copy. A mutation wiring the encoder to the input byte order fails
+    9 steps and 2 tests.
 
   - [ ] **T14b — Shared storage and pools.** Needs T14a. Start with the first
     stage that shares data or emits many frames (T25c, T26a or T33a).

@@ -11,7 +11,9 @@ multimedia functionality. Implement algorithms and APIs in Zig; compiling FFmpeg
 `zig cc`, translating headers, or wrapping libav* does not constitute the port.
 
 Current state: the WAV and AU PCM paths are complete (T01–T12). The `av`
-module (rooted at `zig/root.zig`) exports `pcm`, `audio`, `time`, `wav` and
+module (rooted at `zig/root.zig`) exports `pcm` (kernels and
+decoder/encoder stages), `audio`, `time`, `packet`, `frame`, `stage` (the
+send/receive contract), `wav` and
 `au` (bounded parsers and known-length writers), `detect` (WAV or AU content
 detection), `convert` (the synchronous T13a conversion and stream-copy
 pipeline) and `file` (file and pipe adapters). Two tools sit on it:
@@ -19,9 +21,9 @@ pipeline) and `file` (file and pipe adapters). Two tools sit on it:
 between them. Tests cover 52 WAV and 29 AU fixtures, process runs of both
 tools, and a CI comparison against a pinned FFmpeg build that also reads
 every `zffmpeg` output. Verification is Linux-only during development; Windows
-and ARM wait for T62–T63. T13 is verified; T14a (packet and frame ownership)
-and T16 (dispatch extraction) are next, and TODO.md lays out the roadmap
-through T64. When the state changes, update the current-state statements in
+and ARM wait for T62–T63. T13 and T14a (packets, frames and stages) are
+verified; T20a (decoded sample storage) is next, and TODO.md lays out the
+roadmap through T64. When the state changes, update the current-state statements in
 README.md, port.md ("Status and scope"), the TODO.md introduction and this file
 together.
 

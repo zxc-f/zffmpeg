@@ -177,6 +177,18 @@ port.md's contract table updated, and (after T06) the parser.
 | Partial output on input failure | An exact transfer read that the input cannot fill delivers nothing, so the samples written before a truncation depend on the 4 KiB transfer boundaries. The failure itself is always reported. | `convert.zig`; delivering the readable prefix would need short reads in `readData`. |
 | Rejected-input oracle | Tests expect a rejected input to fail conversion with `detect.probe`'s error, which the fixture contracts already pin, instead of repeating the fixture-to-error mapping. | `convert.zig` tests. |
 
+## Packets, frames and stages
+
+| Decision | Current choice and reason | To change it |
+| --- | --- | --- |
+| Views and `Owned` | `Packet` and `Frame` are views; `clone(gpa)` makes an `Owned` value that composes the view and its allocator. Explicit copies cover every current consumer; reference counting waits for a stage that shares data (T14b). | `core/packet.zig`, `core/frame.zig`; T14b. |
+| One plane | `Frame` holds interleaved s16 samples only, the one supported sample format. | T20a replaces it with real sample storage. |
+| `.full` is a result | Backpressure is a normal answer (`Send.full`), not an error, so `try` never hides it and failures stay errors. | `core/stage.zig`. |
+| Idempotent `finishInput` | A second call does nothing, where FFmpeg decoders answer `AVERROR_EOF`; `send` after it is `InputAfterEnd` in both. One rule for every stage and no error for a harmless repeat. | `core/stage.zig`, port.md. |
+| PCM stages in caller storage | `pcm.Decoder` and `pcm.Encoder` hold one item in storage the caller provides and never allocate, so `av.convert` keeps its fixed memory. A codec that needs growing buffers takes an allocator itself. | `codec/pcm.zig`. |
+| Test stage | `DelayStage` exists only for tests: PCM never buffers, delays or splits, so it alone exercises those rows of the contract. It is not exported. | `zig/testing/delay_stage.zig`. |
+| Byte order with the codec | `detect.Container.sampleEndian` sits next to `codecName`: the order is the codec's property. | `detect.zig`; the codec descriptors of T16 replace both. |
+
 ## zffmpeg command
 
 | Decision | Current choice and reason | To change it |

@@ -135,6 +135,7 @@ slowdowns of the default build.
 | `zig/format/wav.zig`, `zig/io/file.zig`, `zig/cli/probe.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. FFmpeg's `wavdec.c`, `wavenc.c`, `riffenc.c` and `ffprobe` were read for behavior only; no code is copied. |
 | `zig/format/au.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. FFmpeg's `au.c` and `pcm.c` were read for behavior only; no code is copied. |
 | `zig/format/detect.zig`, `zig/format/prefix.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. The detection rule is the project's own; FFmpeg's `au_probe` in `au.c` was read only to record where it differs. |
+| `zig/core/packet.zig`, `zig/core/frame.zig`, `zig/core/stage.zig`, `zig/testing/delay_stage.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. The send/receive rules follow `libavcodec/avcodec.h`; the fields follow `libavcodec/packet.h` and `libavutil/frame.h`; no code is copied. |
 | `zig/format/convert.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. The operation matrix is TODO.md T13's; no FFmpeg source maps to it directly. |
 | `zig/cli/ffmpeg.zig`, `zig/cli/status.zig`, `zig/testing/zffmpeg_cases.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. FFmpeg's `fftools/ffmpeg_opt.c` (`assert_file_overwrite`) was read for the `-y`/`-n` and same-file behavior only; no code is copied. |
 | `zig/testing/reference/build-ffmpeg.sh`, `compare.py` | `LGPL-2.1-or-later` (SPDX header) | Original scripts; they build and run the separate, unmodified FFmpeg reference. |
