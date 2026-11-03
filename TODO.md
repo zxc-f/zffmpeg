@@ -97,6 +97,9 @@ than inheriting the claim.
   redistributable is fetched by pinned hash and still fails when missing.
 - Optional corpora (FATE samples and the like) are reported separately with
   their skips. A missing optional sample never removes a required gate.
+- A check whose code has not landed yet is reported as **not implemented**,
+  apart from passes and skips, and becomes mandatory in the subtask that owns
+  it. It never disappears into a passing skip count.
 - Extend [build-ffmpeg.sh](zig/testing/reference/build-ffmpeg.sh) only with the
   LGPL components the subtask compares against. Record the FFmpeg revision,
   configuration, binary and fixture hashes and commands with each report; a
@@ -461,7 +464,9 @@ to `PCM_S16BE`. Remaining AU encodings, AIFF and raw PCM stay in T22; more
 sample formats stay in T20.
 
 - [ ] **T12 — Known-length AU with signed 16-bit big-endian PCM.** Checked when
-  T12a–T12c are. Reference: `libavformat/au.c`, `pcmdec.c`, `rawenc.c`.
+  T12a–T12c are. Reference: `libavformat/au.c`, `pcmdec.c`, `rawenc.c`. Keep
+  the three subtasks' evidence distinct, so a passing reference-only run is
+  never mistaken for a verified AU implementation.
   - [ ] **T12a — AU contract and fixtures.** Needs T10. Lands with T19a.
     Write the contract (port.md, plus a fixture README) before parser code:
     `.snd` magic; encoding 3 only; mono or stereo; the sample-rate limit; a
@@ -477,25 +482,33 @@ sample formats stay in T20.
     frame, offset and annotation, unsupported encoding, truncated header and
     payload, invalid rate and channel count, and size-limit fixtures with
     standard-library Python; large logical sizes use synthetic readers, not
-    large files.
+    large files. Keep parser acceptance and automatic format detection
+    separately observable. The progress card names the reference commands and
+    outputs, and which subtask activates each Zig parser, writer and probe
+    check.
     Done when the fixtures are generated and hash-checked, every case has an
     expected result and error, and FFmpeg's verdict on each is recorded through
-    T19a.
+    T19a's oracle phase. T12a reaches G5 in a checkout without any AU Zig
+    code.
   - [ ] **T12b — AU parser and writer.** Needs T12a. An allocation-free
     `zig/format/au.zig` over `*std.Io.Reader` and `*std.Io.Writer`, reusing the
-    PCM, audio and time code. Size overflow is detected before any output;
-    read and write finalization, and what stays valid after an I/O failure,
-    are specified.
+    PCM, audio and time code, plus the AU output path of T19a's test driver.
+    Size overflow is detected before any output; read and write finalization,
+    and what stays valid after an I/O failure, are specified.
     Done when memory input, one-byte input, empty and tiny adapter buffers,
     truncation, generic I/O and flush failures and the fuzz seeds pass, decoded
-    samples are exact, and writer bytes equal the expected fixtures.
+    samples are exact, writer bytes equal the expected fixtures, and FFmpeg
+    decodes the driver's actual AU output to the expected samples and timing.
+    That direct reference check becomes mandatory here; T12b cannot reach G5
+    without it.
   - [ ] **T12c — AU in zffprobe with a bounded probe prefix.** Needs T12b.
     Content detection of WAV and AU over a bounded prefix that is retained and
     replayed, so non-seekable input loses no bytes. Extract only the adapter
     pieces that AU proves common.
     Done when file and standard-input process cases pass for both formats,
-    existing WAV reports are unchanged, and FFmpeg decodes actual AU writer
-    output from the T19a test driver to the expected samples.
+    the replayed prefix loses no bytes, existing WAV reports are unchanged,
+    and T19a's full WAV and AU probe comparison, over files and pipes, is
+    mandatory and passes.
 
 - [ ] **T13 — A minimal `zffmpeg` for conversion and stream copy.** Checked
   when T13a and T13b are. The operation matrix:
@@ -676,20 +689,31 @@ names, not as an empty framework.
 - [ ] **T19 — Differential harness.** Checked when T19a–T19c are. Reference:
   `libavformat/framecrcenc.c`, `framehash.c`, `hashenc.c`,
   `tests/fate-run.sh`, `tests/Makefile`.
-  - [ ] **T19a — AU comparison support and a writer test driver.** Lands with
-    T12a, and grows with T12b–T12c. Extend `compare.py` to AU next to WAV: the
-    contract's expected results, FFmpeg's verdicts and `zffprobe` output. Add a
-    small Zig test driver, built by `zig build`, that writes WAV and AU files
-    from the fixture expectations; `compare.py` feeds those actual outputs to
-    FFmpeg. This also replaces T08's indirect writer check.
-    Done when FFmpeg's verdict on every AU fixture is recorded, the driver's
-    WAV and AU output decodes in FFmpeg to the expected samples and timing, and
-    a missing or altered required fixture fails the run.
+  - [ ] **T19a — Comparison runner: oracle phase and WAV writer driver.** Lands
+    with T12a. Extend `compare.py` to AU on the reference side: the contract's
+    expected results, fixture integrity and FFmpeg's verdict on each AU
+    fixture, with intentional differences documented narrowly. Add a small Zig
+    test driver, built by `zig build`, that writes the WAV writer-output
+    streams; `compare.py` feeds those actual files to FFmpeg, which replaces
+    T08's indirect writer check. Checks that need AU code report **not
+    implemented** until their owners land: the driver's AU output in T12b, the
+    `zffprobe` AU and pipe comparisons in T12c.
+    Done when, in a checkout without `zig/format/au.zig`, FFmpeg's verdict on
+    every AU fixture is recorded, the driver's WAV output decodes in FFmpeg to
+    the expected samples and timing, the not-implemented AU checks are listed
+    in the report, and a missing or altered required fixture fails the run.
   - [ ] **T19b — Frame and packet hashes.** Needs T19a. Lands with T26a.
     FFmpeg's `framecrc` (Adler-32), `framemd5` and `streamhash` output compared
     with the same hashes from Zig (the test driver, later
     `zffmpeg -f framecrc`), plus normalized `ffprobe -of json` metadata.
-    Done when FLAC and the PCM paths compare through it in CI.
+    `framecrcenc.c` starts each packet's Adler-32 from 0
+    (`av_adler32_update(0, ...)`), not the usual 1, so the Zig side uses
+    `std.hash.Adler32.permute(0, bytes)` per packet: `abc` gives `0x024a0126`
+    from 0 and `0x024d0127` from 1. The hashed bytes, packet and frame
+    boundaries, time bases and metadata are defined separately, because equal
+    checksums alone do not prove equal media.
+    Done when the seed vectors (empty input, `abc`, a split update and separate
+    packets) pass and FLAC and the PCM paths compare through it in CI.
   - [ ] **T19c — Optional corpus and coverage report.** Needs T19b. Start with
     the first optional sample. An optional FATE sample sync on Linux with
     recorded provenance, and a report of required cases (passed, failed,
@@ -744,9 +768,10 @@ names, not as an empty framework.
 - [ ] **T22 — AU encodings, AIFF, raw PCM and CAF.** Checked when T22a–T22d
   are. Reference: `libavformat/au.c`, `aiffdec.c`, `aiffenc.c`, `pcmdec.c`,
   `pcmenc.c`, `rawenc.c`, `cafdec.c`.
-  - [ ] **T22a — Remaining AU encodings.** Needs T12 and T20b. The other
-    encodings in `au.c`'s table (µ-law, s8, s24be, s32be, f32be, f64be, A-law;
-    the G.72x ADPCM codes wait for T31) and unknown-length AU.
+  - [ ] **T22a — Remaining AU encodings.** Needs T12 and T20b. The other PCM
+    encodings in `au.c`'s table (µ-law, s8, s24be, s32be, f32be, f64be, A-law)
+    and unknown-length AU. The G.722 and G.726 codes (23–26) stay rejected as
+    unsupported, with a fixture, until T31c.
     Done when each encoding demuxes and muxes against the reference.
   - [ ] **T22b — AIFF and AIFF-C.** Needs T16 and T20b. Big-endian fields, the
     80-bit extended sample rate converted exactly, and the PCM, A-law, µ-law
@@ -908,14 +933,20 @@ names, not as an empty framework.
   - [ ] **T30d — PS (HE-AAC v2).** Needs T30c.
     Done when the required PS streams match within tolerance. LATM comes later.
 
-- [ ] **T31 — ADPCM and ALAC.** Checked when T31a and T31b are. Reference:
-  `libavcodec/adpcm.c`, `adpcmenc.c`, `adpcm_data.c`, `alac.c`, `alacenc.c`;
-  `tests/fate/adpcm.mak`, `alac.mak`.
+- [ ] **T31 — ADPCM, G.72x and ALAC.** Checked when T31a–T31c are. Reference:
+  `libavcodec/adpcm.c`, `adpcmenc.c`, `adpcm_data.c`, `g722.c`, `g722dec.c`,
+  `g722enc.c`, `g726.c`, `alac.c`, `alacenc.c`; `tests/fate/adpcm.mak`,
+  `alac.mak`.
   - [ ] **T31a — IMA and Microsoft ADPCM.** Needs T21a. Decoding and encoding
     in WAV.
     Done when both are bit-exact against the reference.
   - [ ] **T31b — ALAC.** Needs T33a or T22d. Decoding and encoding.
     Done when both are bit-exact against the reference.
+  - [ ] **T31c — G.722 and G.726 in AU.** Needs T22a. The AU codes 23, 25 and
+    26 (G.726 little-endian at 4, 3 and 5 bits per sample) and 24 (G.722),
+    decoding and encoding, each with its own vectors.
+    Done when decoding and encoding are bit-exact against the reference for
+    every code, and T22a's rejection fixtures become accepted.
 
 - [ ] **T32 — AC-3 and native lossy encoders.** Checked when T32a–T32d are.
   Reference: `libavcodec/ac3dec.c`, `eac3dec.c`, `ac3dsp.c`, `ac3enc*.c`,
@@ -991,20 +1022,23 @@ configuration parsing is exercised without needing a full decoder.
   - [ ] **T36c — PS demux and mux.** Needs T36a.
     Done when packets match both ways.
 
-- [ ] **T37 — Other containers, raw streams and bitstream filters.** Checked
-  when T37a–T37e are. Reference: `libavformat/avidec.c`, `avienc.c`,
-  `flvdec.c`, `flvenc.c`, `ivfdec.c`, `ivfenc.c`, `rawdec.c`, `rawenc.c`,
-  `concatdec.c`, `libavcodec/*_bsf.c`.
+- [ ] **T37 — Other containers and bitstream filters.** Checked when
+  T37a–T37e are. Reference: `libavformat/avidec.c`, `avienc.c`, `flvdec.c`,
+  `flvenc.c`, `ivfdec.c`, `ivfenc.c`, `concatdec.c`, `libavcodec/*_bsf.c`.
+  Raw elementary streams belong to the parser that splits them, because
+  FFmpeg's raw demuxers rely on a full parser (`AVSTREAM_PARSE_FULL_RAW` in
+  `rawdec.c`): FLAC in T26a, MP3 in T29a, ADTS in T30a, H.264 in T43a and HEVC
+  in T47a.
   - [ ] **T37a — AVI.** Needs T14a and T16. OpenDML past 1 GiB and the index.
     Done when demuxed packets match and FFmpeg reads our output identically.
   - [ ] **T37b — FLV.** Needs T14a and T16.
     Done under the same rule.
-  - [ ] **T37c — IVF and raw elementary streams.** Needs T16. Annex B
-    H.264/HEVC, ADTS, MP3 and FLAC as raw streams.
+  - [ ] **T37c — IVF.** Needs T16.
     Done under the same rule.
   - [ ] **T37d — The concat demuxer and the null muxer.** Needs T52a.
     Done when concatenated timestamps match the reference.
-  - [ ] **T37e — Bitstream filters for stream copy.** Needs T33a.
+  - [ ] **T37e — Bitstream filters for stream copy.** Needs T30a, T33a, T43a
+    and T47a.
     `h264_mp4toannexb`, `hevc_mp4toannexb`, `aac_adtstoasc` and
     `extract_extradata`, using parameter-set parsing only, no decoder.
     Done when filtered packets equal the reference's.
@@ -1114,39 +1148,56 @@ fixtures, committed when small and redistributable or fetched by pinned hash.
   - [ ] **T42c — JPEG and MJPEG encoding.** Needs T42a.
     Done when FFmpeg decodes our output to the same frames as our decoder.
 
-- [ ] **T43 — H.264, part 1: syntax and intra.** Checked when T43a and T43b
-  are. Reference: `libavcodec/h2645_parse.c`, `h264_ps.c`, `h264_sei.c`,
-  `h264_slice.c`, `h264_cavlc.c`, `h264_mb.c`, `h264pred.c`, `h264idct.c`,
-  `h264_loopfilter.c`, `h264_parser.c`, `trace_headers_bsf.c`;
-  `tests/fate/h264.mak` (JVT conformance).
-  - [ ] **T43a — NAL units, parameter sets and slice headers.** Needs T33a
-    and T37c. Lands with T18d. Annex B and length-prefixed NAL units; SPS, PPS and SEI
-    (VUI, color, timing); slice headers and POC types.
+- [ ] **T43 — H.264, part 1: parsing and intra.** Checked when T43a–T43c are.
+  Reference: `libavcodec/h2645_parse.c`, `h264_parser.c`, `h264_ps.c`,
+  `h264_sei.c`, `h264_slice.c`, `h264_cavlc.c`, `h264_mb.c`, `h264pred.c`,
+  `h264idct.c`, `h264_loopfilter.c`, `trace_headers_bsf.c`,
+  `libavformat/h264dec.c`, `rawdec.c`; `tests/fate/h264.mak` (JVT
+  conformance).
+  - [ ] **T43a — NAL units, access units and raw H.264.** Needs T16. Lands
+    with T18d. NAL splitting for Annex B and length-prefixed input, with start
+    codes split across reads; emulation-prevention removal; and the few slice
+    header fields that find picture boundaries as `h264_find_frame_end` does.
+    This subtask owns access-unit assembly and the raw H.264 demuxer. Parsing
+    fixtures can be generated with Python, since no pixels are decoded;
+    conformance streams are added by pinned hash. Required cases: several
+    slices per picture, no access unit delimiters, parameter sets between
+    pictures, start codes and fields split across reads, final-packet drain
+    and truncated input.
+    Done when packet payloads, timestamps, key flags and stream parameters
+    equal the reference's (`-c copy -f framecrc`, `ffprobe -show_packets`)
+    without pixel decoding.
+  - [ ] **T43b — Parameter sets, SEI and slice headers.** Needs T33a and T43a.
+    SPS, PPS and SEI (VUI, color, timing), full slice headers, POC types and
+    `avcC` configuration.
     Done when parsed syntax equals FFmpeg's `trace_headers` output on the
     required streams.
-  - [ ] **T43b — I slices with CAVLC and intra deblocking.** Needs T38b and
-    T43a. Constrained Baseline, 8-bit 4:2:0, progressive frames: CAVLC
-    residuals, intra 4×4, 8×8, 16×16 and chroma prediction, inverse
+  - [ ] **T43c — I slices with CAVLC and intra deblocking.** Needs T38b and
+    T43b. Constrained Baseline, 8-bit 4:2:0, progressive frames: CAVLC
+    residuals, luma Intra_4x4 and Intra_16x16 and chroma prediction, inverse
     transforms, and the deblocking filter on intra edges (boundary strengths 3
-    and 4), which FFmpeg applies to intra macroblocks. An earlier step may
-    accept only streams with deblocking disabled and reject the rest, but it
-    does not complete T43b.
-    Done when the named I-only streams, including some with active
+    and 4), which FFmpeg applies to intra macroblocks. Luma Intra_8x8 belongs
+    to High with 8×8 transforms (T44c): a stream that needs it is rejected as
+    unsupported. An earlier step may accept only streams with deblocking
+    disabled and reject the rest, but it does not complete T43c.
+    Done when the named Baseline I-only streams, including some with active
     deblocking, decode with frame MD5s equal to the reference's.
 
 - [ ] **T44 — H.264, part 2: inter prediction, CABAC, Main and High.** Checked
   when T44a–T44c are. Reference: `h264_cabac.c`, `h264_mvpred.h`,
   `h264_direct.c`, `h264_refs.c`, `h264qpel*.c`, `h264chroma*.c`,
   `h264dsp*.c`, `h264_picture.c`.
-  - [ ] **T44a — P slices (Baseline).** Needs T43b. Motion vector prediction,
+  - [ ] **T44a — P slices (Baseline).** Needs T43c. Motion vector prediction,
     quarter-pel luma and eighth-pel chroma motion compensation, reference list
     management (MMCO, long-term), DPB output order and inter deblocking.
     Done when the named progressive Baseline streams decode bit-exactly.
   - [ ] **T44b — CABAC, B slices and Main.** Needs T44a. CABAC, direct modes
     and weighted prediction.
     Done when the named Main streams decode bit-exactly.
-  - [ ] **T44c — High.** Needs T44b. 8×8 transforms and scaling matrices.
-    Done when the named 8-bit 4:2:0 High streams decode bit-exactly.
+  - [ ] **T44c — High.** Needs T44b. 8×8 transforms, luma Intra_8x8 and
+    scaling matrices.
+    Done when the named 8-bit 4:2:0 High streams decode bit-exactly, including
+    one that needs luma Intra_8x8, which T43c rejects.
 
 - [ ] **T45 — H.264, part 3: interlaced and extended formats.** Checked when
   T45a–T45c are. Each subtask names its streams at G0; there is no
@@ -1170,18 +1221,23 @@ fixtures, committed when small and redistributable or fetched by pinned hash.
   - [ ] **T46c — VP9 profile 2.** Needs T46b. 10-bit.
     Done when the named profile 2 vectors decode bit-exactly.
 
-- [ ] **T47 — HEVC.** Checked when T47a–T47d are. Reference:
-  `libavcodec/hevc/`, `trace_headers_bsf.c`; `tests/fate/hevc.mak`.
-  - [ ] **T47a — HEVC syntax.** Needs T43a (shared H.2645 parsing). VPS, SPS,
-    PPS, SEI and slice headers.
+- [ ] **T47 — HEVC.** Checked when T47a–T47e are. Reference:
+  `libavcodec/hevc/` (including its `parser.c`), `trace_headers_bsf.c`,
+  `libavformat/hevcdec.c`; `tests/fate/hevc.mak`.
+  - [ ] **T47a — NAL units, access units and raw HEVC.** Needs T43a (shared
+    Annex B code). Access-unit assembly and the raw HEVC demuxer, with the
+    same required cases as T43a.
+    Done when packets equal the reference's without pixel decoding.
+  - [ ] **T47b — HEVC syntax.** Needs T33a and T47a. VPS, SPS, PPS, SEI, slice
+    headers and `hvcC` configuration.
     Done when parsed syntax equals `trace_headers` output on the required
     streams.
-  - [ ] **T47b — Main intra.** Needs T38b and T47a. CABAC, intra prediction,
+  - [ ] **T47c — Main intra.** Needs T38b and T47b. CABAC, intra prediction,
     transforms, deblocking and SAO.
     Done when the named intra-only Main streams decode bit-exactly.
-  - [ ] **T47c — Main inter.** Needs T47b.
+  - [ ] **T47d — Main inter.** Needs T47c.
     Done when the named Main streams decode bit-exactly.
-  - [ ] **T47d — Main 10, tiles and WPP.** Needs T47c. Tiles and WPP as data
+  - [ ] **T47e — Main 10, tiles and WPP.** Needs T47d. Tiles and WPP as data
     layout; threading waits for T59.
     Done when the named Main 10 streams decode bit-exactly.
 
