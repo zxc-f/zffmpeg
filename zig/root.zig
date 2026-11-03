@@ -27,6 +27,8 @@
 //!   their PCM encodings (`format/aiff.zig`).
 //! - `raw`: raw PCM reading with given stream parameters and writing, as
 //!   FFmpeg's raw demuxers and muxers (`format/raw.zig`).
+//! - `caf`: bounded Apple CAF reading for linear PCM, A-law and µ-law
+//!   (`format/caf.zig`).
 //! - `codecs`: codec descriptors and the decoder and encoder registries, as
 //!   FFmpeg names them (`codec/registry.zig`).
 //! - `formats`: the format registry, with each container's demuxer probe and
@@ -54,6 +56,7 @@ pub const wav = @import("format/wav.zig");
 pub const au = @import("format/au.zig");
 pub const aiff = @import("format/aiff.zig");
 pub const raw = @import("format/raw.zig");
+pub const caf = @import("format/caf.zig");
 pub const codecs = @import("codec/registry.zig");
 pub const formats = @import("format/registry.zig");
 pub const detect = @import("format/detect.zig");
@@ -75,6 +78,7 @@ test {
     _ = @import("format/au.zig");
     _ = @import("format/aiff.zig");
     _ = @import("format/raw.zig");
+    _ = @import("format/caf.zig");
     _ = @import("format/registry.zig");
     _ = @import("format/detect.zig");
     _ = @import("format/replay.zig");

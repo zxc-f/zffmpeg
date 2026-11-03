@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Original file for this project.
 //! The WAV fixture contract (TODO.md T02), the AU fixture contract (T12a),
-//! the AIFF fixture contract (T22b) and the raw PCM contract (T22c) as typed
-//! test data.
+//! the AIFF fixture contract (T22b), the raw PCM contract (T22c) and the CAF
+//! contract (T22d) as typed test data.
 //!
 //! `all` is imported at compile time from fixtures/manifest.zon, `au.all` from
-//! fixtures/au/manifest.zon, `aiff.all` from fixtures/aiff/manifest.zon and
-//! `raw.all` from fixtures/raw/manifest.zon;
+//! fixtures/au/manifest.zon, `aiff.all`, `raw.all` and `caf.all` from the
+//! manifests in fixtures/aiff, fixtures/raw and fixtures/caf;
 //! fixtures/generate.py writes them. `bytes`, `au.bytes` and `aiff.bytes`
 //! embed a fixture file, so a missing file fails the build. The rules,
 //! decisions and error precedence are documented in fixtures/README.md,
@@ -39,6 +39,7 @@ pub const Codec = enum {
     pcm_s32le,
     pcm_s32be,
     pcm_s64le,
+    pcm_s64be,
     pcm_f32le,
     pcm_f32be,
     pcm_f64le,
@@ -139,7 +140,7 @@ pub const Fixture = struct {
 pub const WriterHeader = enum { riff, rf64, w64 };
 
 /// The formats content probing can choose (T16), by FFmpeg's names.
-pub const Container = enum { wav, w64, au, aiff };
+pub const Container = enum { wav, w64, au, aiff, caf };
 
 /// One tag as bytes: values may hold any byte but NUL.
 pub const Tag = struct {
@@ -299,6 +300,53 @@ pub const raw = struct {
     }
 };
 
+/// The CAF contract (port.md "CAF contract"): linear PCM, A-law and µ-law in
+/// Core Audio Format, read only. It shares `Stream` with the WAV contract.
+pub const caf = struct {
+    const Caf = @This();
+
+    /// Errors of the CAF contract, named exactly as the CAF parser's errors.
+    pub const Failure = enum {
+        InvalidCaf,
+        InvalidFormat,
+        Truncated,
+        UnsupportedFormat,
+        UnsupportedStreamingSize,
+        LimitExceeded,
+    };
+
+    pub const Expected = union(enum) {
+        accept: Stream,
+        reject: Caf.Failure,
+    };
+
+    pub const Fixture = struct {
+        /// The file is fixtures/caf/<name>.caf.
+        name: []const u8,
+        /// Lowercase hexadecimal SHA-256 of the file.
+        sha256: []const u8,
+        expected: Caf.Expected,
+        /// The format FFmpeg's content probing picks, or null for none (T16).
+        detected: ?Container,
+        /// The result with the parser's `unknown_length` option, where it
+        /// differs from `expected`.
+        unknown_length: ?Caf.Expected = null,
+
+        /// The expected result with the `unknown_length` option off or on.
+        pub fn result(fixture: Caf.Fixture, unknown_length: bool) Caf.Expected {
+            if (unknown_length) return fixture.unknown_length orelse fixture.expected;
+            return fixture.expected;
+        }
+    };
+
+    pub const all: []const Caf.Fixture = @import("fixtures/caf/manifest.zon");
+
+    /// The bytes of fixtures/caf/<name>.caf, embedded at compile time.
+    pub fn bytes(comptime name: []const u8) []const u8 {
+        return @embedFile("fixtures/caf/" ++ name ++ ".caf");
+    }
+};
+
 /// This file's own declarations: the WAV contract's `all` and `bytes`.
 const wav_contract = @This();
 
@@ -312,7 +360,7 @@ fn expectConsistent(comptime Contract: type) void {
             }
         }
         expectValidResult(fixture.name, fixture.expected);
-        if (fixture.expected == .reject and fixture.writer_output) {
+        if (@hasField(@TypeOf(fixture), "writer_output") and fixture.expected == .reject and fixture.writer_output) {
             @compileError("only accepted fixtures can be writer output: " ++ fixture.name);
         }
         if (@hasField(@TypeOf(fixture), "writer_header")) {
@@ -371,6 +419,7 @@ test "manifest names are unique and expectations are consistent" {
         expectConsistent(au);
         expectConsistent(aiff);
         expectConsistent(raw);
+        expectConsistent(caf);
     }
 }
 
@@ -379,6 +428,7 @@ test "every fixture file is present and matches its recorded SHA-256" {
     try expectHashes(au);
     try expectHashes(aiff);
     try expectHashes(raw);
+    try expectHashes(caf);
 }
 
 test "fixture names do not collide across contracts" {
@@ -390,6 +440,10 @@ test "fixture names do not collide across contracts" {
         expectDistinct(raw, wav_contract);
         expectDistinct(raw, au);
         expectDistinct(raw, aiff);
+        expectDistinct(caf, wav_contract);
+        expectDistinct(caf, au);
+        expectDistinct(caf, aiff);
+        expectDistinct(caf, raw);
     }
 }
 

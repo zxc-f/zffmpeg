@@ -29,7 +29,7 @@ const examples = [_]Example{
 };
 
 /// The fixture directories: zig/testing/fixtures/wav/ and zig/testing/fixtures/au/.
-const FixtureSet = enum { wav, au, aiff, raw };
+const FixtureSet = enum { wav, au, aiff, raw, caf };
 
 /// A zffprobe process run with its expected exit code and output.
 const ProbeCase = struct {
@@ -147,6 +147,32 @@ const aifc_fl32_report =
     \\format=aiff
     \\codec=pcm_f32be
     \\sample_fmt=flt
+    \\channels=1
+    \\channel_layout=mono
+    \\sample_rate=8000
+    \\nb_samples=8
+    \\duration_num=8
+    \\duration_den=8000
+    \\
+;
+
+const caf_s16be_report =
+    \\format=caf
+    \\codec=pcm_s16be
+    \\sample_fmt=s16
+    \\channels=1
+    \\channel_layout=mono
+    \\sample_rate=8000
+    \\nb_samples=8
+    \\duration_num=8
+    \\duration_den=8000
+    \\
+;
+
+const caf_s64le_report =
+    \\format=caf
+    \\codec=pcm_s64le
+    \\sample_fmt=s64
     \\channels=1
     \\channel_layout=mono
     \\sample_rate=8000
@@ -357,6 +383,13 @@ const probe_cases = [_]ProbeCase{
     .{ .name = "an unsupported channel layout", .args = &.{ "-f", "s16le", "-ch_layout", "5.1" }, .fixture = "mono_8k", .exit_code = 3, .stderr = "zffprobe: 5.1: unsupported channel layout\n" },
     .{ .name = "an option given twice", .args = &.{ "-f", "s16le", "-f", "s16le" }, .fixture = "mono_8k", .exit_code = 1, .stderr = usage_line },
     .{ .name = "an unknown raw format", .args = &.{ "-f", "s64le" }, .fixture = "mono_8k", .exit_code = 3, .stderr = "zffprobe: s64le: unsupported input format\n" },
+    // T22d: CAF, detected from content.
+    .{ .name = "CAF", .set = .caf, .fixture = "caf_s16be_mono_8k", .exit_code = 0, .stdout = caf_s16be_report, .stderr = "" },
+    .{ .name = "CAF 64-bit integers from a pipe", .set = .caf, .args = &.{"-"}, .stdin_fixture = "caf_s64le_mono", .exit_code = 0, .stdout = caf_s64le_report, .stderr = "" },
+    .{ .name = "an unknown CAF data size", .set = .caf, .fixture = "caf_data_size_unknown", .exit_code = 3, .stderr_contains = ": UnsupportedStreamingSize\n" },
+    .{ .name = "a CAF packet table", .set = .caf, .fixture = "caf_pakt", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
+    .{ .name = "a CAF without desc", .set = .caf, .args = &.{ "-f", "caf" }, .fixture = "caf_desc_missing", .exit_code = 2, .stderr_contains = ": InvalidCaf\n" },
+    .{ .name = "a truncated CAF pipe", .set = .caf, .args = &.{"-"}, .stdin_fixture = "caf_truncated_data", .exit_code = 2, .stderr = "zffprobe: -: Truncated\n" },
 };
 
 /// A zffmpeg process run: `args`, then the input fixture's path (or standard
@@ -497,6 +530,10 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "-ac with -ch_layout", .args = &.{ "-ac", "1", "-ch_layout", "mono", "-i", "a.raw", "b.wav" }, .exit_code = 1, .stderr_contains = "given twice: -ch_layout\n" },
     .{ .name = "an unsupported channel count", .set = .raw, .args = &.{ "-f", "s16le", "-ac", "6", "-i" }, .input = "raw_s16le_mono_8k", .tail = &.{ "-f", "wav", "-" }, .exit_code = 3, .stderr = "zffmpeg: 6: unsupported channel count\n" },
     .{ .name = "raw f32 transcode is rejected", .set = .raw, .args = &.{ "-f", "f32le", "-i" }, .input = "raw_f32le_mono_8k", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
+    // T22d: CAF is read only.
+    .{ .name = "CAF copy to WAV", .set = .caf, .args = &.{"-i"}, .input = "caf_s16le_stereo_44k1", .tail = &.{ "-c", "copy", "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_stereo_44k1, .stderr = "" },
+    .{ .name = "CAF copy to AU from a pipe", .set = .caf, .args = &.{ "-i", "-" }, .stdin_input = "caf_s16be_mono_8k", .tail = &.{ "-c", "copy", "-f", "au", "-" }, .exit_code = 0, .stdout = au_mono_8k, .stderr = "" },
+    .{ .name = "CAF output is unsupported", .args = &.{"-i"}, .input = "mono_8k", .tail = &.{ "-f", "caf", "-" }, .exit_code = 3, .stderr = "zffmpeg: caf: unsupported output format\n" },
 };
 
 pub fn build(b: *std.Build) void {

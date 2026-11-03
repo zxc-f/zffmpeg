@@ -12,8 +12,8 @@ recorded as an intentional difference, not checked.
 Unknown-length WAV (T21b): FFmpeg must decode the samples the parser's
 `unknown_length` option accepts from each unknown-size fixture.
 
-AU fixtures (T12a) and AIFF fixtures (T22b): FFmpeg reads each one forced with
-`-f au` or `-f aiff` (parser acceptance) and by content detection, recorded
+AU fixtures (T12a), AIFF fixtures (T22b) and CAF fixtures (T22d): FFmpeg reads
+each one forced with `-f au`, `-f aiff` or `-f caf` (parser acceptance) and by content detection, recorded
 separately. Accepted ones must give the expected parameters and samples, apart
 from the listed differences.
 
@@ -64,6 +64,7 @@ EXIT_STATUS = {
     "InvalidRiff": 2,
     "InvalidAu": 2,
     "InvalidAiff": 2,
+    "InvalidCaf": 2,
     "InvalidWave": 2,
     "InvalidFormat": 2,
     "Truncated": 2,
@@ -91,6 +92,11 @@ KNOWN_FIXTURE_DIFFERENCES = {
     ("empty_data", "duration_ts", "N/A"): "FFmpeg reads data size 0 as unknown length",
     # FFmpeg estimates a raw duration from the file size, and has none for 0 bytes.
     ("raw_empty", "duration_ts", "N/A"): "FFmpeg gives an empty raw file no duration",
+    # FFmpeg sets a CAF frame count only from a nonzero data size.
+    ("caf_empty_data", "duration_ts", "N/A"): "FFmpeg gives an empty CAF data chunk no duration",
+    # FFmpeg estimates a CAF duration from the bit rate over the bytes after the
+    # data start, so the 12-byte trailing ree chunk counts as 6 frames.
+    ("caf_chunks_around_data", "duration_ts", "10"): "FFmpeg estimates the duration from the bytes after the data start",
 }
 
 # Fixtures the `unknown_length` option accepts but FFmpeg cannot open: its
@@ -124,10 +130,19 @@ KNOWN_AIFF_FIELD_DIFFERENCES = {
 
 # The contracts read by forcing a demuxer: (fixture directory and FFmpeg
 # format, title, fixtures, field differences, decode differences).
+# CAF has no layout either without a `chan` chunk, which the fixtures omit.
+KNOWN_CAF_FIELD_DIFFERENCES = {
+    ("channel_layout", "unknown"): "a CAF header has no channel layout without `chan`",
+}
+
 FORCED_CONTRACTS = [
     ("au", "AU", generate.build_au_fixtures, KNOWN_AU_FIELD_DIFFERENCES, KNOWN_AU_DECODE_DIFFERENCES),
     ("aiff", "AIFF", generate.build_aiff_fixtures, KNOWN_AIFF_FIELD_DIFFERENCES, {}),
+    ("caf", "CAF", generate.build_caf_fixtures, KNOWN_CAF_FIELD_DIFFERENCES, {}),
 ]
+# The forced contracts whose muxer the port has, and FFmpeg's reference build
+# enables: CAF is read only (T22d).
+MUXED_CONTRACTS = ("au", "aiff")
 # The field differences of each output container.
 FIELD_DIFFERENCES = {
     "wav": KNOWN_FIELD_DIFFERENCES,
@@ -1117,7 +1132,7 @@ def compare_unknown_length(args, lines, failures):
     still rejects is recorded, not checked."""
     lines += [
         "",
-        "## Unknown-length WAV and AU (T21b, T22a)",
+        "## Unknown-length WAV, AU and CAF (T21b, T22a, T22d)",
         "",
         "The result with the `unknown_length` parser option, which the Zig tests check; "
         "zffprobe and zffmpeg do not enable it.",
@@ -1130,11 +1145,13 @@ def compare_unknown_length(args, lines, failures):
 
     fixtures = [("wav", f) for f in generate.build_fixtures() if changes(f)]
     fixtures += [("au", f) for f in generate.build_au_fixtures() if changes(f)]
+    fixtures += [("caf", f) for f in generate.build_caf_fixtures() if changes(f)]
     accepted = [f for _, f in fixtures if f.unknown_accept is not None]
     accepted_ok = 0
     for directory, fixture in fixtures:
         path = FIXTURES / directory / f"{fixture.name}.{directory}"
         au_file = directory == "au"
+        forced_dir = directory if directory in ("au", "caf") else None
         stream = fixture.unknown_accept
         if stream is None:
             lines.append(f"| `{fixture.name}` | `{fixture.unknown_reject}` | {ffmpeg_verdict(args, path)} | recorded |")
@@ -1152,11 +1169,13 @@ def compare_unknown_length(args, lines, failures):
                          f"| {theirs} ({reason}) | {result} |")
             failures.extend(f"{fixture.name} (unknown_length): {problem}" for problem in problems)
             continue
-        container = "au" if au_file else wav_container(fixture)
+        container = forced_dir or wav_container(fixture)
         expected = expected_stream(container, stream.codec, channels, rate, frames, stream.storage)
         del expected["duration_ts"]
-        problems, notes = check_stream(args, fixture.name, path, expected, stream, "au" if au_file else None,
-                                       field_differences=KNOWN_AU_FIELD_DIFFERENCES if au_file else KNOWN_FIELD_DIFFERENCES)
+        differences = {"au": KNOWN_AU_FIELD_DIFFERENCES, "caf": KNOWN_CAF_FIELD_DIFFERENCES}.get(
+            directory, KNOWN_FIELD_DIFFERENCES)
+        problems, notes = check_stream(args, fixture.name, path, expected, stream, forced_dir,
+                                       field_differences=differences)
         accepted_ok += not problems
         theirs = "same samples and stream" if not problems else "differs"
         if notes:
@@ -1319,7 +1338,9 @@ def main():
     compare_zffmpeg(args, lines, failures)
     compare_ffmpeg_w64(args, lines, failures)
     for container, title, build, _, _ in FORCED_CONTRACTS:
-        compare_ffmpeg_muxer(args, lines, failures, container, title, build)
+        if container in MUXED_CONTRACTS:
+            compare_ffmpeg_muxer(args, lines, failures, container, title, build)
+
     compare_pipes(args, lines, failures)
 
     if NOT_IMPLEMENTED:

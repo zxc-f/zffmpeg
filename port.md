@@ -849,6 +849,23 @@ malformed structure. FFmpeg's probe detects a file that starts with `FORM`, a
 size of at least 4 and `AIFF` or `AIFC`; a smaller size, which FFmpeg's own
 pipe output has, is detected by no demuxer and rejected when forced.
 
+### CAF contract
+
+T22d adds Apple Core Audio Format, read only: linear PCM (`lpcm`, signed
+integers of 8 to 64 bits and floats of 32 or 64, in either byte order),
+A-law and µ-law. The canonical fixture contract is
+[zig/testing/fixtures/caf/README.md](zig/testing/fixtures/caf/README.md). In
+summary:
+
+| Case | Behavior |
+| --- | --- |
+| Structure | `caff`, version 1, then a 32-byte `desc` first (`InvalidCaf` otherwise), then chunks with signed 64-bit sizes to the end of the input, read sequentially; others are skipped, before and after `data`, except `pakt`, which FFmpeg trims samples by (`UnsupportedFormat`). |
+| `desc` | The double sample rate truncated as FFmpeg's int conversion (below 1 `InvalidFormat`, above 192 kHz `LimitExceeded`); the codec from the format ID, flags and whole-byte sample size (`UnsupportedFormat` otherwise); 1 or 2 channels; one frame per packet of the frame's bytes (`InvalidFormat`). |
+| `data` | A skipped edit count, then whole frames (`InvalidFormat`). A size of -1 runs to the end of the input behind `unknown_length`, as for WAV and AU (`UnsupportedStreamingSize` without it). A second `data` is `InvalidCaf`. |
+| Writing | None: FFmpeg's CAF muxer is not ported, so CAF is an input only. |
+
+FFmpeg's probe detects `caff`, version 1 and a `desc` of size 32.
+
 ### Raw PCM contract
 
 T22c adds FFmpeg's raw PCM formats: header-less interleaved samples, one
@@ -902,7 +919,7 @@ stable report separate from T51's future FFprobe-compatible mode.
 T09's `zffprobe` reports stable UTF-8 `key=value` lines, in this order:
 `format`, `codec`, `sample_fmt`, `channels`, `channel_layout`, `sample_rate`,
 `nb_samples`, `duration_num`, `duration_den`. Use `wav`, `w64` (Sony Wave64,
-T21b), `au` (T12c), `aiff` (AIFF and AIFF-C, T22b) or a raw format's name
+T21b), `au` (T12c), `aiff` (AIFF and AIFF-C, T22b), `caf` (T22d) or a raw format's name
 (`s16le`, `alaw`, ..., T22c), the stream's FFmpeg codec
 name (`pcm_s16le`, `pcm_s24le`, `pcm_alaw`, ... for WAV since T21a;
 `pcm_s16be`, `pcm_f32be`, ... for AU and AIFF), its
@@ -925,7 +942,7 @@ Tag chunks count toward the retained-bytes limit (exit code 5).
 
 The container is detected with FFmpeg's winner (T16, `zig/format/detect.zig`;
 the project owner's choice): each registered demuxer's probe, ported from
-FFmpeg's (`wav_probe`, `w64_probe`, `au_probe`, `aiff_probe`), scores the
+FFmpeg's (`wav_probe`, `w64_probe`, `au_probe`, `aiff_probe`, CAF's `probe`), scores the
 first 2048 bytes from 0 to 100, and since T22c a demuxer without a probe
 whose extension matches the input's file name scores 50, as FFmpeg's
 extension fallback (the raw PCM formats; the project owner's choice); the
@@ -933,7 +950,7 @@ highest nonzero score wins and a tie at the highest means none, as in
 `format.c`. Standard input has no name. A stream no
 demuxer recognizes is `UnknownFormat`, exit code 3, as FFmpeg's "Invalid data
 found when processing input": among them input shorter than a probe needs
-(33 bytes for WAV, 41 for Wave64, 24 for AU, 12 for AIFF), an AU file whose
+(33 bytes for WAV, 41 for Wave64, 24 for AU, 12 for AIFF, 20 for CAF), an AU file whose
 data size is 0 and an AIFF file whose `FORM` size is below 4.
 `-f <format>` forces the format, as `ffprobe -f` does, and the
 forced WAV and Wave64 parsers accept only their own layout. `-sample_rate` and
@@ -1161,7 +1178,9 @@ has passed TODO.md gates G2–G4 is implemented, and it becomes verified at G5.
 | AU fixture contract | Verified | [AU contract and 29 fixtures](zig/testing/fixtures/au/README.md), T12a: 9 accepted and 20 rejected, with parser acceptance separate from content detection. Reference-only G5 at `d41c5a4`, [run 41579247329](https://github.com/zxc-f/zffmpeg/actions/runs/41579247329), before AU Zig code existed; full evidence stays in TODO.md. This does not verify the parser, writer or probe. |
 | AU + PCM encodings | Verified | [zig/format/au.zig](zig/format/au.zig), exported by `av.au`, and [write driver](zig/testing/write_driver.zig). Original, `LGPL-2.1-or-later`; behavior follows `libavformat/au.c` and `libavcodec/pcm.c` at the pinned revision. Every PCM encoding of FFmpeg's AU table since T22a (µ-law, s8, s16/s24/s32 big-endian, f32/f64 big-endian, A-law; verified at `2e68534` on local Windows runs, 38 fixtures, FFmpeg's AU muxer byte-identical), and unknown-length input behind `Limits.unknown_length`; mono/stereo, through the shared PCM kernels; sequential input without seeking, no allocation. T12b's G5 at `043c3c3` ([run 41580174746](https://github.com/zxc-f/zffmpeg/actions/runs/41580174746)): all 29 AU fixtures pass from memory, one-byte reads and files in Debug, ReleaseSafe and ReleaseFast, and FFmpeg reads the 4 AU files the Zig writer produced, byte-identical to the writer-output fixtures; full evidence in TODO.md. Limitations: no G.722/G.726 (T31c), annotation metadata or unknown-length output; sustained fuzzing not run. Scalar; not optimized. `zffprobe` reports AU since T12c ([run 41660265753](https://github.com/zxc-f/zffmpeg/actions/runs/41660265753)). |
 | AIFF + PCM encodings | Verified | [zig/format/aiff.zig](zig/format/aiff.zig), exported by `av.aiff`, with its [contract and 44 fixtures](zig/testing/fixtures/aiff/README.md) (T22b). Original, `LGPL-2.1-or-later`; behavior follows `libavformat/aiffdec.c`, `aiffenc.c` and `aiff.c` at the pinned revision, with the stricter [AIFF contract](#aiff-contract). AIFF and AIFF-C with every PCM type of FFmpeg's table (s8, s16/s24/s32 big-endian, `raw `, `sowt`, `fl32`, `fl64`, `alaw`, `ulaw`, `in24`, `in32`), the 80-bit rate converted as FFmpeg does, mono/stereo, sequential, no allocation; the writer's header is FFmpeg's, byte for byte. G5 on local Windows runs at `791bd7f` and `c829e01`: all 44 fixtures pass from memory and one-byte reads in Debug, ReleaseSafe and ReleaseFast; FFmpeg decodes every accepted fixture and every Zig-written AIFF file the same, copies every writer-output fixture to identical bytes, and its own conversions into AU and AIFF equal zffmpeg's. Limitations: no compressed AIFF-C, odd sample sizes, AIFF tags, unknown length or `SSND` before `COMM`; sustained fuzzing not run. Scalar; not optimized. |
-| Raw PCM | Verified | [zig/format/raw.zig](zig/format/raw.zig), exported by `av.raw`, with its [contract and 20 fixtures](zig/testing/fixtures/raw/README.md) (T22c). Original, `LGPL-2.1-or-later`; behavior follows `libavformat/pcmdec.c`, `pcmenc.c`, `pcm.c` and `format.c`. FFmpeg's raw formats for every PCM codec but s64, read with FFmpeg's `-sample_rate`/`-ch_layout` and written unchanged; the frame count from a file's size or counted; detection by FFmpeg's extension fallback (the project owner's choice). G5 on local Windows runs at `3b94b6d`: FFmpeg reads every accepted fixture the same, detects every named copy alike, copies every writer output unchanged, and its own A-law encoding equals zffmpeg's. Limitations: mono and stereo only, no MIME hint, no placeholder headers for pipe input; sustained fuzzing not run. Scalar; not optimized. |
+| CAF | Implemented | [zig/format/caf.zig](zig/format/caf.zig), exported by `av.caf`, with its [contract and 47 fixtures](zig/testing/fixtures/caf/README.md) (T22d). Original, `LGPL-2.1-or-later`; behavior follows `libavformat/cafdec.c`, `caf.c` and `isom.h`. Read only. |
+| Raw PCM | Verified |
+ [zig/format/raw.zig](zig/format/raw.zig), exported by `av.raw`, with its [contract and 20 fixtures](zig/testing/fixtures/raw/README.md) (T22c). Original, `LGPL-2.1-or-later`; behavior follows `libavformat/pcmdec.c`, `pcmenc.c`, `pcm.c` and `format.c`. FFmpeg's raw formats for every PCM codec but s64, read with FFmpeg's `-sample_rate`/`-ch_layout` and written unchanged; the frame count from a file's size or counted; detection by FFmpeg's extension fallback (the project owner's choice). G5 on local Windows runs at `3b94b6d`: FFmpeg reads every accepted fixture the same, detects every named copy alike, copies every writer output unchanged, and its own A-law encoding equals zffmpeg's. Limitations: mono and stereo only, no MIME hint, no placeholder headers for pipe input; sustained fuzzing not run. Scalar; not optimized. |
 | Codec and format registries | Verified | [codec/registry.zig](zig/codec/registry.zig) (`av.codecs`) and [format/registry.zig](zig/format/registry.zig) (`av.formats`), with the probes in each format file and [detect.zig](zig/format/detect.zig) (T16). Original, `LGPL-2.1-or-later`; names and properties from `codec_desc.c`, `allcodecs.c`, `allformats.c` and the format descriptors, scoring from `format.c`. Codec descriptors, decoder and encoder lists with compile-time stage-signature checks, and per-format probes and muxer facts, validated at compile time; FFmpeg's scored probing, winner and tie rule over 2048 replayed bytes. G5 on local Windows runs at `42a6cf5` and `c829e01`: FFmpeg's probe winner on 203/203 fixtures, and the registry dump equal to the reference build's `ffmpeg -codecs`, `-formats` and `-h muxer=...`. Limitations: no larger-buffer probe retry or extension hints until a demuxer needs them; `pcm.Codec` is the codec identifier; parsers and writers dispatch by exhaustive switches. |
 | Metadata dictionary | Verified | [core/metadata.zig](zig/core/metadata.zig), exported as `av.metadata` (T17b). Original, `LGPL-2.1-or-later`; behavior follows `libavutil/dict.c`. Ordered tags with owned storage, ASCII case-insensitive keys and the `av_dict_set` duplicate policies the port uses, in FFmpeg's entry order (checked against the reference `libavutil`); a failed change leaves it unchanged, and every allocation failure is tested. G5 on local Windows runs at `205e13b`. Limitations: no `AV_DICT_APPEND`, suffix matching or string parsing until a consumer needs them. |
 | Decoded sample storage | Verified | [core/samples.zig](zig/core/samples.zig) and `audio.SampleFormat` (T20a). Original, `LGPL-2.1-or-later`; the rules follow `libavutil/samplefmt.c`. The [decoded sample storage](#decoded-sample-storage) contract; 12 format and 3516 buffer vectors printed by the pinned `libavutil` ([generator](zig/testing/reference/samplefmt_vectors.c), checked in CI's reference job) all match, and allocation passes leak checks and failure injection. G5 on local Windows runs at `38020b8`. Limitations: no `dsd`; nothing decodes into these formats until T20b. |

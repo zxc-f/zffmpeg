@@ -65,7 +65,7 @@ with the install prefix and:
 ```text
 --cc=clang --disable-everything --disable-autodetect --disable-doc
 --disable-network --disable-x86asm --disable-ffplay --disable-avdevice
---enable-protocol=file,pipe --enable-demuxer=wav,w64,au,aiff,$pcm_formats
+--enable-protocol=file,pipe --enable-demuxer=wav,w64,au,aiff,caf,$pcm_formats
 --enable-decoder=$pcm_codecs --enable-encoder=$pcm_codecs
 --enable-muxer=wav,w64,au,aiff,$pcm_formats --enable-filter=aresample
 
@@ -77,8 +77,8 @@ pcm_formats=pcm_u8,pcm_s8,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,
 ```
 
 Everything is disabled and then only what the comparison needs is enabled: the
-file and pipe protocols, the WAV, Wave64, AU and AIFF demuxers (T12a added AU,
-T21b Wave64, T22b AIFF), the PCM
+file and pipe protocols, the WAV, Wave64, AU, AIFF and CAF demuxers (T12a added AU,
+T21b Wave64, T22b AIFF, T22d CAF, whose muxer stays off), the PCM
 decoders and encoders T20b compares (T20b widened them from s16 alone), the
 WAV muxer, through which `compare.py` takes FFmpeg's decoded samples in each
 stream's storage format (T21a; it replaced the raw s16le muxer), the Wave64
@@ -165,7 +165,7 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   report, or the contract's status and error, forced with `-f au` where
   FFmpeg's probe detects nothing, which then gives `UnknownFormat` (T16;
   before it, `au_bad_magic` went to the WAV parser and reported `InvalidRiff`).
-- **AIFF fixtures (T22b).** As for AU, with `-f aiff`: accepted fixtures must
+- **AIFF and CAF fixtures (T22b, T22d).** As for AU, with `-f aiff` or `-f caf`: accepted fixtures must
   give the expected codec, storage, fields and samples forced and agree on
   detection; FFmpeg's verdict on rejected ones is recorded; `zffprobe` must
   give the report or the contract's status and error, forced with `-f aiff`

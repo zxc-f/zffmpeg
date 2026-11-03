@@ -52,6 +52,7 @@ const wav = @import("wav.zig");
 const au = @import("au.zig");
 const aiff = @import("aiff.zig");
 const raw = @import("raw.zig");
+const caf = @import("caf.zig");
 const detect = @import("detect.zig");
 
 pub const Container = detect.Container;
@@ -144,6 +145,7 @@ pub const Conversion = struct {
         wav: wav.Parser,
         au: au.Parser,
         aiff: aiff.Parser,
+        caf: caf.Parser,
         raw: raw.Parser,
     };
 
@@ -156,6 +158,7 @@ pub const Conversion = struct {
             .wav => .{ .wav = source.wavParser(limits.wav) },
             .au => .{ .au = .init(source.reader(), limits.au) },
             .aiff => .{ .aiff = .init(source.reader(), limits.aiff) },
+            .caf => .{ .caf = .init(source.reader(), limits.caf) },
             .raw => .{ .raw = source.rawParser(limits.raw) },
         };
         // The tags as the file stores them, renamed once the header is read.
@@ -165,7 +168,7 @@ pub const Conversion = struct {
             std.debug.assert(t.dictionary.count() == 0);
             switch (input) {
                 .wav => |*parser| parser.collectTags(.{ .gpa = t.gpa, .dictionary = &stored }),
-                .au, .aiff, .raw => {},
+                .au, .aiff, .caf, .raw => {},
             }
         }
         const summary: Summary = switch (input) {
@@ -194,7 +197,7 @@ pub const Conversion = struct {
             // Later tags could not reach the output header; `stored` dies here.
             switch (input) {
                 .wav => |*parser| parser.tags = null,
-                .au, .aiff, .raw => {},
+                .au, .aiff, .caf, .raw => {},
             }
             var generic = try wav.genericTags(t.gpa, &stored);
             defer generic.deinit(t.gpa);
@@ -215,6 +218,7 @@ pub const Conversion = struct {
             .au => try au.Writer.check(summary.output_codec, summary.format, try knownCount(summary), limits.au),
             .aiff => try aiff.Writer.check(summary.output_codec, summary.format, try knownCount(summary), aiffOptions(limits)),
             .raw => try raw.Writer.check(summary.output_codec, summary.format, rawOptions(limits)),
+            .caf => unreachable, // no muxer: refused above as UnsupportedOperation
         }
         return .{ .input = input, .limits = limits, .summary = summary, .tags = tags };
     }
@@ -247,6 +251,7 @@ pub const Conversion = struct {
                 var writer = raw.Writer.begin(out, s.output_codec, s.format, s.frame_count, rawOptions(c.limits)) catch |err| return outputFailure(err);
                 try c.transfer(raw.Writer, &writer);
             },
+            .caf => unreachable, // no muxer: `init` refused it
         }
         // Every frame was read: an unknown count is now known.
         if (c.summary.frame_count == null) c.summary.frame_count = @intCast(c.next_pts);
@@ -536,6 +541,10 @@ fn decodeOutput(container: Container, bytes: []const u8, storage: []i16, format:
             var parser: raw.Parser = .init(&reader, container.rawCodec().?, paramsOf(format), bytes.len, .{});
             return decodeWith(raw.Parser, &parser, storage);
         },
+        .caf => {
+            var parser: caf.Parser = .init(&reader, .{});
+            return decodeWith(caf.Parser, &parser, storage);
+        },
     }
 }
 
@@ -595,6 +604,7 @@ fn rawOf(container: Container, bytes: []const u8, out: []u8, format: audio.Forma
         .wav => _ = try wav.decodeToRaw(&reader, &writer, .{}),
         .au => _ = try au.decodeToRaw(&reader, &writer, .{}),
         .aiff => _ = try aiff.decodeToRaw(&reader, &writer, .{}),
+        .caf => _ = try caf.decodeToRaw(&reader, &writer, .{}),
         .raw => _ = try raw.decodeToRaw(&reader, &writer, container.rawCodec().?, paramsOf(format), bytes.len, .{}), // a raw container has a codec
     }
     return writer.buffered();
@@ -676,7 +686,16 @@ test "every accepted fixture gives its samples in every supported cell, and copy
             };
         }
     }
+    inline for (fixtures.caf.all) |fixture| {
+        if (fixture.expected == .accept) {
+            expectEveryCell(.caf, fixture.detected != null, .{}, fixtures.caf.bytes(fixture.name), fixture.expected.accept, false) catch |err| {
+                std.debug.print("fixture {s}\n", .{fixture.name});
+                return err;
+            };
+        }
+    }
     // Raw PCM is forced, with its parameters and its length, as zffmpeg reads a file.
+
     inline for (fixtures.raw.all) |fixture| {
         if (fixture.expected == .accept) {
             const stream = fixture.expected.accept;

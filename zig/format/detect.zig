@@ -38,6 +38,7 @@ const wav = @import("wav.zig");
 const au = @import("au.zig");
 const aiff = @import("aiff.zig");
 const raw = @import("raw.zig");
+const caf = @import("caf.zig");
 const registry = @import("registry.zig");
 const Replay = @import("replay.zig").Replay;
 
@@ -46,7 +47,7 @@ pub const Container = registry.Container;
 /// The WAV, AU, AIFF and raw PCM contract errors, which share their common
 /// names, `UnknownFormat` for a stream no demuxer recognizes, and
 /// `UnusedOption`.
-pub const Error = wav.Error || au.Error || aiff.Error || raw.Error || error{
+pub const Error = wav.Error || au.Error || aiff.Error || raw.Error || caf.Error || error{
     /// No demuxer's probe scored the stream, as FFmpeg's "Invalid data found
     /// when processing input"; force a format to parse it anyway.
     UnknownFormat,
@@ -58,6 +59,7 @@ pub const Limits = struct {
     wav: wav.Limits = .{},
     au: au.Limits = .{},
     aiff: aiff.Limits = .{},
+    caf: caf.Limits = .{},
     raw: raw.Limits = .{},
 };
 
@@ -239,6 +241,12 @@ pub fn probeWith(reader: *std.Io.Reader, limits: Limits, options: Options) Error
             try parser.finish();
             return .{ .container = .aiff, .codec = info.codec, .format = info.format, .frame_count = info.frame_count };
         },
+        .caf => {
+            var parser: caf.Parser = .init(input.reader(), limits.caf);
+            const info = try parser.readHeader();
+            try parser.finish();
+            return .{ .container = .caf, .codec = info.codec, .format = info.format, .frame_count = info.frame_count };
+        },
         .raw => {
             var parser = input.rawParser(limits.raw);
             const info = try parser.readHeader();
@@ -310,6 +318,17 @@ test "detection gives every AIFF fixture FFmpeg's winner and then the parser's r
         const bytes = fixtures.aiff.bytes(fixture.name);
         var direct: std.Io.Reader = .fixed(bytes);
         expectDetection(fixture.detected, bytes, aiff.probe(&direct, .{})) catch |err| {
+            std.debug.print("fixture {s}\n", .{fixture.name});
+            return err;
+        };
+    }
+}
+
+test "detection gives every CAF fixture FFmpeg's winner and then the parser's result" {
+    inline for (fixtures.caf.all) |fixture| {
+        const bytes = fixtures.caf.bytes(fixture.name);
+        var direct: std.Io.Reader = .fixed(bytes);
+        expectDetection(fixture.detected, bytes, caf.probe(&direct, .{})) catch |err| {
             std.debug.print("fixture {s}\n", .{fixture.name});
             return err;
         };
@@ -472,6 +491,7 @@ fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
     if (probeHead(bytes, null)) |container| switch (container.family()) {
         .au => try expectSameResult(au.probe(&direct, .{}), got, .au),
         .aiff => try expectSameResult(aiff.probe(&direct, .{}), got, .aiff),
+        .caf => try expectSameResult(caf.probe(&direct, .{}), got, .caf),
         .wav => try expectSameResult(wav.probe(&direct, .{}), got, container),
         .raw => unreachable, // no content probe chooses raw PCM
     } else try std.testing.expectError(error.UnknownFormat, got);
@@ -486,6 +506,7 @@ test "fuzz: detection agrees with the direct parser on arbitrary input" {
         fixtures.bytes("rf64"),
         fixtures.aiff.bytes("aifc_sowt"),
         fixtures.aiff.bytes("aiff_other_chunks"),
+        fixtures.caf.bytes("caf_chunks_around_data"),
     } });
 }
 

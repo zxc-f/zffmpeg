@@ -193,6 +193,17 @@ port.md's contract table updated, and (after T06) the parser.
 | Format registry | One entry per `Container` in its order: FFmpeg's name and long name, the demuxer's probe (optional: a format without a content signature is chosen only by its extension) and extensions, and the muxer's extensions, MIME type, default audio codec and carried codecs. The tools take `-f` names and output extensions from it. Validated at compile time (order, names, unique lowercase extensions, the default codec carried). | `format/registry.zig`; the 14 raw PCM formats (T22c) are probe-less demuxers. |
 | Checked against FFmpeg | A test tool, `registry-dump`, prints both registries, and `compare.py` requires them to equal the reference build's `ffmpeg -codecs`, `-formats` and `-h muxer=...` and to cover exactly the codecs and formats it enables. | `zig/testing/registry_dump.zig`, `compare_registries`; the reference configuration. |
 
+## CAF contract
+
+| Decision | Current choice and reason | To change it |
+| --- | --- | --- |
+| Read only (T22d) | The task is CAF demux; FFmpeg's CAF muxer is not ported, so the registry has no CAF muxer and the reference build enables only the demuxer. | A later subtask with a writer; the registry entry and `build-ffmpeg.sh`. |
+| Sequential reading | Every chunk before and after `data` is read and validated to the end of the input, never seeking; FFmpeg reads the chunks after `data` only from a seekable file. | `caf.zig`. |
+| Strict description | One frame per packet of exactly the frame's bytes, whole-byte integer sizes, version 1; FFmpeg takes declared packet sizes, rounds sizes up and reads any version when forced. | `caf_bytes_per_packet`, `caf_lpcm_bits12`, `caf_version2`. |
+| `pakt` | `UnsupportedFormat`: FFmpeg trims priming and remainder frames by it, which PCM files do not need. | `caf_pakt`; a codec with packet tables (ALAC, T31b) needs it. |
+| Unknown `data` size | Behind `unknown_length`, as for WAV and AU: it gives up the length check. | `caf_data_size_unknown`. |
+| Sample rate | Truncated toward zero, as FFmpeg's int conversion of the double; below 1 is invalid. | `sampleRate` in `caf.zig`, `caf_rate_fraction`. |
+
 ## Raw PCM contract
 
 | Decision | Current choice and reason | To change it |

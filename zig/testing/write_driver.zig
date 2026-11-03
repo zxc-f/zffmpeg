@@ -151,6 +151,7 @@ fn write(
             try writer.writeData(encoded);
             try writer.finish();
         },
+        .caf => unreachable, // findMuxer returns only formats with a muxer
     }
 }
 

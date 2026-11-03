@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Original file for this project.
-//! zffprobe: validates one WAV, Wave64, AU, AIFF or raw PCM stream and reports
+//! zffprobe: validates one WAV, Wave64, AU, AIFF, CAF or raw PCM stream and reports
 //! it as `key=value` lines.
 //!
 //!     zffprobe [-f <format>] [-sample_rate <rate>] [-ch_layout mono|stereo] <file | ->
@@ -28,10 +28,10 @@ const printError = status.printError;
 const usage = "usage: zffprobe [-f <format>] [-sample_rate <rate>] [-ch_layout mono|stereo] <file | ->\n";
 const help = usage ++
     \\
-    \\Validates a WAV, Wave64, AU, AIFF or raw PCM stream (standard input with -)
+    \\Validates a WAV, Wave64, AU, AIFF, CAF or raw PCM stream (standard input with -)
     \\and prints its stream parameters as key=value lines. The format is detected
     \\from content, or for raw PCM from the name (.sb, .ub, .al, .ul, .sw), or
-    \\forced with -f (wav, w64, au, aiff, or a raw format such as s16le or alaw).
+    \\forced with -f (wav, w64, au, aiff, caf, or a raw format such as s16le).
     \\-sample_rate and -ch_layout describe raw PCM, 44100 Hz mono by default.
     \\Exit codes: 0 success, 1 usage, 2 invalid or truncated media,
     \\3 unsupported media, 4 I/O failure, 5 resource limit, 6 cancellation.

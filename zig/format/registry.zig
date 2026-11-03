@@ -25,6 +25,7 @@ const wav = @import("wav.zig");
 const au = @import("au.zig");
 const aiff = @import("aiff.zig");
 const raw = @import("raw.zig");
+const caf = @import("caf.zig");
 
 pub const Container = enum {
     wav,
@@ -33,6 +34,8 @@ pub const Container = enum {
     au,
     /// AIFF and AIFF-C.
     aiff,
+    /// Apple Core Audio Format, read only (T22d).
+    caf,
     // Raw PCM (T22c), one format per codec FFmpeg has a raw format for, named
     // as the codec: every PCM codec but s64.
     u8,
@@ -51,13 +54,14 @@ pub const Container = enum {
     mulaw,
 
     /// The parser and writer family that reads and writes a container.
-    pub const Family = enum { wav, au, aiff, raw };
+    pub const Family = enum { wav, au, aiff, caf, raw };
 
     pub fn family(container: Container) Family {
         return switch (container) {
             .wav, .w64 => .wav,
             .au => .au,
             .aiff => .aiff,
+            .caf => .caf,
             // Checked below: exactly the raw formats, each named as its codec.
             else => .raw,
         };
@@ -66,7 +70,7 @@ pub const Container = enum {
     /// The codec of a raw PCM format, which shares its name; null otherwise.
     pub fn rawCodec(container: Container) ?pcm.Codec {
         return switch (container) {
-            .wav, .w64, .au, .aiff => null,
+            .wav, .w64, .au, .aiff, .caf => null,
             // Compiles only if every other tag names a codec.
             inline else => |tag| @field(pcm.Codec, @tagName(tag)),
         };
@@ -168,6 +172,14 @@ pub const formats = [_]Format{
             .audio_codec = .s16be,
             .carries = aiff.carries,
         },
+    },
+    .{
+        .container = .caf,
+        .name = "caf",
+        .long_name = "Apple CAF (Core Audio Format)",
+        .demuxer = .{ .probe = caf.probeScore, .probe_bytes = caf.probe_bytes },
+        // FFmpeg's CAF muxer is not ported (T22d is demux only).
+        .muxer = null,
     },
     rawFormat(.u8, "PCM unsigned 8-bit", &.{"ub"}),
     rawFormat(.s8, "PCM signed 8-bit", &.{"sb"}),

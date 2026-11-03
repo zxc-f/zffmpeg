@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LGPL-2.1-or-later
 # Original file for this project.
-"""Generate the fixtures for the WAV (TODO.md T02), AU (T12a), AIFF (T22b) and raw PCM (T22c) contracts.
+"""Generate the fixtures for the WAV (TODO.md T02), AU (T12a), AIFF (T22b), raw PCM (T22c) and CAF (T22d) contracts.
 
 Every fixture is defined below and built byte by byte with the Python standard
 library, independently of the Zig implementation. From those lists this script
@@ -19,6 +19,9 @@ writes:
 * raw/<name>.raw       the raw PCM fixture files (T22c)
 * raw/manifest.zon     raw PCM expected results, with each file's parameters
 * raw/README.md        the raw PCM table between the GENERATED markers
+* caf/<name>.caf       the CAF fixture files (T22d)
+* caf/manifest.zon     CAF expected results
+* caf/README.md        the CAF table between the GENERATED markers
 
 Usage, from the repository root:
 
@@ -46,6 +49,9 @@ AIFF_README = AIFF_DIR / "README.md"
 RAW_DIR = HERE / "raw"
 RAW_MANIFEST = RAW_DIR / "manifest.zon"
 RAW_README = RAW_DIR / "README.md"
+CAF_DIR = HERE / "caf"
+CAF_MANIFEST = CAF_DIR / "manifest.zon"
+CAF_README = CAF_DIR / "README.md"
 TABLE_BEGIN = "<!-- BEGIN GENERATED FIXTURE TABLE: edit generate.py, then run it -->\n"
 TABLE_END = "<!-- END GENERATED FIXTURE TABLE -->\n"
 
@@ -198,6 +204,8 @@ def decode_stored(codec, data):
         return [s for (s,) in struct.iter_unpack(">I", data)]
     if codec == "pcm_f64be":
         return [s for (s,) in struct.iter_unpack(">Q", data)]
+    if codec == "pcm_s64be":  # CAF (T22d)
+        return [s for (s,) in struct.iter_unpack(">q", data)]
     raise ValueError(codec)
 
 
@@ -1380,6 +1388,198 @@ def build_raw_fixtures():
     return fx
 
 
+# --- CAF fixtures (T22d) -----------------------------------------------------
+
+CAF_ERRORS = (
+    "InvalidCaf",
+    "InvalidFormat",
+    "Truncated",
+    "UnsupportedFormat",
+    "UnsupportedStreamingSize",
+    "LimitExceeded",
+)
+CAF_FLOAT = 1
+CAF_LITTLE = 2
+# Codec -> (format ID, flags, bits per channel), as a CAF writer describes it.
+CAF_CODECS = {
+    "pcm_s8": (b"lpcm", 0, 8),
+    "pcm_s16be": (b"lpcm", 0, 16),
+    "pcm_s16le": (b"lpcm", CAF_LITTLE, 16),
+    "pcm_s24be": (b"lpcm", 0, 24),
+    "pcm_s24le": (b"lpcm", CAF_LITTLE, 24),
+    "pcm_s32be": (b"lpcm", 0, 32),
+    "pcm_s32le": (b"lpcm", CAF_LITTLE, 32),
+    "pcm_s64be": (b"lpcm", 0, 64),
+    "pcm_s64le": (b"lpcm", CAF_LITTLE, 64),
+    "pcm_f32be": (b"lpcm", CAF_FLOAT, 32),
+    "pcm_f32le": (b"lpcm", CAF_FLOAT | CAF_LITTLE, 32),
+    "pcm_f64be": (b"lpcm", CAF_FLOAT, 64),
+    "pcm_f64le": (b"lpcm", CAF_FLOAT | CAF_LITTLE, 64),
+    "pcm_alaw": (b"alaw", 0, 8),
+    "pcm_mulaw": (b"ulaw", 0, 8),
+}
+CAF_STORAGE = {**CODEC_STORAGE, "pcm_s64be": "s64"}
+
+
+def caf_chunk(chunk_id, body, size=None):
+    """A CAF chunk: no padding, a signed 64-bit big-endian size."""
+    assert len(chunk_id) == 4
+    return chunk_id + struct.pack(">q", len(body) if size is None else size) + body
+
+
+def caf_desc(rate=8000, format_id=b"lpcm", flags=0, bytes_per_packet=2, frames_per_packet=1, channels=1, bits=16,
+             rate_bytes=None):
+    body = (rate_bytes or struct.pack(">d", rate)) + format_id + struct.pack(
+        ">IIIII", flags, bytes_per_packet, frames_per_packet, channels, bits)
+    return caf_chunk(b"desc", body)
+
+
+def caf_data(payload, size=None, edit_count=0):
+    return caf_chunk(b"data", struct.pack(">I", edit_count) + payload, size=size)
+
+
+def caf(*chunks, magic=b"caff", version=1):
+    return magic + struct.pack(">HH", version, 0) + b"".join(chunks)
+
+
+def caf_for(codec, channels, rate, payload, before=(), after=()):
+    format_id, flags, bits = CAF_CODECS[codec]
+    width = 1 if bits == 8 else bits // 8
+    desc = caf_desc(rate, format_id, flags, width * channels, 1, channels, bits)
+    return caf(desc, *before, caf_data(payload), *after)
+
+
+def build_caf_fixtures():
+    fx = []
+
+    def stream(codec, channels, rate, payload):
+        return Stream(codec, channels, rate, CAF_STORAGE[codec], decode_stored(codec, payload))
+
+    def ok(name, rule, codec, channels, rate, payload, data=None):
+        fx.append(Fixture(name, "accepted", rule, data or caf_for(codec, channels, rate, payload),
+                          accept=stream(codec, channels, rate, payload)))
+
+    def bad(name, group, rule, data, error):
+        assert error in CAF_ERRORS, error
+        fx.append(Fixture(name, group, rule, data, reject=error))
+
+    def values(fmt, items):
+        return b"".join(struct.pack(fmt, v) for v in items)
+
+    s24 = [0, 1, -1, 0x7FFFFF, -0x800000, 123456, -654321, 256]
+    s32 = [0, 1, -1, 0x7FFFFFFF, -0x80000000, 123456789, -987654321, 65536]
+    s64 = [0, 1, -1, 0x7FFFFFFFFFFFFFFF, -0x8000000000000000, 1 << 40, -(1 << 50), 255]
+    f32 = [0, 0x80000000, 0x3F800000, 0xBF800000, 0x3F000000, 0x7F800000, 1, 0x7FC00001]
+    f64 = [0, 0x8000000000000000, 0x3FF0000000000000, 0xBFF0000000000000,
+           0x7FF0000000000000, 1, 0x7FF8000000000001, 0x3FE0000000000000]
+
+    # Every encoding.
+    ok("caf_s16be_mono_8k", "`lpcm`, big-endian 16-bit mono: the encoding afconvert writes by default.",
+       "pcm_s16be", 1, 8000, values(">h", MONO))
+    ok("caf_s16le_stereo_44k1", "`lpcm` with the little-endian flag, stereo at 44.1 kHz.", "pcm_s16le", 2, 44100,
+       pcm(STEREO))
+    ok("caf_s8_mono", "8-bit `lpcm` is signed (FFmpeg passes the signed flag); stored as u8, offset by 128.",
+       "pcm_s8", 1, 8000, bytes([0x00, 0x7F, 0x80, 0xFF, 0x01, 0x81, 0x40, 0xC0]))
+    ok("caf_s24le_stereo_48k", "24-bit little-endian stereo at 48 kHz; stored as s32.", "pcm_s24le", 2, 48000,
+       b"".join(struct.pack("<i", v)[:3] for v in s24))
+    ok("caf_s24be_mono", "24-bit big-endian.", "pcm_s24be", 1, 8000, b"".join(struct.pack(">i", v)[1:] for v in s24))
+    ok("caf_s32be_mono", "32-bit big-endian.", "pcm_s32be", 1, 8000, values(">i", s32))
+    ok("caf_s32le_mono", "32-bit little-endian.", "pcm_s32le", 1, 8000, values("<i", s32))
+    ok("caf_s64be_mono", "64-bit big-endian integers.", "pcm_s64be", 1, 8000, values(">q", s64))
+    ok("caf_s64le_mono", "64-bit little-endian integers.", "pcm_s64le", 1, 8000, values("<q", s64))
+    ok("caf_f32be_mono", "32-bit float (`lpcm` with the float flag); every bit kept.", "pcm_f32be", 1, 8000,
+       values(">I", f32))
+    ok("caf_f32le_mono", "32-bit float, little-endian.", "pcm_f32le", 1, 8000, values("<I", f32))
+    ok("caf_f64be_stereo_96k", "64-bit float stereo at 96 kHz.", "pcm_f64be", 2, 96000, values(">Q", f64))
+    ok("caf_f64le_mono", "64-bit float, little-endian.", "pcm_f64le", 1, 8000, values("<Q", f64))
+    ok("caf_alaw_mono_8k", "Format ID `alaw`; decodes to s16.", "pcm_alaw", 1, 8000,
+       bytes([0xD5, 0x55, 0xAA, 0x2A, 0x00, 0x80, 0x7F, 0xFF]))
+    ok("caf_ulaw_mono_8k", "Format ID `ulaw`; decodes to s16.", "pcm_mulaw", 1, 8000,
+       bytes([0xFF, 0x70, 0x80, 0x00, 0x01, 0x81, 0xFE, 0x7E]))
+
+    four = values(">h", MONO[:4])
+    desc = caf_desc()
+    # Other accepted layouts.
+    ok("caf_empty_data", "A `data` chunk of 4 bytes, its edit count only: 0 frames.", "pcm_s16be", 1, 8000, b"")
+    ok("caf_chunks_around_data", "`free`, `chan` (the mono layout tag), `info` and `kuki` before `data` and `free` "
+       "after it are skipped.",
+       "pcm_s16be", 1, 8000, four,
+       data=caf(desc, caf_chunk(b"free", bytes(6)), caf_chunk(b"chan", struct.pack(">III", 0x640001, 0, 0)),
+                caf_chunk(b"info", b"\0\0\0\x01title\0T\0"), caf_chunk(b"kuki", b"\x01"),
+                caf_data(four), caf_chunk(b"free", b"")))
+    ok("caf_rate_fraction", "A rate of 8000.75 Hz is truncated to 8000, as FFmpeg's int conversion does.",
+       "pcm_s16be", 1, 8000, four, data=caf(caf_desc(rate=8000.75), caf_data(four)))
+    ok("caf_edit_count", "A nonzero edit count is skipped.", "pcm_s16be", 1, 8000, four,
+       data=caf(desc, caf_data(four, edit_count=7)))
+
+    # Unknown length: data size -1 runs to the end of the input, with the option.
+    def unknown(name, rule, data, accept=None, reject=None):
+        fx.append(Fixture(name, "size", rule, data, reject="UnsupportedStreamingSize",
+                          unknown_accept=accept, unknown_reject=reject))
+
+    unknown("caf_data_size_unknown", "`data` size -1, as a writer that could not seek back leaves it: with "
+            "`unknown_length` the data is the rest of the input.", caf(desc, caf_data(four, size=-1)),
+            accept=stream("pcm_s16be", 1, 8000, four))
+    unknown("caf_unknown_size_partial_frame", "Size -1, stereo, ending after 1.5 frames.",
+            caf(caf_desc(bytes_per_packet=4, channels=2), caf_data(values(">h", STEREO[:3]), size=-1)),
+            reject="Truncated")
+
+    # Header and description.
+    bad("caf_empty_input", "header", "No bytes at all.", b"", "Truncated")
+    bad("caf_bad_magic", "header", "Magic `cafe`.", caf(desc, caf_data(four), magic=b"cafe"), "InvalidCaf")
+    bad("caf_version2", "header", "File version 2: only version 1 exists. FFmpeg's probe rejects it, and its "
+        "demuxer, forced, reads it.", caf(desc, caf_data(four), version=2), "InvalidCaf")
+    bad("caf_desc_missing", "header", "The first chunk is `free`, not `desc`.",
+        caf(caf_chunk(b"free", bytes(32)), desc, caf_data(four)), "InvalidCaf")
+    bad("caf_desc_size", "header", "A `desc` chunk of size 36.",
+        caf(caf_chunk(b"desc", desc[12:] + bytes(4)), caf_data(four)), "InvalidCaf")
+    bad("caf_truncated_desc", "header", "Input ends inside `desc`.", caf(desc)[:30], "Truncated")
+    bad("caf_rate_zero", "desc", "Sample rate 0.", caf(caf_desc(rate=0), caf_data(four)), "InvalidFormat")
+    bad("caf_rate_nan", "desc", "Sample rate NaN.", caf(caf_desc(rate_bytes=bytes.fromhex("7ff8000000000000")),
+                                                        caf_data(four)), "InvalidFormat")
+    bad("caf_rate_over_limit", "desc", f"Sample rate {MAX_RATE + 1} Hz, above the default limit.",
+        caf(caf_desc(rate=MAX_RATE + 1), caf_data(four)), "LimitExceeded")
+    bad("caf_format_aac", "desc", "Format ID `aac ` waits for its decoder.",
+        caf(caf_desc(format_id=b"aac ", bytes_per_packet=0, frames_per_packet=1024, bits=0), caf_data(four)),
+        "UnsupportedFormat")
+    bad("caf_lpcm_bits12", "desc", "12-bit `lpcm`: whole bytes only. FFmpeg rounds up to 16.",
+        caf(caf_desc(bits=12), caf_data(four)), "UnsupportedFormat")
+    bad("caf_float_bits16", "desc", "A 16-bit float: no codec.", caf(caf_desc(flags=CAF_FLOAT), caf_data(four)),
+        "UnsupportedFormat")
+    bad("caf_channels0", "desc", "Zero channels.", caf(caf_desc(bytes_per_packet=0, channels=0), caf_data(b"")),
+        "InvalidFormat")
+    bad("caf_channels3", "desc", "Three channels.", caf(caf_desc(bytes_per_packet=6, channels=3), caf_data(bytes(12))),
+        "UnsupportedFormat")
+    bad("caf_bytes_per_packet", "desc", "4 bytes per packet for 16-bit mono.",
+        caf(caf_desc(bytes_per_packet=4), caf_data(four)), "InvalidFormat")
+    bad("caf_frames_per_packet", "desc", "2 frames per packet: PCM has one.",
+        caf(caf_desc(frames_per_packet=2, bytes_per_packet=4), caf_data(four)), "InvalidFormat")
+
+    # Chunks and data.
+    bad("caf_missing_data", "chunks", "`desc`, then the end of the input.", caf(desc), "InvalidCaf")
+    bad("caf_truncated_chunk_header", "chunks", "Input ends inside a chunk header.", caf(desc) + b"data\0\0",
+        "Truncated")
+    bad("caf_chunk_size_negative", "chunks", "A `free` chunk of size -2.",
+        caf(desc, caf_chunk(b"free", b"", size=-2), caf_data(four)), "InvalidCaf")
+    bad("caf_free_size_unknown", "chunks", "A `free` chunk of size -1: only `data` may have an unknown size.",
+        caf(desc, caf_chunk(b"free", b"", size=-1), caf_data(four)), "InvalidCaf")
+    bad("caf_pakt", "chunks", "A packet table, with which FFmpeg trims priming and remainder frames.",
+        caf(desc, caf_chunk(b"pakt", bytes(24)), caf_data(four)), "UnsupportedFormat")
+    bad("caf_data_size_small", "data", "A `data` chunk of size 2, short of its edit count.",
+        caf(desc, caf_chunk(b"data", b"\0\0")), "InvalidCaf")
+    bad("caf_data_not_whole_frames", "data", "Stereo 16-bit data of 6 bytes. FFmpeg reads the whole frame.",
+        caf(caf_desc(bytes_per_packet=4, channels=2), caf_data(values(">h", STEREO[:3]))), "InvalidFormat")
+    bad("caf_truncated_data", "data", "Input ends inside the samples.", caf(desc, caf_data(four))[:-3], "Truncated")
+    bad("caf_second_data", "data", "A second `data` chunk after the first.",
+        caf(desc, caf_data(four), caf_data(four)), "InvalidCaf")
+    bad("caf_trailing_partial_header", "data", "5 bytes after `data`: a cut chunk header.",
+        caf(desc, caf_data(four)) + b"free\0", "Truncated")
+
+    names = [f.name for f in fx]
+    assert len(names) == len(set(names)), "duplicate CAF fixture names"
+    return fx
+
+
 # --- outputs ---------------------------------------------------------------
 
 
@@ -1407,12 +1607,12 @@ def ffmpeg_detect(data):
     """The format FFmpeg's content probing picks for `data`, or None (T16).
 
     An independent reading of the probes in wavdec.c (wav_probe, w64_probe),
-    au.c (au_probe) and aiffdec.c (aiff_probe) and of format.c's choice: the highest nonzero score wins, a
+    au.c (au_probe), aiffdec.c (aiff_probe) and cafdec.c (probe) and of format.c's choice: the highest nonzero score wins, a
     tie at the highest means none. The first probe buffer holds 2048 bytes, and
     these probes never ask for more. File-name extensions (T22c) play no part:
     no fixture's extension is a raw format's."""
     head = data[:2048]
-    scores = {"wav": 0, "w64": 0, "au": 0, "aiff": 0}
+    scores = {"wav": 0, "w64": 0, "au": 0, "aiff": 0, "caf": 0}
     if len(head) > 32 and head[8:12] == b"WAVE":
         if head[:4] in (b"RIFF", b"RIFX"):
             scores["wav"] = 99
@@ -1426,6 +1626,11 @@ def ffmpeg_detect(data):
     padded = head + bytes(12)
     if padded[:4] == b"FORM" and struct.unpack(">I", padded[4:8])[0] >= 4 and padded[8:12] in (b"AIFF", b"AIFC"):
         scores["aiff"] = 100
+    # cafdec.c reads 20 bytes of the zero-padded buffer.
+    padded = head + bytes(20)
+    if (padded[:4] == b"caff" and padded[4:6] == b"\x00\x01" and padded[8:12] == b"desc"
+            and struct.unpack(">Q", padded[12:20])[0] == 32):
+        scores["caf"] = 100
     best = max(scores.values())
     winners = [name for name, score in scores.items() if score == best]
     return winners[0] if best > 0 and len(winners) == 1 else None
@@ -1523,7 +1728,7 @@ def render_readme(path, table):
     return (text[:begin] + table + text[end:]).encode()
 
 
-def outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures):
+def outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures):
     files = {WAV_DIR / f"{f.name}.wav": f.data for f in fixtures}
     files[MANIFEST] = render_manifest(
         fixtures, "// Each entry names wav/<name>.wav; see README.md for the rules and decisions.")
@@ -1540,6 +1745,10 @@ def outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures):
     files[RAW_MANIFEST] = render_manifest(
         raw_fixtures, "// Each entry names raw/<name>.raw; see raw/README.md for the rules and decisions.")
     files[RAW_README] = render_readme(RAW_README, render_table(raw_fixtures))
+    files.update({CAF_DIR / f"{f.name}.caf": f.data for f in caf_fixtures})
+    files[CAF_MANIFEST] = render_manifest(
+        caf_fixtures, "// Each entry names caf/<name>.caf; see caf/README.md for the rules and decisions.")
+    files[CAF_README] = render_readme(CAF_README, render_table(caf_fixtures))
     return files
 
 
@@ -1552,10 +1761,11 @@ def main():
     au_fixtures = build_au_fixtures()
     aiff_fixtures = build_aiff_fixtures()
     raw_fixtures = build_raw_fixtures()
-    expected = outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures)
+    caf_fixtures = build_caf_fixtures()
+    expected = outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures)
     stale = [path for path, content in expected.items() if not path.exists() or path.read_bytes() != content]
     extra = sorted((set(WAV_DIR.glob("*.wav")) | set(AU_DIR.glob("*.au")) | set(AIFF_DIR.glob("*.aiff"))
-             | set(RAW_DIR.glob("*.raw"))) - set(expected))
+             | set(RAW_DIR.glob("*.raw")) | set(CAF_DIR.glob("*.caf"))) - set(expected))
 
     if args.check:
         for path in stale:
@@ -1565,18 +1775,19 @@ def main():
         if stale or extra:
             print("run: python3 zig/testing/fixtures/generate.py", file=sys.stderr)
             return 1
-        print(f"{len(fixtures)} WAV, {len(au_fixtures)} AU, {len(aiff_fixtures)} AIFF and {len(raw_fixtures)} raw PCM fixtures, manifests and README tables are current")
+        print(f"{len(fixtures)} WAV, {len(au_fixtures)} AU, {len(aiff_fixtures)} AIFF, {len(raw_fixtures)} raw PCM and {len(caf_fixtures)} CAF fixtures, manifests and README tables are current")
         return 0
 
     WAV_DIR.mkdir(exist_ok=True)
     AU_DIR.mkdir(exist_ok=True)
     AIFF_DIR.mkdir(exist_ok=True)
     RAW_DIR.mkdir(exist_ok=True)
+    CAF_DIR.mkdir(exist_ok=True)
     for path in extra:
         path.unlink()
     for path in stale:
         path.write_bytes(expected[path])
-    print(f"wrote {len(stale)} file(s), removed {len(extra)}; {len(fixtures)} WAV, {len(au_fixtures)} AU, {len(aiff_fixtures)} AIFF and {len(raw_fixtures)} raw PCM fixtures")
+    print(f"wrote {len(stale)} file(s), removed {len(extra)}; {len(fixtures)} WAV, {len(au_fixtures)} AU, {len(aiff_fixtures)} AIFF, {len(raw_fixtures)} raw PCM and {len(caf_fixtures)} CAF fixtures")
     return 0
 
 

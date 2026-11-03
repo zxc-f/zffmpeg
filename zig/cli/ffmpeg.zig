@@ -2,8 +2,8 @@
 // Original file for this project.
 // fftools/ffmpeg_opt.c at the pinned reference revision was read for the -y/-n
 // and same-file behavior; see port.md "zffmpeg command" for the differences.
-//! zffmpeg: converts or stream-copies one WAV, Wave64, AU, AIFF or raw PCM
-//! stream (TODO.md T13b, T21b, T22b, T22c).
+//! zffmpeg: converts or stream-copies one WAV, Wave64, AU, AIFF, CAF (input
+//! only) or raw PCM stream (TODO.md T13b, T21b, T22b, T22c, T22d).
 //!
 //!     zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate> | -ar <rate>]
 //!             [-ch_layout mono|stereo | -ac 1|2] -i <input | -> [-c copy] [-f <format>] <output | ->
@@ -40,8 +40,8 @@ const printError = status.printError;
 const usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout mono|stereo] -i <input | -> [-c copy] [-f <format>] <output | ->\n";
 const help = usage ++
     \\
-    \\Converts one WAV, Wave64, AU, AIFF or raw PCM stream (standard input or
-    \\output with -). The input container is detected from content, or for raw
+    \\Converts one WAV, Wave64, AU, AIFF, CAF (input only) or raw PCM stream
+    \\(standard input or output with -). The input container is detected from content, or for raw
     \\PCM from the name (.sb, .ub, .al, .ul, .sw), or forced with -f before -i.
     \\Before -i, -sample_rate (or -ar) and -ch_layout (or -ac 1|2) describe raw
     \\PCM input, 44100 Hz mono by default. The output container is the -f after
