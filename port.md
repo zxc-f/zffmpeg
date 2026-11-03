@@ -21,12 +21,14 @@ and writer](zig/format/au.zig), and `zffprobe`, which chooses WAV or AU by
 [content detection](zig/format/detect.zig). The synchronous
 [conversion pipeline](#conversion-pipeline) (T13a, `av.convert`) and the
 [`zffmpeg` command](#zffmpeg-command) (T13b) that converts and stream-copies
-between WAV and AU are verified, and the pipeline now runs on
+between WAV and AU (and since T21b Wave64) are verified, and the pipeline now runs on
 [packets, frames and send/receive stages](#packets-frames-and-stages) (T14a),
 with [decoded sample storage](#decoded-sample-storage) for every sample format
 (T20a) and the [PCM encodings](#pcm-encodings) that decode into it (T20b);
-WAV reads and writes all of them, plain or WAVE_FORMAT_EXTENSIBLE (T21a).
-RF64, Wave64 and unknown-length WAV (T21b) are next.
+WAV reads and writes all of them, plain or WAVE_FORMAT_EXTENSIBLE (T21a),
+in RIFF, RF64/BW64 or Sony Wave64, past 4 GiB, and reads unknown-length input
+behind an option (T21b). The metadata dictionary with WAV metadata (T17b,
+T21c) is next.
 
 The goal is a native Zig multimedia library and tools, built incrementally from
 FFmpeg's functionality. Use idiomatic Zig APIs and explicit resource ownership.
@@ -809,7 +811,7 @@ matrix synchronously over a borrowed `*std.Io.Reader` and `*std.Io.Writer`:
 
 | Case | Behavior |
 | --- | --- |
-| Request | An output container and a mode: `transcode` (decode, then encode as the output container's s16 codec, `pcm_s16le` or `pcm_s16be`) or `copy` (move the encoded data bytes unchanged). Copy needs an output container that carries the input codec: any WAV encoding into WAV, `pcm_s16be` into AU (until T22a); copy across the containers is `UnsupportedOperation`. Transcoding needs samples stored as s16 (`pcm_s16le`, `pcm_s16be`, A-law, mu-law); other storage needs sample-format conversion (T23a) and is `UnsupportedOperation`. Rate and layout never change. |
+| Request | An output container and a mode: `transcode` (decode, then encode as the output container's s16 codec, `pcm_s16le` for WAV and Wave64 or `pcm_s16be` for AU) or `copy` (move the encoded data bytes unchanged). Copy needs an output container that carries the input codec: any WAV encoding into WAV or Wave64 (T21b), `pcm_s16be` into AU (until T22a); copy between AU and the WAV family is `UnsupportedOperation`. Transcoding needs samples stored as s16 (`pcm_s16le`, `pcm_s16be`, A-law, mu-law); other storage needs sample-format conversion (T23a) and is `UnsupportedOperation`. Rate and layout never change. |
 | Before output | `Conversion.init` detects the input, reads its header, then checks the request and the output header (`Writer.check`: rate limit, data and RIFF sizes), and writes nothing. The first failure in that order wins, so a malformed input reports its parse error even when the request would also be rejected. |
 | Output | `run` writes the writer's canonical header with the exact frame count, moves whole frames through a 4 KiB transfer buffer, calls the parser's `finish` (errors after the data fail the operation) and then the writer's `finish` (frame count, then flush). |
 | Metadata | Not carried: WAV chunks other than `fmt ` and `data`, and AU annotations, are dropped by both modes. Encoded media and timing (rate, layout, frame count) are preserved. |
@@ -838,22 +840,26 @@ stable report separate from T51's future FFprobe-compatible mode.
 
 T09's `zffprobe` reports stable UTF-8 `key=value` lines, in this order:
 `format`, `codec`, `sample_fmt`, `channels`, `channel_layout`, `sample_rate`,
-`nb_samples`, `duration_num`, `duration_den`. Use `wav` or `au` (T12c), the
-stream's FFmpeg codec name (`pcm_s16le`, `pcm_s24le`, `pcm_alaw`, ... for WAV
-since T21a; `pcm_s16be` for AU), its storage format as FFmpeg's `sample_fmt`
-(`s16`, `s32` for 24- and 32-bit, `u8`, `s64`, `flt`, `dbl`), and
-`mono`/`stereo` as canonical strings. `nb_samples` counts sample frames (samples per channel); duration is
+`nb_samples`, `duration_num`, `duration_den`. Use `wav`, `w64` (Sony Wave64,
+T21b) or `au` (T12c), the stream's FFmpeg codec name (`pcm_s16le`,
+`pcm_s24le`, `pcm_alaw`, ... for WAV since T21a; `pcm_s16be` for AU), its
+storage format as FFmpeg's `sample_fmt` (`s16`, `s32` for 24- and 32-bit,
+`u8`, `s64`, `flt`, `dbl`), and `mono`/`stereo` as canonical strings.
+`nb_samples` counts sample frames (samples per channel); duration is
 exact and unreduced in the stream's `1/sample_rate` time base:
 `duration_num = nb_samples` and `duration_den = sample_rate`, with no decimal
 rounding or fraction reduction. Empty data reports `duration_num=0` and the
-stream's sample rate as `duration_den`. Emit the report only after validation.
+stream's sample rate as `duration_den`. A frame count the library leaves unknown
+(`unknown_length`, which zffprobe does not enable) prints `N/A` for the three
+count fields, as ffprobe does. Emit the report only after validation.
 
 The container is detected from content, not the file name (T12c,
 `zig/format/detect.zig`): a stream that starts with `.snd` is AU, and anything
 else goes to the WAV parser, so WAV reports and errors are unchanged and a file
-of neither kind reports `InvalidRiff`. Detection reads at most 4 bytes and hands
-them to the chosen parser, so standard input loses no bytes. A malformed AU
-header is `InvalidAu`, exit code 2.
+of neither kind reports `InvalidRiff`; a stream that starts with `riff` is
+reported as Wave64, which the WAV parser reads (T21b). Detection reads at
+most 4 bytes and hands them to the chosen parser, so standard input loses no
+bytes. A malformed AU header is `InvalidAu`, exit code 2.
 
 Exit codes: 0 success/help, 1 usage, 2 invalid/truncated media, 3 unsupported
 media, 4 I/O failure, 5 resource/allocation limit, 6 cancellation. Diagnostics
@@ -867,13 +873,13 @@ T13b's [`zffmpeg`](zig/cli/ffmpeg.zig) is a thin command over the
 [conversion pipeline](#conversion-pipeline):
 
 ```text
-zffmpeg [-y | -n] -i <input | -> [-c copy] [-f wav|au] <output | ->
+zffmpeg [-y | -n] -i <input | -> [-c copy] [-f wav|w64|au] <output | ->
 ```
 
 | Case | Behavior |
 | --- | --- |
-| Options | Exactly one `-i`. `-c copy` (or `-c:a copy`) asks for stream copy; any other codec value is a usage error, and without `-c` the samples are transcoded. `-f wav` or `-f au` names the output container. `-f` and `-c` must follow `-i`: in FFmpeg an option before `-i` applies to the input, which is not supported, so it is rejected rather than read as an output option. Nothing may follow the output. Repeated or unknown options are usage errors. |
-| Output container | `-f`, else the output name's extension, `.wav` or `.au` without regard to case (as FFmpeg's `av_match_ext`). `-` (standard output) needs `-f`. An unknown `-f` value or extension is status 3. |
+| Options | Exactly one `-i`. `-c copy` (or `-c:a copy`) asks for stream copy; any other codec value is a usage error, and without `-c` the samples are transcoded. `-f wav`, `-f w64` (Sony Wave64, since T21b) or `-f au` names the output container. `-f` and `-c` must follow `-i`: in FFmpeg an option before `-i` applies to the input, which is not supported, so it is rejected rather than read as an output option. Nothing may follow the output. Repeated or unknown options are usage errors. |
+| Output container | `-f`, else the output name's extension, `.wav`, `.w64` or `.au` without regard to case (as FFmpeg's `av_match_ext`). `-` (standard output) needs `-f`. An unknown `-f` value or extension is status 3. |
 | Preflight | Before the output file is opened: the arguments, the input (opened, detected, header read), the operation matrix, the output header (`Writer.check`), then the same-file check. A command rejected here leaves an existing output untouched and creates none. |
 | Existing output | Refused (status 1, `PathAlreadyExists`) unless `-y`; `-n` makes the default explicit, and `-y -n` together is a usage error. The file is created exclusively, so there is no gap between a check and the creation. FFmpeg instead asks on an interactive terminal; zffmpeg never prompts. |
 | Same file | An output that is the input file is refused (status 1), compared by file identity (`Stat.inode`), so `./in.wav` for `in.wav` and a standard input redirected from the output are caught. FFmpeg compares the names only. Without a device number, two files on different volumes with the same index also count as the same: a refusal, never a lost input. |
@@ -1062,7 +1068,7 @@ has passed TODO.md gates G2–G4 is implemented, and it becomes verified at G5.
 | Zig toolchain/build/package | Verified | [build.zig](build.zig) (exact Zig 0.17.0 check, `av` module, `libzffmpeg.a`, test step for `av` and each example), [build.zig.zon](build.zig.zon) (toolchain-generated fingerprint, `.paths` allowlist, no dependencies), [zig/README.md](zig/README.md). Original `LGPL-2.1-or-later` files. `zig build` passed in Debug and ReleaseSafe and `zig build test` passed 9/9 in Debug, ReleaseSafe and ReleaseFast in [run 41548960006](https://github.com/zxc-f/zffmpeg/actions/runs/41548960006); failure propagation shown in [run 41548611661](https://github.com/zxc-f/zffmpeg/actions/runs/41548611661). Linux only; no C build dependency. |
 | Audio and time types | Verified | [zig/core/audio.zig](zig/core/audio.zig) and [zig/core/time.zig](zig/core/time.zig) (T05). Original, `LGPL-2.1-or-later`; rescaling follows `av_rescale_q_rnd` except for overflow and INT64_MIN (see [notes.md](notes.md)). Verified in [run 41553566007](https://github.com/zxc-f/zffmpeg/actions/runs/41553566007) against oracle-derived vectors. T10 compared the WAV path's time base and duration with FFmpeg; `rescale` has no direct FFmpeg differential. |
 | WAV fixture contract | Verified | [zig/testing/fixtures](zig/testing/fixtures/README.md): 52 fixtures generated independently of the Zig code by `generate.py` (original, `LGPL-2.1-or-later`), with expected results, boundary decisions and error precedence; integrity-tested by [fixtures.zig](zig/testing/fixtures.zig) in [run 41550661260](https://github.com/zxc-f/zffmpeg/actions/runs/41550661260). The parser (T06) and FFmpeg (T10) agree with every expected result. |
-| WAV + PCM encodings | Verified | [zig/format/wav.zig](zig/format/wav.zig) (bounded parser, `probe`, `decodeToRaw`, known-length `Writer`; T06, T08, T21a) and [zig/io/file.zig](zig/io/file.zig) (file and pipe adapters; T07). Original, `LGPL-2.1-or-later`; behavior follows `libavformat/wavdec.c`, `wavenc.c`, `riffdec.c` and `riffenc.c` at the pinned commit, with the stricter [first WAV contract](#first-wav-contract). Supported: little-endian RIFF/WAVE with every WAV PCM encoding (u8, s16, s24, s32, s64, f32, f64, A-law, mu-law; T21a, verified at `2cf3a3f` on local Windows runs, 76 fixtures and 17 Zig-written files against FFmpeg), plain or WAVE_FORMAT_EXTENSIBLE, the writer choosing FFmpeg's header, mono or stereo up to 192 kHz, known sizes, sequential input without seeking, no allocation. All 76 fixtures pass from memory, one-byte reads and files in Debug, ReleaseSafe and ReleaseFast, and FFmpeg decodes the same samples for every accepted fixture, including the writer-output files ([reference results](zig/testing/reference/README.md#results); the s16 path first in [run 41557971301](https://github.com/zxc-f/zffmpeg/actions/runs/41557971301)). Limitations: no unknown-length, RF64/W64/RIFX (T21b), odd bit depths, layouts beyond mono and stereo (T23b) or metadata (T21c); no seeking or resumable parsing; sustained fuzzing not run. Scalar; not optimized. |
+| WAV + PCM encodings | Verified | [zig/format/wav.zig](zig/format/wav.zig) (bounded parser, `probe`, `decodeToRaw`, known-length `Writer`; T06, T08, T21a, T21b) and [zig/io/file.zig](zig/io/file.zig) (file and pipe adapters; T07). Original, `LGPL-2.1-or-later`; behavior follows `libavformat/wavdec.c`, `wavenc.c`, `w64.c`, `riffdec.c` and `riffenc.c` at the pinned commit, with the stricter [first WAV contract](#first-wav-contract). Supported: little-endian RIFF/WAVE with every WAV PCM encoding (u8, s16, s24, s32, s64, f32, f64, A-law, mu-law; T21a, verified at `2cf3a3f` on local Windows runs), plain or WAVE_FORMAT_EXTENSIBLE, the writer choosing FFmpeg's header; RF64/BW64 and Sony Wave64 read and written with 64-bit sizes past 4 GiB, and unknown-length input read to the end behind `Limits.unknown_length` (T21b, verified at `8373e6b` on local Windows runs, 109 fixtures and 22 Zig-written files against FFmpeg, and FFmpeg-written Wave64 read back); mono or stereo up to 192 kHz, sequential input without seeking, no allocation. All 109 fixtures pass from memory, one-byte reads and files in Debug, ReleaseSafe and ReleaseFast, and FFmpeg decodes the same samples for every accepted fixture, including the writer-output files ([reference results](zig/testing/reference/README.md#results); the s16 path first in [run 41557971301](https://github.com/zxc-f/zffmpeg/actions/runs/41557971301)). Limitations: no RIFX, `ds64` size tables, unknown-length output, odd bit depths, layouts beyond mono and stereo (T23b) or metadata (T21c); no seeking or resumable parsing; sustained fuzzing not run. Scalar; not optimized. |
 | zffprobe | Verified | [zig/cli/probe.zig](zig/cli/probe.zig) (T09, T12c) with [zig/format/detect.zig](zig/format/detect.zig) and [prefix.zig](zig/format/prefix.zig). Original, `LGPL-2.1-or-later`. Prints the [probe output](#initial-probe-output) for one WAV or AU file or standard input, with exit codes 0–6; the container is detected from the first 4 bytes, which are replayed to the parser, so pipes lose nothing. 24 process runs (15 WAV, 9 AU) check stdout, stderr and the status in Debug, ReleaseSafe and ReleaseFast, and the reference comparison runs it on all 81 fixtures, as files and through pipes ([run 41660265753](https://github.com/zxc-f/zffmpeg/actions/runs/41660265753) at `3bbdcf9`; WAV first in [run 41557971301](https://github.com/zxc-f/zffmpeg/actions/runs/41557971301)). Our own output format, not ffprobe's; no scored probing yet (T16). |
 | FFmpeg reference comparison | Verified | [zig/testing/reference](zig/testing/reference/README.md) (T03, T10, T19a, T12): Clang build of the pinned commit with a minimal LGPL configuration (WAV and AU demuxers, s16le and s16be decoders), cached in CI, and `compare.py`. WAV: accepted 12/12 identical in samples and compared metadata, rejected 40/40 with the contract's `zffprobe` status. AU: accepted 9/9 (FFmpeg forced with `-f au`, detection recorded separately), rejected 20/20. FFmpeg reads 9/9 files written by the Zig write driver; `zffprobe` through a pipe equals the file result 81/81; nothing listed as not implemented. Intentional differences recorded. [run 41660265753](https://github.com/zxc-f/zffmpeg/actions/runs/41660265753). T13b adds `zffmpeg`'s output: 63/63 read as expected and 21/21 cross-codec copies rejected before output, first run locally on Windows at `4433337` with the same configuration built by MSYS2 clang. |
 | AU fixture contract | Verified | [AU contract and 29 fixtures](zig/testing/fixtures/au/README.md), T12a: 9 accepted and 20 rejected, with parser acceptance separate from content detection. Reference-only G5 at `d41c5a4`, [run 41579247329](https://github.com/zxc-f/zffmpeg/actions/runs/41579247329), before AU Zig code existed; full evidence stays in TODO.md. This does not verify the parser, writer or probe. |

@@ -5,11 +5,13 @@ documented behavior and algorithms, one supported capability at a time.
 
 Current state: two complete paths work. The `av` library reads and writes
 every WAV PCM encoding (u8, 16- to 64-bit integers, float, A-law, mu-law, plain
-or WAVE_FORMAT_EXTENSIBLE) and signed 16-bit PCM in Sun AU (bounded parsers, known-length writers,
-file and pipe adapters), and the `zffprobe` tool detects WAV or AU from the
-content, validates the file and reports its stream. Both are checked against
-76 WAV and 29 AU fixtures and against a pinned FFmpeg build in CI (Linux). The
-`zffmpeg` tool converts and stream-copies between WAV and AU through the
+or WAVE_FORMAT_EXTENSIBLE) in RIFF, RF64/BW64 or Sony Wave64, past 4 GiB, and
+signed 16-bit PCM in Sun AU (bounded parsers, known-length writers, file and
+pipe adapters); it can also read unknown-length WAV input behind an option.
+The `zffprobe` tool detects WAV, Wave64 or AU from the content, validates the
+file and reports its stream. Both are checked against 109 WAV and 29 AU
+fixtures and against a pinned FFmpeg build in CI (Linux). The `zffmpeg` tool
+converts and stream-copies between WAV, Wave64 and AU through the
 library's synchronous pipeline (T13), which runs on packets, frames and
 send/receive stages (T14a), and FFmpeg reads every output it writes for the
 fixtures. [TODO.md](TODO.md) holds the completion
@@ -40,7 +42,7 @@ the [unplanned features](TODO.md#not-planned).
   [zig/README.md](zig/README.md) documents commands, version policy and layout.
 - [zig/root.zig](zig/root.zig): root of the `av` library module.
 - [zig/testing/fixtures/README.md](zig/testing/fixtures/README.md): the WAV fixture
-  contract (52 fixtures, expected results, decisions, error precedence).
+  contract (109 fixtures, expected results, decisions, error precedence).
 - [zig/testing/fixtures/au/README.md](zig/testing/fixtures/au/README.md): the AU
   fixture contract (29 fixtures, parser and detection expectations kept separate).
 - [zig/testing/reference/README.md](zig/testing/reference/README.md): the pinned

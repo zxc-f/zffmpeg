@@ -132,7 +132,7 @@ slowdowns of the default build.
 | File | License | Origin |
 | --- | --- | --- |
 | `build.zig`, `build.zig.zon`, `zig/root.zig` | `LGPL-2.1-or-later` (SPDX header) | Original project files. The build structure follows the Zig 0.17 build-system guide and port.md; no code is copied. |
-| `zig/format/wav.zig`, `zig/io/file.zig`, `zig/cli/probe.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. FFmpeg's `wavdec.c`, `wavenc.c`, `riffenc.c` and `ffprobe` were read for behavior only; no code is copied. |
+| `zig/format/wav.zig`, `zig/io/file.zig`, `zig/cli/probe.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. FFmpeg's `wavdec.c`, `wavenc.c`, `w64.c`, `riffenc.c` and `ffprobe` were read for behavior only; no code is copied (the Wave64 GUIDs are format constants). |
 | `zig/format/au.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. FFmpeg's `au.c` and `pcm.c` were read for behavior only; no code is copied. |
 | `zig/format/detect.zig`, `zig/format/prefix.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. The detection rule is the project's own; FFmpeg's `au_probe` in `au.c` was read only to record where it differs. |
 | `zig/codec/g711.zig` | `LGPL-2.1-or-later` (SPDX header) | **Derived** from FFmpeg's `libavcodec/pcm_tablegen.h` at commit `5d5a38a7e46be296eab75982c0986054f731e19e`, © 2010 Reimar Döffinger, `LGPL-2.1-or-later`; its A-law and mu-law conversions come from Sun Microsystems' `g711.c` (unrestricted use). The header keeps that attribution. |

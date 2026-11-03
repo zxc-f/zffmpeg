@@ -19,9 +19,11 @@ T12 is verified: the AU contract and 29 fixtures (T12a), the AU parser and
 writer (T12b) and AU in `zffprobe` with content detection (T12c). T13 is verified too: the
 synchronous conversion pipeline (`av.convert`, T13a) and the `zffmpeg`
 command (T13b). T14a, packets, frames and send/receive stages, T20a, decoded sample storage,
-T20b, the PCM encodings, and T21a, WAV's extensible headers and encodings,
-are verified. **Next: T21b, RF64/BW64, Wave64 and unknown-length WAV; T16
-starts with the first third format. See [Near-term order](#near-term-order).**
+T20b, the PCM encodings, T21a, WAV's extensible headers and encodings, and
+T21b, RF64/BW64, Sony Wave64 and unknown-length WAV input, are verified.
+**Next: T17b, the metadata dictionary, with its first consumer T21c (WAV
+metadata); T16 starts with the first format that needs its own parser. See
+[Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
 [How tasks are completed](#how-tasks-are-completed) describes. Tasks and
@@ -1223,11 +1225,81 @@ names, not as an empty framework.
     before output; 105/105 pipe results equal the file results. Writing the
     µ-law fixture found that its negative zero cannot be writer output; the
     fixture leaves it out, as recorded.
-  - [ ] **T21b — RF64/BW64, Wave64 and unknown-length input.** Needs T21a.
+  - [x] **T21b — RF64/BW64, Wave64 and unknown-length input.** Needs T21a.
     `ds64` reading and writing past 4 GiB, Sony Wave64, and unknown-length
     input read to the end of the stream behind an option.
     Done when synthetic readers exercise sizes past 4 GiB, and each layout
     matches the reference.
+
+    ```text
+    ID / parent: T21b / T21
+    State: verified
+    Supported behavior and explicit exclusions: RF64 and BW64 read (a
+      28-byte ds64 first, no size table) and written (WriteOptions.rf64:
+      auto by default, always, never); Sony Wave64 read and written
+      (wav.Variant), detected as w64, in zffprobe and zffmpeg (-f w64,
+      .w64); unknown sizes read to the end of the input behind
+      wav.Limits.unknown_length (off by default; Info.frame_count null for
+      unknown data). Excluded: a ds64 size table, unknown-length output (the
+      writers need the length), the option in the CLIs, unknown sizes of AU
+      (T22a).
+    Needs (verified) / lands with / verified after: T21a (verified); alone.
+    Contract and source provenance: port.md "First WAV contract" (revised),
+      zig/testing/fixtures/README.md (decisions and precedence for RF64,
+      unknown length and Wave64), notes.md "WAV contract" and "Writer";
+      wavdec.c, wavenc.c, w64.c and riffenc.c read for behavior. Original
+      code.
+    Required fixtures / optional corpus: the 109 WAV fixtures (37 accepted,
+      18 writer outputs, 72 rejected): 8 RF64/BW64, 9 unknown-length plus the
+      3 earlier sentinel fixtures, now with a result under the option, and 18
+      Wave64; the earlier w64 rejection became w64_no_chunks. No optional
+      corpus.
+    Ownership, state transitions and limits: unchanged: no allocation,
+      sequential, the same chunk and rate limits; Wave64 files stay below
+      2^63 bytes.
+    Comparison rule and intentional differences: FFmpeg decodes every
+      accepted fixture (RIFF, RF64, BW64, Wave64), every fixture the option
+      accepts, every Zig-written file and every zffmpeg output to the same
+      samples and fields; zffprobe and zffmpeg read FFmpeg-written Wave64,
+      whose sizes count the padding. Recorded and checked: FFmpeg's Wave64
+      duration is an estimate over the bytes after the data start; it
+      rejects an empty Wave64 data chunk and Wave64 unknown sizes; RF64
+      verdicts on rejected fixtures are recorded.
+    Implementation files and test entry points: zig/format/wav.zig (Variant,
+      Limits.unknown_length, parser, writer, headerLen), detect.zig
+      (Container.w64), convert.zig, zig/cli/probe.zig and ffmpeg.zig,
+      write_driver.zig, synthetic.zig, fixtures.zig, generate.py, compare.py,
+      build-ffmpeg.sh; tests in wav.zig, convert.zig, detect.zig; probe and
+      convert cases in build.zig.
+    Evidence commit / Linux CI run / reference report: 6334d0b, c997870,
+      8373e6b / local Windows runs instead (below) / local compare.py run
+      (below).
+    Required cases: passed 37/37 accepted and 72/72 rejected WAV fixtures,
+      10/10 under the option, 22/22 writer files, 185/185 zffmpeg outputs,
+      12/12 FFmpeg-written Wave64 files / failed 0 / missing 0.
+    Optional cases: none.
+    Fuzz seeds, budget and result: detect.zig's entry gained a Wave64 seed;
+      run under zig build test. No sustained run.
+    Remaining work or blocker / next action: none; T17b with T21c is next.
+    ```
+
+    Evidence (G5, local Windows runs with Zig 0.17.0): implementation
+    commits `6334d0b` (RF64/BW64), `c997870` (unknown length) and `8373e6b`
+    (Wave64). `zig build test` passed 89/89 steps in Debug, ReleaseSafe and
+    ReleaseFast (`av` 123 tests, 32 `zffprobe` and 43 `zffmpeg` process
+    runs, the prepared-file cases); fmt, `generate.py --check`, the four
+    cross builds and a Linux type check passed. Synthetic streams carry 5 GiB
+    through RF64 (written and read), Wave64 (written and read, with odd
+    data padding) and unknown-length data (read to the end; a partial final
+    frame is `Truncated`). The reference, rebuilt with the w64 demuxer and
+    muxer, ran `compare.py` with 0 failures: 37/37 accepted fixtures,
+    72/72 rejected ones with the contract's status, 10/10 unknown-length
+    results (8 decoded the same, 2 Wave64 ones refused by FFmpeg as
+    recorded), 22/22 Zig-written files (4 Wave64), 185/185 `zffmpeg`
+    outputs and 91/91 unsupported cells, 12/12 FFmpeg-written Wave64 files
+    and 138/138 pipe results. The FFmpeg vectors regenerate unchanged. Mutations of
+    the pad, partial-header, padded-`fmt ` and partial-frame rules each
+    failed the tests.
   - [ ] **T21c — WAV metadata.** Needs T17b and T21a. LIST/INFO and `bext`.
     Done when tags round-trip through WAV and equal FFmpeg's `ffprobe` tags.
 
