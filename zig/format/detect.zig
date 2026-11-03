@@ -34,6 +34,14 @@ pub const Container = enum {
             .au => "pcm_s16be",
         };
     }
+
+    /// The byte order of that codec's samples.
+    pub fn sampleEndian(container: Container) std.lang.Endian {
+        return switch (container) {
+            .wav => .little,
+            .au => .big,
+        };
+    }
 };
 
 /// The WAV and AU contract errors, which share their common names.

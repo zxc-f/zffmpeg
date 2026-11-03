@@ -22,16 +22,22 @@
 //! samples were written is still a failure; output is not atomic, and what to
 //! do with a partial output is the caller's decision.
 //!
-//! Stream copy moves the encoded data bytes unchanged; transcoding decodes them
-//! to samples and encodes those for the output. Neither keeps container
-//! metadata: the output has the writer's canonical header, so WAV chunks other
-//! than `fmt ` and `data`, and AU annotations, are dropped.
+//! The input is read as packets of whole frames (TODO.md T14a), timestamped in
+//! frames since the start (`1/sample_rate`). Stream copy writes those packets'
+//! bytes unchanged; transcoding sends them through `pcm.Decoder` and
+//! `pcm.Encoder` (the core/stage.zig contract) and writes the encoded packets.
+//! Neither keeps container metadata: the output has the writer's canonical
+//! header, so WAV chunks other than `fmt ` and `data`, and AU annotations, are
+//! dropped.
 //!
 //! Nothing is allocated. Working memory is fixed, whatever the input length:
-//! one 4 KiB transfer buffer plus the parsers' and writers' own 4 KiB scratch.
+//! a 4 KiB packet buffer, for transcoding 4 KiB each of decoded samples and
+//! encoded bytes, plus the parsers' and writers' own 4 KiB scratch.
 
 const std = @import("std");
 const audio = @import("../core/audio.zig");
+const pcm = @import("../codec/pcm.zig");
+const Packet = @import("../core/packet.zig").Packet;
 const wav = @import("wav.zig");
 const au = @import("au.zig");
 const detect = @import("detect.zig");
@@ -96,6 +102,8 @@ pub const Conversion = struct {
     input: Input,
     limits: Limits,
     summary: Summary,
+    /// Frames read so far: the next packet's timestamp.
+    next_pts: i64 = 0,
 
     const Input = union(Container) {
         wav: wav.Parser,
@@ -153,22 +161,22 @@ pub const Conversion = struct {
     }
 
     fn transfer(c: *Conversion, comptime W: type, writer: *W) RunError!void {
+        var packet_bytes: [transfer_len]u8 = undefined;
         switch (c.summary.mode) {
-            .transcode => {
-                var samples: [transfer_len / 2]i16 = undefined;
-                while (true) {
-                    const decoded = try c.readSamples(&samples);
-                    if (decoded.len == 0) break;
-                    writer.writeFrames(decoded) catch |err| return outputFailure(err);
-                }
+            .copy => while (try c.readPacket(&packet_bytes)) |packet| {
+                writer.writeData(packet.data) catch |err| return outputFailure(err);
             },
-            .copy => {
-                var bytes: [transfer_len]u8 = undefined;
-                while (true) {
-                    const data = try c.readData(&bytes);
-                    if (data.len == 0) break;
-                    writer.writeData(data) catch |err| return outputFailure(err);
-                }
+            .transcode => {
+                const s = c.summary;
+                var samples: [transfer_len / 2]i16 = undefined;
+                var encoded: [transfer_len]u8 = undefined;
+                var stages: Transcoder(W) = .{
+                    .decoder = .init(s.input.sampleEndian(), s.format, &samples),
+                    .encoder = .init(s.output.sampleEndian(), s.format, &encoded),
+                    .writer = writer,
+                };
+                while (try c.readPacket(&packet_bytes)) |packet| try stages.push(packet);
+                try stages.push(null);
             },
         }
         // The input first: an error after its data fails the operation
@@ -177,9 +185,24 @@ pub const Conversion = struct {
         writer.finish() catch |err| return outputFailure(err);
     }
 
-    fn readSamples(c: *Conversion, output: []i16) detect.Error![]i16 {
-        return switch (c.input) {
-            inline else => |*parser| parser.readSamples(output),
+    /// The next packet of whole frames, or `null` at the end of the data. Its
+    /// bytes are in `storage`, which holds at least one frame, and stay valid
+    /// until the next call.
+    fn readPacket(c: *Conversion, storage: []u8) detect.Error!?Packet {
+        const data = try c.readData(storage);
+        if (data.len == 0) return null;
+        const format = c.summary.format;
+        // At most `storage.len` bytes, so the frame count fits in i64.
+        const frames: i64 = @intCast(data.len / format.bytesPerFrame());
+        const pts = c.next_pts;
+        c.next_pts += frames;
+        return .{
+            .data = data,
+            .time_base = format.timeBase(),
+            .pts = pts,
+            .dts = pts,
+            .duration = frames,
+            .flags = .{ .key = true },
         };
     }
 
@@ -195,6 +218,56 @@ pub const Conversion = struct {
         };
     }
 };
+
+/// The transcoding stages between the packet reader and the writer `W`.
+///
+/// `push` empties both stages before it returns, so each holds at most one
+/// item and `send` never returns `.full`. Their sends cannot fail either:
+/// packets hold whole frames of the conversion's format and at most
+/// `transfer_len` bytes, which both storages hold; their timestamps are
+/// already in the format's time base, so rescaling is exact; and input ends
+/// only once, with `push(null)`.
+fn Transcoder(comptime W: type) type {
+    return struct {
+        decoder: pcm.Decoder,
+        encoder: pcm.Encoder,
+        writer: *W,
+
+        const Self = @This();
+
+        /// Sends `packet` through both stages and writes what comes out;
+        /// `null` drains them.
+        fn push(t: *Self, packet: ?Packet) std.Io.Writer.Error!void {
+            if (packet) |p| {
+                const sent = t.decoder.send(p) catch unreachable;
+                std.debug.assert(sent == .accepted);
+            } else {
+                t.decoder.finishInput();
+            }
+            while (true) switch (t.decoder.receive()) {
+                .output => |frame| {
+                    const sent = t.encoder.send(frame) catch unreachable;
+                    std.debug.assert(sent == .accepted);
+                    try t.writeEncoded();
+                },
+                .need_input => return,
+                .drained => {
+                    t.encoder.finishInput();
+                    try t.writeEncoded();
+                    std.debug.assert(t.encoder.receive() == .drained);
+                    return;
+                },
+            };
+        }
+
+        fn writeEncoded(t: *Self) std.Io.Writer.Error!void {
+            while (true) switch (t.encoder.receive()) {
+                .output => |p| t.writer.writeData(p.data) catch |err| return outputFailure(err),
+                .need_input, .drained => return,
+            };
+        }
+    };
+}
 
 /// The writer's own failure. `init` already ran the header checks `begin`
 /// repeats, with the same arguments; the parser delivers whole frames of the
@@ -319,6 +392,34 @@ test "every accepted fixture gives its samples in every supported cell, and copy
             try expectEveryCell(.au, fixtures.au.bytes(fixture.name), fixture.expected.accept, fixture.writer_output);
         }
     }
+}
+
+test "the input is read as contiguous, timestamped packets of whole frames" {
+    const gpa = std.testing.allocator;
+    const stereo = try audio.Format.init(48000, 2, .s16);
+    const frame_count = 5000; // Not a multiple of the 1024-frame packets.
+    const bytes = try gpa.alloc(u8, wav.canonical_header_len + frame_count * 4);
+    defer gpa.free(bytes);
+    var out: std.Io.Writer = .fixed(bytes);
+    var writer = try wav.Writer.begin(&out, stereo, frame_count, .{});
+    const zeros: [frame_count * 2]i16 = @splat(0);
+    try writer.writeFrames(&zeros);
+    try writer.finish();
+
+    var reader: std.Io.Reader = .fixed(bytes);
+    var conversion: Conversion = try .init(&reader, .{ .output = .au, .mode = .transcode }, .{});
+    var storage: [transfer_len]u8 = undefined;
+    var expected_pts: i64 = 0;
+    while (try conversion.readPacket(&storage)) |packet| {
+        try std.testing.expectEqual(expected_pts, packet.pts);
+        try std.testing.expectEqual(expected_pts, packet.dts);
+        try std.testing.expectEqual(stereo.timeBase(), packet.time_base);
+        try std.testing.expect(packet.flags.key);
+        const frames: i64 = @intCast(@divExact(packet.data.len, 4));
+        try std.testing.expectEqual(frames, packet.duration.?);
+        expected_pts += packet.duration.?;
+    }
+    try std.testing.expectEqual(frame_count, expected_pts);
 }
 
 test "copy keeps the encoded data and timing but not the container's metadata" {
