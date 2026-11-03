@@ -21,9 +21,10 @@ synchronous conversion pipeline (`av.convert`, T13a) and the `zffmpeg`
 command (T13b). T14a, packets, frames and send/receive stages, T20a, decoded sample storage,
 T20b, the PCM encodings, and T21, complete WAV (T21a, extensible headers and
 encodings; T21b, RF64/BW64, Sony Wave64 and unknown-length input; T21c, tags,
-with T17b's metadata dictionary), are verified. **Next: T22a, the remaining
-AU encodings; T16 starts with the first format that needs its own parser.
-See [Near-term order](#near-term-order).**
+with T17b's metadata dictionary), and T22a, every AU PCM encoding and
+unknown-length AU, are verified. **Next: T16, format descriptors and scored
+probing, with its first consumer T22b (AIFF and AIFF-C); T22c (raw PCM) is
+also ready. See [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
 [How tasks are completed](#how-tasks-are-completed) describes. Tasks and
@@ -1392,11 +1393,69 @@ names, not as an empty framework.
 - [ ] **T22 — AU encodings, AIFF, raw PCM and CAF.** Checked when T22a–T22d
   are. Reference: `libavformat/au.c`, `aiffdec.c`, `aiffenc.c`, `pcmdec.c`,
   `pcmenc.c`, `rawenc.c`, `cafdec.c`.
-  - [ ] **T22a — Remaining AU encodings.** Needs T12 and T20b. The other PCM
+  - [x] **T22a — Remaining AU encodings.** Needs T12 and T20b. The other PCM
     encodings in `au.c`'s table (µ-law, s8, s24be, s32be, f32be, f64be, A-law)
     and unknown-length AU. The G.722 and G.726 codes (23–26) stay rejected as
     unsupported, with a fixture, until T31c.
     Done when each encoding demuxes and muxes against the reference.
+
+    ```text
+    ID / parent: T22a / T22
+    State: verified
+    Supported behavior and explicit exclusions: every PCM encoding of au.c's
+      table (1 µ-law, 2 s8, 3-5 s16/s24/s32be, 6-7 f32/f64be, 27 A-law)
+      read and written, in zffprobe and zffmpeg (A-law and µ-law copy
+      between WAV and AU); unknown-length AU behind au.Limits.unknown_length.
+      Excluded: G.722/G.726 (T31c, au_encoding_g726), annotation metadata,
+      unknown-length output, the option in the CLIs.
+    Needs (verified) / lands with / verified after: T12 and T20b (verified);
+      alone.
+    Contract and source provenance: port.md "AU contract" (revised),
+      zig/testing/fixtures/au/README.md (encodings, decisions, precedence),
+      notes.md "AU contract and the write driver"; au.c read for behavior.
+      Original code.
+    Required fixtures / optional corpus: the 38 AU fixtures (16 accepted,
+      11 writer outputs, 22 rejected): 7 new encodings, 3 unknown-length and
+      a 24-bit alignment fixture; au_encoding_mulaw is gone, and the
+      precedence fixtures moved to unsupported encodings. No optional corpus.
+    Ownership, state transitions and limits: unchanged: no allocation,
+      sequential, the same rate, annotation and data-size limits.
+    Comparison rule and intentional differences: FFmpeg decodes every
+      accepted AU fixture, and every AU file the write driver and zffmpeg
+      write, to the same storage-format samples and fields; FFmpeg's AU
+      muxer copies each writer-output fixture to identical bytes; FFmpeg
+      decodes the unknown-length fixtures the option accepts the same.
+      Rejected-fixture verdicts are recorded.
+    Implementation files and test entry points: zig/format/au.zig
+      (codecFor, encodingFor, carries, Parser, decodeToRaw, Writer),
+      detect.zig (Container.carries), convert.zig, write_driver.zig,
+      generate.py, compare.py, build-ffmpeg.sh; tests in au.zig, convert.zig,
+      file.zig; probe and convert cases in build.zig.
+    Evidence commit / Linux CI run / reference report: 2e68534 / local
+      Windows runs instead (below) / local compare.py run (below).
+    Required cases: passed 16/16 accepted and 22/22 rejected AU fixtures,
+      11/11 FFmpeg AU copies, 2/2 AU unknown-length results / failed 0 /
+      missing 0.
+    Optional cases: none.
+    Fuzz seeds, budget and result: au.zig's entry gained s24 and µ-law
+      seeds; run under zig build test. No sustained run.
+    Remaining work or blocker / next action: none; see the introduction.
+    ```
+
+    Evidence (G5, local Windows runs with Zig 0.17.0): commit `2e68534`.
+    `zig build test` passed 94/94 steps in Debug, ReleaseSafe and
+    ReleaseFast (`av` 140 tests, 34 `zffprobe` and 46 `zffmpeg` process
+    runs); fmt, `generate.py --check`, the four cross builds and a Linux type
+    check passed. The reference, rebuilt with the AU muxer, ran `compare.py`
+    with no failures: 16/16 accepted AU fixtures decode in FFmpeg to the
+    expected samples in their storage formats (µ-law, s8, s16/24/32be,
+    f32/64be, A-law); 22/22 rejected ones give the contract's status; 31/31
+    Zig-written files (11 AU) read as expected; FFmpeg's `-bitexact` AU copy
+    of all 11 AU writer-output fixtures is byte-identical; 12/12
+    unknown-length results (2 AU); 265/265 `zffmpeg` outputs, A-law and
+    µ-law copies between WAV and AU included, and 125/125 unsupported cells;
+    159/159 pipe results. The C vectors regenerate unchanged. A mutation of
+    the encoding table failed the tests.
   - [ ] **T22b — AIFF and AIFF-C.** Needs T16 and T20b. Big-endian fields, the
     80-bit extended sample rate converted exactly, and the PCM, A-law, µ-law
     and float compression types.

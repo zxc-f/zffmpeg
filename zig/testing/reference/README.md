@@ -67,7 +67,7 @@ with the install prefix and:
 --disable-network --disable-x86asm --disable-ffplay --disable-avdevice
 --enable-protocol=file,pipe --enable-demuxer=wav,w64,au
 --enable-decoder=$pcm_codecs --enable-encoder=$pcm_codecs
---enable-muxer=wav,w64 --enable-filter=aresample
+--enable-muxer=wav,w64,au --enable-filter=aresample
 
 pcm_codecs=pcm_u8,pcm_s8,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,
   pcm_s32be,pcm_s64le,pcm_s64be,pcm_f32le,pcm_f32be,pcm_f64le,pcm_f64be,
@@ -80,7 +80,8 @@ T21b Wave64), the PCM
 decoders and encoders T20b compares (T20b widened them from s16 alone), the
 WAV muxer, through which `compare.py` takes FFmpeg's decoded samples in each
 stream's storage format (T21a; it replaced the raw s16le muxer), the Wave64
-muxer, whose files `zffprobe` and `zffmpeg` must read (T21b), and the
+muxer, whose files `zffprobe` and `zffmpeg` must read (T21b), the AU muxer,
+whose copies of the AU writer-output fixtures must be byte-identical (T22a), and the
 `aresample` filter for the
 `ffmpeg` program's audio filter graph. The program itself selects the few other
 filters it always needs. There are no GPL, nonfree, external-library or
@@ -152,8 +153,9 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   difference, checked: if FFmpeg starts reading them, the run fails.
 - **AU fixtures.** FFmpeg reads each file forced with `-f au`, which records
   parser acceptance, and again by content detection, recorded separately. For
-  accepted fixtures the forced read must give `codec_name=pcm_s16be`, the
-  expected stream fields and exactly the expected samples, and detection must
+  accepted fixtures the forced read must give the fixture's `codec_name` (since
+  T22a any AU PCM encoding) and storage `sample_fmt`, the expected stream
+  fields and exactly the expected samples, and detection must
   find `au` except for the recorded difference. For rejected fixtures FFmpeg's
   verdict is recorded but not checked. `zffprobe` must give the expected
   report, or the contract's status and error, except where content detection
@@ -171,6 +173,10 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   command through standard input and output must give the same bytes. Copy
   into a container without the codec must exit 3 with `UnsupportedOperation`
   and create no file.
+- **FFmpeg's AU muxer (T22a).** FFmpeg copies each AU writer-output fixture
+  into AU (`-f au -i … -bitexact -c:a copy -f au`); the result must equal the
+  fixture byte for byte, so FFmpeg's muxer and the Zig writer emit the same
+  header for every encoding.
 - **FFmpeg-written Wave64 (T21b).** FFmpeg copies each writer-output WAV
   fixture with an 8-byte-aligned payload into Wave64; `zffprobe` must report
   it and `zffmpeg -c copy -f wav` must give back exactly the fixture. FFmpeg's
@@ -229,6 +235,23 @@ build include the WAV muxer. Its first run, locally on Windows at commit
   unsupported cells (copy across containers, transcoding samples not stored as
   s16) rejected before any output: **54/54**.
 - Fixtures whose pipe result equals the file result: **105/105**.
+
+T22a added every AU PCM encoding and unknown-length AU, and the AU muxer to
+the reference build. Its run, locally on Windows at commit `2e68534` with
+MSYS2 UCRT64 clang 23.1.4, reported no failures:
+
+- Accepted AU fixtures FFmpeg and zffprobe read as expected: **16/16** (µ-law,
+  s8, s16/24/32 big-endian, f32/64 big-endian, A-law); rejected AU fixtures
+  with zffprobe's status: **22/22**; FFmpeg accepts 10/22 (recorded).
+- Unknown-length results: **12/12**, the 2 accepted AU ones decoded the same.
+- Zig-written files FFmpeg reads as expected: **31/31** (11 AU).
+- FFmpeg's AU muxer: its `-bitexact` copy of each of the **11/11** AU
+  writer-output fixtures is byte-identical.
+- zffmpeg outputs FFmpeg reads as expected, equal through pipes: **265/265**,
+  A-law and µ-law copies between WAV and AU included; unsupported cells:
+  **125/125**.
+- WAV: **49/49** and **72/72**; FFmpeg-written Wave64: **12/12**; pipes
+  **159/159**. The C vectors regenerate unchanged.
 
 T21c added WAV tags. Its run, locally on Windows at commit `f494ee7` with the
 same build, reported no failures:

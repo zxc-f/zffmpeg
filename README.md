@@ -6,11 +6,11 @@ documented behavior and algorithms, one supported capability at a time.
 Current state: two complete paths work. The `av` library reads and writes
 every WAV PCM encoding (u8, 16- to 64-bit integers, float, A-law, mu-law, plain
 or WAVE_FORMAT_EXTENSIBLE) in RIFF, RF64/BW64 or Sony Wave64, past 4 GiB, and
-signed 16-bit PCM in Sun AU (bounded parsers, known-length writers, file and
-pipe adapters); it can also read unknown-length WAV input behind an option,
+every PCM encoding of Sun AU (bounded parsers, known-length writers, file and
+pipe adapters); it can also read unknown-length WAV and AU input behind an option,
 and reads and writes WAV's LIST/INFO and `bext` tags as FFmpeg does. The
 `zffprobe` tool detects WAV, Wave64 or AU from the content, validates the file
-and reports its stream and tags. Both are checked against 121 WAV and 29 AU
+and reports its stream and tags. Both are checked against 121 WAV and 38 AU
 fixtures and against a pinned FFmpeg build in CI (Linux). The `zffmpeg` tool
 converts and stream-copies between WAV, Wave64 and AU, carrying tags as
 FFmpeg does, through the
@@ -46,7 +46,7 @@ the [unplanned features](TODO.md#not-planned).
 - [zig/testing/fixtures/README.md](zig/testing/fixtures/README.md): the WAV fixture
   contract (121 fixtures, expected results, decisions, error precedence).
 - [zig/testing/fixtures/au/README.md](zig/testing/fixtures/au/README.md): the AU
-  fixture contract (29 fixtures, parser and detection expectations kept separate).
+  fixture contract (38 fixtures, parser and detection expectations kept separate).
 - [zig/testing/reference/README.md](zig/testing/reference/README.md): the pinned
   FFmpeg reference build and the recorded comparison results.
 - [zig/format/wav.zig](zig/format/wav.zig), [zig/format/au.zig](zig/format/au.zig),
