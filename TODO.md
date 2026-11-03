@@ -482,7 +482,7 @@ sample formats stay in T20.
   T12a–T12c are. Reference: `libavformat/au.c`, `pcmdec.c`, `rawenc.c`. Keep
   the three subtasks' evidence distinct, so a passing reference-only run is
   never mistaken for a verified AU implementation.
-  - [ ] **T12a — AU contract and fixtures.** Needs T10. Lands with T19a.
+  - [x] **T12a — AU contract and fixtures.** Needs T10. Lands with T19a.
     Write the contract (port.md, plus a fixture README) before parser code:
     `.snd` magic; encoding 3 only; mono or stereo; the sample-rate limit; a
     data offset of at least 24 bytes, a cap on skipped annotation bytes and
@@ -505,6 +505,22 @@ sample formats stay in T20.
     expected result and error, and FFmpeg's verdict on each is recorded through
     T19a's oracle phase. T12a reaches G5 in a checkout without any AU Zig
     code.
+    Evidence: the contract is [port.md](port.md#au-contract) and
+    [zig/testing/fixtures/au/README.md](zig/testing/fixtures/au/README.md);
+    `generate.py` builds 29 AU fixtures (9 accepted, 4 of them writer output,
+    and 20 rejected) into `fixtures/au/` with their manifest, and
+    `fixtures.zig` exposes them as `fixtures.au` with the same manifest and
+    SHA-256 checks as the WAV contract. In [run 41579247329](https://github.com/zxc-f/zffmpeg/actions/runs/41579247329) at `d41c5a4`,
+    with no AU Zig code, `generate.py --check` passed, `zig build test`
+    passed 48/48 in Debug, ReleaseSafe and ReleaseFast, and the reference
+    report recorded FFmpeg reading all 9 accepted fixtures with `-f au` as
+    expected. The recorded differences are `channel_layout=unknown`,
+    `au_trailing_bytes_after_data` decoding 2 more samples, and
+    `au_empty_data` not being detected by content. FFmpeg accepts 7 of the 20
+    rejected fixtures. The AU writer and probe checks were listed as not
+    implemented. The first run, [run 41579021646](https://github.com/zxc-f/zffmpeg/actions/runs/41579021646), failed to compile
+    `fixtures.zig` (an ambiguous reference inside the `au` namespace), fixed
+    in `d41c5a4`.
   - [ ] **T12b — AU parser and writer.** Needs T12a. An allocation-free
     `zig/format/au.zig` over `*std.Io.Reader` and `*std.Io.Writer`, reusing the
     PCM, audio and time code, plus the AU output path of T19a's test driver.
@@ -704,7 +720,7 @@ names, not as an empty framework.
 - [ ] **T19 — Differential harness.** Checked when T19a–T19c are. Reference:
   `libavformat/framecrcenc.c`, `framehash.c`, `hashenc.c`,
   `tests/fate-run.sh`, `tests/Makefile`.
-  - [ ] **T19a — Comparison runner: oracle phase and WAV writer driver.** Lands
+  - [x] **T19a — Comparison runner: oracle phase and WAV writer driver.** Lands
     with T12a. Extend `compare.py` to AU on the reference side: the contract's
     expected results, fixture integrity and FFmpeg's verdict on each AU
     fixture, with intentional differences documented narrowly. Add a small Zig
@@ -717,6 +733,17 @@ names, not as an empty framework.
     every AU fixture is recorded, the driver's WAV output decodes in FFmpeg to
     the expected samples and timing, the not-implemented AU checks are listed
     in the report, and a missing or altered required fixture fails the run.
+    Evidence: [compare.py](zig/testing/reference/compare.py) reads every AU
+    fixture with FFmpeg forced (`-f au`) and by content detection, recorded
+    separately, and its `NOT_IMPLEMENTED` list reports pending checks apart
+    from passes. [write_driver.zig](zig/testing/write_driver.zig), installed by
+    `zig build test-tools` and compiled by `zig build test`, writes the WAV
+    writer-output streams. In [run 41579247329](https://github.com/zxc-f/zffmpeg/actions/runs/41579247329) all 5 were byte-identical to
+    their fixtures and FFmpeg decoded them to the expected samples and
+    parameters, the `au-writer` and `au-probe` checks were listed as not
+    implemented, and `compare.py` fails on a missing fixture or one that
+    differs from `generate.py`. The reference build now enables the AU demuxer
+    and the `pcm_s16be` decoder.
   - [ ] **T19b — Frame and packet hashes.** Needs T19a. Lands with T26a.
     FFmpeg's `framecrc` (Adler-32), `framemd5` and `streamhash` output compared
     with the same hashes from Zig (the test driver, later
