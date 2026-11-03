@@ -20,7 +20,9 @@ only. The compiler is **Zig 0.17.0**, enforced by the build.
 - [CLAUDE.md](CLAUDE.md): repository guidance for development; [AGENTS.md](AGENTS.md)
   contains only `@CLAUDE.md` so other agents load the same file.
 - [doc/zigimg-reference.md](doc/zigimg-reference.md): pinned zigimg source analysis.
-- [doc/zig-0.17-guide.md](doc/zig-0.17-guide.md): how to write Zig 0.17 in this project.
+- [.claude/skills/zig-0-17/](.claude/skills/zig-0-17/SKILL.md): the project skill for writing
+  Zig 0.17 here (workflow, checklist and [guide](.claude/skills/zig-0-17/references/guide.md));
+  Claude Code uses it for every Zig change.
 - [build.zig](build.zig), [build.zig.zon](build.zig.zon): the package and build;
   [zig/README.md](zig/README.md) documents commands, version policy and layout.
 - [zig/root.zig](zig/root.zig): root of the `av` library module.

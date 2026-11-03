@@ -16,7 +16,22 @@ guide's stale unit-test sample into new code. That sample still calls
 `ArrayList.init` and does not compile on 0.17.0. When a webpage and the
 installed std disagree, the installed std wins.
 
-This file is a style guide, not an implementation. It does not add a build.
+This is the reference half of the project's `zig-0-17` skill. The workflow and
+the checklist to run before sending Zig are in [SKILL.md](../SKILL.md). Where
+this guide and [CLAUDE.md](../../../../CLAUDE.md) differ, CLAUDE.md wins.
+
+## Contents
+
+- [What "modern" means here](#what-modern-means-here): the 0.15, 0.16 and 0.17 breaks
+- [The `@as` placebo](#the-as-placebo): casts, coercion and where `@as` still belongs
+- [I/O is two breaks, not a rename](#io-is-two-breaks-not-a-rename): Writergate, `Io`, readers, writers, imports, processes, time and cancellation
+- [Allocators and containers](#allocators-and-containers)
+- [Builtins agents still copy](#builtins-agents-still-copy): type construction, reflection, integers, errors and control flow, other deletions
+- [Formatting](#formatting)
+- [Types, literals, and declarations](#types-literals-and-declarations)
+- [Tests](#tests)
+- [Build graph](#build-graph)
+- [A file that already looks like 0.17](#a-file-that-already-looks-like-017)
 
 ## What "modern" means here
 
@@ -274,7 +289,7 @@ call consumes a whole chunk.
 
 This repository's parsers read required fields with `readSliceAll` into a
 small local array, then `std.mem.readInt`
-([CLAUDE.md](../CLAUDE.md), [io_patterns.zig](../zig/examples/io_patterns.zig)).
+([CLAUDE.md](../../../../CLAUDE.md), [io_patterns.zig](../../../../zig/examples/io_patterns.zig)).
 That works with any reader buffer, including zero bytes. Use `takeInt` only
 where the buffer capacity is known to cover the field.
 
@@ -770,19 +785,5 @@ by casting the file to a slice.
 
 ## Checklist before sending Zig
 
-- No `@as` unless the line stops compiling, or changes type, without it.
-- No `@as(T, @intCast(x))`. The result type is enough: `const y: T = @intCast(x);`.
-- No `std.io`. No `getStdOut`. No reader or writer without a caller-owned buffer and, for files, an `Io`.
-- No `anytype` reader or writer. The type is `*std.Io.Reader` or `*std.Io.Writer`.
-- No `takeStruct` on a file header.
-- `EndOfStream` is mapped before it leaves the parser.
-- `main` that does I/O takes `std.process.Init` and passes `init.io` and `init.gpa` down.
-- `ArrayList` is `.empty`, and `append` / `deinit` take the allocator. No `.init(allocator)`.
-- No `@Type`, `@cImport`, `usingnamespace`, `async`/`await`, `void{}`, or `**`.
-- `@typeInfo(...).@"struct".field_names` and `field_types`, not `.fields`.
-- `std.lang` for language types. `@import("builtin")` only for target facts.
-- `find` / `trimStart` / `allocator.print` / `@fromBackingInt` / `@trunc`.
-- Overflowing size math uses `std.math.mul` / `add`, not `+%` and not a bare `+` that is only safe in Debug.
-- Tests do not print to stdout. `expectEqual` needs no `@as`; peer type resolution types both arguments.
-- No OS-specific code: no `std.os.linux`, direct `std.posix` calls or libc; no hard-coded `/` paths; explicit byte order; fixed-width integers for sizes and counts. See CLAUDE.md "Portable Zig code".
-- If a snippet's first line is `const std = @import("std");` and its second line could have been written in 0.13, it is not done.
+The checklist lives in [SKILL.md](../SKILL.md#checklist-before-sending-zig), so
+there is one copy to keep current.

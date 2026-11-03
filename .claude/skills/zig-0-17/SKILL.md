@@ -1,0 +1,83 @@
+---
+name: zig-0-17
+description: How to write and change Zig 0.17.0 code in the zffmpeg repository. Use it every time you create or edit a .zig file (anything under zig/, or build.zig) or build.zig.zon, including one-line fixes, tests and examples, and when reviewing Zig or answering how to write something in Zig here. The pinned 0.17.0 standard library moved I/O, containers, builtins, reflection and the build API since 0.13–0.15, so Zig written from memory or from older web examples usually fails to compile or is subtly wrong.
+---
+
+# Zig 0.17 in zffmpeg
+
+The compiler is exactly **0.17.0**; `build.zig` rejects any other. Three
+releases of breaking changes (0.15's Writergate, 0.16's `Io` capability, 0.17's
+language cleanup) separate it from most Zig in training data and on the web.
+Code that looks fluent from memory is often 0.13 code. This skill exists so
+every Zig change starts from the pinned toolchain's rules instead.
+
+## Workflow
+
+1. **Read before writing.** For a new file, or the first Zig change in a
+   session, read [references/guide.md](references/guide.md) in full (about 790
+   lines). For a later small edit in the same session, re-read the sections the
+   change touches, using the map below.
+2. **Apply the project rules.** [CLAUDE.md](../../../CLAUDE.md) wins where it
+   differs from the guide. Its sections "Portable Zig code", "Zig 0.17 I/O and
+   test patterns", "Modern Zig metaprogramming" and "When adding code" apply to
+   every change. port.md's "Verified Zig 0.17 I/O choices" and "C-to-Zig
+   decisions that affect correctness" record facts already checked against the
+   pinned std; consult them before re-deriving one.
+3. **Trust the installed std over memory.** When the guide, port.md and memory
+   do not settle an API, read Zig 0.17.0's installed `lib/std` (`zig env`
+   prints `lib_dir`) or compile a minimal check with the pinned compiler. If
+   the std contradicts the guide, fix `references/guide.md` in the same change.
+4. **Write the code**, then go through the checklist below against every
+   changed hunk, not only the parts you remember writing.
+5. **Verify.** Run `zig fmt --check build.zig build.zig.zon zig/` and
+   `zig build test` in Debug, ReleaseSafe and ReleaseFast (CLAUDE.md
+   "Commands"). Without a local Zig 0.17.0, the pull request's CI run is the
+   verification: say so, and never report results that were not run.
+
+## Section map
+
+| The change involves | Read in [references/guide.md](references/guide.md) |
+| --- | --- |
+| Casts, `@as`, integer conversions | "The `@as` placebo", "Integers" |
+| Readers, writers, files, stdio, `main` | "I/O is two breaks, not a rename" with "Readers", "Writers", "What not to import", "Processes, time, cancellation" |
+| `ArrayList`, maps, allocators | "Allocators and containers" |
+| Reflection, generated types, comptime tables | "Type construction", "Reflection" |
+| Error sets, `errdefer`, control flow | "Errors and control flow", "Other deletions that still appear in snippets" |
+| Tests | "Tests" |
+| `build.zig`, `build.zig.zon` | "Build graph" |
+| Formatting, literals, declarations | "Formatting", "Types, literals, and declarations" |
+| A whole new file | "A file that already looks like 0.17", then everything above it touches |
+
+## Checklist before sending Zig
+
+- No `@as` unless the line stops compiling, or changes type, without it.
+- No `@as(T, @intCast(x))`. The result type is enough: `const y: T = @intCast(x);`.
+- No `std.io`. No `getStdOut`. No reader or writer without a caller-owned buffer and, for files, an `Io`.
+- No `anytype` reader or writer. The type is `*std.Io.Reader` or `*std.Io.Writer`.
+- No `takeStruct` on a file header.
+- `EndOfStream` is mapped before it leaves the parser.
+- `main` that does I/O takes `std.process.Init` and passes `init.io` and `init.gpa` down.
+- `ArrayList` is `.empty`, and `append` / `deinit` take the allocator. No `.init(allocator)`.
+- No `@Type`, `@cImport`, `usingnamespace`, `async`/`await`, `void{}`, or `**`.
+- `@typeInfo(...).@"struct".field_names` and `field_types`, not `.fields`.
+- `std.lang` for language types. `@import("builtin")` only for target facts.
+- `find` / `trimStart` / `allocator.print` / `@fromBackingInt` / `@trunc`.
+- Overflowing size math uses `std.math.mul` / `add`, not `+%` and not a bare `+` that is only safe in Debug.
+- Tests do not print to stdout. `expectEqual` needs no `@as`; peer type resolution types both arguments.
+- No OS-specific code: no `std.os.linux`, direct `std.posix` calls or libc; no hard-coded `/` paths; explicit byte order; fixed-width integers for sizes and counts. See CLAUDE.md "Portable Zig code".
+- If a snippet's first line is `const std = @import("std");` and its second line could have been written in 0.13, it is not done.
+
+Repository checks, from CLAUDE.md:
+
+- A new `.zig` file starts with an `SPDX-License-Identifier` line and a
+  provenance comment, then `//!` module docs.
+- A new `av` file with tests is referenced from a `test` block in
+  `zig/root.zig`, because Zig analyzes lazily and unreferenced tests never run.
+  A new example is registered in the `examples` list in `build.zig`.
+- CLI behavior is tested with a `probe_cases` process run, never by printing
+  from a unit test. Parsing stays in `av`; `zig/cli/` only handles arguments,
+  files and output.
+- Parsers check lengths and arithmetic before reading or allocating, so they
+  stay safe in ReleaseFast, where runtime safety is off.
+- Nothing breaks the compile-only cross build for x86_64-windows-gnu,
+  aarch64-linux-musl and aarch64-macos.
