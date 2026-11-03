@@ -14,7 +14,7 @@ every Zig change starts from the pinned toolchain's rules instead.
 ## Workflow
 
 1. **Read before writing.** For a new file, or the first Zig change in a
-   session, read [references/guide.md](references/guide.md) in full (about 790
+   session, read [references/guide.md](references/guide.md) in full (about 980
    lines). For a later small edit in the same session, re-read the sections the
    change touches, using the map below.
 2. **Apply the project rules.** [CLAUDE.md](../../../CLAUDE.md) wins where it
@@ -27,9 +27,16 @@ every Zig change starts from the pinned toolchain's rules instead.
    do not settle an API, read Zig 0.17.0's installed `lib/std` (`zig env`
    prints `lib_dir`) or compile a minimal check with the pinned compiler. If
    the std contradicts the guide, fix `references/guide.md` in the same change.
-4. **Write the code**, then go through the checklist below against every
+4. **Design before syntax.** Identify closed value sets, operation errors,
+   state-specific payloads, ownership and external numeric or string
+   boundaries. Prefer a normal enum, error union, optional or tagged union
+   when it expresses those facts directly. Keep concrete loops and explicit
+   wire parsing when they are the clearest implementation. A generic helper
+   must remove real duplication or enforce an invariant for current callers.
+   The guide's "Model values, state and boundaries" has the patterns.
+5. **Write the code**, then go through the checklist below against every
    changed hunk, not only the parts you remember writing.
-5. **Verify.** Run `zig fmt --check build.zig build.zig.zon zig/` and
+6. **Verify.** Run `zig fmt --check build.zig build.zig.zon zig/` and
    `zig build test` in Debug, ReleaseSafe and ReleaseFast (CLAUDE.md
    "Commands"). Without a local Zig 0.17.0, the pull request's CI run is the
    verification: say so, and never report results that were not run.
@@ -42,6 +49,7 @@ every Zig change starts from the pinned toolchain's rules instead.
 | Readers, writers, files, stdio, `main` | "I/O is two breaks, not a rename" with "Readers", "Writers", "What not to import", "Processes, time, cancellation" |
 | `ArrayList`, maps, allocators | "Allocators and containers" |
 | Reflection, generated types, comptime tables | "Type construction", "Reflection" |
+| CLI statuses, parser APIs and state, error domains, test helpers, shared helpers | "Model values, state and boundaries" |
 | Error sets, `errdefer`, control flow | "Errors and control flow", "Other deletions that still appear in snippets" |
 | Tests | "Tests" |
 | `build.zig`, `build.zig.zon` | "Build graph" |
@@ -66,6 +74,29 @@ every Zig change starts from the pinned toolchain's rules instead.
 - Tests do not print to stdout. `expectEqual` needs no `@as`; peer type resolution types both arguments.
 - No OS-specific code: no `std.os.linux`, direct `std.posix` calls or libc; no hard-coded `/` paths; explicit byte order; fixed-width integers for sizes and counts. See CLAUDE.md "Portable Zig code".
 - If a snippet's first line is `const std = @import("std");` and its second line could have been written in 0.13, it is not done.
+
+Design questions, from the guide's "Model values, state and boundaries":
+
+- A closed outcome set has a named type when that improves the API; stable
+  numeric encodings appear only at the external boundary, converted with
+  `@backingInt` / `@fromBackingInt`.
+- A state tag and a nullable payload do not duplicate an invariant without a
+  documented reason; otherwise the state carries its payload.
+- An empty slice or numeric sentinel does not ambiguously stand for EOF,
+  missing data and insufficient capacity. Contract changes stay explicit.
+- A boundary's error domain is named where practical. `anyerror` and `anytype`
+  have a specific callback or generic-use justification.
+- Tests compare errors as values (`expectError`, `expectEqual`) unless the
+  external spelling is what is tested. Fixture and process expectations stay
+  independent of the implementation under test.
+- An unwrap (`.?`) follows a clear invariant; prefer capture or `orelse` when
+  that expresses validation locally. A proven `unreachable` sits next to its proof.
+- Before duplicating an operation, check whether the second working caller
+  calls for a small shared helper. Do not add a framework to satisfy this.
+- A guide example or [io_patterns.zig](../../../zig/examples/io_patterns.zig)
+  is copied only if it follows this checklist; the guide, this checklist and
+  that executable example must agree, so fix whichever one drifts. Compile-only
+  checks are not native execution or multimedia verification.
 
 Repository checks, from CLAUDE.md:
 

@@ -27,6 +27,7 @@ this guide and [CLAUDE.md](../../../../CLAUDE.md) differ, CLAUDE.md wins.
 - [I/O is two breaks, not a rename](#io-is-two-breaks-not-a-rename): Writergate, `Io`, readers, writers, imports, processes, time and cancellation
 - [Allocators and containers](#allocators-and-containers)
 - [Builtins agents still copy](#builtins-agents-still-copy): type construction, reflection, integers, errors and control flow, other deletions
+- [Model values, state and boundaries](#model-values-state-and-boundaries): typed statuses, error domains, state payloads, empty results, reuse, error assertions, captures
 - [Formatting](#formatting)
 - [Types, literals, and declarations](#types-literals-and-declarations)
 - [Tests](#tests)
@@ -63,7 +64,7 @@ required.
 ```zig
 const count = @as(usize, 0);
 const rate: u32 = @as(u32, 44100);
-const sample = @as(i16, bytes[0]); // not a conversion; i16 is not a u8
+const sample = @as(i16, bytes[0]); // valid widening, but the type belongs on the name
 try decode(output, @as(usize, 0));
 
 fn decode(out: []i16, start: usize) void {
@@ -73,13 +74,17 @@ fn decode(out: []i16, start: usize) void {
 ```
 
 `decode`'s parameter already has a type. `rate` already has a type. The
-`@as` does nothing the compiler was not going to do.
+`@as` does nothing the compiler was not going to do. For a `[]const u8`,
+`@as(i16, bytes[0])` compiles: every `u8` fits in an `i16`. It is noise, not
+an error, but simply deleting it changes the inferred type to `u8`, so move
+the type to the declaration.
 
 ### Write this
 
 ```zig
 const count: usize = 0;
 const rate: u32 = 44100;
+const sample: i16 = bytes[0];
 try decode(output, 0);
 ```
 
@@ -382,8 +387,11 @@ go through `std.Io.Dir` and `std.Io.File`.
 ### Processes, time, cancellation
 
 Spawn with `std.process.spawn(io, options)`. There is no `Child.init` on this
-std. `std.process.exit(status)` and `std.process.cleanExit(io)` are how a CLI
-ends. Returning an error from `main` is not a documented exit code.
+std. A CLI with documented statuses returns them from a `u8` `main`, so every
+`defer` runs first; `std.process.exit(status)` and `std.process.cleanExit(io)`
+end a process without unwinding. Returning an error from `main` is not a
+documented exit code: `std/start.zig` logs it and exits with status 1. See
+"Typed outcomes, numeric encoding at the boundary" below.
 
 `std.time.timestamp()` and `std.time.Timer` are not media clocks. PCM duration
 is an integer sample count and a sample rate. `Io` has clocks for timeouts.
@@ -584,6 +592,174 @@ to mean "not applicable".
 
 `@cImport` moving "to the build system" in 0.16 is not permission to parse C
 with `zig translate-c` and call that a port. The project rule is native Zig.
+
+## Model values, state and boundaries
+
+Most code that type-checks against 0.17 can still pick a C-shaped
+representation: integer constants for a closed set, `anyerror` at a boundary,
+a state enum beside nullable payloads. These are design tools, not
+requirements. Not every number becomes an enum and not every struct becomes
+a union; small direct code is often the right result. The rules against
+premature registries and universal contexts still apply.
+
+### Typed outcomes, numeric encoding at the boundary
+
+A closed set of process statuses is an enum. Helpers return tags; `main`
+converts once:
+
+```zig
+const ExitStatus = enum(u8) { ok = 0, usage = 1, invalid = 2, io = 4, limit = 5 };
+
+pub fn main(init: std.process.Init) u8 {
+    return @backingInt(run(init));
+}
+
+fn run(init: std.process.Init) ExitStatus {
+    const args = init.minimal.args.toSlice(init.arena.allocator()) catch return .limit;
+    if (args.len != 2) return .usage;
+    probePath(init.io, args[1]) catch |err| return exitStatus(err);
+    return .ok;
+}
+```
+
+`main` returns normally, so `defer` cleanup runs. Operations still return
+their Zig errors; only the classifier turns them into statuses. Do not use
+error numbers as exit codes. `zig/cli/probe.zig` is the project's instance.
+A tool with its own status contract gets its own small enum
+(`zig/testing/write_driver.zig`) instead of borrowing another's meanings.
+Process tests in `build.zig` keep expected statuses as literals: an
+independent oracle catches an accidental renumbering that an expectation
+derived from the enum would hide.
+
+`!void` remains right for a tool that promises no distinct failure codes, as
+in the complete example at the end of this guide.
+
+### Name the error domain at a boundary
+
+```zig
+const ParseError = error{ Truncated, InvalidHeader, IoFailure };
+const ProbeError = ParseError || std.Io.File.OpenError || std.Io.File.Reader.Error;
+
+fn exitStatus(err: ProbeError) ExitStatus {
+    return switch (err) {
+        error.Truncated, error.InvalidHeader => .invalid,
+        error.SystemResources => .limit,
+        else => .io, // the remaining platform I/O errors, by policy
+    };
+}
+```
+
+With `anyerror`, an unrelated error added later is classified silently. With
+a named set, a new error source must be added to the set on purpose, and a
+prong naming an error outside it is a compile error. zffprobe's classifier
+found a dead `error.OutOfMemory` prong that way. A finite parameter type does
+not require listing every OS error; an `else` fallback can be the policy.
+
+`anyerror` and `anytype` keep specific uses: `std.testing.fuzz` callbacks
+have the `anyerror!void` signature; formatting takes heterogeneous argument
+tuples; `withReadCause` / `withWriteCause` in `zig/io/file.zig` preserve each
+caller's own error set.
+
+### State owns the payload it guarantees
+
+A state enum beside nullable fields stores an invariant in two places:
+
+```zig
+state: enum { header, data, done } = .header,
+format: ?Format = null, // non-null exactly when state == .data
+data_left: u32 = 0,
+// ...
+const format = p.format.?;
+```
+
+A tagged union puts the payload in the state that guarantees it:
+
+```zig
+const State = union(enum) {
+    header,
+    data: struct { format: Format, data_left: u32 },
+    done,
+};
+
+const data = switch (p.state) {
+    .data => |*data| data,
+    .header, .done => unreachable, // caller precondition
+};
+```
+
+This removes invalid field combinations; it does not make fields private or
+forbid bad call sequences, so keep the precondition policy explicit and do
+not invent media errors for API misuse. Different formats need different
+header payloads (WAV must remember a `fmt ` seen before `data`); do not merge
+them into one shared state machine. The WAV and AU parsers still use the
+separate-field form, which is part of their public API: changing it is a
+contract change (port.md, notes.md, TODO.md and tests together).
+
+### Empty, unavailable and insufficient are different results
+
+An empty slice should mean one thing. If a read returns no samples both at
+the end of data and when `output` cannot hold one frame, a caller looping
+until `len == 0` must separately guarantee capacity. The small synchronous
+fix is an error such as `error.OutputTooSmall` while unread data remains.
+Do not build a resumable backpressure result before a consumer needs it.
+The current parsers document the ambiguity (TODO.md T13a); changing it is a
+contract change.
+
+### Reuse follows working callers
+
+The PCM kernels are already shared. When a second format repeats the same
+transfer loop around them, extract a small helper that takes explicit slices,
+a `*std.Io.Writer` and a `comptime` byte order. Keep header parsing, limits,
+error precedence and finalization local to each format. Do not add a
+registry, a heap-backed frame object or a universal codec context to remove a
+few loops, and keep the path allocation-free.
+
+### Test values, not their spelling
+
+```zig
+const Failure = enum { Truncated, InvalidHeader };
+
+fn expectedError(failure: Failure) ParseError {
+    return switch (failure) {
+        .Truncated => error.Truncated,
+        .InvalidHeader => error.InvalidHeader,
+    };
+}
+
+try std.testing.expectError(expectedError(fixture.failure), parse(bytes));
+```
+
+The fixture enum stays independent of the parser, and the exhaustive switch
+makes a missing mapping a compile error. Comparing `@tagName(failure)` with
+`@errorName(err)` tests a spelling instead. Spelling is the contract only for
+external output such as CLI diagnostics, which process runs check.
+
+### Capture validated values
+
+```zig
+// Validity lives in an earlier branch the reader must find.
+const container = if (args.len == 6) std.meta.stringToEnum(Container, args[1]) else null;
+if (container == null) return usageError(io);
+try write(container.?);
+
+// The validated value has type Container.
+if (args.len != 6) return usageError(io);
+const container = std.meta.stringToEnum(Container, args[1]) orelse return usageError(io);
+try write(container);
+```
+
+`.?` is not banned; it needs a documented invariant next to it.
+
+### Patterns that stay
+
+- Explicit `readInt` / `writeInt` over local arrays for wire layouts. A
+  numeric wire constant does not need an enum.
+- Counters and `while` loops in PCM kernels, extent accounting and bounded
+  streaming loops.
+- `inline for` over fixture tables and byte-order specializations: real
+  compile-time work.
+- `catch unreachable` beside a stated capacity proof; external input is still
+  rejected explicitly, because ReleaseFast has no safety checks.
 
 ## Formatting
 
@@ -787,6 +963,10 @@ test readRate {
     try std.testing.expectEqual(expected_rate, header.rate);
 }
 ```
+
+This tool promises no distinct failure codes, so `!void` and an immediate
+`std.process.exit(1)` for usage are enough. A product CLI with documented
+statuses follows "Typed outcomes, numeric encoding at the boundary" instead.
 
 `readRate` takes a complete slice, so the stream adapter has to obtain those
 bytes first. `peek(10)` fills the reader buffer until ten bytes are available
