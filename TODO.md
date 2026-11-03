@@ -3,14 +3,16 @@
 This is the execution checklist for [port.md](port.md). The plan explains the
 architecture and compatibility rules; this file records the work to do next.
 The repository tracks project documentation, the minimal Zig package and build
-(the `av` module, documented in [zig/README.md](zig/README.md)), two tested
+(the `av` module, documented in [zig/README.md](zig/README.md)), the WAV fixture
+contract ([zig/testing/fixtures](zig/testing/fixtures/README.md)), two tested
 standalone Zig examples and a Linux CI workflow. FFmpeg and zigimg are
 independent clones in ignored `.references/`; see
 [README.md](README.md#clone-the-reference-repositories) for setup. There is no
 codec/container implementation yet.
 
-**Next tasks: T02 — materialize the WAV contract and fixtures, and T03 — the C
-reference setup (independent of T02). T04 and T05 need T01 and T02.**
+**Next tasks: T04 — PCM sample conversion kernels, T05 — audio/time types (both
+unblocked by T01 and T02), and T03 — the C reference setup, which runs
+independently.**
 
 Work through the first WAV/PCM path before expanding the framework. Tasks have
 stable IDs for references. Check an item only when its completion criteria are
@@ -142,7 +144,8 @@ agree with the [first WAV contract](port.md#first-wav-contract).
 - [ ] **T06 — Implement one bounded WAV parser.** Depends on T02 and T05. Accept
   `*std.Io.Reader`, initially tested with `Reader.fixed`; read exact fields into
   local arrays instead of casting structs. Implement T02's complete contract,
-  including validation after data and contextual EOF/error mapping. Use checked
+  including validation after data and contextual EOF/error mapping; test every
+  fixture through `zig/testing/fixtures.zig`, matching its error precedence. Use checked
   size arithmetic in every optimization mode. Add a bounded `std.testing.fuzz`
   entry using `Smith`, plus deterministic fixture regressions; sustained fuzzing
   remains later work. Done when all contract cases pass in Debug, ReleaseSafe
