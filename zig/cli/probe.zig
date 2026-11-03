@@ -73,9 +73,6 @@ fn writeReport(out: *std.Io.Writer, info: av.detect.Probed) std.Io.Writer.Error!
         \\channels={d}
         \\channel_layout={s}
         \\sample_rate={d}
-        \\nb_samples={d}
-        \\duration_num={d}
-        \\duration_den={d}
         \\
     , .{
         info.container.name(),
@@ -84,8 +81,12 @@ fn writeReport(out: *std.Io.Writer, info: av.detect.Probed) std.Io.Writer.Error!
         format.channelCount(),
         format.layout.name(),
         format.sample_rate,
-        info.frame_count,
-        info.frame_count,
-        format.sample_rate,
     });
+    if (info.frame_count) |frames| {
+        try out.print("nb_samples={d}\nduration_num={d}\nduration_den={d}\n", .{ frames, frames, format.sample_rate });
+    } else {
+        // Unknown-length data, which zffprobe does not enable yet: no count
+        // or duration, as ffprobe's N/A.
+        try out.writeAll("nb_samples=N/A\nduration_num=N/A\nduration_den=N/A\n");
+    }
 }

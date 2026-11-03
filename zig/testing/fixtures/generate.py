@@ -263,6 +263,22 @@ class Fixture:
     reject: str = None  # contract error name
     writer_output: bool = False
     writer_rf64: bool = False  # writer output with `rf64 = .always`
+    # The result with the parser's `unknown_length` option (T21b), where it differs.
+    unknown_accept: Stream = None
+    unknown_reject: str = None
+
+
+def streaming(name, group, rule, data, accept=None, reject=None):
+    """A WAV fixture with an unknown-size sentinel: `UnsupportedStreamingSize` by
+    default; `accept` (a Stream) or `reject` (an error) with `unknown_length`."""
+    assert (accept is None) != (reject is None) and reject in (None, *ERRORS)
+    return Fixture(name, group, rule, data, reject="UnsupportedStreamingSize",
+                   unknown_accept=accept, unknown_reject=reject)
+
+
+def wav_stream(codec, channels, rate, encoded):
+    """The accepted stream of a WAV `data` payload in any contract encoding."""
+    return Stream(codec, channels, rate, WAV_CODECS[codec][2], decode_stored(codec, encoded))
 
 
 def accepted(name, group, rule, data, channels, rate, samples, writer_output=False, codec=None):
@@ -274,9 +290,7 @@ def accepted(name, group, rule, data, channels, rate, samples, writer_output=Fal
 
 def accepted_encoded(name, group, rule, data, codec, channels, rate, encoded, writer_output=False):
     """An accepted WAV stream of any contract encoding; `encoded` is its `data` payload."""
-    storage = WAV_CODECS[codec][2]
-    return Fixture(name, group, rule, data,
-                   accept=Stream(codec, channels, rate, storage, decode_stored(codec, encoded)),
+    return Fixture(name, group, rule, data, accept=wav_stream(codec, channels, rate, encoded),
                    writer_output=writer_output)
 
 
@@ -437,10 +451,14 @@ def build_fixtures():
     w64 = W64_RIFF_GUID + struct.pack("<Q", 40) + W64_WAVE_GUID
     fx.append(rejected("w64", "riff header", "Sony Wave64 (starts with the lowercase `riff` GUID).",
                        w64, "UnsupportedFormat"))
-    fx.append(rejected("riff_size_unknown", "riff header", "`riff_size` is the 0xFFFFFFFF unknown-size sentinel.",
-                       riff(fmt_chunk(), data_chunk(MONO[:4]), size=0xFFFFFFFF), "UnsupportedStreamingSize"))
-    fx.append(rejected("riff_size_zero", "riff header", "`riff_size` is 0, the other unknown-size sentinel.",
-                       riff(fmt_chunk(), data_chunk(MONO[:4]), size=0), "UnsupportedStreamingSize"))
+    fx.append(streaming("riff_size_unknown", "riff header",
+                        "`riff_size` is the 0xFFFFFFFF unknown-size sentinel. With `unknown_length` the extent "
+                        "is the rest of the stream.",
+                        riff(fmt_chunk(), data_chunk(MONO[:4]), size=0xFFFFFFFF),
+                        accept=wav_stream("pcm_s16le", 1, 8000, pcm(MONO[:4]))))
+    fx.append(streaming("riff_size_zero", "riff header", "`riff_size` is 0, the other unknown-size sentinel.",
+                        riff(fmt_chunk(), data_chunk(MONO[:4]), size=0),
+                        accept=wav_stream("pcm_s16le", 1, 8000, pcm(MONO[:4]))))
     fx.append(rejected("riff_size_too_small", "riff header", "`riff_size` 2 cannot hold the form type.",
                        riff(fmt_chunk(), data_chunk(MONO[:4]), size=2), "InvalidRiff"))
     fx.append(rejected("not_wave_form", "riff header", "RIFF form type `AVI ` instead of `WAVE`.",
@@ -536,9 +554,52 @@ def build_fixtures():
                        riff(fmt_chunk(), data_chunk(MONO[:2]), data_chunk(MONO[:2])), "InvalidWave"))
 
     # Data length.
-    fx.append(rejected("data_size_unknown", "data length",
-                       "`data` size 0xFFFFFFFF; precedence: the sentinel is reported before the extent check.",
-                       riff(fmt_chunk(), data_chunk(MONO[:2], size=0xFFFFFFFF)), "UnsupportedStreamingSize"))
+    fx.append(streaming("data_size_unknown", "data length",
+                        "`data` size 0xFFFFFFFF; precedence: the sentinel is reported before the extent check. "
+                        "With `unknown_length` the data is the rest of the stream.",
+                        riff(fmt_chunk(), data_chunk(MONO[:2], size=0xFFFFFFFF)),
+                        accept=wav_stream("pcm_s16le", 1, 8000, pcm(MONO[:2]))))
+
+    # Unknown length (T21b): read to the end of the stream with `unknown_length`.
+    unknown = 0xFFFFFFFF
+    fx.append(streaming("unknown_length_pipe", "unknown length",
+                        "RIFF and `data` sizes 0xFFFFFFFF, as FFmpeg's muxer leaves them on a pipe.",
+                        riff(fmt_chunk(), data_chunk(MONO, size=unknown), size=unknown),
+                        accept=wav_stream("pcm_s16le", 1, 8000, pcm(MONO))))
+    u8_data = bytes([0x00, 0x80, 0xFF])
+    fx.append(streaming("unknown_length_odd_u8", "unknown length",
+                        "Three u8 frames of unknown length: odd data at the end of the stream needs no pad byte.",
+                        riff(fmt_chunk(bits=8), chunk(b"data", u8_data, size=unknown, pad=False), size=unknown),
+                        accept=wav_stream("pcm_u8", 1, 8000, u8_data)))
+    fx.append(streaming("unknown_length_partial_frame", "unknown length",
+                        "Stereo data of unknown length ending after 1.5 frames.",
+                        riff(fmt_chunk(channels=2), data_chunk(STEREO[:3], size=unknown), size=unknown),
+                        reject="Truncated"))
+    trailer = chunk(b"JUNK", bytes(4))
+    fx.append(streaming("unknown_length_reads_past_chunks", "unknown length",
+                        "`data` size 0xFFFFFFFF in a known RIFF extent: the data is the rest of the stream, so the "
+                        "chunk after it decodes as samples and the RIFF size goes unchecked, as in FFmpeg.",
+                        riff(fmt_chunk(), data_chunk(MONO[:2], size=unknown), trailer, size_delta=-4),
+                        accept=wav_stream("pcm_s16le", 1, 8000, pcm(MONO[:2]) + trailer)))
+    fx.append(streaming("unknown_riff_chunk_after_data", "unknown length",
+                        "Unknown `riff_size` with a known `data` size: the chunks after `data` are read to the end "
+                        "of the stream.",
+                        riff(fmt_chunk(), data_chunk(MONO[:2]), trailer, size=0),
+                        accept=wav_stream("pcm_s16le", 1, 8000, pcm(MONO[:2]))))
+    fx.append(streaming("unknown_riff_empty_data", "unknown length",
+                        "Unknown `riff_size` with `data` size 0: still an empty stream.",
+                        riff(fmt_chunk(), data_chunk([]), size=unknown),
+                        accept=wav_stream("pcm_s16le", 1, 8000, b"")))
+    fx.append(streaming("unknown_riff_partial_chunk_header", "unknown length",
+                        "Unknown `riff_size`: the stream ends 3 bytes into the chunk header after `data`.",
+                        riff(fmt_chunk(), data_chunk(MONO[:2]), b"abc", size=unknown), reject="Truncated"))
+    fx.append(streaming("unknown_riff_missing_data", "unknown length",
+                        "Unknown `riff_size`: the stream ends after `fmt `, between chunks, with no `data`.",
+                        riff(fmt_chunk(), size=unknown), reject="InvalidWave"))
+    fx.append(streaming("unknown_riff_pad_missing", "unknown length",
+                        "Unknown `riff_size`: odd u8 data of known size, and the stream ends before its pad byte.",
+                        riff(fmt_chunk(bits=8), chunk(b"data", u8_data, pad=False), size=unknown),
+                        reject="Truncated"))
     fx.append(rejected("data_not_block_aligned", "data length", "Stereo `data` of 6 bytes (1.5 frames).",
                        riff(fmt_chunk(channels=2), data_chunk(STEREO[:3])), "InvalidFormat"))
 
@@ -724,6 +785,16 @@ def sha256(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def render_expected(accept, reject):
+    if accept is None:
+        return f".{{ .reject = .{reject} }}"
+    # Float samples are bit patterns, clearest in hexadecimal.
+    text = (lambda v: f"0x{v:x}") if accept.storage in ("flt", "dbl") else str
+    sample_list = "{}" if not accept.stored else "{ " + ", ".join(text(v) for v in accept.stored) + " }"
+    return (f".{{ .accept = .{{ .codec = .{accept.codec}, .channels = {accept.channels}, "
+            f".sample_rate = {accept.rate}, .samples = .{{ .{accept.storage} = .{sample_list} }} }} }}")
+
+
 def render_manifest(fixtures, entry_note):
     lines = [
         "// Generated by zig/testing/fixtures/generate.py from its FIXTURES list; do not edit.",
@@ -734,36 +805,35 @@ def render_manifest(fixtures, entry_note):
         lines.append("    .{")
         lines.append(f'        .name = "{f.name}",')
         lines.append(f'        .sha256 = "{sha256(f.data)}",')
-        if f.accept is not None:
-            s = f.accept
-            # Float samples are bit patterns, clearest in hexadecimal.
-            text = (lambda v: f"0x{v:x}") if s.storage in ("flt", "dbl") else str
-            sample_list = "{}" if not s.stored else "{ " + ", ".join(text(v) for v in s.stored) + " }"
-            lines.append(
-                f"        .expected = .{{ .accept = .{{ .codec = .{s.codec}, .channels = {s.channels}, "
-                f".sample_rate = {s.rate}, .samples = .{{ .{s.storage} = .{sample_list} }} }} }},"
-            )
-        else:
-            lines.append(f"        .expected = .{{ .reject = .{f.reject} }},")
+        lines.append(f"        .expected = {render_expected(f.accept, f.reject)},")
         if f.writer_output:
             lines.append("        .writer_output = true,")
         if f.writer_rf64:
             lines.append("        .writer_rf64 = true,")
+        if f.unknown_accept is not None or f.unknown_reject is not None:
+            lines.append(f"        .unknown_length = {render_expected(f.unknown_accept, f.unknown_reject)},")
         lines.append("    },")
     lines.append("}")
     return ("\n".join(lines) + "\n").encode()
 
 
+def describe_result(accept, reject):
+    if accept is None:
+        return f"reject: `{reject}`"
+    channels, rate, samples = accept
+    layout = {1: "mono", 2: "stereo"}[channels]
+    frames = len(samples) // channels
+    text = f"accept: {layout}, {rate} Hz, {frames} frame{'s' if frames != 1 else ''}"
+    if accept.codec not in ("pcm_s16le", "pcm_s16be"):
+        text += f", `{accept.codec}`"
+    return text
+
+
 def describe(f):
-    if f.accept is not None:
-        channels, rate, samples = f.accept
-        layout = {1: "mono", 2: "stereo"}[channels]
-        frames = len(samples) // channels
-        text = f"accept: {layout}, {rate} Hz, {frames} frame{'s' if frames != 1 else ''}"
-        if f.accept.codec not in ("pcm_s16le", "pcm_s16be"):
-            text += f", `{f.accept.codec}`"
-        return text + ("; writer output" if f.writer_output else "")
-    return f"reject: `{f.reject}`"
+    text = describe_result(f.accept, f.reject) + ("; writer output" if f.writer_output else "")
+    if f.unknown_accept is not None or f.unknown_reject is not None:
+        text += f"; with `unknown_length`, {describe_result(f.unknown_accept, f.unknown_reject)}"
+    return text
 
 
 def render_table(fixtures, extra_rows=()):

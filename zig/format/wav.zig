@@ -10,7 +10,9 @@
 //! The parser is sequential and never seeks, so it works on pipes. It reads
 //! every field exactly into local arrays, keeps only the `fmt ` fields, and
 //! validates the whole declared RIFF extent, including the chunks after `data`.
-//! Its accepted subset, error names and error precedence are the contract in
+//! RF64 and BW64 carry 64-bit sizes; the unknown sizes streaming writers leave
+//! are rejected unless `Limits.unknown_length` opts in (T21b). Its accepted
+//! subset, error names and error precedence are the contract in
 //! zig/testing/fixtures/README.md; every fixture there is tested below.
 //!
 //! The writer emits the header FFmpeg's `riffenc.c` chooses: extensible above
@@ -42,19 +44,29 @@ pub const Error = error{
     IoFailure,
 };
 
-/// Configurable policy limits; exceeding one is `error.LimitExceeded`.
+/// Configurable parser policy: limits, where exceeding one is
+/// `error.LimitExceeded`, and the unknown-length opt-in.
 pub const Limits = struct {
     max_sample_rate: u32 = 192_000,
     /// Counts every chunk header inside the RIFF extent, `fmt ` and `data` included.
     max_chunks: u32 = 4096,
+    /// Accept the unknown-size sentinels streaming writers leave (T21b),
+    /// rather than rejecting them as `UnsupportedStreamingSize`. A plain RIFF
+    /// size of 0 or 0xFFFFFFFF makes the extent the rest of the stream, which
+    /// may then end between chunks. A `data` size of 0xFFFFFFFF outside RF64
+    /// makes the data the rest of the stream, ending on a whole frame;
+    /// `Info.frame_count` is then null and nothing after the data is read, so
+    /// a known RIFF size goes unchecked. A `data` size of 0 is still empty.
+    unknown_length: bool = false,
 };
 
 pub const Info = struct {
     codec: pcm.Codec,
     /// The decoded stream: `sample_format` is `codec.storage()`.
     format: audio.Format,
-    /// Sample frames in the `data` chunk.
-    frame_count: u64,
+    /// Sample frames in the `data` chunk; null when its length is unknown
+    /// (`Limits.unknown_length`) and the data runs to the end of the stream.
+    frame_count: ?u64,
 };
 
 /// Size of the header the writer emits for 16-bit PCM up to 48 kHz: RIFF
@@ -140,8 +152,9 @@ pub const Parser = struct {
     limits: Limits,
     /// Bytes content detection already read; they come before the reader's.
     prefix: Prefix = .{},
-    /// Bytes of the declared RIFF (or RF64) extent not yet consumed.
-    extent_left: u64 = 0,
+    /// Bytes of the declared RIFF (or RF64) extent not yet consumed; null
+    /// when the RIFF size is unknown and the extent is the rest of the stream.
+    extent_left: ?u64 = 0,
     /// RF64/BW64: the `data` size from `ds64`, for a `data` chunk sized 0xFFFFFFFF.
     ds64_data_size: ?u64 = null,
     chunks: u32 = 0,
@@ -150,8 +163,9 @@ pub const Parser = struct {
     codec: pcm.Codec = .s16le,
     /// Bytes of one encoded frame.
     frame_bytes: u32 = 0,
-    /// Bytes of `data` not yet delivered.
-    data_left: u64 = 0,
+    /// Bytes of `data` not yet delivered; null when the data runs to the end
+    /// of the stream.
+    data_left: ?u64 = 0,
     /// The `data` size is odd, so a pad byte follows it.
     data_padded: bool = false,
     state: State = .header,
@@ -182,16 +196,22 @@ pub const Parser = struct {
         }
         const size_bytes = try p.readArray(4);
         const riff_size = std.mem.readInt(u32, &size_bytes, .little);
+        const unknown_size = !rf64 and (riff_size == 0 or riff_size == std.math.maxInt(u32));
         if (rf64) {
             // RF64 keeps its sizes in `ds64`; the 32-bit field must say so.
             if (riff_size != std.math.maxInt(u32)) return error.InvalidRiff;
-        } else {
-            if (riff_size == 0 or riff_size == std.math.maxInt(u32)) return error.UnsupportedStreamingSize;
-            if (riff_size < 4) return error.InvalidRiff;
+        } else if (unknown_size) {
+            if (!p.limits.unknown_length) return error.UnsupportedStreamingSize;
+        } else if (riff_size < 4) {
+            return error.InvalidRiff;
         }
         const form = try p.readArray(4);
         if (!std.mem.eql(u8, &form, "WAVE")) return error.InvalidWave;
-        if (rf64) try p.readDs64() else p.extent_left = riff_size - 4;
+        if (rf64) {
+            try p.readDs64();
+        } else {
+            p.extent_left = if (unknown_size) null else riff_size - 4;
+        }
 
         while (true) {
             // The extent ended before `data`: `fmt ` or `data` is missing.
@@ -234,18 +254,30 @@ pub const Parser = struct {
     /// hold one frame.
     pub fn readData(p: *Parser, output: []u8) Error![]u8 {
         std.debug.assert(p.state == .data);
-        const data_left = std.math.cast(usize, p.data_left) orelse std.math.maxInt(usize);
-        const want = @min(data_left, output.len - output.len % p.frame_bytes);
-        p.reader.readSliceAll(output[0..want]) catch |err| return mapRead(err);
-        p.data_left -= @intCast(want);
-        return output[0..want];
+        const whole = output[0 .. output.len - output.len % p.frame_bytes];
+        const data_left = p.data_left orelse {
+            // The data runs to the end of the stream: a short read ends it.
+            const len = p.reader.readSliceShort(whole) catch |err| return mapShort(err);
+            if (len % p.frame_bytes != 0) return error.Truncated;
+            return whole[0..len];
+        };
+        const want = @min(std.math.cast(usize, data_left) orelse std.math.maxInt(usize), whole.len);
+        p.reader.readSliceAll(whole[0..want]) catch |err| return mapRead(err);
+        p.data_left = data_left - want;
+        return whole[0..want];
     }
 
     /// Skips any unread data, then validates the chunks after `data` up to the
-    /// end of the RIFF extent. Bytes after the extent are never read.
+    /// end of the RIFF extent. Bytes after the extent are never read. When the
+    /// data runs to the end of the stream, only the skip remains.
     pub fn finish(p: *Parser) Error!void {
         std.debug.assert(p.state == .data);
-        p.reader.discardAll64(p.data_left) catch |err| return mapRead(err);
+        const data_left = p.data_left orelse {
+            try p.discardToEnd();
+            p.state = .done;
+            return;
+        };
+        p.reader.discardAll64(data_left) catch |err| return mapRead(err);
         p.data_left = 0;
         if (p.data_padded) try p.skipPad(1);
         while (try p.nextChunk()) |header| {
@@ -258,10 +290,20 @@ pub const Parser = struct {
     }
 
     fn nextChunk(p: *Parser) Error!?ChunkHeader {
-        if (p.extent_left == 0) return null;
-        if (p.extent_left < 8) return error.InvalidRiff;
-        const bytes = try p.readArray(8);
-        p.extent_left -= 8;
+        var bytes: [8]u8 = undefined;
+        if (p.extent_left) |*left| {
+            if (left.* == 0) return null;
+            if (left.* < 8) return error.InvalidRiff;
+            bytes = try p.readArray(8);
+            left.* -= 8;
+        } else {
+            // The extent is the rest of the stream, which may end between
+            // chunks. The RIFF tag already consumed any detection prefix.
+            std.debug.assert(p.prefix.pending().len == 0);
+            const len = p.reader.readSliceShort(&bytes) catch |err| return mapShort(err);
+            if (len == 0) return null;
+            if (len < bytes.len) return error.Truncated;
+        }
         if (p.chunks >= p.limits.max_chunks) return error.LimitExceeded;
         p.chunks += 1;
         return .{ .id = bytes[0..4].*, .size = std.mem.readInt(u32, bytes[4..8], .little) };
@@ -323,7 +365,7 @@ pub const Parser = struct {
             else => return error.UnsupportedFormat,
         };
         // Accepted sizes are even, so no pad byte follows.
-        p.extent_left -= size;
+        p.consumeExtent(size);
         p.format = .{ .sample_rate = rate, .layout = layout, .sample_format = codec.storage() };
         p.codec = codec;
         p.frame_bytes = frame_bytes;
@@ -333,13 +375,16 @@ pub const Parser = struct {
         // Data is read straight from the reader; the prefix was consumed first.
         std.debug.assert(p.prefix.pending().len == 0);
         const format = p.format orelse return error.InvalidWave;
-        const size: u64 = if (declared_size == std.math.maxInt(u32))
-            p.ds64_data_size orelse return error.UnsupportedStreamingSize
-        else
-            declared_size;
+        const size: u64 = if (declared_size != std.math.maxInt(u32)) declared_size else p.ds64_data_size orelse {
+            if (!p.limits.unknown_length) return error.UnsupportedStreamingSize;
+            // The data is the rest of the stream; `finish` reads nothing after it.
+            p.data_left = null;
+            p.state = .data;
+            return .{ .codec = p.codec, .format = format, .frame_count = null };
+        };
         if (size % p.frame_bytes != 0) return error.InvalidFormat;
         try p.checkExtent(size);
-        p.extent_left -= size;
+        p.consumeExtent(size);
         // An odd size (8-bit mono, or 24-bit with an odd frame count) is
         // followed by a pad byte, which `finish` skips like a chunk's.
         p.data_left = size;
@@ -351,16 +396,29 @@ pub const Parser = struct {
     fn skipChunk(p: *Parser, size: u32) Error!void {
         try p.checkExtent(size);
         p.reader.discardAll(size) catch |err| return mapRead(err);
-        p.extent_left -= size;
+        p.consumeExtent(size);
         try p.skipPad(size);
     }
 
-    /// A pad byte that would lie outside the extent is not read.
+    /// A pad byte that would lie outside a known extent is not read; in an
+    /// unknown one it must be present.
     fn skipPad(p: *Parser, size: u32) Error!void {
-        if (size % 2 == 1 and p.extent_left > 0) {
-            p.reader.discardAll(1) catch |err| return mapRead(err);
-            p.extent_left -= 1;
+        if (size % 2 == 0 or p.extent_left == 0) return;
+        p.reader.discardAll(1) catch |err| return mapRead(err);
+        p.consumeExtent(1);
+    }
+
+    /// Data of unknown length: skips to the end of the stream, which must end
+    /// on a whole frame. Counts modulo the frame size, so no total overflows.
+    fn discardToEnd(p: *Parser) Error!void {
+        const step = 1 << 16;
+        var partial: usize = 0;
+        while (true) {
+            const skipped = p.reader.discardShort(step) catch |err| return mapShort(err);
+            partial = (partial + skipped) % p.frame_bytes;
+            if (skipped < step) break;
         }
+        if (partial != 0) return error.Truncated;
     }
 
     /// RF64/BW64: the `ds64` chunk that must come first, holding the 64-bit
@@ -388,8 +446,15 @@ pub const Parser = struct {
         p.ds64_data_size = data_size;
     }
 
+    /// An unknown extent holds anything; the stream's end bounds it instead.
     fn checkExtent(p: *Parser, size: u64) Error!void {
-        if (size > p.extent_left) return error.InvalidRiff;
+        const left = p.extent_left orelse return;
+        if (size > left) return error.InvalidRiff;
+    }
+
+    /// After `checkExtent(size)` passed, or for a pad byte inside the extent.
+    fn consumeExtent(p: *Parser, size: u64) void {
+        if (p.extent_left) |*left| left.* -= size;
     }
 
     /// Every header and chunk field goes through here, so the first read takes
@@ -404,6 +469,13 @@ pub const Parser = struct {
 fn mapRead(err: std.Io.Reader.Error) Error {
     return switch (err) {
         error.EndOfStream => error.Truncated,
+        error.ReadFailed => error.IoFailure,
+    };
+}
+
+/// Short reads end at the end of the stream; the caller decides what that means.
+fn mapShort(err: std.Io.Reader.ShortError) Error {
+    return switch (err) {
         error.ReadFailed => error.IoFailure,
     };
 }
@@ -674,7 +746,8 @@ fn expectStream(comptime stream: fixtures.Stream, decoded: Decoded) !void {
     try std.testing.expectEqual(stream.channels, decoded.info.format.channelCount());
     try std.testing.expectEqual(stream.sample_rate, decoded.info.format.sample_rate);
     try std.testing.expectEqual(codecOf(stream.codec).storage(), decoded.info.format.sample_format);
-    try std.testing.expectEqual(stream.frameCount(), decoded.info.frame_count);
+    // Unknown-length data has no count; the samples below still fix the length.
+    if (decoded.info.frame_count) |count| try std.testing.expectEqual(stream.frameCount(), count);
     var expected: [1024]u8 = undefined;
     try std.testing.expectEqualSlices(u8, stream.samples.littleEndian(&expected), decoded.raw);
 }
@@ -693,58 +766,93 @@ fn expectedError(failure: fixtures.Failure) Error {
     };
 }
 
-fn expectFixture(comptime fixture: fixtures.Fixture, reader: *std.Io.Reader) !void {
+/// Decodes one fixture with the `unknown_length` option off or on and checks
+/// the result the manifest gives for that setting.
+fn expectFixture(comptime fixture: fixtures.Fixture, comptime unknown_length: bool, reader: *std.Io.Reader) !void {
     var storage: [1024]u8 = undefined;
-    const result = decodeAll(reader, .{}, &storage);
-    switch (fixture.expected) {
-        .accept => |stream| {
-            const decoded = result catch |err| {
-                std.debug.print("fixture {s}: expected acceptance, got error.{t}\n", .{ fixture.name, err });
-                return err;
-            };
-            expectStream(stream, decoded) catch |err| {
-                std.debug.print("fixture {s}\n", .{fixture.name});
-                return err;
-            };
-        },
-        .reject => |failure| std.testing.expectError(expectedError(failure), result) catch |err| {
-            std.debug.print("fixture {s}\n", .{fixture.name});
-            return err;
-        },
+    const result = decodeAll(reader, .{ .unknown_length = unknown_length }, &storage);
+    errdefer std.debug.print("fixture {s}, unknown_length {}\n", .{ fixture.name, unknown_length });
+    switch (comptime fixture.result(unknown_length)) {
+        .accept => |stream| try expectStream(stream, try result),
+        .reject => |failure| try std.testing.expectError(expectedError(failure), result),
     }
 }
 
 test "every fixture gives its contract result from memory" {
     inline for (fixtures.all) |fixture| {
-        var reader: std.Io.Reader = .fixed(fixtures.bytes(fixture.name));
-        try expectFixture(fixture, &reader);
+        inline for (.{ false, true }) |unknown_length| {
+            var reader: std.Io.Reader = .fixed(fixtures.bytes(fixture.name));
+            try expectFixture(fixture, unknown_length, &reader);
+        }
     }
 }
 
 test "every fixture gives the same result from one-byte reads" {
     inline for (fixtures.all) |fixture| {
-        var buffer: [1]u8 = undefined;
-        var source: std.testing.Reader = .init(&buffer, &.{.{ .buffer = fixtures.bytes(fixture.name) }});
-        source.artificial_limit = .limited(1);
-        try expectFixture(fixture, &source.interface);
+        inline for (.{ false, true }) |unknown_length| {
+            var buffer: [1]u8 = undefined;
+            var source: std.testing.Reader = .init(&buffer, &.{.{ .buffer = fixtures.bytes(fixture.name) }});
+            source.artificial_limit = .limited(1);
+            try expectFixture(fixture, unknown_length, &source.interface);
+        }
     }
 }
 
 test "probing validates without decoding and agrees with decoding" {
     inline for (fixtures.all) |fixture| {
-        var reader: std.Io.Reader = .fixed(fixtures.bytes(fixture.name));
-        const result = probe(&reader, .{});
-        switch (fixture.expected) {
-            .accept => |stream| {
-                const info = try result;
-                try std.testing.expectEqual(codecOf(stream.codec), info.codec);
-                try std.testing.expectEqual(stream.channels, info.format.channelCount());
-                try std.testing.expectEqual(stream.sample_rate, info.format.sample_rate);
-                try std.testing.expectEqual(stream.frameCount(), info.frame_count);
-            },
-            .reject => |failure| try std.testing.expectError(expectedError(failure), result),
+        inline for (.{ false, true }) |unknown_length| {
+            var reader: std.Io.Reader = .fixed(fixtures.bytes(fixture.name));
+            const result = probe(&reader, .{ .unknown_length = unknown_length });
+            switch (comptime fixture.result(unknown_length)) {
+                .accept => |stream| {
+                    const info = try result;
+                    try std.testing.expectEqual(codecOf(stream.codec), info.codec);
+                    try std.testing.expectEqual(stream.channels, info.format.channelCount());
+                    try std.testing.expectEqual(stream.sample_rate, info.format.sample_rate);
+                    if (info.frame_count) |count| try std.testing.expectEqual(stream.frameCount(), count);
+                },
+                .reject => |failure| try std.testing.expectError(expectedError(failure), result),
+            }
         }
     }
+}
+
+test "unknown length: a count when the data size is known, none when it is not" {
+    const limits: Limits = .{ .unknown_length = true };
+    var known: std.Io.Reader = .fixed(fixtures.bytes("riff_size_unknown"));
+    try std.testing.expectEqual(4, (try probe(&known, limits)).frame_count);
+    var empty: std.Io.Reader = .fixed(fixtures.bytes("unknown_riff_empty_data"));
+    try std.testing.expectEqual(0, (try probe(&empty, limits)).frame_count);
+    var unknown: std.Io.Reader = .fixed(fixtures.bytes("data_size_unknown"));
+    try std.testing.expectEqual(null, (try probe(&unknown, limits)).frame_count);
+}
+
+test "unknown-length data past 4 GiB is read to the end of the stream" {
+    // The header of unknown_length_pipe: RIFF and `data` sizes 0xFFFFFFFF.
+    const header = fixtures.bytes("unknown_length_pipe")[0..canonical_header_len];
+    try std.testing.expectEqual(std.math.maxInt(u32), std.mem.readInt(u32, header[40..44], .little));
+    const limits: Limits = .{ .unknown_length = true };
+    var reader_buffer: [64]u8 = undefined;
+    var whole: synthetic.ZeroStream = .init(header, 5 << 30, "", &reader_buffer);
+    try std.testing.expectEqual(null, (try probe(&whole.interface, limits)).frame_count);
+    // One byte past a whole frame is a partial frame at the end.
+    var partial: synthetic.ZeroStream = .init(header, (5 << 30) + 1, "", &reader_buffer);
+    try std.testing.expectError(error.Truncated, probe(&partial.interface, limits));
+    // Off by default, whatever follows.
+    var off: synthetic.ZeroStream = .init(header, 5 << 30, "", &reader_buffer);
+    try std.testing.expectError(error.UnsupportedStreamingSize, probe(&off.interface, .{}));
+}
+
+test "unknown-length data is delivered in whole frames up to the end" {
+    var reader: std.Io.Reader = .fixed(fixtures.bytes("unknown_length_pipe"));
+    var parser: Parser = .init(&reader, .{ .unknown_length = true });
+    try std.testing.expectEqual(null, (try parser.readHeader()).frame_count);
+    // 3 bytes hold one 2-byte frame; the 8 frames arrive one at a time.
+    var output: [3]u8 = undefined;
+    var frames: usize = 0;
+    while ((try parser.readData(&output)).len != 0) frames += 1;
+    try std.testing.expectEqual(8, frames);
+    try parser.finish();
 }
 
 test "readSamples gives s16 samples for every encoding stored as s16" {

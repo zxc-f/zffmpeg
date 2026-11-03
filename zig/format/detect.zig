@@ -65,8 +65,9 @@ pub const Probed = struct {
     codec: pcm.Codec,
     /// `sample_format` is `codec.storage()`.
     format: audio.Format,
-    /// Sample frames in the stream.
-    frame_count: u64,
+    /// Sample frames in the stream; null for WAV data of unknown length
+    /// (`wav.Limits.unknown_length`).
+    frame_count: ?u64,
 };
 
 /// Reads up to `prefix.max_len` bytes and chooses a container. Only a failing

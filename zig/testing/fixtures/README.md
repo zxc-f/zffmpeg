@@ -85,7 +85,8 @@ so most of the bounds rules here are stricter than FFmpeg's on purpose.
 | A chunk, including `data`, whose declared size runs past the RIFF extent | `InvalidRiff`, found from the chunk header before its body is read (`data_exceeds_riff_extent`, `chunk_exceeds_riff_extent`). | Reads `data` up to its declared end or EOF. |
 | `riff_size` disagrees with the input length | Input longer than the extent: the extra bytes are ignored (`trailing_bytes_after_riff`). Input shorter: `Truncated` (`riff_size_exceeds_input`). A known input size may report this before any audio; otherwise it appears while reading. | Ignores `riff_size`. |
 | Fewer than 8 bytes of extent left where a chunk header should start | `InvalidRiff` (`partial_chunk_header_in_extent`). | Stops at EOF. |
-| `riff_size` sentinels | 0 and 0xFFFFFFFF are unknown sizes: `UnsupportedStreamingSize`. 1 to 3 cannot hold the form type: `InvalidRiff`. | Ignores `riff_size`. |
+| `riff_size` sentinels | 0 and 0xFFFFFFFF are unknown sizes: `UnsupportedStreamingSize` by default (`riff_size_unknown`, `riff_size_zero`). 1 to 3 cannot hold the form type: `InvalidRiff`. | Ignores `riff_size`. |
+| Unknown length (T21b) | Opt-in: the parser's `Limits.unknown_length`. Off, every unknown size is `UnsupportedStreamingSize`; the manifest's `unknown_length` field gives the result with it on, where it differs, and every other fixture must give its usual result either way. On, an unknown `riff_size` makes the extent the rest of the stream: it may end cleanly between chunks (`unknown_riff_chunk_after_data`), but not inside a header (`unknown_riff_partial_chunk_header`, `Truncated`) or before a pad byte (`unknown_riff_pad_missing`, `Truncated`), and ending before `data` is `InvalidWave` (`unknown_riff_missing_data`). A `data` size of 0xFFFFFFFF outside RF64 makes the data the rest of the stream (`unknown_length_pipe`, as FFmpeg writes to a pipe), with no frame count; it must end on a whole frame (`unknown_length_partial_frame`, `Truncated`), needs no pad byte (`unknown_length_odd_u8`), and nothing after it is read, so later chunks decode as samples and a known `riff_size` goes unchecked (`unknown_length_reads_past_chunks`). `data` size 0 stays an empty stream (`unknown_riff_empty_data`). RF64 sizes stay known. | Always reads unknown sizes to the end of the input, also a `data` size of 0; keeps a partial frame's whole samples. |
 | RF64 and BW64 (T21b) | Accepted (`rf64`, `bw64`): the 32-bit RIFF size must be 0xFFFFFFFF (`rf64_riff_size_not_sentinel`), `ds64` must come first (`rf64_missing_ds64`) with at least 28 bytes (`rf64_ds64_short`) and no table of other chunks' sizes (`rf64_ds64_table`, `UnsupportedFormat`); its RIFF size bounds the extent, and its data size is used only when `data`'s own is 0xFFFFFFFF (`rf64_data_size_in_chunk`); the sample count is ignored like `fact`'s. | Ignores the 32-bit size and the table, accepts a 24-byte `ds64`, and reads `data` past the extent (`rf64_data_exceeds_extent`). |
 | RF64 in the writer | `WriteOptions.rf64`: `.auto` (the default) writes RF64 exactly when the RIFF or `data` size would not fit in 32 bits, decided before the header since the length is known; `.always` writes it for any stream (`rf64`); `.never` makes such sizes `SizeOverflow`. The layout is FFmpeg's: `ds64` (28 bytes, no table) after `WAVE`, then the same `fmt ` and `fact` (0xFFFFFFFF when the count needs 64 bits), and `data` sized 0xFFFFFFFF. | `-rf64` defaults to `never`, which writes broken sizes past 4 GiB; `auto` needs seekable output. |
 | `fmt ` declaring fewer than 16 bytes | `InvalidFormat`: a complete but malformed chunk (`fmt_size_14`). Input ending inside `fmt ` is `Truncated` (`fmt_truncated`). This is what the contract's "short fields are truncated" means. | Rejects. |
@@ -114,20 +115,22 @@ Within one structure, checks run in this order:
 1. **RIFF header** (12 bytes): the container tag (`RIFF`, `RF64` or `BW64`;
    `RIFX` and the W64 `riff` GUID are `UnsupportedFormat`; anything else is
    `InvalidRiff`), then `riff_size` (RF64: not 0xFFFFFFFF is `InvalidRiff`;
-   RIFF: sentinels, then the minimum of 4), then the form type (`WAVE`, else
+   RIFF: sentinels unless `unknown_length`, then the minimum of 4), then the form type (`WAVE`, else
    `InvalidWave`). For RF64 the `ds64` chunk follows: another chunk ID, a size
    below 28, or a RIFF size that cannot hold `ds64` is `InvalidRiff`; a table
    is `UnsupportedFormat`. Input that ends before a check's bytes are complete
    is `Truncated`.
 2. **Each chunk header** inside the extent:
    1. fewer than 8 bytes of extent left: `InvalidRiff`; input ends inside the
-      header: `Truncated`;
+      header: `Truncated` (an unknown extent ends where the input does, between
+      chunks);
    2. chunk count above 4,096: `LimitExceeded`;
    3. `fmt `: a second one is `InvalidWave`; a declared size below 16 is
       `InvalidFormat`. `data`: no `fmt ` yet or a second `data` is
       `InvalidWave`; size 0xFFFFFFFF is `UnsupportedStreamingSize` (RF64: the
-      `ds64` data size instead); a size that is not a multiple of `block_align`
-      is `InvalidFormat`;
+      `ds64` data size instead; with `unknown_length`, the rest of the input,
+      where a partial final frame is `Truncated`); a size that is not a
+      multiple of `block_align` is `InvalidFormat`;
    4. the body ends beyond the extent: `InvalidRiff`;
    5. the body, and its pad byte when the pad lies inside the extent: input
       ends early: `Truncated`.
@@ -230,8 +233,8 @@ of the Zig tables.
 | `rf64_data_exceeds_extent` | rf64 | 88 | reject: `InvalidRiff` | `ds64` declares 64 data bytes, but the RF64 extent ends after 8. | `842d16c4389674b69a28bd5d74f59a6929300a3adf432223b5fac524ee6286ec` |
 | `rf64_truncated_ds64` | rf64 | 30 | reject: `Truncated` | Input ends inside `ds64`. | `396b56f69749b010a61d32aec205ffdbfd4aa5f9f4293a97fed1512004308d23` |
 | `w64` | riff header | 40 | reject: `UnsupportedFormat` | Sony Wave64 (starts with the lowercase `riff` GUID). | `c241923d87f74120fe400a96583693c9e1c64984f3dc3d57939b27e3533bdaf2` |
-| `riff_size_unknown` | riff header | 52 | reject: `UnsupportedStreamingSize` | `riff_size` is the 0xFFFFFFFF unknown-size sentinel. | `6f4aee6c2e8c23872b15942f3873525270ed8be04fb64aa0907e7f13f86a528a` |
-| `riff_size_zero` | riff header | 52 | reject: `UnsupportedStreamingSize` | `riff_size` is 0, the other unknown-size sentinel. | `2efc1f7b368fa82528aaf298aa8a1b0c69c0bae297d8b7c2fb5a0b35a5034c50` |
+| `riff_size_unknown` | riff header | 52 | reject: `UnsupportedStreamingSize`; with `unknown_length`, accept: mono, 8000 Hz, 4 frames | `riff_size` is the 0xFFFFFFFF unknown-size sentinel. With `unknown_length` the extent is the rest of the stream. | `6f4aee6c2e8c23872b15942f3873525270ed8be04fb64aa0907e7f13f86a528a` |
+| `riff_size_zero` | riff header | 52 | reject: `UnsupportedStreamingSize`; with `unknown_length`, accept: mono, 8000 Hz, 4 frames | `riff_size` is 0, the other unknown-size sentinel. | `2efc1f7b368fa82528aaf298aa8a1b0c69c0bae297d8b7c2fb5a0b35a5034c50` |
 | `riff_size_too_small` | riff header | 52 | reject: `InvalidRiff` | `riff_size` 2 cannot hold the form type. | `00ef3e3b7d407394188f7d35cb008f353e8866c0f2d8ba1274742d37dc577700` |
 | `not_wave_form` | riff header | 52 | reject: `InvalidWave` | RIFF form type `AVI ` instead of `WAVE`. | `c550e46e05c769704d13e5ab988b17cd505983f51cebc712f5f29fad437f2ff1` |
 | `no_chunks` | riff header | 12 | reject: `InvalidWave` | A WAVE form with no chunks: `fmt ` and `data` are missing. | `1fe5a351bf0314c8a1840b023fd1e4cab3f0f123468940c241bd7bf20e989ab8` |
@@ -263,7 +266,16 @@ of the Zig tables.
 | `missing_data` | order | 36 | reject: `InvalidWave` | `fmt ` but no `data` within the RIFF extent. | `96b0b94deea11168966c72d7ec8d7fbff14d4dd6ad06dbbd5089b034e0b4bb70` |
 | `duplicate_fmt` | order | 76 | reject: `InvalidWave` | Two `fmt ` chunks (FFmpeg ignores the second). | `c9d98fda8d44b0d655a71cd2858f5a6d905e647386e67bc01c800c703f837efc` |
 | `duplicate_data` | order | 60 | reject: `InvalidWave` | A second `data` chunk after the first; reported after the first chunk's 2 frames. | `ee90f0ce3209f1028d1292c906d694927ebcecdef66382edc149dd3c0e8e3868` |
-| `data_size_unknown` | data length | 48 | reject: `UnsupportedStreamingSize` | `data` size 0xFFFFFFFF; precedence: the sentinel is reported before the extent check. | `f86e50fa5b8f8a6f20bd2311eabc6f35f966149a900b324540819167e72d7ca4` |
+| `data_size_unknown` | data length | 48 | reject: `UnsupportedStreamingSize`; with `unknown_length`, accept: mono, 8000 Hz, 2 frames | `data` size 0xFFFFFFFF; precedence: the sentinel is reported before the extent check. With `unknown_length` the data is the rest of the stream. | `f86e50fa5b8f8a6f20bd2311eabc6f35f966149a900b324540819167e72d7ca4` |
+| `unknown_length_pipe` | unknown length | 60 | reject: `UnsupportedStreamingSize`; with `unknown_length`, accept: mono, 8000 Hz, 8 frames | RIFF and `data` sizes 0xFFFFFFFF, as FFmpeg's muxer leaves them on a pipe. | `68f584fab2283a877a08e64ce4f496c2310e5bd2ddcb5ab110c89fca4001e3ab` |
+| `unknown_length_odd_u8` | unknown length | 47 | reject: `UnsupportedStreamingSize`; with `unknown_length`, accept: mono, 8000 Hz, 3 frames, `pcm_u8` | Three u8 frames of unknown length: odd data at the end of the stream needs no pad byte. | `5b1a0f675921871c49db55ef3d52e8498546e22d0c83eab70687d317640edfbc` |
+| `unknown_length_partial_frame` | unknown length | 50 | reject: `UnsupportedStreamingSize`; with `unknown_length`, reject: `Truncated` | Stereo data of unknown length ending after 1.5 frames. | `9794a375928fe143b3c73b0b9914d305154b3df8c0d8da0658fced2cd6db0af1` |
+| `unknown_length_reads_past_chunks` | unknown length | 60 | reject: `UnsupportedStreamingSize`; with `unknown_length`, accept: mono, 8000 Hz, 8 frames | `data` size 0xFFFFFFFF in a known RIFF extent: the data is the rest of the stream, so the chunk after it decodes as samples and the RIFF size goes unchecked, as in FFmpeg. | `5c511724a1b6aafc0ba9fe414f27f91d1d49d7072dd6056a00d175fc08552331` |
+| `unknown_riff_chunk_after_data` | unknown length | 60 | reject: `UnsupportedStreamingSize`; with `unknown_length`, accept: mono, 8000 Hz, 2 frames | Unknown `riff_size` with a known `data` size: the chunks after `data` are read to the end of the stream. | `4be4b937341fafcfbbb7e3d44c7a197616206988bfd7e89c20f2edc6846a71cf` |
+| `unknown_riff_empty_data` | unknown length | 44 | reject: `UnsupportedStreamingSize`; with `unknown_length`, accept: mono, 8000 Hz, 0 frames | Unknown `riff_size` with `data` size 0: still an empty stream. | `f8487a3786721ce11170385e66f3d34e7496d69445ba8a2f91a1b4a22e95841b` |
+| `unknown_riff_partial_chunk_header` | unknown length | 51 | reject: `UnsupportedStreamingSize`; with `unknown_length`, reject: `Truncated` | Unknown `riff_size`: the stream ends 3 bytes into the chunk header after `data`. | `f2748524acb393b05010303d8d3f7c5c292ba7c7713aad983f0ceed8b074647c` |
+| `unknown_riff_missing_data` | unknown length | 36 | reject: `UnsupportedStreamingSize`; with `unknown_length`, reject: `InvalidWave` | Unknown `riff_size`: the stream ends after `fmt `, between chunks, with no `data`. | `dca663a405f417efaeb1b049fe2d8bdc6f39de2cf6770fe9ec01b154116f1fef` |
+| `unknown_riff_pad_missing` | unknown length | 47 | reject: `UnsupportedStreamingSize`; with `unknown_length`, reject: `Truncated` | Unknown `riff_size`: odd u8 data of known size, and the stream ends before its pad byte. | `fa6f7be9eaad8857e6224f730f242d7428dff709bf6a293b9fabe89d0ef512ef` |
 | `data_not_block_aligned` | data length | 50 | reject: `InvalidFormat` | Stereo `data` of 6 bytes (1.5 frames). | `185fc947b7c8f7394eb72d7af262ba0a7a180b37104d8393c642c9d537835e36` |
 | `data_exceeds_riff_extent` | bounds | 60 | reject: `InvalidRiff` | `data` declares 64 bytes but the RIFF extent ends after 16. | `6182a7c308a387407f09ad54ab255aadc71e0cd7f6d45aceb5eda0f7eb9fdd5a` |
 | `chunk_exceeds_riff_extent` | bounds | 60 | reject: `InvalidRiff` | A chunk after `data` declares more bytes than the RIFF extent has left. | `f993ca1dae9966512e96d45047119325e21dd7051f8ef9d2dffe244ff6a4f7ce` |

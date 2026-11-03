@@ -95,6 +95,15 @@ pub const Fixture = struct {
     writer_output: bool = false,
     /// ... with `rf64 = .always` (T21b), rather than the default.
     writer_rf64: bool = false,
+    /// The result with the parser's `unknown_length` option (T21b), where it
+    /// differs from `expected`.
+    unknown_length: ?Expected = null,
+
+    /// The expected result with the `unknown_length` option off or on.
+    pub fn result(fixture: Fixture, unknown_length: bool) Expected {
+        if (unknown_length) return fixture.unknown_length orelse fixture.expected;
+        return fixture.expected;
+    }
 };
 
 pub const all: []const Fixture = @import("fixtures/manifest.zon");
@@ -156,19 +165,33 @@ fn expectConsistent(comptime Contract: type) void {
                 @compileError("duplicate fixture name: " ++ fixture.name);
             }
         }
-        switch (fixture.expected) {
-            .accept => |stream| {
-                if (stream.channels != 1 and stream.channels != 2) {
-                    @compileError("accepted fixtures are mono or stereo: " ++ fixture.name);
-                }
-                if (stream.samples.len() % stream.channels != 0) {
-                    @compileError("samples do not fill whole frames: " ++ fixture.name);
-                }
-            },
-            .reject => if (fixture.writer_output) {
-                @compileError("only accepted fixtures can be writer output: " ++ fixture.name);
-            },
+        expectValidResult(fixture.name, fixture.expected);
+        if (fixture.expected == .reject and fixture.writer_output) {
+            @compileError("only accepted fixtures can be writer output: " ++ fixture.name);
         }
+        if (@hasField(@TypeOf(fixture), "unknown_length")) {
+            if (fixture.unknown_length) |unknown| {
+                expectValidResult(fixture.name, unknown);
+                // The option only changes what the unknown-size sentinels do.
+                if (fixture.expected != .reject or fixture.expected.reject != .UnsupportedStreamingSize) {
+                    @compileError("only UnsupportedStreamingSize changes with unknown_length: " ++ fixture.name);
+                }
+            }
+        }
+    }
+}
+
+fn expectValidResult(comptime name: []const u8, comptime result: anytype) void {
+    switch (result) {
+        .accept => |stream| {
+            if (stream.channels != 1 and stream.channels != 2) {
+                @compileError("accepted fixtures are mono or stereo: " ++ name);
+            }
+            if (stream.samples.len() % stream.channels != 0) {
+                @compileError("samples do not fill whole frames: " ++ name);
+            }
+        },
+        .reject => {},
     }
 }
 

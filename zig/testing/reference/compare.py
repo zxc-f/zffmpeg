@@ -9,6 +9,9 @@ and zffprobe must print the expected report. For rejected ones, zffprobe must
 exit with the contract's status and error name; FFmpeg's own verdict is
 recorded as an intentional difference, not checked.
 
+Unknown-length WAV (T21b): FFmpeg must decode the samples the parser's
+`unknown_length` option accepts from each unknown-size fixture.
+
 AU fixtures (T12a): FFmpeg reads each one forced with `-f au` (parser
 acceptance) and by content detection, recorded separately. Accepted ones must
 give the expected parameters and samples, apart from the listed differences.
@@ -242,15 +245,18 @@ def compare_rejected(fixture, args, path):
     if code != want or not err.endswith(f": {fixture.reject}"):
         problems.append(f"zffprobe exited {code} ({err}), expected {want} with {fixture.reject}")
 
+    return problems, f"`{fixture.reject}` (exit {want})", f"exit {code}", ffmpeg_verdict(args, path)
+
+
+def ffmpeg_verdict(args, path):
+    """FFmpeg's own verdict on a file the contract rejects."""
     probe_code, fields, probe_err = ffprobe(args.ffprobe, path)
     decode_code, raw, decode_err = ffmpeg_decode(args.ffmpeg, path)
     if probe_code == 0 and decode_code == 0:
         layout = fields.get("channel_layout") or f"{fields.get('channels', '?')} channels"
-        verdict = f"accepts: {layout}, {fields.get('sample_rate', '?')} Hz, {len(raw) // 2} samples"
-    else:
-        reason = clean(first_line(probe_err or decode_err), path) or f"exit {probe_code or decode_code}"
-        verdict = f"rejects: {reason}"
-    return problems, f"`{fixture.reject}` (exit {want})", f"exit {code}", verdict
+        return f"accepts: {layout}, {fields.get('sample_rate', '?')} Hz, {len(raw) // 2} samples"
+    reason = clean(first_line(probe_err or decode_err), path) or f"exit {probe_code or decode_code}"
+    return f"rejects: {reason}"
 
 
 def expected_stream(format_name, codec_name, channels, rate, frames, storage="s16"):
@@ -576,6 +582,48 @@ def compare_pipes(args, lines, failures):
     ]
 
 
+def compare_unknown_length(args, lines, failures):
+    """The fixtures whose result changes with the parser's `unknown_length` option (T21b).
+
+    Their default result is checked with the other fixtures. FFmpeg always reads
+    unknown sizes to the end of the stream, so for the ones the option accepts it
+    must decode exactly the expected samples and stream; its duration is not
+    compared, since the header gives none. Its verdict on the ones the option
+    still rejects is recorded, not checked."""
+    lines += [
+        "",
+        "## Unknown-length WAV (T21b)",
+        "",
+        "The result with the `unknown_length` parser option, which the Zig tests check; "
+        "zffprobe and zffmpeg do not enable it.",
+        "",
+        "| Fixture | With `unknown_length` | FFmpeg | Result |",
+        "| --- | --- | --- | --- |",
+    ]
+    fixtures = [f for f in generate.build_fixtures() if f.unknown_accept is not None or f.unknown_reject is not None]
+    accepted = [f for f in fixtures if f.unknown_accept is not None]
+    accepted_ok = 0
+    for fixture in fixtures:
+        path = FIXTURES / "wav" / f"{fixture.name}.wav"
+        stream = fixture.unknown_accept
+        if stream is None:
+            lines.append(f"| `{fixture.name}` | `{fixture.unknown_reject}` | {ffmpeg_verdict(args, path)} | recorded |")
+            continue
+        channels, rate, samples = stream
+        frames = len(samples) // channels
+        expected = expected_stream("wav", stream.codec, channels, rate, frames, stream.storage)
+        del expected["duration_ts"]
+        problems, notes = check_stream(args, fixture.name, path, expected, stream)
+        accepted_ok += not problems
+        theirs = "same samples and stream" if not problems else "differs"
+        if notes:
+            theirs += "; " + "; ".join(notes)
+        result = "pass" if not problems else "**FAIL**: " + "; ".join(problems)
+        lines.append(f"| `{fixture.name}` | {LAYOUT[channels]}, {rate} Hz, {frames_text(frames)} | {theirs} | {result} |")
+        failures.extend(f"{fixture.name} (unknown_length): {problem}" for problem in problems)
+    lines += ["", f"Fixtures the option accepts that FFmpeg decodes the same: {accepted_ok}/{len(accepted)}."]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--ffmpeg", required=True)
@@ -628,6 +676,7 @@ def main():
         f"Rejected fixtures with the contract's zffprobe status: {rejected_ok}/{rejected}.",
         f"Rejected fixtures that FFmpeg accepts (intentional differences): {ffmpeg_accepts_rejected}/{rejected}.",
     ]
+    compare_unknown_length(args, lines, failures)
     compare_au(args, lines, failures)
     compare_writer(args, lines, failures)
     compare_zffmpeg(args, lines, failures)

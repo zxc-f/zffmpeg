@@ -737,11 +737,11 @@ evidence.
 
 | Case | Initial behavior |
 | --- | --- |
-| Container | Little-endian RIFF/WAVE, and since T21b RF64 and BW64 (64-bit sizes in a leading `ds64` chunk, the 32-bit fields 0xFFFFFFFF). Reject W64 and RIFX as `UnsupportedFormat`, and the `riff_size` sentinels 0 and 0xFFFFFFFF of plain RIFF as `UnsupportedStreamingSize`. |
+| Container | Little-endian RIFF/WAVE, and since T21b RF64 and BW64 (64-bit sizes in a leading `ds64` chunk, the 32-bit fields 0xFFFFFFFF). Reject W64 and RIFX as `UnsupportedFormat`, and the `riff_size` sentinels 0 and 0xFFFFFFFF of plain RIFF as `UnsupportedStreamingSize` unless the parser's `unknown_length` option (T21b) makes the extent the rest of the input. |
 | `fmt ` | Since T21a: tag 1 PCM at 8, 16, 24, 32 or 64 bits (`pcm_u8`, `pcm_s16le`, `pcm_s24le`, `pcm_s32le`, `pcm_s64le`), tag 3 float at 32 or 64 bits, tag 6 A-law and tag 7 mu-law at 8 bits, in a 16-byte `fmt ` or an 18-byte one with `cbSize == 0`; or WAVE_FORMAT_EXTENSIBLE (0xFFFE, exactly 40 bytes, `cbSize == 22`) with a KSDATAFORMAT subformat of those tags, valid bits 0 or all, and a channel mask of 0 or the layout's. Mono or stereo. A `fmt ` declaring fewer than 16 bytes is `InvalidFormat`; input ending inside it is `Truncated`; other complete variants are `UnsupportedFormat`. |
 | Rate/alignment | Rate must be positive; default rate limit 192,000 Hz (above it: `LimitExceeded`). Require `block_align == channels * bits / 8` with checked arithmetic. Zero channels/rate or an inconsistent `block_align` are invalid. `byte_rate` is informational: decoding never uses it and FFmpeg does not validate it, so accept a mismatch and ignore the value. A `fact` chunk is skipped like an unknown chunk. |
 | Ordering | Exactly one `fmt ` before exactly one `data`. Reject missing/duplicate required chunks within the declared RIFF extent. |
-| Data length | Explicit length, divisible by block alignment. Zero means an empty stream, never read-to-EOF. Reject `0xFFFFFFFF` as unsupported streaming size. |
+| Data length | Explicit length, divisible by block alignment. Zero means an empty stream, never read-to-EOF. Reject `0xFFFFFFFF` as unsupported streaming size, unless the `unknown_length` option (T21b, off by default) reads the data to the end of the input: whole frames, no frame count, and nothing after the data is read. |
 | Bounds | Account for chunk headers, bodies and odd-size padding inside `riff_size + 8`. Never read beyond that extent. Known input size permits early truncation checks; otherwise detect it during consumption. A chunk (including `data`) whose declared size runs past the extent is `InvalidRiff`; so is an extent that leaves fewer than 8 bytes for a chunk header. A final odd-sized chunk whose pad byte lies outside the extent is complete; a pad byte inside the extent but missing from the input is `Truncated`, as is any input shorter than the extent. |
 | Unknown chunks | Skip bounded contents and padding. Continue validation after `data` to the RIFF end so later duplicates/truncated chunks are detected. Ignore bytes outside the declared RIFF extent. |
 | Completion | Header discovery is not full-file validation. Success requires consuming/validating the declared extent. Errors found after emitting audio are reported; callers must not assume atomic output. |
@@ -749,7 +749,11 @@ evidence.
 | Output | Known frame count up front; the `fmt ` FFmpeg's `riffenc.c` chooses (plain 16-byte tag 1 for PCM, 18-byte for float, A-law and mu-law, WAVE_FORMAT_EXTENSIBLE above 48 kHz or above 16 bits except float), a `fact` chunk for every encoding but tag 1, and exact RIFF/data sizes with the pad byte of odd data. Validate the total RIFF size, not just `data`; reject overflows and encodings WAV cannot carry before the header. No seeking or placeholder sizes. `finish` verifies the exact frame count and flushes. |
 
 T07 includes sequential non-seekable input with known sizes and the ordering above.
-It does not include unknown-length streaming WAV or resumable nonblocking parsing.
+It does not include unknown-length streaming WAV, which T21b adds behind an
+option, or resumable nonblocking parsing. The conversion pipeline refuses
+unknown-length input as `UnsupportedStreamingSize` before any output, because
+both writers need the length up front; zffprobe and zffmpeg do not enable the
+option.
 Writer output targets memory and files/streams through the same Writer interface;
 T07 supplies the I/O adapters used by T08. Under/overproduction relative to the
 declared frame count is an error; a failed stream may contain partial output.

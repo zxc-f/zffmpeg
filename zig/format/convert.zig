@@ -127,6 +127,8 @@ pub const Conversion = struct {
         const summary: Summary = switch (input) {
             inline else => |*parser, container| blk: {
                 const info = try parser.readHeader();
+                // Only WAV can have unknown-length data, and only on request.
+                const frame_count: ?u64 = info.frame_count;
                 break :blk .{
                     .input = container,
                     .output = request.output,
@@ -137,7 +139,8 @@ pub const Conversion = struct {
                         .transcode => request.output.s16Codec(),
                     },
                     .format = info.format,
-                    .frame_count = info.frame_count,
+                    // Both writers put the length in the header up front.
+                    .frame_count = frame_count orelse return error.UnsupportedStreamingSize,
                 };
             },
         };
@@ -346,6 +349,9 @@ fn decodeOutput(container: Container, bytes: []const u8, storage: []i16) !Decode
 
 fn decodeWith(comptime P: type, parser: *P, storage: []i16) !Decoded {
     const info = try parser.readHeader();
+    // Both writers write known lengths, which the default limits require.
+    const optional_count: ?u64 = info.frame_count;
+    const frame_count = optional_count orelse return error.TestUnexpectedResult;
     var len: usize = 0;
     while (true) {
         const decoded = try parser.readSamples(storage[len..]);
@@ -353,9 +359,9 @@ fn decodeWith(comptime P: type, parser: *P, storage: []i16) !Decoded {
         len += decoded.len;
     }
     // Storage that filled up would hide undelivered samples.
-    if (len != info.frame_count * info.format.channelCount()) return error.TestUnexpectedResult;
+    if (len != frame_count * info.format.channelCount()) return error.TestUnexpectedResult;
     try parser.finish();
-    return .{ .format = info.format, .frame_count = info.frame_count, .samples = storage[0..len] };
+    return .{ .format = info.format, .frame_count = frame_count, .samples = storage[0..len] };
 }
 
 fn canonicalHeaderLen(container: Container) usize {
@@ -533,6 +539,28 @@ test "every rejected fixture fails with the error probing reports" {
             };
         }
     }
+}
+
+test "unknown-length input is refused before any output, because the writers need the length" {
+    // Accepted by the parser with the option on, but there is nothing to write
+    // in the output header's size fields.
+    var limits: Limits = .{};
+    limits.wav.unknown_length = true;
+    for ([_]Mode{ .transcode, .copy }) |mode| {
+        for ([_]Container{ .wav, .au }) |output| {
+            var reader: std.Io.Reader = .fixed(fixtures.bytes("unknown_length_pipe"));
+            var buffer: [1024]u8 = undefined;
+            var out: std.Io.Writer = .fixed(&buffer);
+            try std.testing.expectError(error.UnsupportedStreamingSize, convert(&reader, &out, .{ .output = output, .mode = mode }, limits));
+            try std.testing.expectEqual(0, out.buffered().len);
+        }
+    }
+    // A known data size in an unknown RIFF extent converts.
+    var reader: std.Io.Reader = .fixed(fixtures.bytes("unknown_riff_chunk_after_data"));
+    var buffer: [1024]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&buffer);
+    const summary = try convert(&reader, &out, .{ .output = .wav, .mode = .copy }, limits);
+    try std.testing.expectEqual(2, summary.frame_count);
 }
 
 test "an error found after samples were written fails the conversion" {
