@@ -136,6 +136,14 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   its diagnostic with the contract's error name. FFmpeg's own verdict is
   recorded but not checked, because the contract is deliberately stricter.
   FFmpeg counts as accepting a fixture when both `ffprobe` and `ffmpeg` exit 0.
+- **Tags (T21c).** For every accepted WAV fixture, ffprobe's format tags
+  (`-show_entries format_tags -of compact=p=0:escape=c`, unescaped) and
+  zffprobe's `tag:` lines must both equal the fixture's hand-written tags, in
+  order. FFmpeg must read back the tags of the Zig writer's tagged files. Each
+  zffmpeg WAV output from a tagged input must carry the tags FFmpeg's own
+  `ffmpeg -bitexact` conversion of the same input carries (copy or
+  `-c:a pcm_s16le`), apart from the recorded difference below, and Wave64
+  and AU outputs must carry none.
 - **Unknown-length WAV (T21b).** For each fixture whose result changes with
   the parser's `unknown_length` option, FFmpeg (which always reads unknown
   sizes to the end) must decode exactly the samples the option accepts, with
@@ -222,6 +230,22 @@ build include the WAV muxer. Its first run, locally on Windows at commit
   s16) rejected before any output: **54/54**.
 - Fixtures whose pipe result equals the file result: **105/105**.
 
+T21c added WAV tags. Its run, locally on Windows at commit `f494ee7` with the
+same build, reported no failures:
+
+- Accepted WAV fixtures matching FFmpeg and zffprobe: **49/49**; for the 11
+  with tags, ffprobe's format tags (read with `-of compact=escape=c`) and
+  zffprobe's `tag:` lines both equal the hand-written ones, in order.
+- Rejected WAV fixtures with the contract's zffprobe status: **72/72**.
+- Zig-written files FFmpeg reads as expected: **24/24**, the 2 tagged ones
+  with their tags.
+- zffmpeg outputs FFmpeg reads as expected, equal through pipes: **245/245**;
+  each WAV output from a tagged input carries the tags FFmpeg's own
+  `ffmpeg -bitexact` conversion carries (`encoded_by` dropped on transcode),
+  except `info_after_data`, whose trailing tags are recorded as not carried;
+  Wave64 and AU outputs carry none. Unsupported cells: **103/103**.
+- The other sections as for T21b; pipes **150/150**.
+
 T21b added RF64/BW64, unknown-length input and Sony Wave64, and the Wave64
 demuxer and muxer to the reference build. Its run, locally on Windows at
 commit `8373e6b` with MSYS2 UCRT64 clang 23.1.4, reported no failures:
@@ -288,6 +312,7 @@ FFmpeg decodes the same samples as the contract for every accepted fixture, and
 | Content detection, `au_empty_data` only | not detected | detected | FFmpeg's `au_probe` needs every header field nonzero, including the data size; with `-f au` it reads the file as expected. Our detection checks only the `.snd` magic. |
 | `duration_ts`, Wave64 files with pad bytes or chunks after the data | the bytes from the data start to the end of the file, in frames, rounded | the frame count | FFmpeg's Wave64 demuxer sets no duration from the `data` size, so libavformat estimates one from the bit rate; the decoded samples still match. `compare.py` computes the estimate and accepts exactly that value. |
 | Empty Wave64 `data` (zffmpeg's Wave64 output of an empty stream) | rejected | 0 frames | FFmpeg's demuxer rejects any chunk of 24 bytes or less, the header alone; zffprobe must read it. |
+| Carried tags, `info_after_data` only | carried | not carried | FFmpeg reads a seekable input's tags after `data` before writing its output header; zffmpeg reads sequentially and has written the header by then. |
 | Wave64 unknown sizes (`w64_unknown_length_pipe`, `w64_data_size_unknown`) | rejected | read with `unknown_length` | FFmpeg reads the 64-bit sizes as signed: all ones is -1 and INT64_MAX fails its bounds check, so it rejects even its own pipe output. |
 
 ### Zig-written files read by FFmpeg

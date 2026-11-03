@@ -12,22 +12,24 @@ multimedia functionality. Implement algorithms and APIs in Zig; compiling FFmpeg
 
 Current state: the WAV and AU PCM paths are complete (T01–T12), WAV with every
 PCM encoding, plain or extensible (T21a), in RIFF, RF64/BW64 or Sony Wave64,
-with unknown-length input behind an option (T21b). The `av`
+with unknown-length input behind an option (T21b) and LIST/INFO and `bext`
+tags (T21c). The `av`
 module (rooted at `zig/root.zig`) exports `pcm` (the PCM encodings,
 kernels and s16 decoder/encoder stages), `audio`, `time`, `samples` (decoded sample storage
 for every sample format), `packet`, `frame`, `stage` (the send/receive
-contract), `wav` (also Wave64) and
+contract), `metadata` (the tag dictionary), `wav` (also Wave64) and
 `au` (bounded parsers and known-length writers), `detect` (WAV, Wave64 or AU
 content detection), `convert` (the synchronous T13a conversion and stream-copy
 pipeline) and `file` (file and pipe adapters). Two tools sit on it:
-`zffprobe` probes WAV, Wave64 and AU, and `zffmpeg` (T13b) converts and
-stream-copies between them. Tests cover 109 WAV and 29 AU fixtures, process
-runs of both tools, and a CI comparison against a pinned FFmpeg build that also
-reads every `zffmpeg` output. Verification is Linux-only during development;
-Windows and ARM wait for T62–T63. T13, T14a (packets, frames and stages), T20a
-(decoded sample storage), T20b (the PCM encodings), T21a (WAV extensible
-headers and encodings) and T21b (RF64, Wave64, unknown length) are verified;
-T17b (the metadata dictionary) with T21c (WAV metadata) is next, and TODO.md
+`zffprobe` probes WAV, Wave64 and AU, tags included, and `zffmpeg` (T13b)
+converts and stream-copies between them, carrying tags. Tests cover 121 WAV
+and 29 AU fixtures, process runs of both tools, and a CI comparison against a
+pinned FFmpeg build that also reads every `zffmpeg` output. Verification is
+Linux-only during development; Windows and ARM wait for T62–T63. T13, T14a
+(packets, frames and stages), T17b (the metadata dictionary), T20a (decoded
+sample storage), T20b (the PCM encodings) and T21 (complete WAV: T21a
+extensible headers and encodings, T21b RF64, Wave64 and unknown length, T21c
+tags) are verified; T22a (the remaining AU encodings) is next, and TODO.md
 lays out the roadmap through T64. When the state changes, update the current-state statements in
 README.md, port.md ("Status and scope"), the TODO.md introduction and this file
 together.

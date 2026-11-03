@@ -19,11 +19,11 @@ T12 is verified: the AU contract and 29 fixtures (T12a), the AU parser and
 writer (T12b) and AU in `zffprobe` with content detection (T12c). T13 is verified too: the
 synchronous conversion pipeline (`av.convert`, T13a) and the `zffmpeg`
 command (T13b). T14a, packets, frames and send/receive stages, T20a, decoded sample storage,
-T20b, the PCM encodings, T21a, WAV's extensible headers and encodings, and
-T21b, RF64/BW64, Sony Wave64 and unknown-length WAV input, are verified.
-**Next: T17b, the metadata dictionary, with its first consumer T21c (WAV
-metadata); T16 starts with the first format that needs its own parser. See
-[Near-term order](#near-term-order).**
+T20b, the PCM encodings, and T21, complete WAV (T21a, extensible headers and
+encodings; T21b, RF64/BW64, Sony Wave64 and unknown-length input; T21c, tags,
+with T17b's metadata dictionary), are verified. **Next: T22a, the remaining
+AU encodings; T16 starts with the first format that needs its own parser.
+See [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
 [How tasks are completed](#how-tasks-are-completed) describes. Tasks and
@@ -968,12 +968,28 @@ names, not as an empty framework.
     evaluation arrives with T25b.
     Done when parsing matches FFmpeg's accepted and rejected forms for the
     supported options (vectors from `parseutils.c`).
-  - [ ] **T17b — Metadata dictionary.** Needs T14a. Start with T21c.
+  - [x] **T17b — Metadata dictionary.** Needs T14a. Start with T21c.
     Reference: `libavutil/dict.c`.
     Container and stream tags with ordered, case-insensitive keys, an explicit
     duplicate-key policy and owned storage.
     Done when ownership, duplicate keys, ordering and allocation failure are
     tested on their own. The container round trip is T21c's gate.
+
+    Evidence (G5, local Windows runs with Zig 0.17.0): commit `205e13b`,
+    [zig/core/metadata.zig](zig/core/metadata.zig), exported as
+    `av.metadata`. `Dictionary` is unmanaged and owns copies of its keys and
+    values; keys match ASCII case-insensitively; NUL is `InvalidTag`; the
+    `Duplicates` policies `replace`, `keep` and `keep_distinct` are
+    `av_dict_set` without flags, with `AV_DICT_MULTIKEY` and with
+    `AV_DICT_MULTIKEY | AV_DICT_DEDUP`. Its 7 tests cover ownership (inputs
+    changed after `put`, independent `clone`), duplicate keys, the entry
+    order on replace and remove, and every allocation failure
+    (`checkAllAllocationFailures`: no leak, the failed `put` changes
+    nothing); they pass in Debug, ReleaseSafe and ReleaseFast. A one-off C
+    program against the reference `libavutil` printed exactly the orders the
+    tests expect for replace, first-match replace, dedup and remove. A
+    mutation to order-preserving removal failed the order test. The
+    container round trip is T21c's evidence.
 
 - [ ] **T18 — Bit readers, writers and checksums.** Checked when T18a–T18d
   are. Each piece lands with its first consumer. Reference: `libavcodec/get_bits.h`, `put_bits.h`, `golomb.h`, `vlc.c`,
@@ -1154,8 +1170,8 @@ names, not as an empty framework.
     offsets, stereo interleaving and input and output at odd addresses have
     unit tests. A wrong A-law mask or s24 shift fails the digests.
 
-- [ ] **T21 — Complete WAV.** Checked when T21a–T21c are; WAV seeking is
-  T52a's first container. Reference:
+- [x] **T21 — Complete WAV.** Checked when T21a–T21c are; WAV seeking is
+  T52a's first container. Checked with T21c at `f494ee7`. Reference:
   `libavformat/wavdec.c`, `wavenc.c`, `riff.c` (`ff_codec_wav_tags`),
   `riffdec.c`, `riffenc.c`, `w64.c`.
   WAV carries only the encodings its tag table maps: tag 1 by bit depth to u8,
@@ -1300,8 +1316,78 @@ names, not as an empty framework.
     and 138/138 pipe results. The FFmpeg vectors regenerate unchanged. Mutations of
     the pad, partial-header, padded-`fmt ` and partial-frame rules each
     failed the tests.
-  - [ ] **T21c — WAV metadata.** Needs T17b and T21a. LIST/INFO and `bext`.
+  - [x] **T21c — WAV metadata.** Needs T17b and T21a. LIST/INFO and `bext`.
     Done when tags round-trip through WAV and equal FFmpeg's `ffprobe` tags.
+
+    ```text
+    ID / parent: T21c / T21
+    State: verified
+    Supported behavior and explicit exclusions: LIST/INFO and bext read from
+      RIFF and RF64 streams, before and after data, as wavdec.c and
+      riffdec.c read them, and reported under FFmpeg's names and order
+      (wav.genericTags); written as riffenc.c's ff_riff_write_info and
+      wavenc.c's -write_bext write them; carried by av.convert and zffmpeg
+      as FFmpeg's command carries them; printed by zffprobe as tag: lines
+      (both CLI choices the project owner's). Excluded: Wave64 summarylist
+      tags, AU annotations, other LIST types (adtl, cue labels), carrying
+      tags after data, a zffmpeg option for bext output.
+    Needs (verified) / lands with / verified after: T17b and T21a
+      (verified); lands with T17b.
+    Contract and source provenance: port.md "First WAV contract" (Tags,
+      Output), "Conversion pipeline" (Metadata) and "Initial probe output";
+      zig/testing/fixtures/README.md (tags, writing and carrying decisions);
+      notes.md "Metadata dictionary and WAV tags" and "Probe output";
+      wavdec.c, riffdec.c, riffenc.c, wavenc.c, metadata.c and
+      fftools/ffmpeg_mux_init.c read for behavior. Original code.
+    Required fixtures / optional corpus: 12 tag fixtures (11 with tags, two
+      of them writer output); 121 WAV fixtures in all. No optional corpus.
+    Ownership, state transitions and limits: tags only on request
+      (Parser.collectTags, detect.probeWithTags, Request.tags), so the
+      parser, writer and converter stay allocation-free otherwise; tag
+      chunks count toward the 1 MiB retained-bytes limit; tag content never
+      changes a verdict.
+    Comparison rule and intentional differences: ffprobe and zffprobe report
+      exactly each fixture's hand-written tags; FFmpeg reads back the Zig
+      writer's tags; each zffmpeg WAV output carries the tags FFmpeg's own
+      -bitexact conversion carries. Recorded: tags after data are not
+      carried; FFmpeg's encoder tag is not added; a value never runs past
+      its list; a short bext gives no tags.
+    Implementation files and test entry points: zig/core/metadata.zig,
+      zig/format/wav.zig (collectTags, parseInfo, parseBext, genericTags,
+      infoValue, writeInfoList, writeBext), convert.zig (carriedTags),
+      detect.zig (probeWithTags), zig/io/file.zig, zig/cli/probe.zig and
+      ffmpeg.zig, write_driver.zig, generate.py, compare.py; tests in
+      metadata.zig, wav.zig, convert.zig; probe and convert cases in
+      build.zig.
+    Evidence commit / Linux CI run / reference report: 205e13b, f494ee7 /
+      local Windows runs instead (below) / local compare.py run (below).
+    Required cases: passed 49/49 accepted WAV fixtures (11 with tags) and
+      2/2 tagged Zig-written files against FFmpeg, 20/20 tagged zffmpeg WAV
+      outputs against FFmpeg's own conversion / failed 0 / missing 0.
+    Optional cases: none.
+    Fuzz seeds, budget and result: wav.zig's and convert.zig's entries cover
+      tag chunks only through the default parser, which skips them; no
+      sustained run.
+    Remaining work or blocker / next action: none; see the introduction for
+      the next task.
+    ```
+
+    Evidence (G5, local Windows runs with Zig 0.17.0): commits `205e13b`
+    (dictionary and reading) and `f494ee7` (writing and carrying).
+    `zig build test` passed 93/93 steps in Debug, ReleaseSafe and
+    ReleaseFast (`av` 138 tests, 34 `zffprobe` and 45 `zffmpeg` process
+    runs); fmt, `generate.py --check`, the four cross builds and a Linux type
+    check passed. Round trip: `info_tags` is read, renamed, written and read
+    again unchanged by the writer, `av.convert` and `zffmpeg` in both modes,
+    and FFmpeg's `-bitexact` copy of it is byte-identical. `compare.py`
+    reported no failures: ffprobe and zffprobe gave every fixture's
+    hand-written tags (FFmpeg's missing-pad recovery, replace order,
+    duplicate renaming, UMIDs and coding histories included); FFmpeg read
+    the 2 tagged Zig-written files' tags; the 20 tagged zffmpeg WAV outputs
+    carried what FFmpeg's own conversion carries, `encoded_by` dropped on
+    transcode, with `info_after_data`'s trailing tags recorded as not
+    carried. Mutations of the INFO recovery, the renaming's de-duplication
+    and the re-encode rule each failed the tests.
 
 - [ ] **T22 — AU encodings, AIFF, raw PCM and CAF.** Checked when T22a–T22d
   are. Reference: `libavformat/au.c`, `aiffdec.c`, `aiffenc.c`, `pcmdec.c`,
