@@ -7,9 +7,9 @@ Current state: the first complete path works. The `av` library reads and writes
 signed 16-bit PCM WAV (bounded parser, known-length writer, file and pipe
 adapters), and the `zffprobe` tool validates a WAV file and reports its stream.
 Both are checked against 52 fixtures and against a pinned FFmpeg build in CI
-(Linux). The AU contract and its 29 fixtures are verified (T12a); the AU parser
-and writer are implemented, with T12b verification still pending. AU probing
-and a conversion tool follow in T12c and T13; [TODO.md](TODO.md) holds their
+(Linux). The AU contract and its 29 fixtures (T12a) and the AU parser and
+writer (T12b) are verified. AU probing and a conversion tool follow in T12c
+and T13; [TODO.md](TODO.md) holds their
 completion evidence and the roadmap. Development is verified on Linux only.
 The compiler is **Zig 0.17.0**, enforced by the build.
 

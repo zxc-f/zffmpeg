@@ -17,9 +17,8 @@ the first tool and currently probes WAV. The WAV path covers 52 fixtures,
 process runs of `zffprobe`, and a CI comparison against a pinned FFmpeg build.
 Verification is Linux-only during
 development; Windows and ARM wait for T62–T63. T12a (the AU contract and 29
-fixtures) is verified; the AU parser and writer are implemented but T12b's G5
-verification remains unchecked. Next complete T12b, then T12c and T13;
-TODO.md lays out the roadmap through T64. When the state changes, update the
+fixtures) and T12b (the AU parser and writer) are verified. Next T12c (AU in
+`zffprobe`), then T13; TODO.md lays out the roadmap through T64. When the state changes, update the
 current-state statements in README.md, port.md ("Status and scope"), the TODO.md
 introduction and this file together.
 

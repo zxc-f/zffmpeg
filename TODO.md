@@ -15,9 +15,8 @@ Development is verified on Linux only; see the
 zigimg are independent clones in ignored `.references/`; see
 [README.md](README.md#clone-the-reference-repositories) for setup.
 
-The AU contract and 29 fixtures are verified (T12a). The AU parser and writer
-are implemented; their T12b verification remains unchecked.
-**Next: complete T12b's evidence, then T12c and T13a–T13b. See
+The AU contract and 29 fixtures (T12a) and the AU parser and writer (T12b) are
+verified. **Next: T12c, AU in zffprobe, then T13a–T13b. See
 [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
@@ -532,7 +531,7 @@ sample formats stay in T20.
     implemented. The first run, [run 41579021646](https://github.com/zxc-f/zffmpeg/actions/runs/41579021646), failed to compile
     `fixtures.zig` (an ambiguous reference inside the `au` namespace), fixed
     in `d41c5a4`.
-  - [ ] **T12b — AU parser and writer.** Needs T12a. An allocation-free
+  - [x] **T12b — AU parser and writer.** Needs T12a. An allocation-free
     `zig/format/au.zig` over `*std.Io.Reader` and `*std.Io.Writer`, reusing the
     PCM, audio and time code, plus the AU output path of T19a's test driver.
     Size overflow is detected before any output; read and write finalization,
@@ -543,11 +542,28 @@ sample formats stay in T20.
     decodes the driver's actual AU output to the expected samples and timing.
     That direct reference check becomes mandatory here; T12b cannot reach G5
     without it.
-    Implementation: `a226665` adds `zig/format/au.zig`, the `av.au` export
-    and the write-driver AU path; `043c3c3` adds file-adapter tests with tiny
-    buffers. This records code presence only. Keep unchecked until the required
-    checks, reference result and Linux CI run for the verified commit are
-    recorded here under G5.
+    Evidence (G5): [zig/format/au.zig](zig/format/au.zig), exported as
+    `av.au`, and the AU output of [write_driver.zig](zig/testing/write_driver.zig),
+    implemented at `a226665`; `043c3c3` adds the file-adapter tests. Required
+    cases: all 29 AU fixtures give their contract result from memory, from
+    one-byte reads and from real files with reader buffers of 0, 1 and 64
+    bytes and 64 KiB, including the samples delivered before a failure; the
+    writer reproduces the 4 writer-output fixtures in memory and through file
+    writers with 0-, 1- and 64-byte buffers; FFmpeg reads all 4 AU files the
+    driver wrote, byte-identical to those fixtures, with the expected samples
+    and stream. Other `au.zig` tests cover probing, raw decoding, configurable
+    limits, an annotation at the 1 MiB limit, the largest data size from a
+    header alone, frame-count and size errors before any output, write and
+    flush failures and a failing reader. Neither the parser nor the writer
+    allocates, so allocation-failure injection does not apply; cancellation
+    reaches them only as a reader or writer failure. In [run 41580174746](https://github.com/zxc-f/zffmpeg/actions/runs/41580174746) at
+    `043c3c3`, `zig build test` passed 64/64 in Debug, ReleaseSafe and
+    ReleaseFast (`av` 57) and the reference report listed 9/9 Zig-written
+    files as read correctly; [run 41579516649](https://github.com/zxc-f/zffmpeg/actions/runs/41579516649) at `a226665` passed the
+    same before the file-adapter tests. Fuzz: the `std.testing.fuzz` entry
+    runs its four-fixture corpus under `zig build test`; sustained fuzzing
+    has not been run. The `zffprobe` AU check stayed listed as not
+    implemented, for T12c.
   - [ ] **T12c — AU in zffprobe with a bounded probe prefix.** Needs T12b.
     Content detection of WAV and AU over a bounded prefix that is retained and
     replayed, so non-seekable input loses no bytes. Extract only the adapter

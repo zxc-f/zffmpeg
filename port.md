@@ -15,10 +15,9 @@ and CI compares them with a pinned FFmpeg build
 repository tracks the port's own files. FFmpeg in `.references/ffmpeg` remains
 the behavioral reference. Verification is Linux-only during development;
 Windows and ARM wait for the platform milestone (TODO.md T62–T63). The AU
-contract and its 29 fixtures are verified (T12a); the [AU parser and
-writer](zig/format/au.zig) are implemented, with T12b verification still
-unchecked. Complete that evidence before AU probing (T12c) and the conversion
-pipeline (T13).
+contract and its 29 fixtures (T12a) and the [AU parser and
+writer](zig/format/au.zig) (T12b) are verified. AU probing (T12c) is next,
+then the conversion pipeline (T13).
 
 The goal is a native Zig multimedia library and tools, built incrementally from
 FFmpeg's functionality. Use idiomatic Zig APIs and explicit resource ownership.
@@ -954,12 +953,12 @@ has passed TODO.md gates G2–G4 is implemented, and it becomes verified at G5.
 | zffprobe | Verified | [zig/cli/probe.zig](zig/cli/probe.zig) (T09). Original, `LGPL-2.1-or-later`. Prints the [probe output](#initial-probe-output) for one WAV file or standard input, with exit codes 0–6. 15 process runs check stdout, stderr and the status in Debug, ReleaseSafe and ReleaseFast, and the reference comparison runs it on every fixture ([run 41557971301](https://github.com/zxc-f/zffmpeg/actions/runs/41557971301)). Our own output format, not ffprobe's. |
 | FFmpeg reference comparison | Verified | [zig/testing/reference](zig/testing/reference/README.md) (T03, T10): Clang build of the pinned commit with a minimal LGPL configuration, cached in CI, and `compare.py`. Accepted fixtures 12/12 identical in samples and compared metadata; rejected fixtures 40/40 with the contract's `zffprobe` status; intentional differences recorded. [run 41557971301](https://github.com/zxc-f/zffmpeg/actions/runs/41557971301). |
 | AU fixture contract | Verified | [AU contract and 29 fixtures](zig/testing/fixtures/au/README.md), T12a: 9 accepted and 20 rejected, with parser acceptance separate from content detection. Reference-only G5 at `d41c5a4`, [run 41579247329](https://github.com/zxc-f/zffmpeg/actions/runs/41579247329), before AU Zig code existed; full evidence stays in TODO.md. This does not verify the parser, writer or probe. |
-| AU + PCM s16be | Implemented | [zig/format/au.zig](zig/format/au.zig), exported by `av.au`, and [write driver](zig/testing/write_driver.zig). Original, `LGPL-2.1-or-later`; behavior follows `libavformat/au.c` and `libavcodec/pcm.c` at the pinned revision. Known-length encoding 3, mono/stereo, through the existing PCM kernels. Implementation at `a226665`, file-adapter tests at `043c3c3`; T12b remains unchecked pending its G5 evidence, including FFmpeg decoding actual writer output. AU probe integration is T12c. |
+| AU + PCM s16be | Verified | [zig/format/au.zig](zig/format/au.zig), exported by `av.au`, and [write driver](zig/testing/write_driver.zig). Original, `LGPL-2.1-or-later`; behavior follows `libavformat/au.c` and `libavcodec/pcm.c` at the pinned revision. Known-length encoding 3, mono/stereo, through the existing PCM kernels; sequential input without seeking, no allocation. T12b's G5 at `043c3c3` ([run 41580174746](https://github.com/zxc-f/zffmpeg/actions/runs/41580174746)): all 29 AU fixtures pass from memory, one-byte reads and files in Debug, ReleaseSafe and ReleaseFast, and FFmpeg reads the 4 AU files the Zig writer produced, byte-identical to the writer-output fixtures; full evidence in TODO.md. Limitations: no unknown-length data, other encodings or metadata; sustained fuzzing not run. Scalar; not optimized. AU probe integration is T12c. |
 | zffmpeg | Planned | Conversion and stream-copy tool (T13). |
 
 The first complete path, WAV with signed 16-bit PCM, is verified on Linux.
-AU's contract is verified and its parser/writer are implemented; T12b and T12c
-remain unchecked. Other codecs, containers and the conversion tool are planned.
+AU's contract and its parser and writer are verified; AU probing (T12c) remains
+unchecked. Other codecs, containers and the conversion tool are planned.
 
 The authoritative next action is in [TODO.md](TODO.md). Let the first working
 path determine which shared infrastructure is necessary.
