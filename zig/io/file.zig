@@ -100,14 +100,14 @@ fn writeStream(out: *std.Io.Writer, format: audio.Format, samples: []const i16, 
     try writer.finish();
 }
 
-fn withReadCause(err: anytype, reader: *const std.Io.File.Reader) @TypeOf(err) || std.Io.File.Reader.Error {
+fn withReadCause(err: anytype, reader: *const std.Io.File.Reader) (@TypeOf(err) || std.Io.File.Reader.Error) {
     if (err == error.IoFailure) {
         if (reader.err) |cause| return cause;
     }
     return err;
 }
 
-fn withWriteCause(err: anytype, file_writer: *const std.Io.File.Writer) @TypeOf(err) || std.Io.File.Writer.Error {
+fn withWriteCause(err: anytype, file_writer: *const std.Io.File.Writer) (@TypeOf(err) || std.Io.File.Writer.Error) {
     if (err == error.WriteFailed) {
         if (file_writer.err) |cause| return cause;
     }
