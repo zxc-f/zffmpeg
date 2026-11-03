@@ -133,7 +133,7 @@ agree with the [first WAV contract](port.md#first-wav-contract).
   explicit Linux reference-test dependency, independent of native Windows Zig
   tests; work can proceed alongside T01/T02/T04/T05.
 
-- [ ] **T04 — Implement the PCM sample conversion kernels.** Depends on T01 and
+- [x] **T04 — Implement the PCM sample conversion kernels.** Depends on T01 and
   T02. Add typed slice-based signed 16-bit decoding and encoding with explicit
   byte order and destination capacity. Start with the needed specialization;
   retain a scalar implementation and document ownership/overlap rules. Done
@@ -142,13 +142,30 @@ agree with the [first WAV contract](port.md#first-wav-contract).
   Promote the kernel/tests from `zig/examples/pcm_s16.zig` into
   `zig/codec/pcm.zig` and update the port.md source link; record applicable
   per-file license/provenance.
+  Evidence: [zig/codec/pcm.zig](zig/codec/pcm.zig) (`decodeS16`/`encodeS16`, both
+  byte orders; the example file is removed). Its 7 tests cover signed extrema,
+  empty and odd-length input, short outputs with unchanged contents on failure,
+  an exhaustive round trip of all 65,536 values checked against independently
+  computed bytes, and the 5 writer-output fixtures from `generate.py`.
+  [run 41553566007](https://github.com/zxc-f/zffmpeg/actions/runs/41553566007) passed `zig build test` with 28/28 tests in Debug, ReleaseSafe and
+  ReleaseFast. Scalar only; no SIMD.
 
-- [ ] **T05 — Add only the audio/time types needed by this path.** Depends on T01
+- [x] **T05 — Add only the audio/time types needed by this path.** Depends on T01
   and T02. Represent sample rate, channel count/order, interleaving and borrowed
   samples clearly. Derive timing from integer sample-frame counts; define the
   required time-base/rescaling behavior. Done when zero/invalid rates, channel
   alignment, rounding and overflow boundaries are covered. Defer general frame
   ownership, reference counting and compressed bit readers until needed.
+  Evidence: [zig/core/audio.zig](zig/core/audio.zig) (`ChannelLayout`,
+  `SampleFormat`, validated `Format` with checked frame/byte arithmetic, borrowed
+  `S16Frames`) and [zig/core/time.zig](zig/core/time.zig) (`TimeBase`, `rescale`
+  with FFmpeg's five rounding modes, `?i64` timestamps). Tests cover zero rates
+  and channel counts, unsupported layouts, incomplete frames, `u64` overflow at
+  the boundary, every rounding mode on positive, negative and halfway values,
+  and `i64`/`u32` extremes. The rescale vectors come from an exact rational
+  oracle that agrees with a transcription of `av_rescale_rnd` except for the
+  two documented differences (overflow error, exact INT64_MIN). Passed in
+  [run 41553566007](https://github.com/zxc-f/zffmpeg/actions/runs/41553566007). A differential run against the built FFmpeg reference awaits T03.
 
 ## Second milestone: a complete WAV/PCM path
 
