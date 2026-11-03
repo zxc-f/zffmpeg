@@ -16,6 +16,8 @@
 //!   PCM (`format/au.zig`).
 //! - `detect`: WAV or AU content detection that hands the bytes it read to the
 //!   chosen parser (`format/detect.zig`).
+//! - `convert`: synchronous WAV/AU conversion and stream copy, with every
+//!   check made before output starts (`format/convert.zig`).
 //! - `file`: file and stream adapters for the WAV and AU paths, with
 //!   borrowed-handle and path variants (`io/file.zig`).
 //!
@@ -28,6 +30,7 @@ pub const time = @import("core/time.zig");
 pub const wav = @import("format/wav.zig");
 pub const au = @import("format/au.zig");
 pub const detect = @import("format/detect.zig");
+pub const convert = @import("format/convert.zig");
 pub const file = @import("io/file.zig");
 
 test {
@@ -38,6 +41,7 @@ test {
     _ = @import("format/au.zig");
     _ = @import("format/detect.zig");
     _ = @import("format/prefix.zig");
+    _ = @import("format/convert.zig");
     _ = @import("io/file.zig");
     // Test-only files: the WAV and AU fixture contracts and their integrity checks.
     _ = @import("testing/fixtures.zig");

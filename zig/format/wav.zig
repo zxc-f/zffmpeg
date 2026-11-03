@@ -124,28 +124,32 @@ pub const Parser = struct {
     /// and returns the decoded prefix. Returns no samples once the data is
     /// exhausted, or when `output` cannot hold one frame.
     pub fn readSamples(p: *Parser, output: []i16) Error![]i16 {
-        std.debug.assert(p.state == .data);
-        const format = p.format.?;
-        const channels = format.channelCount();
-        const frame_bytes = format.bytesPerFrame();
         var scratch: [scratch_len]u8 = undefined;
         var produced: usize = 0;
-        while (p.data_left > 0) {
-            const room_frames = (output.len - produced) / channels;
-            if (room_frames == 0) break;
-            // room_frames * frame_bytes <= 2 * output.len, which cannot overflow
-            // because an i16 slice already spans 2 * output.len bytes.
-            const room_bytes = room_frames * frame_bytes;
-            const data_left: usize = p.data_left;
-            const want = @min(data_left, scratch_len, room_bytes);
-            const bytes = scratch[0..want];
-            p.reader.readSliceAll(bytes) catch |err| return mapRead(err);
-            // `want` is a whole number of frames that fits in the output.
+        while (true) {
+            // An i16 slice already spans 2 * len bytes, so this cannot overflow.
+            const room_bytes = @min(scratch_len, (output.len - produced) * 2);
+            const bytes = try p.readData(scratch[0..room_bytes]);
+            if (bytes.len == 0) break;
+            // Whole frames of at most room_bytes bytes fit in the output.
             const decoded = pcm.decodeS16(.little, bytes, output[produced..]) catch unreachable;
             produced += decoded.len;
-            p.data_left -= @intCast(want);
         }
         return output[0..produced];
+    }
+
+    /// Reads whole frames of `data`, still encoded as s16le, into the start of
+    /// `output` and returns that prefix: the stream-copy counterpart of
+    /// `readSamples`. Returns no bytes once the data is exhausted, or when
+    /// `output` cannot hold one frame.
+    pub fn readData(p: *Parser, output: []u8) Error![]u8 {
+        std.debug.assert(p.state == .data);
+        const frame_bytes = p.format.?.bytesPerFrame();
+        const data_left: usize = p.data_left;
+        const want = @min(data_left, output.len - output.len % frame_bytes);
+        p.reader.readSliceAll(output[0..want]) catch |err| return mapRead(err);
+        p.data_left -= @intCast(want);
+        return output[0..want];
     }
 
     /// Skips any unread data, then validates the chunks after `data` up to the
@@ -281,13 +285,17 @@ pub fn decodeToRaw(reader: *std.Io.Reader, out: *std.Io.Writer, limits: Limits) 
     return info;
 }
 
-pub const WriteError = std.Io.Writer.Error || error{
+/// The header checks `Writer.check` and `Writer.begin` share.
+pub const HeaderError = error{
     /// A zero sample rate.
     InvalidFormat,
     /// The sample rate is above `Limits.max_sample_rate`.
     LimitExceeded,
     /// The `data` or RIFF size would not fit in 32 bits.
     SizeOverflow,
+};
+
+pub const WriteError = std.Io.Writer.Error || HeaderError || error{
     /// The samples do not fill whole frames.
     IncompleteFrame,
     /// More frames than declared to `begin`.
@@ -308,6 +316,19 @@ pub const Writer = struct {
     /// Checks every size, then writes the header. Nothing is written when a
     /// check fails.
     pub fn begin(out: *std.Io.Writer, format: audio.Format, frame_count: u64, limits: Limits) WriteError!Writer {
+        const header = try encodeHeader(format, frame_count, limits);
+        try out.writeAll(&header);
+        // encodeHeader checked that the data size, and so the frame count, fits in u32.
+        return .{ .out = out, .format = format, .frames_expected = @intCast(frame_count) };
+    }
+
+    /// Runs `begin`'s checks without writing, so a caller can reject an
+    /// operation before its output exists.
+    pub fn check(format: audio.Format, frame_count: u64, limits: Limits) HeaderError!void {
+        _ = try encodeHeader(format, frame_count, limits);
+    }
+
+    fn encodeHeader(format: audio.Format, frame_count: u64, limits: Limits) HeaderError![canonical_header_len]u8 {
         if (format.sample_rate == 0) return error.InvalidFormat;
         if (format.sample_rate > limits.max_sample_rate) return error.LimitExceeded;
         const frame_bytes = format.bytesPerFrame();
@@ -330,9 +351,7 @@ pub const Writer = struct {
         std.mem.writeInt(u16, header[34..36], 16, .little);
         @memcpy(header[36..40], "data");
         std.mem.writeInt(u32, header[40..44], @intCast(data_bytes), .little);
-        try out.writeAll(&header);
-
-        return .{ .out = out, .format = format, .frames_expected = @intCast(frame_count) };
+        return header;
     }
 
     /// Writes whole interleaved frames. Fails without writing when the frames
@@ -340,16 +359,27 @@ pub const Writer = struct {
     pub fn writeFrames(w: *Writer, samples: []const i16) WriteError!void {
         const channels = w.format.channelCount();
         if (samples.len % channels != 0) return error.IncompleteFrame;
-        const frames = samples.len / channels;
-        if (frames > w.frames_expected - w.frames_written) return error.TooManyFrames;
+        if (samples.len / channels > w.frames_expected - w.frames_written) return error.TooManyFrames;
         var bytes: [scratch_len]u8 = undefined;
         var rest = samples;
         while (rest.len > 0) {
+            // scratch_len / 2 samples are whole mono and stereo frames and
+            // encode into at most scratch_len bytes.
             const take = @min(rest.len, scratch_len / 2);
-            // `take` samples encode into at most scratch_len bytes.
-            try w.out.writeAll(pcm.encodeS16(.little, rest[0..take], &bytes) catch unreachable);
+            try w.writeData(pcm.encodeS16(.little, rest[0..take], &bytes) catch unreachable);
             rest = rest[take..];
         }
+    }
+
+    /// Writes whole frames already encoded as s16le, unchanged: the
+    /// stream-copy counterpart of `writeFrames`. Fails without writing when
+    /// the frames are incomplete or exceed the declared count.
+    pub fn writeData(w: *Writer, bytes: []const u8) WriteError!void {
+        const frame_bytes = w.format.bytesPerFrame();
+        if (bytes.len % frame_bytes != 0) return error.IncompleteFrame;
+        const frames = bytes.len / frame_bytes;
+        if (frames > w.frames_expected - w.frames_written) return error.TooManyFrames;
+        try w.out.writeAll(bytes);
         w.frames_written += @intCast(frames);
     }
 
