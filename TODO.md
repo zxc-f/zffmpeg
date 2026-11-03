@@ -72,6 +72,21 @@ use "Depends on", which means **Needs**. Pick the next subtask whose needs are
 verified; milestone order is a guide, not a gate. Keep one active
 implementation slice unless two slices have independent prerequisites.
 
+Splitting a task keeps every existing ID's meaning and appends new IDs; IDs do
+not need to follow execution order. One exception happened before any of the
+affected work started: commit `8b1652a` re-split T43 and T47 and moved these
+subtask IDs to new meanings. Earlier reviews and references keep their original
+IDs and commits; read them with this mapping:
+
+| Meaning at `4fe1beb` | ID there | ID from `8b1652a` |
+| --- | --- | --- |
+| H.264 parameter sets and slice syntax | T43a | T43b (packet assembly is the new T43a) |
+| H.264 intra decoding | T43b | T43c |
+| HEVC syntax | T47a | T47b (packet assembly is the new T47a) |
+| HEVC Main intra | T47b | T47c |
+| HEVC Main inter | T47c | T47d |
+| HEVC Main 10, tiles and WPP | T47d | T47e |
+
 ### Gates
 
 | Gate | Artifact or behavior | Exit condition |
@@ -1164,14 +1179,26 @@ fixtures, committed when small and redistributable or fetched by pinned hash.
     slices per picture, no access unit delimiters, parameter sets between
     pictures, start codes and fields split across reads, final-packet drain
     and truncated input.
-    Done when packet payloads, timestamps, key flags and stream parameters
-    equal the reference's (`-c copy -f framecrc`, `ffprobe -show_packets`)
-    without pixel decoding.
+    Done when packet payloads and picture boundaries equal the reference
+    parser's (`-c copy -f framecrc` payload hashes and sizes), fragmented input
+    gives the same packets, the final packet drains, malformed input fails as
+    the contract says, and storage stays bounded, all without pixel decoding.
+    Stream parameters, key flags beyond IDR detection and timing need SPS, PPS
+    and SEI interpretation, so T43b owns them: an assembly-only pass is not
+    reported as raw-demuxer parity.
   - [ ] **T43b — Parameter sets, SEI and slice headers.** Needs T33a and T43a.
     SPS, PPS and SEI (VUI, color, timing), full slice headers, POC types and
-    `avcC` configuration.
-    Done when parsed syntax equals FFmpeg's `trace_headers` output on the
-    required streams.
+    `avcC` configuration, and the packet metadata FFmpeg's parser derives from
+    them after a picture is found (`parse_nal_units` in `h264_parser.c`):
+    width, height and cropping from the SPS selected through the slice's PPS,
+    key flags from IDR and recovery-point SEI, and timing from picture-timing
+    and buffering-period SEI. Required cases include cropping, timing
+    information and a non-IDR recovery point; unsupported cases are scoped
+    explicitly.
+    Done when parsed syntax equals FFmpeg's `trace_headers` output, and the
+    full raw-demuxer comparison (payloads, stream parameters, key flags and
+    timestamps, via `ffprobe -show_packets -show_streams`) is mandatory and
+    passes on the required streams, without pixel decoding.
   - [ ] **T43c — I slices with CAVLC and intra deblocking.** Needs T38b and
     T43b. Constrained Baseline, 8-bit 4:2:0, progressive frames: CAVLC
     residuals, luma Intra_4x4 and Intra_16x16 and chroma prediction, inverse
@@ -1227,11 +1254,17 @@ fixtures, committed when small and redistributable or fetched by pinned hash.
   - [ ] **T47a — NAL units, access units and raw HEVC.** Needs T43a (shared
     Annex B code). Access-unit assembly and the raw HEVC demuxer, with the
     same required cases as T43a.
-    Done when packets equal the reference's without pixel decoding.
+    Done under T43a's rule: payloads and picture boundaries only. FFmpeg's
+    `hevc/parser.c` also interprets parameter sets after finding a frame, so
+    stream parameters, key flags and timing belong to T47b.
   - [ ] **T47b — HEVC syntax.** Needs T33a and T47a. VPS, SPS, PPS, SEI, slice
-    headers and `hvcC` configuration.
-    Done when parsed syntax equals `trace_headers` output on the required
-    streams.
+    headers and `hvcC` configuration, and the packet metadata the parser
+    derives from them.
+    Done when parsed syntax equals `trace_headers` output, and the full
+    raw-demuxer comparison (payloads, stream parameters, key flags and
+    timestamps) is mandatory and passes on the required streams, including
+    conformance-window cropping and both IRAP and non-IRAP pictures (FFmpeg's
+    HEVC parser marks key frames by IRAP NAL type).
   - [ ] **T47c — Main intra.** Needs T38b and T47b. CABAC, intra prediction,
     transforms, deblocking and SAO.
     Done when the named intra-only Main streams decode bit-exactly.
