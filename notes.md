@@ -93,6 +93,30 @@ port.md's contract table updated, and (after T06) the parser.
 | Sample-rate policy | `audio.Format` accepts any nonzero `u32` rate; the 192 kHz cap is WAV-parser policy. | Keep limits in the parser's configurable options. |
 | Example promotion | The former `zig/examples/pcm_s16.zig` was moved into `zig/codec/pcm.zig`; examples now cover only I/O patterns. | Re-add examples only for patterns not shown by library code. |
 
+## WAV parser, writer and file adapters
+
+| Decision | Current choice and reason | To change it |
+| --- | --- | --- |
+| Parser API | `wav.Parser`: `readHeader`, `readSamples`, `finish`; `wav.probe` validates without decoding and `wav.decodeToRaw` streams raw s16le. Validity requires `finish`, which skips unread data and checks the rest of the extent. | `zig/format/wav.zig`; a resumable or seeking parser would be a separate API. |
+| Working storage | 4 KiB on the stack per read or write call; no allocator anywhere in the WAV path. The 64 KiB figure is the recommended file-adapter buffer (`file.default_buffer_len`). | Raise `scratch_len` only with a measured benefit. |
+| Configurable limits | `wav.Limits` exposes `max_sample_rate` (192 kHz) and `max_chunks` (4,096). The 1 MiB retained-bytes limit has no knob because the parser keeps only the `fmt ` fields. | Add a field when the parser starts retaining metadata. |
+| Writer limits | `wav.Writer.begin` rejects rates above `Limits.max_sample_rate` (`LimitExceeded`) and sizes beyond 32 bits (`SizeOverflow`) before writing anything; frame-count errors leave the writer usable. | `zig/format/wav.zig` and its tests. |
+| File reading | Always `readerStreaming`, never positional reads, so files and pipes take one code path. | `zig/io/file.zig`; positional reads could help only a future seeking parser. |
+| Error detail | File adapters return the file's own error (for example `NotOpenForReading`, `Canceled`) instead of `IoFailure`/`WriteFailed`. | `withReadCause` / `withWriteCause` in `zig/io/file.zig`. |
+| Namespace | The adapters are `av.file`. | Rename before external users depend on it. |
+
+## zffprobe and the FFmpeg reference
+
+| Decision | Current choice and reason | To change it |
+| --- | --- | --- |
+| Arguments | Exactly one path, or `-` for standard input; `-h`/`--help` prints help. No options yet. | `zig/cli/probe.zig` and the `probe_cases` in `build.zig`. |
+| Diagnostics | One stderr line, `zffprobe: <path>: <ErrorName>`, using Zig error names rather than prose, so tests and scripts can match them. | Same places; `compare.py` matches the error name too. |
+| Exit-code mapping | Contract errors map to 2, 3 or 5; `OutOfMemory`, `SystemResources` and descriptor-quota errors to 5; `Canceled` to 6; every other error to 4 (I/O). | `exitCode` in `zig/cli/probe.zig`. |
+| CLI tests and filters | The 15 process cases run in `zig build test` but are skipped when `-Dtest-filter` is given. | `build.zig`. |
+| Reference build | Linux x86-64, Clang, minimal LGPL configuration, `--disable-x86asm` (the C paths are the reference; no NASM dependency), built out of tree and cached in CI keyed by the build script. | `zig/testing/reference/build-ffmpeg.sh`; changing it rebuilds the cache. |
+| Reference job | Runs on every pull request and push to `master`, after the first build only from the cache. | `.github/workflows/ci.yml`; move it to a schedule if it gets slow. |
+| Writer verification | FFmpeg decodes the writer-output fixtures, and the writer is tested to produce those exact bytes; that pair stands in for FFmpeg decoding writer output directly. | Add a writer CLI (T13) to feed its output to FFmpeg directly. |
+
 ## Probe output
 
 | Decision | Current choice and reason | To change it |

@@ -16,6 +16,7 @@ same independent source as the committed fixtures.
 
 import argparse
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -36,9 +37,17 @@ EXIT_STATUS = {
 }
 LAYOUT = {1: "mono", 2: "stereo"}
 
-# Reference differences on accepted fixtures that are understood and accepted,
-# as {fixture: {ffprobe field: reason}}. Anything else fails the comparison.
-KNOWN_REFERENCE_DIFFERENCES = {}
+# Understood differences in FFmpeg's metadata for accepted fixtures, matched on
+# the exact value; see zig/testing/reference/README.md. Anything else fails.
+KNOWN_FIELD_DIFFERENCES = {
+    # A plain tag-1 header has no channel mask: FFmpeg leaves the order
+    # unspecified, while the contract reports the default layout.
+    ("channel_layout", "unknown"): "no channel mask in a plain WAV header",
+}
+KNOWN_FIXTURE_DIFFERENCES = {
+    # FFmpeg reads a data size of 0 as unknown length and reports no duration.
+    ("empty_data", "duration_ts", "N/A"): "FFmpeg reads data size 0 as unknown length",
+}
 
 
 def run(*command):
@@ -84,6 +93,12 @@ def first_line(message):
     return message.splitlines()[0] if message else ""
 
 
+def clean(message, path):
+    """Removes run-specific paths and pointer addresses from FFmpeg messages."""
+    message = message.replace(f"{path}: ", "")
+    return re.sub(r" @ 0x[0-9a-f]+\]", "]", message)
+
+
 def compare_accepted(fixture, args, path):
     channels, rate, samples = fixture.accept
     frames = len(samples) // channels
@@ -101,21 +116,21 @@ def compare_accepted(fixture, args, path):
         "duration_ts": str(frames),
     }
     if code != 0:
-        problems.append(f"ffprobe failed: {first_line(err)}")
+        problems.append(f"ffprobe failed: {clean(first_line(err), path)}")
     else:
-        known = KNOWN_REFERENCE_DIFFERENCES.get(fixture.name, {})
         for key, value in expected.items():
             got = fields.get(key)
             if got == value:
                 continue
-            if key in known:
-                notes.append(f"ffprobe {key}={got} (expected {value}): {known[key]}")
+            reason = KNOWN_FIXTURE_DIFFERENCES.get((fixture.name, key, got)) or KNOWN_FIELD_DIFFERENCES.get((key, got))
+            if reason:
+                notes.append(f"`{key}={got}` ({reason})")
             else:
                 problems.append(f"ffprobe {key}={got!r}, expected {value!r}")
 
     code, raw, err = ffmpeg_decode(args.ffmpeg, path)
     if code != 0:
-        problems.append(f"ffmpeg failed: {first_line(err)}")
+        problems.append(f"ffmpeg failed: {clean(first_line(err), path)}")
     elif raw != generate.pcm(samples):
         problems.append(f"ffmpeg decoded {len(raw) // 2} samples that differ from the {len(samples)} expected")
 
@@ -134,7 +149,7 @@ def compare_accepted(fixture, args, path):
     if code != 0 or fields != z_expected:
         problems.append(f"zffprobe exited {code} with {fields or first_line(err)}")
 
-    verdict = "same stream, duration and samples" if not problems else "differs"
+    verdict = "same samples and stream" if not problems else "differs"
     if notes:
         verdict += "; " + "; ".join(notes)
     return problems, f"{LAYOUT[channels]}, {rate} Hz, {frames} frames", "exit 0, report matches", verdict
@@ -153,7 +168,7 @@ def compare_rejected(fixture, args, path):
         layout = fields.get("channel_layout") or f"{fields.get('channels', '?')} channels"
         verdict = f"accepts: {layout}, {fields.get('sample_rate', '?')} Hz, {len(raw) // 2} samples"
     else:
-        reason = first_line(probe_err or decode_err) or f"exit {probe_code or decode_code}"
+        reason = clean(first_line(probe_err or decode_err), path) or f"exit {probe_code or decode_code}"
         verdict = f"rejects: {reason}"
     return problems, f"`{fixture.reject}` (exit {want})", f"exit {code}", verdict
 

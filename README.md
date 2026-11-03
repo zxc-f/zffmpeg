@@ -4,11 +4,12 @@ A native Zig multimedia library and tools, developed incrementally from FFmpeg's
 documented behavior and algorithms. The first planned path is signed 16-bit PCM
 in WAV, followed by a small probe tool.
 
-Current state: architecture, an implementation checklist, a minimal Zig package
-and build, the `av` library module with PCM s16 kernels and audio/time types,
-the WAV fixture contract, a tested standalone I/O example and a Linux CI
-workflow. Codecs, containers and the CLI are still
-planned. The compiler is **Zig 0.17.0**, enforced by the build.
+Current state: the first complete path works. The `av` library reads and writes
+signed 16-bit PCM WAV (bounded parser, known-length writer, file and pipe
+adapters), and the `zffprobe` tool validates a WAV file and reports its stream.
+Both are checked against 52 fixtures and against a pinned FFmpeg build in CI
+(Linux). Other codecs, containers and a conversion tool are still planned. The
+compiler is **Zig 0.17.0**, enforced by the build.
 
 ## Project files
 
@@ -24,6 +25,11 @@ planned. The compiler is **Zig 0.17.0**, enforced by the build.
 - [zig/root.zig](zig/root.zig): root of the `av` library module.
 - [zig/testing/fixtures/README.md](zig/testing/fixtures/README.md): the WAV fixture
   contract (52 fixtures, expected results, decisions, error precedence).
+- [zig/testing/reference/README.md](zig/testing/reference/README.md): the pinned
+  FFmpeg reference build and the recorded comparison results.
+- [zig/format/wav.zig](zig/format/wav.zig), [zig/io/file.zig](zig/io/file.zig),
+  [zig/cli/probe.zig](zig/cli/probe.zig): WAV parser and writer, file adapters,
+  and the `zffprobe` tool.
 - [zig/examples/io_patterns.zig](zig/examples/io_patterns.zig): runnable I/O example.
 - [zig/codec/pcm.zig](zig/codec/pcm.zig): signed 16-bit PCM decode/encode kernels.
 - [zig/core/audio.zig](zig/core/audio.zig), [zig/core/time.zig](zig/core/time.zig):
@@ -74,14 +80,16 @@ reference clone or C compiler is needed. From the repository root:
 
 ```text
 zig build
+zig build probe -- zig/testing/fixtures/wav/stereo_44k1.wav
 zig build test
 zig build test -Doptimize=ReleaseSafe
 zig build test -Doptimize=ReleaseFast
 zig fmt --check build.zig build.zig.zon zig/
 ```
 
-`zig build` compiles the `av` library; `zig build test` runs the `av` module
-tests and every example's tests. Add `-Dtest-filter="text"` to run only
+`zig build` compiles the `av` library and installs `zig-out/bin/zffprobe`;
+`zig build test` runs the `av` module tests, every example's tests and the
+`zffprobe` process checks. Add `-Dtest-filter="text"` to run only
 matching tests and `--summary all` to list test counts.
 [zig/README.md](zig/README.md) covers the version policy, build graph and
 package manifest. A single example also runs with

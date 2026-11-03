@@ -2,17 +2,18 @@
 
 ## Status and scope
 
-Initialized on 2026-11-02. Current deliverables are the design, checklist, the
-minimal Zig package and build ([build.zig](build.zig), the `av` module rooted at
-[zig/root.zig](zig/root.zig), documented in [zig/README.md](zig/README.md)), the
-`av` module's first features ([PCM s16 kernels](zig/codec/pcm.zig) and
-[audio](zig/core/audio.zig) and [time](zig/core/time.zig) types), a tested
-standalone [I/O example](zig/examples/io_patterns.zig) and a Linux CI workflow. This
-standalone repository tracks the port's own files. FFmpeg in `.references/ffmpeg`
-remains the behavioral reference. The first WAV contract has named fixtures with
-expected results ([zig/testing/fixtures](zig/testing/fixtures/README.md)). There
-is no container parser or writer and no command-line tool yet; WAV support starts
-with T06.
+Initialized on 2026-11-02. The first complete path, signed 16-bit PCM in WAV,
+works: the `av` module ([build.zig](build.zig), rooted at
+[zig/root.zig](zig/root.zig), documented in [zig/README.md](zig/README.md)) has
+[PCM s16 kernels](zig/codec/pcm.zig), [audio](zig/core/audio.zig) and
+[time](zig/core/time.zig) types, a bounded [WAV parser and known-length
+writer](zig/format/wav.zig) and [file and pipe adapters](zig/io/file.zig), and
+[zffprobe](zig/cli/probe.zig) is the first tool. The first WAV contract has named
+fixtures with expected results ([zig/testing/fixtures](zig/testing/fixtures/README.md)),
+and CI compares them with a pinned FFmpeg build
+([zig/testing/reference](zig/testing/reference/README.md)). This standalone
+repository tracks the port's own files. FFmpeg in `.references/ffmpeg` remains
+the behavioral reference. Native Windows runs are outstanding (T11); T12 is next.
 
 The goal is a native Zig multimedia library and tools, built incrementally from
 FFmpeg's functionality. Use idiomatic Zig APIs and explicit resource ownership.
@@ -189,17 +190,16 @@ zig/
     time.zig                 # existing: time bases and FFmpeg-compatible rescaling
     audio.zig                # existing: layouts, sample/stream formats, borrowed samples
   io/                        # thin adapters over standard-library I/O
-    file.zig
+    file.zig                 # existing: file and pipe adapters for the WAV path
   codec/
     pcm.zig                  # existing: s16 kernels; grow a directory when needed
   format/
-    wav.zig                  # bounded RIFF chunks, PCM stream metadata and I/O
+    wav.zig                  # existing: bounded parser and known-length writer
   cli/
-    probe.zig                # first tool: zffprobe
+    probe.zig                # existing: first tool, zffprobe
   testing/                   # native tests; FFmpeg tests stay in its clone
     fixtures.zig             # existing: typed fixture manifest and integrity tests
-    integration.zig
-    differential.zig
+    reference/               # existing: FFmpeg reference build and comparison scripts
     fixtures/                # existing: tiny fixtures; README.md is their contract
 ```
 
