@@ -10,6 +10,8 @@
 //!   interleaved samples (`core/audio.zig`).
 //! - `time`: time bases and FFmpeg-compatible timestamp rescaling
 //!   (`core/time.zig`).
+//! - `wav`: bounded RIFF/WAVE parsing and known-length writing for s16 PCM
+//!   (`format/wav.zig`).
 //!
 //! Zig analyzes files lazily, so tests run only in files this module imports.
 //! When a file with tests is added, reference it from the `test` block here.
@@ -17,11 +19,13 @@
 pub const pcm = @import("codec/pcm.zig");
 pub const audio = @import("core/audio.zig");
 pub const time = @import("core/time.zig");
+pub const wav = @import("format/wav.zig");
 
 test {
     _ = @import("codec/pcm.zig");
     _ = @import("core/audio.zig");
     _ = @import("core/time.zig");
+    _ = @import("format/wav.zig");
     // Test-only files: the WAV fixture contract and its integrity checks.
     _ = @import("testing/fixtures.zig");
 }
