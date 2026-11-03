@@ -5,8 +5,9 @@ documented behavior and algorithms. The first planned path is signed 16-bit PCM
 in WAV, followed by a small probe tool.
 
 Current state: architecture, an implementation checklist, a minimal Zig package
-and build (the `av` library module, its tests and two tested standalone
-examples), the WAV fixture contract and a Linux CI workflow. Codecs, containers and the CLI are still
+and build, the `av` library module with PCM s16 kernels and audio/time types,
+the WAV fixture contract, a tested standalone I/O example and a Linux CI
+workflow. Codecs, containers and the CLI are still
 planned. The compiler is **Zig 0.17.0**, enforced by the build.
 
 ## Project files
@@ -24,7 +25,9 @@ planned. The compiler is **Zig 0.17.0**, enforced by the build.
 - [zig/testing/fixtures/README.md](zig/testing/fixtures/README.md): the WAV fixture
   contract (52 fixtures, expected results, decisions, error precedence).
 - [zig/examples/io_patterns.zig](zig/examples/io_patterns.zig): runnable I/O example.
-- [zig/examples/pcm_s16.zig](zig/examples/pcm_s16.zig): runnable PCM kernel example.
+- [zig/codec/pcm.zig](zig/codec/pcm.zig): signed 16-bit PCM decode/encode kernels.
+- [zig/core/audio.zig](zig/core/audio.zig), [zig/core/time.zig](zig/core/time.zig):
+  audio stream descriptions, time bases and timestamp rescaling.
 - [.github/workflows/ci.yml](.github/workflows/ci.yml): Linux CI for the build and tests.
 - [LICENSE](LICENSE): GNU LGPL v2.1 text for the project's `LGPL-2.1-or-later` sources.
 

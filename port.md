@@ -4,14 +4,15 @@
 
 Initialized on 2026-11-02. Current deliverables are the design, checklist, the
 minimal Zig package and build ([build.zig](build.zig), the `av` module rooted at
-[zig/root.zig](zig/root.zig), documented in [zig/README.md](zig/README.md)), two
-tested standalone examples ([I/O patterns](zig/examples/io_patterns.zig) and a
-[PCM s16 kernel](zig/examples/pcm_s16.zig)) and a Linux CI workflow. This
+[zig/root.zig](zig/root.zig), documented in [zig/README.md](zig/README.md)), the
+`av` module's first features ([PCM s16 kernels](zig/codec/pcm.zig) and
+[audio](zig/core/audio.zig) and [time](zig/core/time.zig) types), a tested
+standalone [I/O example](zig/examples/io_patterns.zig) and a Linux CI workflow. This
 standalone repository tracks the port's own files. FFmpeg in `.references/ffmpeg`
 remains the behavioral reference. The first WAV contract has named fixtures with
 expected results ([zig/testing/fixtures](zig/testing/fixtures/README.md)). There
-is no codec, container or command-line tool yet; the `av` module exports nothing
-and the examples do not implement WAV support.
+is no container parser or writer and no command-line tool yet; WAV support starts
+with T06.
 
 The goal is a native Zig multimedia library and tools, built incrementally from
 FFmpeg's functionality. Use idiomatic Zig APIs and explicit resource ownership.
@@ -184,14 +185,13 @@ zig/
   root.zig                   # existing: av: small public facade with direct feature access
   examples/
     io_patterns.zig          # existing: standalone, tested I/O usage
-    pcm_s16.zig              # existing: standalone PCM kernel; promoted in T04
   core/                      # internal files in the av module
-    time.zig                 # only required time-base/rescale operations
-    audio.zig                # small typed audio view and format description
+    time.zig                 # existing: time bases and FFmpeg-compatible rescaling
+    audio.zig                # existing: layouts, sample/stream formats, borrowed samples
   io/                        # thin adapters over standard-library I/O
     file.zig
   codec/
-    pcm.zig                  # concrete kernels, grow a directory when needed
+    pcm.zig                  # existing: s16 kernels; grow a directory when needed
   format/
     wav.zig                  # bounded RIFF chunks, PCM stream metadata and I/O
   cli/
@@ -436,12 +436,11 @@ Relevant features are documented in the
 
 In [pcm.c](https://github.com/FFmpeg/FFmpeg/blob/5d5a38a7e46be296eab75982c0986054f731e19e/libavcodec/pcm.c), `DECODE` builds reader and integer names by token
 pasting and mutates pointers supplied by its caller. A native Zig kernel can
-express the signed 16-bit subset with one ordinary loop. The standalone
-[pcm_s16.zig](zig/examples/pcm_s16.zig) example implements `decodeS16` with a
-`comptime` byte-order parameter and tests both byte orders, signed extrema,
-invalid buffer sizes, unchanged output on failure and empty input. It uses the
-installed Zig 0.17 API and is a design example, not a complete codec
-implementation.
+express the signed 16-bit subset with one ordinary loop.
+[zig/codec/pcm.zig](zig/codec/pcm.zig) implements `decodeS16` and `encodeS16`
+with a `comptime` byte-order parameter. Its tests cover both byte orders, signed
+extrema, invalid buffer sizes, unchanged output on failure, empty input, an
+exhaustive round trip of every `i16`, and the generated writer-output fixtures.
 
 The caller owns `output`; the returned slice borrows it. Input and output must
 not overlap. Byte order is fixed per specialization; sample count and the loop
@@ -825,10 +824,10 @@ Only mark a feature verified after its acceptance evidence exists.
 | --- | --- | --- |
 | Project guidance and architecture | Implemented | `CLAUDE.md` (imported by `AGENTS.md`) and this file. |
 | Standalone Zig I/O example | Verified | Original [source](zig/examples/io_patterns.zig); formatting and 6/6 tests per mode in Debug, ReleaseSafe and ReleaseFast on native Windows, Zig 0.17.0. A seventh test, for the file adapter's retained `.err`, was added later; all 7 tests passed per mode in [Linux CI run 41544372319](https://github.com/zxc-f/zffmpeg/actions/runs/41544372319), Zig 0.17.0, but have not been rerun on Windows. Individual fields only; no media parser, allocations or optimization claims. Provenance and reference evidence: [zigimg analysis](doc/zigimg-reference.md). |
-| Standalone PCM s16 kernel example | Verified | Original [source](zig/examples/pcm_s16.zig), moved from this document; formatting and 2/2 tests passed per mode in [Linux CI run 41544372319](https://github.com/zxc-f/zffmpeg/actions/runs/41544372319), Zig 0.17.0. Design example only; T04 promotes it into the library. |
+| PCM s16 kernels | Verified | [zig/codec/pcm.zig](zig/codec/pcm.zig), promoted from the former `zig/examples/pcm_s16.zig` example (T04). Original, `LGPL-2.1-or-later`; behavior follows `libavcodec/pcm.c`. Exhaustive `i16` round trip and fixture cross-check passed in [run 41553566007](https://github.com/zxc-f/zffmpeg/actions/runs/41553566007). Scalar only. |
 | Linux CI | Implemented | [Workflow](.github/workflows/ci.yml) on `ubuntu-24.04` requires `zig version` 0.17.0, checks `zig fmt` on `build.zig`, `build.zig.zon` and `zig/` and that every example is registered in `build.zig`, runs `zig build` in Debug and ReleaseSafe and `zig build test` in Debug, ReleaseSafe and ReleaseFast. First example-only pass: [run 41544372319](https://github.com/zxc-f/zffmpeg/actions/runs/41544372319); first build/test pass: [run 41548960006](https://github.com/zxc-f/zffmpeg/actions/runs/41548960006). Native Windows CI is deferred. |
 | Zig toolchain/build/package | Verified | [build.zig](build.zig) (exact Zig 0.17.0 check, `av` module, `libzffmpeg.a`, test step for `av` and each example), [build.zig.zon](build.zig.zon) (toolchain-generated fingerprint, `.paths` allowlist, no dependencies), [zig/README.md](zig/README.md). Original `LGPL-2.1-or-later` files. `zig build` passed in Debug and ReleaseSafe and `zig build test` passed 9/9 in Debug, ReleaseSafe and ReleaseFast in [run 41548960006](https://github.com/zxc-f/zffmpeg/actions/runs/41548960006); failure propagation shown in [run 41548611661](https://github.com/zxc-f/zffmpeg/actions/runs/41548611661). Linux only; no C build dependency. |
-| Core types and readers | Planned | Implement only time/audio views and byte access needed for WAV/PCM first. |
+| Audio and time types | Verified | [zig/core/audio.zig](zig/core/audio.zig) and [zig/core/time.zig](zig/core/time.zig) (T05). Original, `LGPL-2.1-or-later`; rescaling follows `av_rescale_q_rnd` except for overflow and INT64_MIN (see [notes.md](notes.md)). Verified in [run 41553566007](https://github.com/zxc-f/zffmpeg/actions/runs/41553566007) against oracle-derived vectors; FFmpeg differential pending T03. |
 | WAV fixture contract | Implemented | [zig/testing/fixtures](zig/testing/fixtures/README.md): 52 fixtures generated independently of the Zig code by `generate.py` (original, `LGPL-2.1-or-later`), with expected results, boundary decisions and error precedence; integrity-tested by [fixtures.zig](zig/testing/fixtures.zig) in [run 41550661260](https://github.com/zxc-f/zffmpeg/actions/runs/41550661260). Verified against a parser in T06. |
 | WAV + PCM s16le | Planned | First complete multimedia path, scoped above. |
 | zffprobe / zffmpeg | Planned | Add after the corresponding library path works. |

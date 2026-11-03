@@ -96,6 +96,7 @@ C compiler play no part in the native build.
 | File | License | Origin |
 | --- | --- | --- |
 | `build.zig`, `build.zig.zon`, `zig/root.zig` | `LGPL-2.1-or-later` (SPDX header) | Original project files. The build structure follows the Zig 0.17 build-system guide and port.md; no code is copied. |
+| `zig/codec/pcm.zig`, `zig/core/audio.zig`, `zig/core/time.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. Behavior follows FFmpeg's `libavcodec/pcm.c`, `libavutil/mathematics.c`, `channel_layout.h` and `samplefmt.c` at the pinned revision; no code is copied. |
 | `zig/testing/fixtures.zig`, `zig/testing/fixtures/generate.py` | `LGPL-2.1-or-later` (SPDX header) | Original project files. |
 | `zig/testing/fixtures/wav/*.wav`, `manifest.zon` | Generated data | Written by `generate.py`; see the [fixture README](testing/fixtures/README.md#provenance). |
 | `.zig-version` | Not applicable | A one-line version marker. |

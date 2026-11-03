@@ -10,11 +10,11 @@ This standalone repository is becoming a native Zig implementation of FFmpeg's
 multimedia functionality. Implement algorithms and APIs in Zig; compiling FFmpeg's C with
 `zig cc`, translating headers, or wrapping libav* does not constitute the port.
 
-Current state: the minimal Zig package and build (the `av` module rooted at
-`zig/root.zig`, which exports nothing yet), the WAV fixture contract with 52
-fixtures, two tested standalone examples (I/O patterns and a PCM s16 kernel) and
-a Linux CI workflow; no codec/container implementation yet. The next tasks are
-T03 (the reference build), T04 (PCM kernels) and T05 (audio/time types). When the state changes, update the current-state
+Current state: the minimal Zig package and build; the `av` module rooted at
+`zig/root.zig` exporting `pcm` (s16 kernels), `audio` and `time`; the WAV fixture
+contract with 52 fixtures; a tested standalone I/O example; and a Linux CI
+workflow. No container parser, writer or CLI yet. The next tasks are T06 (the
+WAV parser) and T03 (the reference build). When the state changes, update the current-state
 statements in README.md, port.md ("Status and scope"), the TODO.md introduction
 and this file together.
 
