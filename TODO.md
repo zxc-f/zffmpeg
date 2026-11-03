@@ -95,7 +95,7 @@ agree with the [first WAV contract](port.md#first-wav-contract).
   libraries or package dependencies, and CI builds from a checkout without
   `.references/`. Native Windows was not run (T11).
 
-- [ ] **T02 — Materialize the WAV contract and fixtures.** Create the canonical
+- [x] **T02 — Materialize the WAV contract and fixtures.** Create the canonical
   `zig/testing/fixtures/README.md` with a named fixture for each rule in port.md:
   `fmt ` sizes/extensions, mono/stereo, rate/alignment, chunk order/duplicates,
   empty data versus unknown size, padding, truncation, limits and trailing data.
@@ -109,6 +109,18 @@ agree with the [first WAV contract](port.md#first-wav-contract).
   `byte_rate`, which is accepted and ignored. Keep required tiny
   fixtures local and fail if any are missing. Done when small independent
   vectors make every accepted/rejected case reproducible.
+  Evidence: [fixture README](zig/testing/fixtures/README.md),
+  [generate.py](zig/testing/fixtures/generate.py),
+  [manifest.zon](zig/testing/fixtures/manifest.zon) and
+  [fixtures.zig](zig/testing/fixtures.zig). 52 committed fixtures (12 accepted,
+  5 of them exact writer output, and 40 rejected) plus one synthesized 2 MiB
+  vector, each with its expected result and SHA-256. The README records the
+  boundary decisions, the error precedence and a byte-by-byte check of
+  `mono_8k`. [run 41550661260](https://github.com/zxc-f/zffmpeg/actions/runs/41550661260): `generate.py --check` passed, and `zig build test`
+  passed 12/12 in Debug, ReleaseSafe and ReleaseFast, including the `av`
+  fixture tests (manifest consistency, every file embedded and matching its
+  SHA-256). Remaining: no parser consumes the fixtures until T06, and the FFmpeg
+  comparison of accepted fixtures belongs to T03/T10.
 
 - [ ] **T03 — Establish the C reference comparison setup.** Use Linux x86-64 in
   a pinned container or WSL environment. Build `.references/ffmpeg` at the
