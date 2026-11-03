@@ -8,7 +8,7 @@ every WAV PCM encoding (u8, 16- to 64-bit integers, float, A-law, mu-law, plain
 or WAVE_FORMAT_EXTENSIBLE) and signed 16-bit PCM in Sun AU (bounded parsers, known-length writers,
 file and pipe adapters), and the `zffprobe` tool detects WAV or AU from the
 content, validates the file and reports its stream. Both are checked against
-52 WAV and 29 AU fixtures and against a pinned FFmpeg build in CI (Linux). The
+76 WAV and 29 AU fixtures and against a pinned FFmpeg build in CI (Linux). The
 `zffmpeg` tool converts and stream-copies between WAV and AU through the
 library's synchronous pipeline (T13), which runs on packets, frames and
 send/receive stages (T14a), and FFmpeg reads every output it writes for the

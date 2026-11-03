@@ -20,7 +20,7 @@ contract), `wav` and
 detection), `convert` (the synchronous T13a conversion and stream-copy
 pipeline) and `file` (file and pipe adapters). Two tools sit on it:
 `zffprobe` probes WAV and AU, and `zffmpeg` (T13b) converts and stream-copies
-between them. Tests cover 52 WAV and 29 AU fixtures, process runs of both
+between them. Tests cover 76 WAV and 29 AU fixtures, process runs of both
 tools, and a CI comparison against a pinned FFmpeg build that also reads
 every `zffmpeg` output. Verification is Linux-only during development; Windows
 and ARM wait for T62–T63. T13, T14a (packets, frames and stages), T20a
