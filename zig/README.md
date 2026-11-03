@@ -135,6 +135,9 @@ slowdowns of the default build.
 | `zig/format/wav.zig`, `zig/io/file.zig`, `zig/cli/probe.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. FFmpeg's `wavdec.c`, `wavenc.c`, `riffenc.c` and `ffprobe` were read for behavior only; no code is copied. |
 | `zig/format/au.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. FFmpeg's `au.c` and `pcm.c` were read for behavior only; no code is copied. |
 | `zig/format/detect.zig`, `zig/format/prefix.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. The detection rule is the project's own; FFmpeg's `au_probe` in `au.c` was read only to record where it differs. |
+| `zig/codec/g711.zig` | `LGPL-2.1-or-later` (SPDX header) | **Derived** from FFmpeg's `libavcodec/pcm_tablegen.h` at commit `5d5a38a7e46be296eab75982c0986054f731e19e`, © 2010 Reimar Döffinger, `LGPL-2.1-or-later`; its A-law and mu-law conversions come from Sun Microsystems' `g711.c` (unrestricted use). The header keeps that attribution. |
+| `zig/testing/reference/pcm_vectors.c` | `LGPL-2.1-or-later` (SPDX header) | Original reference tool: it drives the pinned FFmpeg's public `libavcodec` API to print the T20b oracle and is not part of the port. |
+| `zig/testing/vectors/pcm.txt` | Generated data | Printed by `pcm_vectors.c` from the pinned `libavcodec`; see the [reference README](testing/reference/README.md). |
 | `zig/core/samples.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. The size, line and plane rules follow `libavutil/samplefmt.c`; no code is copied. |
 | `zig/testing/reference/samplefmt_vectors.c` | `LGPL-2.1-or-later` (SPDX header) | Original reference tool: it calls the pinned FFmpeg's public `libavutil` API to print the T20a oracle and is not part of the port. |
 | `zig/testing/vectors/samplefmt.txt` | Generated data | Printed by `samplefmt_vectors.c` from the pinned `libavutil`; see the [reference README](testing/reference/README.md). |

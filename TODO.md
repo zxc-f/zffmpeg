@@ -18,9 +18,10 @@ zigimg are independent clones in ignored `.references/`; see
 T12 is verified: the AU contract and 29 fixtures (T12a), the AU parser and
 writer (T12b) and AU in `zffprobe` with content detection (T12c). T13 is verified too: the
 synchronous conversion pipeline (`av.convert`, T13a) and the `zffmpeg`
-command (T13b). T14a, packets, frames and send/receive stages, and T20a, decoded sample
-storage, are verified. **Next: T20b, the PCM encodings; T16 starts with the
-first third format. See [Near-term order](#near-term-order).**
+command (T13b). T14a, packets, frames and send/receive stages, T20a, decoded sample storage,
+and T20b, the PCM encodings, are verified. **Next: T21a, WAV's extensible
+headers and encodings; T16 starts with the first third format. See
+[Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
 [How tasks are completed](#how-tasks-are-completed) describes. Tasks and
@@ -1096,7 +1097,7 @@ names, not as an empty framework.
     tests. Padding samples to 16 instead of 32, or dropping one vector line,
     fails the tests. The WAV and AU writers now reject a non-s16 format with
     `UnsupportedFormat` before writing, with tests.
-  - [ ] **T20b — PCM encodings.** Needs T20a. Codec identities and kernels for
+  - [x] **T20b — PCM encodings.** Needs T20a. Codec identities and kernels for
     u8, s8, s16/s24/s32/s64 in both byte orders, f32/f64 in both byte orders,
     A-law and µ-law, specialized at compile time over the real formats. Planar
     PCM codecs only when a container needs them.
@@ -1104,6 +1105,52 @@ names, not as an empty framework.
     bit-exactly against the reference, exhaustively for 8- and 16-bit
     encodings and by vectors for wider ones, with short and misaligned input
     covered.
+
+    ```text
+    ID / parent: T20b / T20
+    State: verified
+    Supported behavior and explicit exclusions: port.md "PCM encodings": the
+      sixteen codecs above over packed T20a storage. Excluded: planar PCM
+      codecs, u16/u24/u32, DAUD, LXF, VIDC; container support (T21a, T22a,
+      T22c).
+    Needs (verified) / lands with / verified after: T20a (verified); alone.
+    Contract and source provenance: port.md "PCM encodings", notes.md "PCM
+      encodings"; libavcodec/pcm.c behavior; g711.zig derived from
+      libavcodec/pcm_tablegen.h (attribution in its header).
+    Required fixtures / optional corpus: zig/testing/vectors/pcm.txt, 32
+      SHA-256 digests from the pinned libavcodec (pcm_vectors.c): decode all
+      256 bytes (u8, s8, A-law, mu-law) and all 65536 16-bit inputs (s16le,
+      s16be); encode all 256 u8 values (u8, s8) and all 65536 s16 values
+      (s16le, s16be, A-law, mu-law); a 65536-sample LCG stream both ways for
+      s24, s32, s64, f32 and f64 in both orders. The count is checked.
+    Ownership, state transitions and limits: stateless kernels over caller
+      memory; no allocation.
+    Comparison rule and intentional differences: exact digests of decoded
+      storage (little-endian) and encoded bytes; none.
+    Implementation files and test entry points: zig/codec/pcm.zig,
+      zig/codec/g711.zig; tests in both.
+    Evidence commit / Linux CI run / reference report: 464de03 / local
+      Windows runs instead (below) / local compare.py and generator runs.
+    Required cases: passed 32 digests and the unit tests / failed 0 /
+      missing 0.
+    Optional cases: none.
+    Fuzz seeds, budget and result: none: no parser; every byte value is an
+      input of the exhaustive vectors.
+    Remaining work or blocker / next action: none; T21a is next.
+    ```
+
+    Evidence (G5, local Windows runs with Zig 0.17.0 count as completion
+    evidence, by the project owner's decision): implementation commit
+    `464de03`. `zig build test` passed 73/73 steps in Debug, ReleaseSafe and
+    ReleaseFast (`av` 111 tests); fmt, the cross builds and a Linux type
+    check passed. The reference was rebuilt with every PCM decoder and
+    encoder (`build-ffmpeg.sh`, MSYS2 clang 23.1.4); `pcm_vectors.c` built
+    against it reproduced `pcm.txt`, `samplefmt_vectors.c` still reproduced
+    `samplefmt.txt`, and `compare.py` passed every check (FFmpeg's recorded
+    verdicts changed for four fixtures that only lacked a decoder). Short
+    input, a wrong storage format, a small destination (nothing written),
+    offsets, stereo interleaving and input and output at odd addresses have
+    unit tests. A wrong A-law mask or s24 shift fails the digests.
 
 - [ ] **T21 — Complete WAV.** Checked when T21a–T21c are; WAV seeking is
   T52a's first container. Reference:

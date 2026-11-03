@@ -24,7 +24,8 @@ and writer](zig/format/au.zig), and `zffprobe`, which chooses WAV or AU by
 between WAV and AU are verified, and the pipeline now runs on
 [packets, frames and send/receive stages](#packets-frames-and-stages) (T14a),
 with [decoded sample storage](#decoded-sample-storage) for every sample format
-(T20a). The PCM encodings (T20b) are next.
+(T20a) and the [PCM encodings](#pcm-encodings) that decode into it (T20b).
+WAV's extensible headers and encodings (T21a) are next.
 
 The goal is a native Zig multimedia library and tools, built incrementally from
 FFmpeg's functionality. Use idiomatic Zig APIs and explicit resource ownership.
@@ -495,6 +496,23 @@ from what a container carries:
 
 The oracle is FFmpeg itself: [samplefmt_vectors.c](zig/testing/reference/samplefmt_vectors.c)
 calls the pinned `libavutil` and prints [the committed vectors](zig/testing/vectors/samplefmt.txt).
+
+### PCM encodings
+
+T20b's `pcm.Codec` ([codec/pcm.zig](zig/codec/pcm.zig)) names the encodings
+FFmpeg calls `pcm_u8`, `pcm_s8`, `pcm_s16le`/`be`, `pcm_s24le`/`be`,
+`pcm_s32le`/`be`, `pcm_s64le`/`be`, `pcm_f32le`/`be`, `pcm_f64le`/`be`,
+`pcm_alaw` and `pcm_mulaw`, separately from storage and containers.
+
+| Case | Behavior |
+| --- | --- |
+| Storage | Packed, as FFmpeg's decoders store it: u8 and s8 as `u8` (s8 offset by 128), s16, A-law and mu-law as `s16`, s24 shifted into the top 24 bits of `s32`, s32 as `s32`, s64 as `s64`, f32 and f64 as `flt` and `dbl` with every bit kept (NaN payloads included). |
+| Encoding | The inverse; s24 keeps the top 24 bits of `s32`, A-law and mu-law quantize through FFmpeg's 16384-entry tables (index `(v + 32768) >> 2`), built at compile time by [codec/g711.zig](zig/codec/g711.zig). |
+| API | `pcm.decode(codec, bytes, buffer, offset)` and `pcm.encode(codec, buffer, offset, frames, out)` over `samples.Buffer`; stored values are in the target's byte order, encoded ones in the codec's. `FormatMismatch`, `IncompleteFrame` and `OutputTooSmall` write nothing. Input may be at any address. |
+| Not yet | Planar PCM codecs (only when a container needs them), unsigned 16/24/32-bit, DAUD, LXF, VIDC; the containers that carry the new encodings (T21a WAV, T22a AU, T22c raw). The PCM stages and `Frame` stay s16. |
+
+The oracle is FFmpeg's `libavcodec`: [pcm_vectors.c](zig/testing/reference/pcm_vectors.c)
+records SHA-256 digests of the pinned decoders' and encoders' output.
 
 ### Packets, frames and stages
 
@@ -1028,6 +1046,7 @@ has passed TODO.md gates G2–G4 is implemented, and it becomes verified at G5.
 | --- | --- | --- |
 | Project guidance and architecture | Implemented | `CLAUDE.md` (imported by `AGENTS.md`) and this file. |
 | Standalone Zig I/O example | Verified | Original [source](zig/examples/io_patterns.zig); formatting and 6/6 tests per mode in Debug, ReleaseSafe and ReleaseFast on native Windows, Zig 0.17.0. A seventh test, for the file adapter's retained `.err`, was added later; all 7 tests passed per mode in [Linux CI run 41544372319](https://github.com/zxc-f/zffmpeg/actions/runs/41544372319), Zig 0.17.0, but have not been rerun on Windows. Individual fields only; no media parser, allocations or optimization claims. Provenance and reference evidence: [zigimg analysis](doc/zigimg-reference.md). |
+| PCM encodings | Verified | `pcm.Codec`, `pcm.decode` and `pcm.encode` in [codec/pcm.zig](zig/codec/pcm.zig) and [codec/g711.zig](zig/codec/g711.zig) (T20b). `pcm.zig` original, `LGPL-2.1-or-later`, behavior from `libavcodec/pcm.c`; `g711.zig` derived from `libavcodec/pcm_tablegen.h` (© 2010 Reimar Döffinger, `LGPL-2.1-or-later`, from Sun's unrestricted `g711.c`). The [PCM encodings](#pcm-encodings) contract; all 32 decode and encode digests from the pinned `libavcodec` match (exhaustive for 8- and 16-bit inputs and for A-law/mu-law encoding, a 65536-sample stream otherwise), regenerated in CI's reference job. G5 on local Windows runs at `464de03`. Limitations: no container carries the new encodings yet (T21a, T22a, T22c); scalar. |
 | PCM s16 kernels | Verified | [zig/codec/pcm.zig](zig/codec/pcm.zig), promoted from the former `zig/examples/pcm_s16.zig` example (T04). Original, `LGPL-2.1-or-later`; behavior follows `libavcodec/pcm.c`. Exhaustive `i16` round trip and fixture cross-check passed in [run 41553566007](https://github.com/zxc-f/zffmpeg/actions/runs/41553566007). Scalar only. |
 | Linux CI | Implemented | [Workflow](.github/workflows/ci.yml) on `ubuntu-24.04`. The `linux` job requires `zig version` 0.17.0, checks `zig fmt` on `build.zig`, `build.zig.zon` and `zig/`, that the fixtures are current and that every example is registered, runs `zig build` in Debug and ReleaseSafe and `zig build test` (unit tests and `zffprobe` process runs) in Debug, ReleaseSafe and ReleaseFast, and cross-compiles for x86_64-windows-gnu, aarch64-linux-musl and aarch64-macos without running. The `reference` job builds the pinned FFmpeg and runs the comparison (see the FFmpeg reference row). First example-only pass: [run 41544372319](https://github.com/zxc-f/zffmpeg/actions/runs/41544372319); first build/test pass: [run 41548960006](https://github.com/zxc-f/zffmpeg/actions/runs/41548960006); both jobs: [run 41557971301](https://github.com/zxc-f/zffmpeg/actions/runs/41557971301). Windows and ARM runs wait for TODO.md T62–T63. |
 | Zig toolchain/build/package | Verified | [build.zig](build.zig) (exact Zig 0.17.0 check, `av` module, `libzffmpeg.a`, test step for `av` and each example), [build.zig.zon](build.zig.zon) (toolchain-generated fingerprint, `.paths` allowlist, no dependencies), [zig/README.md](zig/README.md). Original `LGPL-2.1-or-later` files. `zig build` passed in Debug and ReleaseSafe and `zig build test` passed 9/9 in Debug, ReleaseSafe and ReleaseFast in [run 41548960006](https://github.com/zxc-f/zffmpeg/actions/runs/41548960006); failure propagation shown in [run 41548611661](https://github.com/zxc-f/zffmpeg/actions/runs/41548611661). Linux only; no C build dependency. |
@@ -1046,8 +1065,8 @@ has passed TODO.md gates G2–G4 is implemented, and it becomes verified at G5.
 The first complete path, WAV with signed 16-bit PCM, is verified on Linux.
 AU with signed 16-bit PCM, including `zffprobe` detection, is verified as well
 (T12), and so are the conversion pipeline and the `zffmpeg` command (T13)
-the packet, frame and stage types (T14a) and decoded sample storage (T20a).
-Other codecs and containers are planned.
+the packet, frame and stage types (T14a), decoded sample storage (T20a) and
+the PCM encodings (T20b). Other codecs and containers are planned.
 
 The authoritative next action is in [TODO.md](TODO.md). Let the first working
 path determine which shared infrastructure is necessary.

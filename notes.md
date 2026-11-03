@@ -177,6 +177,17 @@ port.md's contract table updated, and (after T06) the parser.
 | Partial output on input failure | An exact transfer read that the input cannot fill delivers nothing, so the samples written before a truncation depend on the 4 KiB transfer boundaries. The failure itself is always reported. | `convert.zig`; delivering the readable prefix would need short reads in `readData`. |
 | Rejected-input oracle | Tests expect a rejected input to fail conversion with `detect.probe`'s error, which the fixture contracts already pin, instead of repeating the fixture-to-error mapping. | `convert.zig` tests. |
 
+## PCM encodings
+
+| Decision | Current choice and reason | To change it |
+| --- | --- | --- |
+| FFmpeg's storage per codec | Each codec decodes to the packed format FFmpeg's decoder sets (s8 to u8, s24 to s32, G.711 to s16), so decoded samples compare bit for bit and later conversions start from the same values. | `Codec.storage` in `codec/pcm.zig`. |
+| One per-sample conversion | `decodeSample`/`encodeSample`, specialized per codec at compile time, back both the `samples.Buffer` kernels and the older s16 slice kernels: one implementation per encoding. | `codec/pcm.zig`. |
+| Floats as bits | f32 and f64 are moved as integer bit patterns, never through float registers, so NaN payloads and signaling NaNs survive as in FFmpeg's `memcpy`. | Same. |
+| Tables at compile time | G.711 tables are built by `comptime` code restating FFmpeg's `build_xlaw_table`, instead of FFmpeg's run-once init or a pasted table. | `codec/g711.zig`. |
+| Hash vectors | The oracle stores SHA-256 digests of FFmpeg's output over patterns both sides regenerate, keeping exhaustive 16-bit coverage in 32 lines. A mismatch says which codec and direction failed, not which sample. | `pcm_vectors.c`, `pcm.txt`; store full outputs if a mismatch needs locating. |
+| Wider reference build | The reference enables every PCM decoder and encoder T20b compares; the comparison's recorded FFmpeg verdicts for four fixtures changed with it. | `build-ffmpeg.sh`, the reference README. |
+
 ## Decoded sample storage
 
 | Decision | Current choice and reason | To change it |
