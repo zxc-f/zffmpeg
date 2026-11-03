@@ -42,6 +42,8 @@ pub const Limits = struct {
 };
 
 pub const Info = struct {
+    /// Always `pcm_s16be` (AU encoding 3) until TODO.md T22a.
+    codec: pcm.Codec = .s16be,
     format: audio.Format,
     /// Sample frames in the data.
     frame_count: u64,
@@ -355,7 +357,7 @@ fn expectFixture(comptime fixture: fixtures.au.Fixture, reader: *std.Io.Reader) 
             };
             try std.testing.expectEqual(stream.channels, decoded.format.channelCount());
             try std.testing.expectEqual(stream.sample_rate, decoded.format.sample_rate);
-            try std.testing.expectEqualSlices(i16, stream.samples, decoded.samples);
+            try std.testing.expectEqualSlices(i16, stream.samples.s16, decoded.samples);
         },
         .reject => |failure| std.testing.expectError(expectedError(failure), result) catch |err| {
             std.debug.print("fixture {s}\n", .{fixture.name});
@@ -389,7 +391,7 @@ test "probing validates without decoding and agrees with decoding" {
                 const info = try result;
                 try std.testing.expectEqual(stream.channels, info.format.channelCount());
                 try std.testing.expectEqual(stream.sample_rate, info.format.sample_rate);
-                try std.testing.expectEqual(stream.samples.len / stream.channels, info.frame_count);
+                try std.testing.expectEqual(stream.frameCount(), info.frame_count);
             },
             .reject => |failure| try std.testing.expectError(expectedError(failure), result),
         }
@@ -405,7 +407,7 @@ test "raw decoding writes the expected little-endian samples" {
             var out: std.Io.Writer = .fixed(&raw);
             _ = try decodeToRaw(&reader, &out, .{});
             var expected: [512]u8 = undefined;
-            try std.testing.expectEqualSlices(u8, try pcm.encodeS16(.little, stream.samples, &expected), out.buffered());
+            try std.testing.expectEqualSlices(u8, try pcm.encodeS16(.little, stream.samples.s16, &expected), out.buffered());
         }
     }
 }
@@ -492,11 +494,11 @@ test "the writer reproduces every AU writer-output fixture byte for byte" {
             const format = try audio.Format.init(stream.sample_rate, stream.channels, .s16);
             var buffer: [256]u8 = undefined;
             var out: std.Io.Writer = .fixed(&buffer);
-            var writer = try Writer.begin(&out, format, stream.samples.len / stream.channels, .{});
+            var writer = try Writer.begin(&out, format, stream.frameCount(), .{});
             // One frame per call exercises repeated writes.
             var i: usize = 0;
-            while (i < stream.samples.len) : (i += stream.channels) {
-                try writer.writeFrames(stream.samples[i..][0..stream.channels]);
+            while (i < stream.samples.s16.len) : (i += stream.channels) {
+                try writer.writeFrames(stream.samples.s16[i..][0..stream.channels]);
             }
             try writer.finish();
             try std.testing.expectEqualSlices(u8, fixtures.au.bytes(fixture.name), out.buffered());

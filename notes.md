@@ -88,8 +88,10 @@ port.md's contract table updated, and (after T06) the parser.
 
 | Decision | Current choice and reason | Fixtures |
 | --- | --- | --- |
-| Supported subset | Little-endian RIFF/WAVE, tag 1, signed 16-bit, mono or stereo only; everything else is `UnsupportedFormat`. Widen it as kernels and channel layouts land (T12). | `fmt_*`, `rifx_*`, `rf64`, `bw64`, `w64` |
-| `fmt ` sizes | 16, or 18 with `cbSize == 0`. Fewer than 16 declared bytes is `InvalidFormat`; other sizes are `UnsupportedFormat`. | `fmt18_cbsize0`, `fmt_size_14`, `fmt20_cbsize2`, `fmt_extensible` |
+| Supported subset | Little-endian RIFF/WAVE with the WAV PCM encodings (T21a: tag 1 at 8, 16, 24, 32 or 64 bits, tag 3 float at 32 or 64, A-law, mu-law, and WAVE_FORMAT_EXTENSIBLE with those subformats), mono or stereo only; everything else is `UnsupportedFormat`. Widen it as channel layouts (T23b) and RF64/W64 (T21b) land. | `fmt_*`, `extensible_*`, `rifx_*`, `rf64`, `bw64`, `w64` |
+| `fmt ` sizes | 16, or 18 with `cbSize == 0`; extensible exactly 40 with `cbSize == 22`. Fewer than 16 declared bytes is `InvalidFormat`; other sizes are `UnsupportedFormat`. | `fmt18_cbsize0`, `fmt_size_14`, `fmt20_cbsize2`, `extensible_fmt18`, `extensible_cbsize_short` |
+| Whole-byte depths | Tag 1 takes 8, 16, 24, 32 or 64 bits, float 32 or 64, G.711 8; FFmpeg rounds other depths up. Odd depths in the wild are rare, and rounding would decode samples the header misdescribes. | `fmt_bits12`, `fmt_float_bits16`, `fmt_alaw_bits16` |
+| Extensible details | Valid bits must be 0 or all bits, and the channel mask 0 or the layout's canonical mask; FFmpeg trusts both. A partial-valid-bits mode or a non-canonical mask needs a recorded use first (masks with T23b). | `extensible_valid_bits_*`, `extensible_mask_*` |
 | `byte_rate` | Ignored, even when inconsistent, because decoding never uses it and real files get it wrong. | `byte_rate_mismatch` |
 | Sample-rate limit | 192,000 Hz default; above it is `LimitExceeded`. A configurable policy limit, not a format rule. | `mono_192k_rate_limit`, `fmt_rate_over_limit` |
 | Chunk-count limit | 4,096 chunks including `fmt ` and `data`; the 4,097th is `LimitExceeded`. | `chunks_at_limit`, `chunks_over_limit` |
@@ -107,7 +109,7 @@ port.md's contract table updated, and (after T06) the parser.
 
 | Decision | Current choice and reason | To change it |
 | --- | --- | --- |
-| Header format | Always a 16-byte tag-1 `fmt `, including above 48 kHz where FFmpeg writes WAVE_FORMAT_EXTENSIBLE. Compare decoded samples and metadata with FFmpeg, not header bytes. | Writer-output fixtures (`stereo_96k_tag1`, `mono_192k_rate_limit`) and T08. |
+| Header format | Since T21a, the `fmt ` FFmpeg's `riffenc.c` chooses: extensible above 48 kHz or above 16 bits unless float, else plain (16 bytes for tag 1, 18 with `cbSize` 0 otherwise), plus a `fact` chunk for every encoding but tag 1, which FFmpeg writes on seekable output and we always can. This replaced T08's tag 1 at every rate: TODO.md T21a asked for FFmpeg's choice, and plain high-rate files remain accepted input. Compare decoded samples and metadata with FFmpeg, not file bytes (FFmpeg adds LIST/INFO). | `canonical_wav` in `generate.py`, `Writer` in `wav.zig`, the writer-output fixtures. |
 | Known length | The frame count is required up front; exact sizes are written with no seeking or placeholder sizes. | T08; streaming output would need seekable writers or placeholder patching. |
 
 ## PCM, audio and time types
@@ -198,7 +200,7 @@ port.md's contract table updated, and (after T06) the parser.
 | `Alignment` union | `.sample_padding` and `.line = n` instead of FFmpeg's `align = 0` sentinel. | Same. |
 | Oracle from libavutil | The vectors come from calling the pinned FFmpeg's functions (a C generator), not from a reimplementation, and CI regenerates and diffs them. The generator is a reference tool; nothing of it enters the port. | `zig/testing/reference/samplefmt_vectors.c`, the reference job. |
 | LF vectors | The generator's output is stored with LF endings (`.gitattributes`), and MinGW's `\r\n` is stripped when generating on Windows, so both platforms give identical bytes. | `.gitattributes`, the reference README. |
-| s16-only users | The WAV and AU writers reject other formats (`UnsupportedFormat`), `Frame.init` rejects them and the PCM stages assert them, so the larger enum cannot reach code that assumes s16. | T20b, T21a and T22a widen each. |
+| s16-only users | The AU writer rejects other formats (`UnsupportedFormat`), the WAV writer rejects a storage that is not its codec's, `Frame.init` rejects them and the PCM stages assert them, so the larger enum cannot reach code that assumes s16. | T21a widened the WAV writer; T22a widens AU; T23a the stages. |
 
 ## Packets, frames and stages
 

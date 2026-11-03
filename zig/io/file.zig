@@ -55,7 +55,8 @@ pub fn probePath(
 }
 
 /// Decodes the WAV stream in a borrowed file and writes its samples to `out`
-/// as raw signed 16-bit little-endian PCM. The caller flushes `out`.
+/// as raw little-endian samples of its storage format (`wav.decodeToRaw`).
+/// The caller flushes `out`.
 pub fn decodeFile(
     io: std.Io,
     file: std.Io.File,
@@ -67,8 +68,9 @@ pub fn decodeFile(
     return wav.decodeToRaw(&reader.interface, out, limits) catch |err| return withReadCause(err, &reader);
 }
 
-/// Writes interleaved `samples` as one WAV stream to a borrowed file and
-/// flushes before returning.
+/// Writes interleaved s16 `samples` as one `pcm_s16le` WAV stream to a
+/// borrowed file and flushes before returning. For other encodings, build a
+/// `wav.Writer` over `file.writerStreaming(...).interface`.
 pub fn writeFile(
     io: std.Io,
     file: std.Io.File,
@@ -101,7 +103,7 @@ pub fn writePath(
 fn writeStream(out: *std.Io.Writer, format: audio.Format, samples: []const i16, limits: wav.Limits) wav.WriteError!void {
     const channels = format.channelCount();
     if (samples.len % channels != 0) return error.IncompleteFrame;
-    var writer = try wav.Writer.begin(out, format, samples.len / channels, limits);
+    var writer = try wav.Writer.begin(out, .s16le, format, samples.len / channels, limits);
     try writer.writeFrames(samples);
     try writer.finish();
 }
@@ -226,7 +228,7 @@ test "a 4 MiB stream is written and read back with fixed memory" {
         defer file.close(io);
         var buffer: [default_buffer_len]u8 = undefined;
         var file_writer = file.writerStreaming(io, &buffer);
-        var writer = try wav.Writer.begin(&file_writer.interface, stereo, frame_count, .{});
+        var writer = try wav.Writer.begin(&file_writer.interface, .s16le, stereo, frame_count, .{});
         var chunk: [4096]i16 = undefined;
         var next: u64 = 0;
         while (next < frame_count * 2) {
@@ -289,11 +291,12 @@ test "writer adapters produce the writer-output fixtures" {
     defer tmp.cleanup();
     var buffer: [1]u8 = undefined;
 
+    // The helpers write pcm_s16le from s16 samples, plain or extensible.
     inline for (fixtures.all) |fixture| {
-        if (fixture.writer_output) {
+        if (fixture.writer_output and fixture.expected.accept.codec == .pcm_s16le) {
             const stream = fixture.expected.accept;
             const format = try audio.Format.init(stream.sample_rate, stream.channels, .s16);
-            try writePath(io, tmp.dir, fixture.name ++ ".wav", &buffer, format, stream.samples, .{});
+            try writePath(io, tmp.dir, fixture.name ++ ".wav", &buffer, format, stream.samples.s16, .{});
             var content: [256]u8 = undefined;
             const written = try tmp.dir.readFile(io, fixture.name ++ ".wav", &content);
             try std.testing.expectEqualSlices(u8, fixtures.bytes(fixture.name), written);
@@ -354,9 +357,8 @@ test "the AU writer reproduces its fixtures through every writer buffer size" {
                     const file = try tmp.dir.createFile(io, path, .{});
                     defer file.close(io);
                     var file_writer = file.writerStreaming(io, buffer[0..capacity]);
-                    const frame_count = stream.samples.len / format.channelCount();
-                    var writer = try au.Writer.begin(&file_writer.interface, format, frame_count, .{});
-                    try writer.writeFrames(stream.samples);
+                    var writer = try au.Writer.begin(&file_writer.interface, format, stream.frameCount(), .{});
+                    try writer.writeFrames(stream.samples.s16);
                     try writer.finish();
                 }
                 var content: [256]u8 = undefined;

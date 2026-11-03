@@ -113,7 +113,121 @@ def mono_8k():
     return riff(fmt_chunk(channels=1, rate=8000), data_chunk(MONO))
 
 
+# --- encodings (T21a) --------------------------------------------------------
+
+# The WAV encodings of the contract: FFmpeg codec name -> (format tag, bits per
+# sample, storage). Storage is the sample format FFmpeg's decoder gives.
+WAV_CODECS = {
+    "pcm_u8": (1, 8, "u8"),
+    "pcm_s16le": (1, 16, "s16"),
+    "pcm_s24le": (1, 24, "s32"),
+    "pcm_s32le": (1, 32, "s32"),
+    "pcm_s64le": (1, 64, "s64"),
+    "pcm_f32le": (3, 32, "flt"),
+    "pcm_f64le": (3, 64, "dbl"),
+    "pcm_alaw": (6, 8, "s16"),
+    "pcm_mulaw": (7, 8, "s16"),
+}
+# KSDATAFORMAT_SUBTYPE_*: the format tag as a little-endian u32, then this.
+SUBFORMAT_BASE = bytes.fromhex("00001000800000aa00389b71")
+CHANNEL_MASK = {1: 0x4, 2: 0x3}  # front center; front left | front right
+WRITER_MAX_PLAIN_RATE = 48_000  # riffenc.c: WAVE_FORMAT_EXTENSIBLE above this
+
+
+def alaw_to_linear(code):
+    """G.711 A-law expansion, as in the ITU recommendation's reference code."""
+    a = code ^ 0x55
+    t = (a & 0x0F) << 4
+    seg = (a & 0x70) >> 4
+    t = t + 8 if seg == 0 else (t + 0x108) << (seg - 1)
+    return t if a & 0x80 else -t
+
+
+def mulaw_to_linear(code):
+    """G.711 mu-law expansion with the 0x84 bias."""
+    u = ~code & 0xFF
+    t = (((u & 0x0F) << 3) + 0x84) << ((u & 0x70) >> 4)
+    return 0x84 - t if u & 0x80 else t - 0x84
+
+
+def decode_stored(codec, data):
+    """The decoded samples as FFmpeg stores them: integers, floats as bit patterns."""
+    if codec == "pcm_u8":
+        return list(data)
+    if codec == "pcm_s16le":
+        return [s for (s,) in struct.iter_unpack("<h", data)]
+    if codec == "pcm_s24le":
+        raws = [int.from_bytes(data[i:i + 3], "little") for i in range(0, len(data), 3)]
+        return [struct.unpack("<i", struct.pack("<I", (raw << 8) & 0xFFFFFFFF))[0] for raw in raws]
+    if codec == "pcm_s32le":
+        return [s for (s,) in struct.iter_unpack("<i", data)]
+    if codec == "pcm_s64le":
+        return [s for (s,) in struct.iter_unpack("<q", data)]
+    if codec == "pcm_f32le":
+        return [s for (s,) in struct.iter_unpack("<I", data)]
+    if codec == "pcm_f64le":
+        return [s for (s,) in struct.iter_unpack("<Q", data)]
+    if codec == "pcm_alaw":
+        return [alaw_to_linear(b) for b in data]
+    if codec == "pcm_mulaw":
+        return [mulaw_to_linear(b) for b in data]
+    raise ValueError(codec)
+
+
+STORAGE_PACK = {"u8": "<B", "s16": "<h", "s32": "<i", "s64": "<q", "flt": "<I", "dbl": "<Q"}
+
+
+def storage_bytes(stream):
+    """The decoded samples serialized little-endian, as `ffmpeg -c:a pcm_<storage>le` writes them."""
+    fmt = STORAGE_PACK[stream.storage]
+    return b"".join(struct.pack(fmt, s) for s in stream.stored)
+
+
+def canonical_wav(codec, channels, rate, data):
+    """The writer's output for one known-length stream: the header riffenc.c
+    chooses (WAVE_FORMAT_EXTENSIBLE above 48 kHz, or above 16 bits unless
+    float), a `fact` chunk for every encoding but tag 1, then `data`."""
+    tag, bits, _ = WAV_CODECS[codec]
+    frames = len(data) // (channels * bits // 8)
+    if rate > WRITER_MAX_PLAIN_RATE or (bits > 16 and tag != 3):
+        extension = u16(bits) + u32(CHANNEL_MASK[channels]) + u32(tag) + SUBFORMAT_BASE
+        fmt = fmt_body(channels, rate, bits, tag=0xFFFE, cb_size=22, extra=extension)
+    elif tag == 1:
+        fmt = fmt_body(channels, rate, bits, tag=1)
+    else:
+        fmt = fmt_body(channels, rate, bits, tag=tag, cb_size=0)
+    chunks = [chunk(b"fmt ", fmt)]
+    if tag != 1:
+        chunks.append(chunk(b"fact", u32(frames)))
+    chunks.append(chunk(b"data", data))
+    return riff(*chunks)
+
+
+def extensible_fmt(channels=1, rate=8000, bits=16, sub_tag=1, valid=None, mask=None,
+                   cb_size=22, block_align=None, subformat=None):
+    """A 40-byte WAVE_FORMAT_EXTENSIBLE `fmt ` body; every field can be overridden."""
+    valid = bits if valid is None else valid
+    mask = CHANNEL_MASK.get(channels, 0) if mask is None else mask
+    guid = u32(sub_tag) + SUBFORMAT_BASE if subformat is None else subformat
+    return fmt_body(channels, rate, bits, tag=0xFFFE, block_align=block_align, cb_size=cb_size,
+                    extra=u16(valid) + u32(mask) + guid)
+
+
 # --- fixtures --------------------------------------------------------------
+
+
+@dataclasses.dataclass
+class Stream:
+    """An accepted stream. Iterating gives (channels, rate, stored), as the s16-only
+    tuple used to."""
+    codec: str
+    channels: int
+    rate: int
+    storage: str
+    stored: list  # decoded samples as stored: integers; floats as IEEE bit patterns
+
+    def __iter__(self):
+        return iter((self.channels, self.rate, self.stored))
 
 
 @dataclasses.dataclass
@@ -122,13 +236,23 @@ class Fixture:
     group: str
     rule: str
     data: bytes
-    accept: tuple = None  # (channels, sample_rate, samples)
+    accept: Stream = None
     reject: str = None  # contract error name
     writer_output: bool = False
 
 
-def accepted(name, group, rule, data, channels, rate, samples, writer_output=False):
-    return Fixture(name, group, rule, data, accept=(channels, rate, list(samples)),
+def accepted(name, group, rule, data, channels, rate, samples, writer_output=False, codec=None):
+    """An accepted s16 stream (`pcm_s16le`, or the AU contract's `pcm_s16be`)."""
+    return Fixture(name, group, rule, data,
+                   accept=Stream(codec or "pcm_s16le", channels, rate, "s16", list(samples)),
+                   writer_output=writer_output)
+
+
+def accepted_encoded(name, group, rule, data, codec, channels, rate, encoded, writer_output=False):
+    """An accepted WAV stream of any contract encoding; `encoded` is its `data` payload."""
+    storage = WAV_CODECS[codec][2]
+    return Fixture(name, group, rule, data,
+                   accept=Stream(codec, channels, rate, storage, decode_stored(codec, encoded)),
                    writer_output=writer_output)
 
 
@@ -154,13 +278,14 @@ def build_fixtures():
                        riff(fmt_chunk(channels=2, rate=44100), data_chunk(STEREO)),
                        2, 44100, STEREO, writer_output=True))
     fx.append(accepted("stereo_96k_tag1", "accepted",
-                       "High-rate stereo with a plain tag-1 `fmt `. Intentional difference: FFmpeg's "
-                       "writer emits WAVE_FORMAT_EXTENSIBLE above 48 kHz; ours keeps tag 1.",
+                       "High-rate stereo with a plain tag-1 `fmt `, as older writers produce. The writer "
+                       "emits WAVE_FORMAT_EXTENSIBLE above 48 kHz (`s16_stereo_96k_extensible`).",
                        riff(fmt_chunk(channels=2, rate=96000), data_chunk(STEREO)),
-                       2, 96000, STEREO, writer_output=True))
-    fx.append(accepted("mono_192k_rate_limit", "accepted", "Sample rate exactly at the 192,000 Hz limit.",
+                       2, 96000, STEREO))
+    fx.append(accepted("mono_192k_rate_limit", "accepted",
+                       "Sample rate exactly at the 192,000 Hz limit, with a plain tag-1 `fmt `.",
                        riff(fmt_chunk(channels=1, rate=MAX_RATE), data_chunk(MONO[:4])),
-                       1, MAX_RATE, MONO[:4], writer_output=True))
+                       1, MAX_RATE, MONO[:4]))
     fx.append(accepted("empty_data", "accepted", "`data` size 0 is an empty stream, not read-to-EOF.",
                        riff(fmt_chunk(), data_chunk([])), 1, 8000, [], writer_output=True))
     fx.append(accepted("fmt18_cbsize0", "accepted", "18-byte `fmt ` with `cbSize == 0`.",
@@ -191,6 +316,60 @@ def build_fixtures():
                        f"Exactly {MAX_CHUNKS} chunks: `fmt `, {MAX_CHUNKS - 2} empty `JUNK`, `data`.",
                        riff(fmt_chunk(), *([chunk(b"JUNK", b"")] * (MAX_CHUNKS - 2)), data_chunk(MONO[:2])),
                        1, 8000, MONO[:2]))
+
+    # Encodings (T21a): every contract encoding as the writer emits it.
+    u8_bytes = bytes([0, 1, 127, 128, 129, 255, 64, 200])
+    s24_bytes = b"".join((v & 0xFFFFFF).to_bytes(3, "little")
+                         for v in [0, 1, -1, 0x7FFFFF, -0x800000, 123456, -654321, 256])
+    s32_bytes = b"".join(struct.pack("<i", v) for v in
+                         [0, 1, -1, 0x7FFFFFFF, -0x80000000, 123456789, -987654321, 65536])
+    s64_bytes = b"".join(struct.pack("<q", v) for v in
+                         [0, 1, -1, 2**63 - 1, -2**63, 1234567890123, -42, 1 << 40])
+    # Zero, negative zero, +-1, 0.5, infinity, the smallest subnormal, a NaN with a payload.
+    f32_bytes = b"".join(struct.pack("<I", v) for v in
+                         [0, 0x80000000, 0x3F800000, 0xBF800000, 0x3F000000, 0x7F800000, 1, 0x7FC00001])
+    f64_bytes = b"".join(struct.pack("<Q", v) for v in
+                         [0, 0x8000000000000000, 0x3FF0000000000000, 0xBFF0000000000000,
+                          0x7FF0000000000000, 1, 0x7FF8000000000001, 0x3FE0000000000000])
+    # Each code's smallest and largest magnitudes of both signs, and two more.
+    alaw_bytes = bytes([0xD5, 0x55, 0xAA, 0x2A, 0x00, 0x80, 0x7F, 0xFF])
+    # Not 0x7F: mu-law's negative zero decodes like 0xFF, and every encoder,
+    # FFmpeg's included, writes zero as 0xFF, so it cannot be writer output.
+    mulaw_bytes = bytes([0xFF, 0x70, 0x80, 0x00, 0x01, 0x81, 0xFE, 0x7E])
+    encoded = [
+        ("u8_mono_8k", "pcm_u8", 1, 8000, u8_bytes,
+         "Unsigned 8-bit (tag 1, 8 bits) with a 16-byte `fmt `; silence is 128."),
+        ("s24_stereo_48k_extensible", "pcm_s24le", 2, 48000, s24_bytes,
+         "24-bit stereo; above 16 bits the writer uses WAVE_FORMAT_EXTENSIBLE with the channel mask."),
+        ("s32_mono_8k_extensible", "pcm_s32le", 1, 8000, s32_bytes, "32-bit integers, extensible."),
+        ("s64_mono_8k_extensible", "pcm_s64le", 1, 8000, s64_bytes, "64-bit integers, extensible."),
+        ("f32_mono_8k", "pcm_f32le", 1, 8000, f32_bytes,
+         "IEEE float (tag 3) up to 48 kHz: an 18-byte `fmt ` with `cbSize` 0 and a `fact` chunk. "
+         "Every bit is kept, NaN payload included."),
+        ("f64_stereo_96k_extensible", "pcm_f64le", 2, 96000, f64_bytes,
+         "64-bit float above 48 kHz: extensible with the IEEE float subformat, and a `fact` chunk."),
+        ("alaw_mono_8k", "pcm_alaw", 1, 8000, alaw_bytes,
+         "A-law (tag 6): an 18-byte `fmt ` and a `fact` chunk; decodes to s16."),
+        ("mulaw_mono_8k", "pcm_mulaw", 1, 8000, mulaw_bytes,
+         "mu-law (tag 7): an 18-byte `fmt ` and a `fact` chunk; decodes to s16. Its negative zero "
+         "(0x7F) is left out: it reads as zero, which every encoder writes as 0xFF."),
+        ("s16_stereo_96k_extensible", "pcm_s16le", 2, 96000, pcm(STEREO),
+         "16-bit stereo above 48 kHz: the writer uses WAVE_FORMAT_EXTENSIBLE, as FFmpeg's does."),
+        ("s16_mono_192k_extensible", "pcm_s16le", 1, MAX_RATE, pcm(MONO[:4]),
+         "16-bit mono at the 192 kHz limit, extensible."),
+    ]
+    for name, codec, channels, rate, payload, rule in encoded:
+        fx.append(accepted_encoded(name, "encodings", rule, canonical_wav(codec, channels, rate, payload),
+                                   codec, channels, rate, payload, writer_output=True))
+    fx.append(accepted_encoded("extensible_mask_zero", "encodings",
+                               "Extensible with channel mask 0 (unspecified): the default layout applies.",
+                               riff(chunk(b"fmt ", extensible_fmt(mask=0)), data_chunk(MONO[:4])),
+                               "pcm_s16le", 1, 8000, pcm(MONO[:4])))
+    fx.append(accepted_encoded("extensible_valid_bits_zero", "encodings",
+                               "Extensible 24-bit stereo with `wValidBitsPerSample` 0: all bits are valid.",
+                               riff(chunk(b"fmt ", extensible_fmt(channels=2, bits=24, valid=0)),
+                                    chunk(b"data", s24_bytes)),
+                               "pcm_s24le", 2, 8000, s24_bytes))
 
     # RIFF header.
     fx.append(rejected("empty_input", "riff header", "No bytes at all.", b"", "Truncated"))
@@ -233,12 +412,58 @@ def build_fixtures():
                        riff(chunk(b"fmt ", fmt_body(cb_size=2, extra=b"\0\0")), data_chunk(MONO[:4])),
                        "UnsupportedFormat"))
     extensible = fmt_body(tag=0xFFFE, cb_size=22, extra=u16(16) + u32(4) + EXTENSIBLE_PCM_GUID)
-    fx.append(rejected("fmt_extensible", "fmt", "WAVE_FORMAT_EXTENSIBLE (tag 0xFFFE, 40 bytes), even with a PCM subformat.",
-                       riff(chunk(b"fmt ", extensible), data_chunk(MONO[:4])), "UnsupportedFormat"))
-    fx.append(rejected("fmt_float32", "fmt", "IEEE float (tag 3, 32-bit).",
-                       riff(fmt_chunk(tag=3, bits=32), data_chunk(MONO[:4])), "UnsupportedFormat"))
-    fx.append(rejected("fmt_bits24", "fmt", "Tag 1 with 24-bit samples.",
-                       riff(fmt_chunk(bits=24), data_chunk(MONO[:3])), "UnsupportedFormat"))
+    fx.append(accepted_encoded("fmt_extensible", "fmt",
+                               "WAVE_FORMAT_EXTENSIBLE (tag 0xFFFE, 40 bytes) with the PCM subformat and "
+                               "the mono mask: 16-bit PCM (rejected before T21a).",
+                               riff(chunk(b"fmt ", extensible), data_chunk(MONO[:4])),
+                               "pcm_s16le", 1, 8000, pcm(MONO[:4])))
+    fx.append(accepted_encoded("fmt_float32", "fmt",
+                               "IEEE float (tag 3, 32-bit) with a 16-byte `fmt ` and no `fact` chunk, which is "
+                               "optional (rejected before T21a).",
+                               riff(fmt_chunk(tag=3, bits=32), data_chunk(MONO[:4])),
+                               "pcm_f32le", 1, 8000, pcm(MONO[:4])))
+    fx.append(accepted_encoded("fmt_bits24", "fmt",
+                               "Tag 1 with 24-bit samples and a plain 16-byte `fmt ` (rejected before T21a).",
+                               riff(fmt_chunk(bits=24), data_chunk(MONO[:3])),
+                               "pcm_s24le", 1, 8000, pcm(MONO[:3])))
+    fx.append(rejected("fmt_bits12", "fmt",
+                       "Tag 1 with 12 bits in 2-byte samples: only whole-byte depths. FFmpeg rounds up and "
+                       "reads s16.", riff(fmt_chunk(bits=12, block_align=2), data_chunk(MONO[:4])),
+                       "UnsupportedFormat"))
+    fx.append(rejected("fmt_float_bits16", "fmt", "Tag 3 with 16-bit samples: float is 32 or 64 bits.",
+                       riff(fmt_chunk(tag=3, bits=16), data_chunk(MONO[:4])), "UnsupportedFormat"))
+    fx.append(rejected("fmt_alaw_bits16", "fmt", "A-law (tag 6) declaring 16 bits: A-law is 8 bits.",
+                       riff(fmt_chunk(tag=6, bits=16), data_chunk(MONO[:4])), "UnsupportedFormat"))
+    fx.append(rejected("fmt_adpcm", "fmt", "Tag 2 (Microsoft ADPCM) is not a contract encoding.",
+                       riff(fmt_chunk(tag=2, bits=4, block_align=1), data_chunk(MONO[:4])), "UnsupportedFormat"))
+    fx.append(rejected("fmt_s24_block_align_mismatch", "fmt", "24-bit stereo with `block_align` 4 instead of 6.",
+                       riff(fmt_chunk(channels=2, bits=24, block_align=4), data_chunk(STEREO[:4])),
+                       "InvalidFormat"))
+    fx.append(rejected("extensible_fmt18", "extensible", "Tag 0xFFFE in an 18-byte `fmt ` with `cbSize` 0.",
+                       riff(chunk(b"fmt ", fmt_body(tag=0xFFFE, cb_size=0)), data_chunk(MONO[:4])),
+                       "UnsupportedFormat"))
+    fx.append(rejected("extensible_cbsize_short", "extensible", "A 40-byte extensible `fmt ` declaring `cbSize` 10.",
+                       riff(chunk(b"fmt ", extensible_fmt(cb_size=10)), data_chunk(MONO[:4])),
+                       "UnsupportedFormat"))
+    fx.append(rejected("extensible_unknown_subformat", "extensible",
+                       "An extensible `fmt ` whose subformat is the AC-3 GUID.",
+                       riff(chunk(b"fmt ", extensible_fmt(
+                           subformat=bytes.fromhex("2c806de046dbcf11b4d100805f6cbbea"))), data_chunk(MONO[:4])),
+                       "UnsupportedFormat"))
+    fx.append(rejected("extensible_subformat_adpcm", "extensible",
+                       "The base subformat GUID with tag 2 (ADPCM).",
+                       riff(chunk(b"fmt ", extensible_fmt(sub_tag=2, bits=4, block_align=1)), data_chunk(MONO[:4])),
+                       "UnsupportedFormat"))
+    fx.append(rejected("extensible_valid_bits_mismatch", "extensible",
+                       "24-bit samples declaring 20 valid bits: only all bits valid. FFmpeg reads them as s24.",
+                       riff(chunk(b"fmt ", extensible_fmt(channels=2, bits=24, valid=20)), chunk(b"data", bytes(12))),
+                       "UnsupportedFormat"))
+    fx.append(rejected("extensible_mask_mismatch", "extensible",
+                       "Stereo with the mono channel mask (front center): layouts beyond mono and stereo wait for T23b.",
+                       riff(chunk(b"fmt ", extensible_fmt(channels=2, mask=0x4)), data_chunk(STEREO)),
+                       "UnsupportedFormat"))
+    fx.append(rejected("extensible_truncated", "extensible", "Input ends inside the 40-byte extensible `fmt `.",
+                       riff(chunk(b"fmt ", extensible_fmt()), data_chunk(MONO[:4]))[:50], "Truncated"))
     fx.append(rejected("fmt_channels3", "fmt", "Three channels.",
                        riff(fmt_chunk(channels=3), data_chunk(MONO[:6])), "UnsupportedFormat"))
     fx.append(rejected("fmt_channels0", "fmt", "Zero channels.",
@@ -250,8 +475,9 @@ def build_fixtures():
     fx.append(rejected("fmt_block_align_mismatch", "fmt", "Stereo with `block_align` 2 instead of 4.",
                        riff(fmt_chunk(channels=2, block_align=2), data_chunk(STEREO)), "InvalidFormat"))
     fx.append(rejected("fmt_unsupported_before_invalid", "fmt",
-                       "Precedence: tag 3 with zero channels reports the unsupported tag first.",
-                       riff(fmt_chunk(tag=3, bits=32, channels=0), data_chunk([])), "UnsupportedFormat"))
+                       "Precedence: tag 2 (ADPCM) with zero channels reports the unsupported tag first.",
+                       riff(fmt_chunk(tag=2, bits=4, channels=0, block_align=1), data_chunk([])),
+                       "UnsupportedFormat"))
 
     # Chunk order and duplicates.
     fx.append(rejected("data_before_fmt", "order", "`data` appears before any `fmt `.",
@@ -359,7 +585,7 @@ def build_au_fixtures():
     fx = []
 
     def ok(name, group, rule, data, channels, rate, samples, writer_output=False):
-        fx.append(accepted(name, group, rule, data, channels, rate, samples, writer_output))
+        fx.append(accepted(name, group, rule, data, channels, rate, samples, writer_output, codec="pcm_s16be"))
 
     def bad(name, group, rule, data, error):
         assert error in AU_ERRORS, error
@@ -464,11 +690,13 @@ def render_manifest(fixtures, entry_note):
         lines.append(f'        .name = "{f.name}",')
         lines.append(f'        .sha256 = "{sha256(f.data)}",')
         if f.accept is not None:
-            channels, rate, samples = f.accept
-            sample_list = "{}" if not samples else "{ " + ", ".join(str(s) for s in samples) + " }"
+            s = f.accept
+            # Float samples are bit patterns, clearest in hexadecimal.
+            text = (lambda v: f"0x{v:x}") if s.storage in ("flt", "dbl") else str
+            sample_list = "{}" if not s.stored else "{ " + ", ".join(text(v) for v in s.stored) + " }"
             lines.append(
-                f"        .expected = .{{ .accept = .{{ .channels = {channels}, .sample_rate = {rate}, "
-                f".samples = .{sample_list} }} }},"
+                f"        .expected = .{{ .accept = .{{ .codec = .{s.codec}, .channels = {s.channels}, "
+                f".sample_rate = {s.rate}, .samples = .{{ .{s.storage} = .{sample_list} }} }} }},"
             )
         else:
             lines.append(f"        .expected = .{{ .reject = .{f.reject} }},")
@@ -485,6 +713,8 @@ def describe(f):
         layout = {1: "mono", 2: "stereo"}[channels]
         frames = len(samples) // channels
         text = f"accept: {layout}, {rate} Hz, {frames} frame{'s' if frames != 1 else ''}"
+        if f.accept.codec not in ("pcm_s16le", "pcm_s16be"):
+            text += f", `{f.accept.codec}`"
         return text + ("; writer output" if f.writer_output else "")
     return f"reject: `{f.reject}`"
 

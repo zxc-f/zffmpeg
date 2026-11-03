@@ -79,7 +79,7 @@ fn writeReport(out: *std.Io.Writer, info: av.detect.Probed) std.Io.Writer.Error!
         \\
     , .{
         info.container.name(),
-        info.container.codecName(),
+        info.codec.name(),
         format.sample_format.name(),
         format.channelCount(),
         format.layout.name(),

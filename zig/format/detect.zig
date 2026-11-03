@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const audio = @import("../core/audio.zig");
+const pcm = @import("../codec/pcm.zig");
 const wav = @import("wav.zig");
 const au = @import("au.zig");
 const prefix = @import("prefix.zig");
@@ -27,19 +28,19 @@ pub const Container = enum {
         return @tagName(container);
     }
 
-    /// The codec of the supported subset, as FFmpeg's `codec_name`.
-    pub fn codecName(container: Container) []const u8 {
+    /// Whether this container can carry `codec`.
+    pub fn carries(container: Container, codec: pcm.Codec) bool {
         return switch (container) {
-            .wav => "pcm_s16le",
-            .au => "pcm_s16be",
+            .wav => wav.carries(codec),
+            .au => codec == .s16be, // until TODO.md T22a
         };
     }
 
-    /// The byte order of that codec's samples.
-    pub fn sampleEndian(container: Container) std.lang.Endian {
+    /// The codec transcoding writes, for samples stored as s16.
+    pub fn s16Codec(container: Container) pcm.Codec {
         return switch (container) {
-            .wav => .little,
-            .au => .big,
+            .wav => .s16le,
+            .au => .s16be,
         };
     }
 };
@@ -60,6 +61,9 @@ pub const Detected = struct {
 
 pub const Probed = struct {
     container: Container,
+    /// The stream's encoding, as FFmpeg's `codec_name` names it.
+    codec: pcm.Codec,
+    /// `sample_format` is `codec.storage()`.
     format: audio.Format,
     /// Sample frames in the stream.
     frame_count: u64,
@@ -84,13 +88,13 @@ pub fn probe(reader: *std.Io.Reader, limits: Limits) Error!Probed {
             var parser: wav.Parser = .initPrefixed(reader, limits.wav, detected.prefix);
             const info = try parser.readHeader();
             try parser.finish();
-            return .{ .container = .wav, .format = info.format, .frame_count = info.frame_count };
+            return .{ .container = .wav, .codec = info.codec, .format = info.format, .frame_count = info.frame_count };
         },
         .au => {
             var parser: au.Parser = .initPrefixed(reader, limits.au, detected.prefix);
             const info = try parser.readHeader();
             try parser.finish();
-            return .{ .container = .au, .format = info.format, .frame_count = info.frame_count };
+            return .{ .container = .au, .codec = info.codec, .format = info.format, .frame_count = info.frame_count };
         },
     }
 }
@@ -150,7 +154,7 @@ test "detection reports the container and passes limits to its parser" {
     var mono: std.Io.Reader = .fixed(fixtures.au.bytes("au_mono_8k"));
     const probed = try probe(&mono, .{});
     try std.testing.expectEqual(Container.au, probed.container);
-    try std.testing.expectEqualStrings("pcm_s16be", probed.container.codecName());
+    try std.testing.expectEqualStrings("pcm_s16be", probed.codec.name());
     var fast: std.Io.Reader = .fixed(fixtures.au.bytes("au_mono_192k_rate_limit"));
     try std.testing.expectError(error.LimitExceeded, probe(&fast, .{ .au = .{ .max_sample_rate = 191_999 } }));
     var wav_fast: std.Io.Reader = .fixed(fixtures.bytes("mono_192k_rate_limit"));

@@ -64,8 +64,9 @@ pub const Request = struct {
 /// output header. `LimitExceeded` can come from the input's or the output's
 /// limits.
 pub const InitError = detect.Error || wav.HeaderError || au.HeaderError || error{
-    /// The request is outside the operation matrix: stream copy between
-    /// different codecs.
+    /// The request is outside the operation matrix: stream copy into a
+    /// container that cannot carry the codec, or transcoding samples not
+    /// stored as s16 (sample-format conversion waits for TODO.md T23a).
     UnsupportedOperation,
 };
 
@@ -78,6 +79,10 @@ pub const Summary = struct {
     input: Container,
     output: Container,
     mode: Mode,
+    input_codec: pcm.Codec,
+    /// The input codec when copying; when transcoding, the output
+    /// container's s16 codec.
+    output_codec: pcm.Codec,
     /// The input's and the output's format; neither rate nor layout changes.
     format: audio.Format,
     /// Sample frames in the input and the output. The duration is this many
@@ -85,14 +90,14 @@ pub const Summary = struct {
     frame_count: u64,
 };
 
-/// Bytes moved per transfer step. It holds a whole number of mono and stereo
-/// frames, so an empty read always means the end of the data (the parsers also
-/// return nothing when the output cannot hold one frame).
+/// Bytes moved per transfer step. It holds at least one frame of every
+/// encoding, so an empty read always means the end of the data (the parsers
+/// read whole frames and return nothing only when none fits or none is left).
 const transfer_len = 4096;
 
 comptime {
-    const largest_frame: usize = 2 * audio.SampleFormat.s16.bytesPerSample(); // stereo s16
-    std.debug.assert(transfer_len % largest_frame == 0);
+    const largest_frame: usize = 2 * 8; // stereo s64 or f64
+    std.debug.assert(transfer_len >= largest_frame);
 }
 
 /// One conversion from a borrowed reader to a borrowed writer. Create it with
@@ -126,18 +131,23 @@ pub const Conversion = struct {
                     .input = container,
                     .output = request.output,
                     .mode = request.mode,
+                    .input_codec = info.codec,
+                    .output_codec = switch (request.mode) {
+                        .copy => info.codec,
+                        .transcode => request.output.s16Codec(),
+                    },
                     .format = info.format,
                     .frame_count = info.frame_count,
                 };
             },
         };
-        if (request.mode == .copy and
-            !std.mem.eql(u8, summary.input.codecName(), summary.output.codecName()))
-        {
-            return error.UnsupportedOperation;
-        }
+        const supported = switch (request.mode) {
+            .copy => request.output.carries(summary.input_codec),
+            .transcode => summary.input_codec.storage() == .s16,
+        };
+        if (!supported) return error.UnsupportedOperation;
         switch (request.output) {
-            .wav => try wav.Writer.check(summary.format, summary.frame_count, limits.wav),
+            .wav => try wav.Writer.check(summary.output_codec, summary.format, summary.frame_count, limits.wav),
             .au => try au.Writer.check(summary.format, summary.frame_count, limits.au),
         }
         return .{ .input = input, .limits = limits, .summary = summary };
@@ -150,7 +160,7 @@ pub const Conversion = struct {
         const s = c.summary;
         switch (s.output) {
             .wav => {
-                var writer = wav.Writer.begin(out, s.format, s.frame_count, c.limits.wav) catch |err| return outputFailure(err);
+                var writer = wav.Writer.begin(out, s.output_codec, s.format, s.frame_count, c.limits.wav) catch |err| return outputFailure(err);
                 try c.transfer(wav.Writer, &writer);
             },
             .au => {
@@ -168,11 +178,13 @@ pub const Conversion = struct {
             },
             .transcode => {
                 const s = c.summary;
-                var samples: [transfer_len / 2]i16 = undefined;
-                var encoded: [transfer_len]u8 = undefined;
+                // A packet of 1-byte samples (A-law, mu-law) is transfer_len
+                // samples, which encode as s16 into twice the bytes.
+                var samples: [transfer_len]i16 = undefined;
+                var encoded: [2 * transfer_len]u8 = undefined;
                 var stages: Transcoder(W) = .{
-                    .decoder = .init(s.input.sampleEndian(), s.format, &samples),
-                    .encoder = .init(s.output.sampleEndian(), s.format, &encoded),
+                    .decoder = .init(s.input_codec, s.format, &samples),
+                    .encoder = .init(s.output_codec, s.format, &encoded),
                     .writer = writer,
                 };
                 while (try c.readPacket(&packet_bytes)) |packet| try stages.push(packet);
@@ -192,8 +204,9 @@ pub const Conversion = struct {
         const data = try c.readData(storage);
         if (data.len == 0) return null;
         const format = c.summary.format;
+        const sample_bytes: usize = c.summary.input_codec.bytesPerSample();
         // At most `storage.len` bytes, so the frame count fits in i64.
-        const frames: i64 = @intCast(data.len / format.bytesPerFrame());
+        const frames: i64 = @intCast(data.len / (sample_bytes * format.channelCount()));
         const pts = c.next_pts;
         c.next_pts += frames;
         return .{
@@ -223,8 +236,8 @@ pub const Conversion = struct {
 ///
 /// `push` empties both stages before it returns, so each holds at most one
 /// item and `send` never returns `.full`. Their sends cannot fail either:
-/// packets hold whole frames of the conversion's format and at most
-/// `transfer_len` bytes, which both storages hold; their timestamps are
+/// packets hold whole frames of the input codec, at most `transfer_len`
+/// bytes, which both storages hold even for 1-byte codecs; their timestamps are
 /// already in the format's time base, so rescaling is exact; and input ends
 /// only once, with `push(null)`.
 fn Transcoder(comptime W: type) type {
@@ -346,37 +359,65 @@ fn canonicalHeaderLen(container: Container) usize {
     };
 }
 
-/// Runs every matrix cell on one accepted fixture.
-fn expectEveryCell(input: Container, bytes: []const u8, stream: fixtures.Stream, writer_output: bool) !void {
+/// The bytes before the samples in an output the writers produce.
+fn headerLenOf(container: Container, codec: pcm.Codec, format: audio.Format) usize {
+    return switch (container) {
+        .wav => wav.headerLen(codec, format),
+        .au => au.canonical_header_len,
+    };
+}
+
+/// A stream's decoded samples, little-endian in their storage format, read by
+/// the container's own parser.
+fn rawOf(container: Container, bytes: []const u8, out: []u8) ![]const u8 {
+    var reader: std.Io.Reader = .fixed(bytes);
+    var writer: std.Io.Writer = .fixed(out);
+    switch (container) {
+        .wav => _ = try wav.decodeToRaw(&reader, &writer, .{}),
+        .au => _ = try au.decodeToRaw(&reader, &writer, .{}),
+    }
+    return writer.buffered();
+}
+
+/// Runs every matrix cell on one accepted fixture. Neither container carries
+/// the other's codecs, so copy works only into the input's container, and
+/// transcoding only from samples stored as s16 (other storage needs T23a).
+fn expectEveryCell(input: Container, bytes: []const u8, comptime stream: fixtures.Stream, writer_output: bool) !void {
+    var expected_buffer: [1024]u8 = undefined;
+    const expected = stream.samples.littleEndian(&expected_buffer);
     for (all_cells) |request| {
         var reader: std.Io.Reader = .fixed(bytes);
         var buffer: [1024]u8 = undefined;
         var out: std.Io.Writer = .fixed(&buffer);
         const result = convert(&reader, &out, request, .{});
-        if (request.mode == .copy and request.output != input) {
+        const supported = switch (request.mode) {
+            .copy => request.output == input,
+            .transcode => stream.samples == .s16,
+        };
+        if (!supported) {
             try std.testing.expectError(error.UnsupportedOperation, result);
             try std.testing.expectEqual(0, out.buffered().len);
             continue;
         }
         const summary = try result;
-        const frame_count = stream.samples.len / stream.channels;
+        const frame_count = stream.frameCount();
         try std.testing.expectEqual(input, summary.input);
         try std.testing.expectEqual(request.output, summary.output);
+        try std.testing.expectEqualStrings(@tagName(stream.codec), summary.input_codec.name());
         try std.testing.expectEqual(stream.sample_rate, summary.format.sample_rate);
         try std.testing.expectEqual(stream.channels, summary.format.channelCount());
         try std.testing.expectEqual(frame_count, summary.frame_count);
 
-        // The output holds the canonical header and exactly the samples, at
+        // The output holds the writer's header and exactly the samples, at
         // the same rate and frame count, so the duration is unchanged.
         const written = out.buffered();
-        try std.testing.expectEqual(canonicalHeaderLen(request.output) + 2 * stream.samples.len, written.len);
-        var storage: [256]i16 = undefined;
-        const decoded = try decodeOutput(request.output, written, &storage);
-        try std.testing.expectEqual(summary.format, decoded.format);
-        try std.testing.expectEqual(frame_count, decoded.frame_count);
-        try std.testing.expectEqualSlices(i16, stream.samples, decoded.samples);
+        const data_len = frame_count * stream.channels * summary.output_codec.bytesPerSample();
+        const header_len = headerLenOf(request.output, summary.output_codec, summary.format);
+        try std.testing.expectEqual(header_len + data_len + data_len % 2, written.len);
+        var raw_buffer: [1024]u8 = undefined;
+        try std.testing.expectEqualSlices(u8, expected, try rawOf(request.output, written, &raw_buffer));
         // A canonical input converts to itself, byte for byte.
-        if (writer_output and request.output == input) {
+        if (writer_output and request.output == input and summary.output_codec == summary.input_codec) {
             try std.testing.expectEqualSlices(u8, bytes, written);
         }
     }
@@ -402,7 +443,7 @@ test "the input is read as contiguous, timestamped packets of whole frames" {
     const bytes = try gpa.alloc(u8, wav.canonical_header_len + frame_count * 4);
     defer gpa.free(bytes);
     var out: std.Io.Writer = .fixed(bytes);
-    var writer = try wav.Writer.begin(&out, stereo, frame_count, .{});
+    var writer = try wav.Writer.begin(&out, .s16le, stereo, frame_count, .{});
     const zeros: [frame_count * 2]i16 = @splat(0);
     try writer.writeFrames(&zeros);
     try writer.finish();
@@ -599,7 +640,7 @@ test "a long stream converts with fixed memory and exact frame counts" {
         const file = try tmp.dir.createFile(io, "long.wav", .{});
         defer file.close(io);
         var file_writer = file.writerStreaming(io, &buffer);
-        var writer = try wav.Writer.begin(&file_writer.interface, stereo, frame_count, .{});
+        var writer = try wav.Writer.begin(&file_writer.interface, .s16le, stereo, frame_count, .{});
         var chunk: [4096]i16 = undefined;
         var next: u64 = 0;
         while (next < frame_count * 2) : (next += chunk.len) {
@@ -678,14 +719,19 @@ fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
     const probed = detect.probe(&probe_reader, .{});
     for (all_cells) |request| {
         var reader: std.Io.Reader = .fixed(bytes);
-        // 1 KiB of input holds at most 1 KiB of data under a 44-byte header.
-        var buffer: [2048]u8 = undefined;
+        // 1 KiB of input holds at most 1 KiB of data; transcoding 1-byte
+        // samples doubles it, under a header of at most 80 bytes.
+        var buffer: [4096]u8 = undefined;
         var out: std.Io.Writer = .fixed(&buffer);
         const result = convert(&reader, &out, request, .{});
         // A stream the probe accepts converts in every supported cell, with
         // the same format and frame count; one it rejects never converts.
         if (probed) |info| {
-            if (request.mode == .copy and request.output != info.container) {
+            const supported = switch (request.mode) {
+                .copy => request.output == info.container,
+                .transcode => info.format.sample_format == .s16,
+            };
+            if (!supported) {
                 try std.testing.expectError(error.UnsupportedOperation, result);
             } else {
                 const summary = try result;
@@ -704,5 +750,7 @@ test "fuzz: conversion agrees with probing on arbitrary input" {
         fixtures.bytes("unknown_chunks"),
         fixtures.au.bytes("au_stereo_44k1"),
         fixtures.au.bytes("au_truncated_data"),
+        fixtures.bytes("s24_stereo_48k_extensible"),
+        fixtures.bytes("alaw_mono_8k"),
     } });
 }

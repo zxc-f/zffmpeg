@@ -737,15 +737,15 @@ evidence.
 | Case | Initial behavior |
 | --- | --- |
 | Container | Little-endian RIFF/WAVE only. Reject RF64, BW64, W64 and RIFX as `UnsupportedFormat`, and the `riff_size` sentinels 0 and 0xFFFFFFFF as `UnsupportedStreamingSize`. |
-| `fmt ` | Accept 16 bytes, or 18 bytes with `cbSize == 0`; tag 1, 16-bit signed PCM, mono or stereo. A `fmt ` declaring fewer than 16 bytes is `InvalidFormat`; input ending inside it is `Truncated`; other complete variants are `UnsupportedFormat`. |
-| Rate/alignment | Rate must be positive; default rate limit 192,000 Hz (above it: `LimitExceeded`). Require `block_align == channels * 2` with checked arithmetic. Zero channels/rate or an inconsistent `block_align` are invalid. `byte_rate` is informational: decoding never uses it and FFmpeg does not validate it, so accept a mismatch and ignore the value. |
+| `fmt ` | Since T21a: tag 1 PCM at 8, 16, 24, 32 or 64 bits (`pcm_u8`, `pcm_s16le`, `pcm_s24le`, `pcm_s32le`, `pcm_s64le`), tag 3 float at 32 or 64 bits, tag 6 A-law and tag 7 mu-law at 8 bits, in a 16-byte `fmt ` or an 18-byte one with `cbSize == 0`; or WAVE_FORMAT_EXTENSIBLE (0xFFFE, exactly 40 bytes, `cbSize == 22`) with a KSDATAFORMAT subformat of those tags, valid bits 0 or all, and a channel mask of 0 or the layout's. Mono or stereo. A `fmt ` declaring fewer than 16 bytes is `InvalidFormat`; input ending inside it is `Truncated`; other complete variants are `UnsupportedFormat`. |
+| Rate/alignment | Rate must be positive; default rate limit 192,000 Hz (above it: `LimitExceeded`). Require `block_align == channels * bits / 8` with checked arithmetic. Zero channels/rate or an inconsistent `block_align` are invalid. `byte_rate` is informational: decoding never uses it and FFmpeg does not validate it, so accept a mismatch and ignore the value. A `fact` chunk is skipped like an unknown chunk. |
 | Ordering | Exactly one `fmt ` before exactly one `data`. Reject missing/duplicate required chunks within the declared RIFF extent. |
 | Data length | Explicit length, divisible by block alignment. Zero means an empty stream, never read-to-EOF. Reject `0xFFFFFFFF` as unsupported streaming size. |
 | Bounds | Account for chunk headers, bodies and odd-size padding inside `riff_size + 8`. Never read beyond that extent. Known input size permits early truncation checks; otherwise detect it during consumption. A chunk (including `data`) whose declared size runs past the extent is `InvalidRiff`; so is an extent that leaves fewer than 8 bytes for a chunk header. A final odd-sized chunk whose pad byte lies outside the extent is complete; a pad byte inside the extent but missing from the input is `Truncated`, as is any input shorter than the extent. |
 | Unknown chunks | Skip bounded contents and padding. Continue validation after `data` to the RIFF end so later duplicates/truncated chunks are detected. Ignore bytes outside the declared RIFF extent. |
 | Completion | Header discovery is not full-file validation. Success requires consuming/validating the declared extent. Errors found after emitting audio are reported; callers must not assume atomic output. |
 | Resource defaults | At most 4,096 chunks and 1 MiB of retained non-audio bytes (headers and chunk contents the parser keeps in memory); a 64 KiB streaming work buffer. Skipped chunk bodies and padding are bounded by the chunk-count limit and the RIFF extent, not by the byte limit, so large `LIST`, `id3 ` or `iXML` chunks remain readable. Data streams within RIFF's checked 32-bit length limits, without whole-file allocation. Expose configurable policy limits. |
-| Output | Known frame count up front; write a 16-byte tag-1 `fmt ` and exact RIFF/data sizes. Validate the total RIFF size, not just `data`; reject overflows before the header. No seeking or placeholder sizes. `finish` verifies the exact frame count and flushes. |
+| Output | Known frame count up front; the `fmt ` FFmpeg's `riffenc.c` chooses (plain 16-byte tag 1 for PCM, 18-byte for float, A-law and mu-law, WAVE_FORMAT_EXTENSIBLE above 48 kHz or above 16 bits except float), a `fact` chunk for every encoding but tag 1, and exact RIFF/data sizes with the pad byte of odd data. Validate the total RIFF size, not just `data`; reject overflows and encodings WAV cannot carry before the header. No seeking or placeholder sizes. `finish` verifies the exact frame count and flushes. |
 
 T07 includes sequential non-seekable input with known sizes and the ordering above.
 It does not include unknown-length streaming WAV or resumable nonblocking parsing.
@@ -765,10 +765,13 @@ several rules: the first violation in stream order wins.
 permissively, treats zero/maximum data sizes as unknown-length cases, ignores
 `riff_size` and stops at end of input, so it tolerates every bounds violation
 above.
-`riffenc.c` selects extensible headers above 48 kHz. Our writer deliberately
-keeps tag 1 for the supported rate range; compare samples and metadata with
-FFmpeg, not byte-identical headers. A decoded field match is the compatibility
-goal. Preserve separate fixtures for these intentional differences.
+Since T21a our writer chooses the same `fmt ` as `riffenc.c` (extensible above
+48 kHz or 16 bits), where it used to keep tag 1 at every rate; FFmpeg still
+adds LIST/INFO tags, so compare samples and metadata with FFmpeg, not
+byte-identical files. A decoded field match is the compatibility goal. The
+parser stays stricter: FFmpeg rounds odd bit depths up, lets extensible valid
+bits override the container size, accepts any channel mask and more `fmt `
+sizes, which are rejected here with named fixtures.
 
 ### AU contract
 
@@ -801,7 +804,7 @@ matrix synchronously over a borrowed `*std.Io.Reader` and `*std.Io.Writer`:
 
 | Case | Behavior |
 | --- | --- |
-| Request | An output container and a mode: `transcode` (decode, then encode for the output) or `copy` (move the encoded data bytes unchanged). Copy needs the same codec at both ends; WAV s16le to AU s16be, or back, is `UnsupportedOperation`. Rate and layout never change. |
+| Request | An output container and a mode: `transcode` (decode, then encode as the output container's s16 codec, `pcm_s16le` or `pcm_s16be`) or `copy` (move the encoded data bytes unchanged). Copy needs an output container that carries the input codec: any WAV encoding into WAV, `pcm_s16be` into AU (until T22a); copy across the containers is `UnsupportedOperation`. Transcoding needs samples stored as s16 (`pcm_s16le`, `pcm_s16be`, A-law, mu-law); other storage needs sample-format conversion (T23a) and is `UnsupportedOperation`. Rate and layout never change. |
 | Before output | `Conversion.init` detects the input, reads its header, then checks the request and the output header (`Writer.check`: rate limit, data and RIFF sizes), and writes nothing. The first failure in that order wins, so a malformed input reports its parse error even when the request would also be rejected. |
 | Output | `run` writes the writer's canonical header with the exact frame count, moves whole frames through a 4 KiB transfer buffer, calls the parser's `finish` (errors after the data fail the operation) and then the writer's `finish` (frame count, then flush). |
 | Metadata | Not carried: WAV chunks other than `fmt ` and `data`, and AU annotations, are dropped by both modes. Encoded media and timing (rate, layout, frame count) are preserved. |
@@ -830,9 +833,11 @@ stable report separate from T51's future FFprobe-compatible mode.
 
 T09's `zffprobe` reports stable UTF-8 `key=value` lines, in this order:
 `format`, `codec`, `sample_fmt`, `channels`, `channel_layout`, `sample_rate`,
-`nb_samples`, `duration_num`, `duration_den`. Use `wav` with `pcm_s16le`, or
-`au` with `pcm_s16be` (T12c), and `s16` and `mono`/`stereo` as canonical
-strings. `nb_samples` counts sample frames (samples per channel); duration is
+`nb_samples`, `duration_num`, `duration_den`. Use `wav` or `au` (T12c), the
+stream's FFmpeg codec name (`pcm_s16le`, `pcm_s24le`, `pcm_alaw`, ... for WAV
+since T21a; `pcm_s16be` for AU), its storage format as FFmpeg's `sample_fmt`
+(`s16`, `s32` for 24- and 32-bit, `u8`, `s64`, `flt`, `dbl`), and
+`mono`/`stereo` as canonical strings. `nb_samples` counts sample frames (samples per channel); duration is
 exact and unreduced in the stream's `1/sample_rate` time base:
 `duration_num = nb_samples` and `duration_den = sample_rate`, with no decimal
 rounding or fraction reduction. Empty data reports `duration_num=0` and the

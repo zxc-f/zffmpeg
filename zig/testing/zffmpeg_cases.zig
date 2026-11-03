@@ -250,7 +250,7 @@ fn writeLongWav(io: std.Io, dir: std.Io.Dir, path: []const u8) !void {
     var buffer: [4096]u8 = undefined;
     var file_writer = file.writerStreaming(io, &buffer);
     const stereo = try av.audio.Format.init(48000, 2, .s16);
-    var writer = try av.wav.Writer.begin(&file_writer.interface, stereo, long_frames, .{});
+    var writer = try av.wav.Writer.begin(&file_writer.interface, .s16le, stereo, long_frames, .{});
     var chunk: [1024]i16 = undefined;
     var written: usize = 0;
     while (written < long_frames * 2) : (written += chunk.len) {

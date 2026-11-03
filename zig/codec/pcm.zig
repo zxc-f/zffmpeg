@@ -50,16 +50,7 @@ pub fn decodeS16(
     bytes: []const u8,
     output: []i16,
 ) DecodeError![]i16 {
-    if (bytes.len % 2 != 0) return error.TruncatedSample;
-    const count = bytes.len / 2;
-    if (output.len < count) return error.OutputTooSmall;
-    std.debug.assert(disjoint(bytes, std.mem.sliceAsBytes(output)));
-
-    const codec: Codec = if (endian == .little) .s16le else .s16be;
-    for (output[0..count], 0..) |*sample, i| {
-        sample.* = decodeSample(codec, bytes[i * 2 ..][0..2]);
-    }
-    return output[0..count];
+    return decodeToS16(if (endian == .little) .s16le else .s16be, bytes, output);
 }
 
 /// Encodes `samples` as signed 16-bit values in `endian` order into the start of
@@ -69,17 +60,56 @@ pub fn encodeS16(
     samples: []const i16,
     output: []u8,
 ) EncodeError![]u8 {
-    // An `i16` slice occupies `samples.len * 2` bytes of memory, so the product
-    // cannot overflow `usize`.
-    const byte_count = samples.len * 2;
+    return encodeFromS16(if (endian == .little) .s16le else .s16be, samples, output);
+}
+
+/// Decodes `bytes`, whole samples of `codec`, into the start of `output` and
+/// returns that prefix. `codec` must be stored as s16: `s16le`, `s16be`,
+/// `alaw` or `mulaw`.
+pub fn decodeToS16(codec: Codec, bytes: []const u8, output: []i16) DecodeError![]i16 {
+    std.debug.assert(codec.storage() == .s16);
+    const width = codec.bytesPerSample();
+    if (bytes.len % width != 0) return error.TruncatedSample;
+    const count = bytes.len / width;
+    if (output.len < count) return error.OutputTooSmall;
+    std.debug.assert(disjoint(bytes, std.mem.sliceAsBytes(output)));
+    switch (codec) {
+        inline .s16le, .s16be, .alaw, .mulaw => |c| {
+            const w = comptime c.bytesPerSample();
+            for (output[0..count], 0..) |*sample, i| sample.* = decodeSample(c, bytes[i * w ..][0..w]);
+        },
+        else => unreachable, // asserted above
+    }
+    return output[0..count];
+}
+
+/// Encodes `samples` as `codec` into the start of `output` and returns that
+/// prefix. `codec` must be stored as s16.
+pub fn encodeFromS16(codec: Codec, samples: []const i16, output: []u8) EncodeError![]u8 {
+    std.debug.assert(codec.storage() == .s16);
+    // At most 2 bytes per sample: an `i16` slice already spans that much
+    // memory, so the product cannot overflow `usize`.
+    const byte_count = samples.len * codec.bytesPerSample();
     if (output.len < byte_count) return error.OutputTooSmall;
     std.debug.assert(disjoint(std.mem.sliceAsBytes(samples), output));
-
-    const codec: Codec = if (endian == .little) .s16le else .s16be;
-    for (samples, 0..) |sample, i| {
-        output[i * 2 ..][0..2].* = encodeSample(codec, sample);
+    switch (codec) {
+        inline .s16le, .s16be, .alaw, .mulaw => |c| {
+            const w = comptime c.bytesPerSample();
+            for (samples, 0..) |sample, i| output[i * w ..][0..w].* = encodeSample(c, sample);
+        },
+        else => unreachable, // asserted above
     }
     return output[0..byte_count];
+}
+
+/// Reorders stored samples of `format`, held in the target's byte order, to
+/// little-endian in place (nothing to do on little-endian targets). This is
+/// how FFmpeg's `-c:a pcm_<storage>le` serializes decoded samples.
+pub fn storedToLittle(format: audio.SampleFormat, bytes: []u8) void {
+    const size = format.bytesPerSample();
+    if (native_endian == .little or size == 1) return;
+    var i: usize = 0;
+    while (i + size <= bytes.len) : (i += size) std.mem.reverse(u8, bytes[i..][0..size]);
 }
 
 /// A PCM encoding: codec identity, separate from the storage its samples
@@ -254,14 +284,15 @@ fn disjoint(a: []const u8, b: []const u8) bool {
     return a_start + a.len <= b_start or b_start + b.len <= a_start;
 }
 
-/// Decodes signed 16-bit PCM packets into frames (`pcm_s16le`, `pcm_s16be`).
+/// Decodes packets of a codec stored as s16 (`pcm_s16le`, `pcm_s16be`,
+/// `pcm_alaw`, `pcm_mulaw`) into frames.
 ///
 /// Holds at most one frame. A received frame borrows the caller's `storage`
 /// and stays valid until the next `send` or `reset`. A packet is read during
 /// `send` and not retained. A failed `send` consumes nothing and leaves the
 /// state unchanged, so the decoder stays usable.
 pub const Decoder = struct {
-    endian: std.lang.Endian,
+    codec: Codec,
     format: audio.Format,
     storage: []i16,
     pending: ?Frame = null,
@@ -275,22 +306,21 @@ pub const Decoder = struct {
     };
 
     /// `storage` bounds the packet size: at most `storage.len` samples.
-    /// `format` must store packed s16, which the frames carry.
-    pub fn init(endian: std.lang.Endian, format: audio.Format, storage: []i16) Decoder {
-        std.debug.assert(format.sample_format == .s16);
-        return .{ .endian = endian, .format = format, .storage = storage };
+    /// `codec` and `format` must store packed s16, which the frames carry.
+    pub fn init(codec: Codec, format: audio.Format, storage: []i16) Decoder {
+        std.debug.assert(codec.storage() == .s16 and format.sample_format == .s16);
+        return .{ .codec = codec, .format = format, .storage = storage };
     }
 
     pub fn send(d: *Decoder, packet: Packet) Error!stage.Send {
         if (d.state != .accepting) return error.InputAfterEnd;
         if (d.pending != null) return .full;
-        if (packet.data.len % d.format.bytesPerFrame() != 0) return error.IncompleteFrame;
-        if (packet.data.len / 2 > d.storage.len) return error.OutputTooSmall;
+        const width = d.codec.bytesPerSample();
+        if (packet.data.len % (width * d.format.channelCount()) != 0) return error.IncompleteFrame;
+        if (packet.data.len / width > d.storage.len) return error.OutputTooSmall;
         const pts = try time.rescaleTimestamp(packet.pts, packet.time_base, d.format.timeBase(), .nearest);
         // Whole frames are whole samples, and the size was checked above.
-        const samples = switch (d.endian) {
-            inline else => |endian| decodeS16(endian, packet.data, d.storage) catch unreachable,
-        };
+        const samples = decodeToS16(d.codec, packet.data, d.storage) catch unreachable;
         d.pending = .{ .format = d.format, .samples = samples, .pts = pts };
         return .accepted;
     }
@@ -319,7 +349,8 @@ pub const Decoder = struct {
     }
 };
 
-/// Encodes frames into signed 16-bit PCM packets (`pcm_s16le`, `pcm_s16be`).
+/// Encodes frames into packets of a codec stored as s16 (`pcm_s16le`,
+/// `pcm_s16be`, `pcm_alaw`, `pcm_mulaw`).
 ///
 /// Holds at most one packet. A received packet borrows the caller's `storage`
 /// and stays valid until the next `send` or `reset`. Its time base is the
@@ -327,7 +358,7 @@ pub const Decoder = struct {
 /// a key packet. A frame is read during `send` and not retained; a failed
 /// `send` consumes nothing and leaves the state unchanged.
 pub const Encoder = struct {
-    endian: std.lang.Endian,
+    codec: Codec,
     format: audio.Format,
     storage: []u8,
     pending: ?Packet = null,
@@ -341,19 +372,17 @@ pub const Encoder = struct {
     };
 
     /// `storage` bounds the frame size: at most `storage.len` bytes encoded.
-    /// `format` must store packed s16, which the frames carry.
-    pub fn init(endian: std.lang.Endian, format: audio.Format, storage: []u8) Encoder {
-        std.debug.assert(format.sample_format == .s16);
-        return .{ .endian = endian, .format = format, .storage = storage };
+    /// `codec` and `format` must store packed s16, which the frames carry.
+    pub fn init(codec: Codec, format: audio.Format, storage: []u8) Encoder {
+        std.debug.assert(codec.storage() == .s16 and format.sample_format == .s16);
+        return .{ .codec = codec, .format = format, .storage = storage };
     }
 
     pub fn send(e: *Encoder, frame: Frame) Error!stage.Send {
         if (e.state != .accepting) return error.InputAfterEnd;
         if (e.pending != null) return .full;
         if (!std.meta.eql(frame.format, e.format)) return error.FormatMismatch;
-        const bytes = switch (e.endian) {
-            inline else => |endian| try encodeS16(endian, frame.samples, e.storage),
-        };
+        const bytes = try encodeFromS16(e.codec, frame.samples, e.storage);
         e.pending = .{
             .data = bytes,
             .time_base = e.format.timeBase(),
@@ -392,7 +421,7 @@ pub const Encoder = struct {
 test "the decoder turns one packet into one frame and applies backpressure" {
     const stereo = try audio.Format.init(44100, 2, .s16);
     var storage: [8]i16 = undefined;
-    var decoder: Decoder = .init(.big, stereo, &storage);
+    var decoder: Decoder = .init(.s16be, stereo, &storage);
     const packet: Packet = .{ .data = &.{ 0, 1, 0, 2, 255, 255, 128, 0 }, .time_base = stereo.timeBase(), .pts = 10 };
     try std.testing.expectEqual(stage.Send.accepted, try decoder.send(packet));
     // A second packet before receiving is rejected without being consumed.
@@ -410,7 +439,7 @@ test "the decoder turns one packet into one frame and applies backpressure" {
 test "the decoder drains once, stays drained and resets" {
     const mono = try audio.Format.init(8000, 1, .s16);
     var storage: [4]i16 = undefined;
-    var decoder: Decoder = .init(.little, mono, &storage);
+    var decoder: Decoder = .init(.s16le, mono, &storage);
     _ = try decoder.send(.{ .data = &.{ 7, 0 }, .time_base = mono.timeBase(), .pts = 0 });
     decoder.finishInput();
     decoder.finishInput(); // Idempotent.
@@ -431,7 +460,7 @@ test "the decoder drains once, stays drained and resets" {
 test "decoder failures consume nothing and leave it usable" {
     const stereo = try audio.Format.init(48000, 2, .s16);
     var storage: [2]i16 = undefined;
-    var decoder: Decoder = .init(.little, stereo, &storage);
+    var decoder: Decoder = .init(.s16le, stereo, &storage);
     const tb = stereo.timeBase();
     const two_frames: [8]u8 = @splat(0);
     try std.testing.expectError(error.IncompleteFrame, decoder.send(.{ .data = &.{ 0, 0 }, .time_base = tb }));
@@ -446,7 +475,7 @@ test "decoder failures consume nothing and leave it usable" {
 test "decoder timestamps are rescaled to the sample-rate time base, and missing ones stay missing" {
     const mono = try audio.Format.init(8000, 1, .s16);
     var storage: [2]i16 = undefined;
-    var decoder: Decoder = .init(.little, mono, &storage);
+    var decoder: Decoder = .init(.s16le, mono, &storage);
     const millis: time.TimeBase = .{ .num = 1, .den = 1000 };
     _ = try decoder.send(.{ .data = &.{ 0, 0 }, .time_base = millis, .pts = 3 });
     try std.testing.expectEqual(24, decoder.receive().output.pts);
@@ -457,7 +486,7 @@ test "decoder timestamps are rescaled to the sample-rate time base, and missing 
 test "the encoder turns frames into key packets with timing" {
     const stereo = try audio.Format.init(44100, 2, .s16);
     var storage: [8]u8 = undefined;
-    var encoder: Encoder = .init(.little, stereo, &storage);
+    var encoder: Encoder = .init(.s16le, stereo, &storage);
     const frame = try Frame.init(stereo, &.{ 1, 2, -1, -32768 }, 4);
     try std.testing.expectEqual(stage.Send.accepted, try encoder.send(frame));
     try std.testing.expectEqual(stage.Send.full, try encoder.send(frame));
@@ -487,8 +516,9 @@ test "decoding then encoding a packet gives the same bytes in either order" {
     var bytes: [8]u8 = undefined;
     const input = [_]u8{ 0x12, 0x34, 0xff, 0x7f, 0x00, 0x80, 0xff, 0xff };
     inline for ([_]std.lang.Endian{ .little, .big }) |endian| {
-        var decoder: Decoder = .init(endian, mono, &samples);
-        var encoder: Encoder = .init(endian, mono, &bytes);
+        const codec: Codec = if (endian == .little) .s16le else .s16be;
+        var decoder: Decoder = .init(codec, mono, &samples);
+        var encoder: Encoder = .init(codec, mono, &bytes);
         _ = try decoder.send(.{ .data = &input, .time_base = mono.timeBase(), .pts = 0 });
         _ = try encoder.send(decoder.receive().output);
         try std.testing.expectEqualSlices(u8, &input, encoder.receive().output.data);
@@ -565,17 +595,20 @@ test "kernels agree with the independently generated writer-output fixtures" {
     const header_len = 44;
     const max_samples = 64;
     inline for (fixtures.all) |fixture| {
-        if (fixture.writer_output) {
+        // 16-bit PCM up to 48 kHz has the plain 44-byte header.
+        const plain = fixture.writer_output and fixture.expected.accept.codec == .pcm_s16le and
+            fixture.expected.accept.sample_rate <= 48000;
+        if (plain) {
             const stream = fixture.expected.accept;
-            comptime std.debug.assert(stream.samples.len <= max_samples);
+            comptime std.debug.assert(stream.samples.s16.len <= max_samples);
             const file = fixtures.bytes(fixture.name);
             try std.testing.expectEqualStrings("data", file[36..40]);
             const data = file[header_len..];
 
             var decoded: [max_samples]i16 = undefined;
-            try std.testing.expectEqualSlices(i16, stream.samples, try decodeS16(.little, data, &decoded));
+            try std.testing.expectEqualSlices(i16, stream.samples.s16, try decodeS16(.little, data, &decoded));
             var encoded: [max_samples * 2]u8 = undefined;
-            try std.testing.expectEqualSlices(u8, data, try encodeS16(.little, stream.samples, &encoded));
+            try std.testing.expectEqualSlices(u8, data, try encodeS16(.little, stream.samples.s16, &encoded));
         }
     }
 }
@@ -619,13 +652,6 @@ fn vectorField(fields: *std.mem.TokenIterator(u8, .scalar)) error{MalformedVecto
     return fields.next() orelse error.MalformedVector;
 }
 
-/// Copies samples of `size` bytes between little-endian and stored order.
-fn reorderLittle(bytes: []u8, size: usize) void {
-    if (native_endian == .little) return;
-    var i: usize = 0;
-    while (i < bytes.len) : (i += size) std.mem.reverse(u8, bytes[i..][0..size]);
-}
-
 test "every codec decodes and encodes exactly as FFmpeg's" {
     const gpa = std.testing.allocator;
     const pattern = try gpa.alloc(u8, 65536 * 8 + 131072);
@@ -651,13 +677,13 @@ test "every codec decodes and encodes exactly as FFmpeg's" {
                 const width = codec.bytesPerSample();
                 try std.testing.expectEqual(count, try fillPattern(pattern_name, width, pattern));
                 try std.testing.expectEqual(count, try decode(codec, pattern[0 .. count * width], owned.buffer, 0));
-                reorderLittle(owned.buffer.bytes, stored_size);
+                storedToLittle(codec.storage(), owned.buffer.bytes);
                 std.crypto.hash.sha2.Sha256.hash(owned.buffer.bytes, &digest, .{});
             },
             'E' => {
                 try std.testing.expectEqual(count, try fillPattern(pattern_name, stored_size, pattern));
                 @memcpy(owned.buffer.bytes, pattern[0 .. count * stored_size]);
-                reorderLittle(owned.buffer.bytes, stored_size);
+                storedToLittle(codec.storage(), owned.buffer.bytes);
                 const out = try gpa.alloc(u8, count * codec.bytesPerSample());
                 defer gpa.free(out);
                 std.crypto.hash.sha2.Sha256.hash(try encode(codec, owned.buffer, 0, count, out), &digest, .{});

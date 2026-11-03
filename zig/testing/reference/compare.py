@@ -125,10 +125,28 @@ def ffprobe(binary, path, input_format=None):
     return process.returncode, key_values(text(process.stdout)), text(process.stderr)
 
 
-def ffmpeg_decode(binary, path, input_format=None):
+# The encoder that writes each storage format's samples unchanged, little-endian.
+STORAGE_CODEC = {"u8": "pcm_u8", "s16": "pcm_s16le", "s32": "pcm_s32le", "s64": "pcm_s64le",
+                 "flt": "pcm_f32le", "dbl": "pcm_f64le"}
+
+
+def wav_payload(data):
+    """The bytes after the first `data` chunk header of a WAV stream written to a pipe,
+    where FFmpeg cannot go back to fill in the sizes."""
+    position = 12
+    while position + 8 <= len(data):
+        chunk_id, size = data[position:position + 4], int.from_bytes(data[position + 4:position + 8], "little")
+        if chunk_id == b"data":
+            return data[position + 8:]
+        position += 8 + size + (size & 1)
+    return b""
+
+
+def ffmpeg_decode(binary, path, input_format=None, storage="s16"):
+    """Decoded samples in `storage` (FFmpeg converts other formats to it), little-endian."""
     process = run(binary, "-v", "error", "-nostdin", *forced(input_format), "-i", path,
-                  "-map", "0:a:0", "-c:a", "pcm_s16le", "-f", "s16le", "-")
-    return process.returncode, process.stdout, text(process.stderr)
+                  "-map", "0:a:0", "-c:a", STORAGE_CODEC[storage], "-f", "wav", "-")
+    return process.returncode, wav_payload(process.stdout), text(process.stderr)
 
 
 def detected_format(binary, path):
@@ -160,15 +178,16 @@ def clean(message, path):
 
 
 def compare_accepted(fixture, args, path):
-    channels, rate, samples = fixture.accept
+    stream = fixture.accept
+    channels, rate, samples = stream
     frames = len(samples) // channels
     problems, notes = [], []
 
     code, fields, err = ffprobe(args.ffprobe, path)
     expected = {
         "format_name": "wav",
-        "codec_name": "pcm_s16le",
-        "sample_fmt": "s16",
+        "codec_name": stream.codec,
+        "sample_fmt": stream.storage,
         "channels": str(channels),
         "channel_layout": LAYOUT[channels],
         "sample_rate": str(rate),
@@ -188,17 +207,17 @@ def compare_accepted(fixture, args, path):
             else:
                 problems.append(f"ffprobe {key}={got!r}, expected {value!r}")
 
-    code, raw, err = ffmpeg_decode(args.ffmpeg, path)
+    code, raw, err = ffmpeg_decode(args.ffmpeg, path, storage=stream.storage)
     if code != 0:
         problems.append(f"ffmpeg failed: {clean(first_line(err), path)}")
-    elif raw != generate.pcm(samples):
-        problems.append(f"ffmpeg decoded {len(raw) // 2} samples that differ from the {len(samples)} expected")
+    elif raw != generate.storage_bytes(stream):
+        problems.append(f"ffmpeg decoded {len(raw)} bytes of {stream.storage} that differ from the {len(samples)} expected samples")
 
     code, fields, err = zffprobe(args.zffprobe, path)
     z_expected = {
         "format": "wav",
-        "codec": "pcm_s16le",
-        "sample_fmt": "s16",
+        "codec": stream.codec,
+        "sample_fmt": stream.storage,
         "channels": str(channels),
         "channel_layout": LAYOUT[channels],
         "sample_rate": str(rate),
@@ -212,7 +231,8 @@ def compare_accepted(fixture, args, path):
     verdict = "same samples and stream" if not problems else "differs"
     if notes:
         verdict += "; " + "; ".join(notes)
-    return problems, f"{LAYOUT[channels]}, {rate} Hz, {frames} frames", "exit 0, report matches", verdict
+    encoding = "" if stream.codec == "pcm_s16le" else f", `{stream.codec}`"
+    return problems, f"{LAYOUT[channels]}, {rate} Hz, {frames} frames{encoding}", "exit 0, report matches", verdict
 
 
 def compare_rejected(fixture, args, path):
@@ -233,11 +253,11 @@ def compare_rejected(fixture, args, path):
     return problems, f"`{fixture.reject}` (exit {want})", f"exit {code}", verdict
 
 
-def expected_stream(format_name, codec_name, channels, rate, frames):
+def expected_stream(format_name, codec_name, channels, rate, frames, storage="s16"):
     return {
         "format_name": format_name,
         "codec_name": codec_name,
-        "sample_fmt": "s16",
+        "sample_fmt": storage,
         "channels": str(channels),
         "channel_layout": LAYOUT[channels],
         "sample_rate": str(rate),
@@ -250,9 +270,9 @@ def frames_text(frames):
     return f"{frames} frame{'s' if frames != 1 else ''}"
 
 
-def check_stream(args, fixture_name, path, expected, samples, input_format=None, decode_note=None,
+def check_stream(args, fixture_name, path, expected, stream, input_format=None, decode_note=None,
                  field_differences=KNOWN_FIELD_DIFFERENCES):
-    """ffprobe fields and decoded samples; returns (problems, notes)."""
+    """ffprobe fields and the decoded samples of `stream` (a generate.Stream); returns (problems, notes)."""
     problems, notes = [], []
     code, fields, err = ffprobe(args.ffprobe, path, input_format)
     if code != 0:
@@ -268,8 +288,9 @@ def check_stream(args, fixture_name, path, expected, samples, input_format=None,
             else:
                 problems.append(f"ffprobe {key}={got!r}, expected {value!r}")
 
-    code, raw, err = ffmpeg_decode(args.ffmpeg, path, input_format)
-    want = generate.pcm(samples)
+    code, raw, err = ffmpeg_decode(args.ffmpeg, path, input_format, stream.storage)
+    want = generate.storage_bytes(stream)
+    samples = stream.stored
     if code != 0:
         problems.append(f"ffmpeg failed: {clean(first_line(err), path)}")
     elif decode_note is not None:
@@ -282,11 +303,11 @@ def check_stream(args, fixture_name, path, expected, samples, input_format=None,
     return problems, notes
 
 
-def zffprobe_report(container, codec, channels, rate, frames):
+def zffprobe_report(container, codec, channels, rate, frames, storage="s16"):
     return {
         "format": container,
         "codec": codec,
-        "sample_fmt": "s16",
+        "sample_fmt": storage,
         "channels": str(channels),
         "channel_layout": LAYOUT[channels],
         "sample_rate": str(rate),
@@ -318,7 +339,7 @@ def compare_au_accepted(fixture, args, path):
     channels, rate, samples = fixture.accept
     frames = len(samples) // channels
     expected = expected_stream("au", "pcm_s16be", channels, rate, frames)
-    problems, notes = check_stream(args, fixture.name, path, expected, samples, "au",
+    problems, notes = check_stream(args, fixture.name, path, expected, fixture.accept, "au",
                                    KNOWN_AU_DECODE_DIFFERENCES.get(fixture.name),
                                    KNOWN_AU_FIELD_DIFFERENCES)
 
@@ -421,12 +442,13 @@ def compare_writer(args, lines, failures):
     with tempfile.TemporaryDirectory() as tmp:
         work = pathlib.Path(tmp)
         for container, fixture in streams:
-            channels, rate, samples = fixture.accept
+            stream = fixture.accept
+            channels, rate, samples = stream
             frames = len(samples) // channels
-            raw = work / f"{fixture.name}.s16le"
+            raw = work / f"{fixture.name}.raw"
             out = work / f"{fixture.name}.{container}"
-            raw.write_bytes(generate.pcm(samples))
-            process = run(args.writer, container, rate, channels, raw, out)
+            raw.write_bytes(generate.storage_bytes(stream))
+            process = run(args.writer, container, stream.codec, rate, channels, raw, out)
             problems, notes = [], []
             if process.returncode != 0:
                 problems.append(f"write-driver exited {process.returncode}: {first_line(text(process.stderr))}")
@@ -436,20 +458,19 @@ def compare_writer(args, lines, failures):
                 output = f"{len(written)} bytes, " + ("equal to the fixture" if written == fixture.data else "differs")
                 if written != fixture.data:
                     problems.append("output differs from the writer-output fixture")
+                expected = expected_stream(container, stream.codec, channels, rate, frames, stream.storage)
                 if container == "wav":
-                    expected = expected_stream("wav", "pcm_s16le", channels, rate, frames)
-                    stream_problems, notes = check_stream(args, fixture.name, out, expected, samples)
+                    stream_problems, notes = check_stream(args, fixture.name, out, expected, stream)
                 else:
                     # Forced, because FFmpeg's probe does not detect an empty AU file.
-                    expected = expected_stream("au", "pcm_s16be", channels, rate, frames)
-                    stream_problems, notes = check_stream(args, fixture.name, out, expected, samples, "au",
+                    stream_problems, notes = check_stream(args, fixture.name, out, expected, stream, "au",
                                                           field_differences=KNOWN_AU_FIELD_DIFFERENCES)
                 problems += stream_problems
             verdict = "same samples and stream" if not problems else "differs"
             if notes:
                 verdict += "; " + "; ".join(notes)
             result = "pass" if not problems else "**FAIL**: " + "; ".join(problems)
-            label = f"{container.upper()} {LAYOUT[channels]}, {rate} Hz, {frames_text(frames)} (`{fixture.name}`)"
+            label = f"{container.upper()} `{stream.codec}` {LAYOUT[channels]}, {rate} Hz, {frames_text(frames)} (`{fixture.name}`)"
             lines.append(f"| {label} | {output} | {verdict} | {result} |")
             passed += not problems
             failures.extend(f"writer {fixture.name}: {problem}" for problem in problems)
@@ -457,12 +478,15 @@ def compare_writer(args, lines, failures):
 
 
 def compare_zffmpeg(args, lines, failures):
-    """zffmpeg's actual output for every accepted fixture, read by FFmpeg (T13b).
+    """zffmpeg's actual output for every accepted fixture, read by FFmpeg (T13b, T21a).
 
-    Each supported cell (transcode to WAV and to AU, copy within one codec)
-    writes a file that FFmpeg must probe and decode to the fixture's samples and
-    stream; the same command through standard input and output must give the
-    same bytes. Copy across codecs must fail before creating any output.
+    Neither container carries the other's codecs, so copy works only into the
+    input's container (any encoding it carries), and transcoding only from
+    samples stored as s16 (other storage needs sample-format conversion, T23a).
+    Each supported cell writes a file that FFmpeg must probe and decode to the
+    fixture's samples and stream; the same command through standard input and
+    output must give the same bytes. Every other cell must fail with status 3
+    before creating any output.
     """
     lines += [
         "",
@@ -477,13 +501,24 @@ def compare_zffmpeg(args, lines, failures):
     with tempfile.TemporaryDirectory() as tmp:
         work = pathlib.Path(tmp)
         for container, path, fixture in inputs:
-            channels, rate, samples = fixture.accept
+            stream = fixture.accept
+            channels, rate, samples = stream
             frames = len(samples) // channels
-            for output, copy in (("wav", False), ("au", False), (container, True)):
+            for output, copy in (("wav", False), ("au", False), ("wav", True), ("au", True)):
                 cell = f"{'copy' if copy else 'transcode'} to {output.upper()}"
                 options = (["-c", "copy"] if copy else []) + ["-f", output]
                 out = work / f"{fixture.name}-{'copy' if copy else 'transcode'}.{output}"
                 code, _, err = zffprobe_raw(args.zffmpeg, "-i", path, *options, out)
+                supported = output == container if copy else stream.storage == "s16"
+                if not supported:
+                    rejected_total += 1
+                    if code == 3 and b"UnsupportedOperation" in err and not out.exists():
+                        rejected_ok += 1
+                    else:
+                        failures.append(f"zffmpeg {fixture.name} {cell}: exited {code} "
+                                        f"({first_line(text(err)) or 'no error'}), "
+                                        f"output {'created' if out.exists() else 'absent'}")
+                    continue
                 problems, notes = [], []
                 if code != 0:
                     problems.append(f"zffmpeg exited {code}: {first_line(text(err))}")
@@ -494,13 +529,13 @@ def compare_zffmpeg(args, lines, failures):
                     pipe_code, pipe_out, _ = zffprobe_raw(args.zffmpeg, "-i", "-", *options, "-", data=path.read_bytes())
                     if pipe_code != 0 or pipe_out != written:
                         problems.append(f"through pipes zffmpeg exited {pipe_code} with different output")
-                    codec = "pcm_s16le" if output == "wav" else "pcm_s16be"
-                    expected = expected_stream(output, codec, channels, rate, frames)
+                    codec = stream.codec if copy else ("pcm_s16le" if output == "wav" else "pcm_s16be")
+                    expected = expected_stream(output, codec, channels, rate, frames, stream.storage)
                     differences = dict(KNOWN_FIELD_DIFFERENCES if output == "wav" else KNOWN_AU_FIELD_DIFFERENCES)
                     if output == "wav" and frames == 0:
                         differences[("duration_ts", "N/A")] = "FFmpeg reads data size 0 as unknown length"
                     # Forced for AU, because FFmpeg's probe does not detect an empty AU file.
-                    stream_problems, notes = check_stream(args, f"zffmpeg {fixture.name}", out, expected, samples,
+                    stream_problems, notes = check_stream(args, f"zffmpeg {fixture.name}", out, expected, stream,
                                                           "au" if output == "au" else None,
                                                           field_differences=differences)
                     problems += stream_problems
@@ -512,24 +547,11 @@ def compare_zffmpeg(args, lines, failures):
                 result = "pass" if not problems else "**FAIL**: " + "; ".join(problems)
                 lines.append(f"| `{fixture.name}` | {cell} | {summary} | {verdict} | {result} |")
                 failures.extend(f"zffmpeg {fixture.name} {cell}: {problem}" for problem in problems)
-
-            # Copy into the other container needs byte swapping: rejected
-            # during preflight, so no output file is created.
-            other = "au" if container == "wav" else "wav"
-            out = work / f"{fixture.name}-rejected.{other}"
-            code, _, err = zffprobe_raw(args.zffmpeg, "-i", path, "-c", "copy", "-f", other, out)
-            rejected_total += 1
-            if code == 3 and b"UnsupportedOperation" in err and not out.exists():
-                rejected_ok += 1
-            else:
-                failures.append(f"zffmpeg {fixture.name} copy to {other.upper()}: exited {code} "
-                                f"({first_line(text(err)) or 'no error'}), output {'created' if out.exists() else 'absent'}")
     lines += [
         "",
         f"zffmpeg outputs FFmpeg reads as expected, equal through pipes: {read_ok}/{read_total}.",
-        f"Copies across codecs rejected before any output: {rejected_ok}/{rejected_total}.",
+        f"Unsupported cells rejected before any output: {rejected_ok}/{rejected_total}.",
     ]
-
 
 def compare_pipes(args, lines, failures):
     """zffprobe through a pipe must match zffprobe on the file (T12c)."""

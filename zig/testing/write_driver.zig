@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Original file for this project.
-//! Test driver for the FFmpeg comparison (TODO.md T19a). It writes one media
-//! file from raw samples with the `av` writers, so the reference reads the
-//! actual Zig output rather than only fixtures the writer is tested to
-//! reproduce.
+//! Test driver for the FFmpeg comparison (TODO.md T19a, T21a). It writes one
+//! media file from decoded samples with the `av` encoders and writers, so the
+//! reference reads the actual Zig output rather than only fixtures the writer
+//! is tested to reproduce.
 //!
-//!     write-driver <wav|au> <sample_rate> <channels> <input.s16le> <output>
+//!     write-driver <wav|au> <codec> <sample_rate> <channels> <input.raw> <output>
 //!
-//! The input holds interleaved signed 16-bit little-endian samples, at most
-//! `max_input_bytes` of them. Exit status: 0 on success, 1 for usage errors, 2
+//! `codec` is an FFmpeg PCM codec name such as `pcm_s24le`. The input holds
+//! interleaved samples in that codec's storage format (`s32` for 24-bit),
+//! little-endian, at most `max_input_bytes` of them. Exit status: 0 on success, 1 for usage errors, 2
 //! for any other failure, with one diagnostic line on stderr.
 //! zig/testing/reference/compare.py runs it. It is a test tool, not a product:
 //! `zig build test-tools` installs it, and `zig build test` compiles it.
@@ -16,7 +17,7 @@
 const std = @import("std");
 const av = @import("av");
 
-const usage = "usage: write-driver <wav|au> <sample_rate> <channels> <input.s16le> <output>\n";
+const usage = "usage: write-driver <wav|au> <codec> <sample_rate> <channels> <input.raw> <output>\n";
 
 const Container = enum { wav, au };
 
@@ -42,9 +43,10 @@ fn run(init: std.process.Init) Status {
         printError(io, "write-driver: out of memory\n", .{});
         return .failure;
     };
-    if (args.len != 6) return usageError(io);
+    if (args.len != 7) return usageError(io);
     const container = std.meta.stringToEnum(Container, args[1]) orelse return usageError(io);
-    write(io, init.gpa, container, args[2], args[3], args[4], args[5]) catch |err| {
+    const codec = codecFromName(args[2]) orelse return usageError(io);
+    write(io, init.gpa, container, codec, args[3], args[4], args[5], args[6]) catch |err| {
         printError(io, "write-driver: {t}\n", .{err});
         return .failure;
     };
@@ -56,10 +58,16 @@ fn usageError(io: std.Io) Status {
     return .usage;
 }
 
+fn codecFromName(name: []const u8) ?av.pcm.Codec {
+    if (!std.mem.startsWith(u8, name, "pcm_")) return null;
+    return std.meta.stringToEnum(av.pcm.Codec, name["pcm_".len..]);
+}
+
 fn write(
     io: std.Io,
     gpa: std.mem.Allocator,
     container: Container,
+    codec: av.pcm.Codec,
     rate_text: []const u8,
     channels_text: []const u8,
     input_path: []const u8,
@@ -67,38 +75,45 @@ fn write(
 ) !void {
     const sample_rate = try std.fmt.parseInt(u32, rate_text, 10);
     const channels = try std.fmt.parseInt(u16, channels_text, 10);
-    const format = try av.audio.Format.init(sample_rate, channels, .s16);
+    const format = try av.audio.Format.init(sample_rate, channels, codec.storage());
 
     const cwd = std.Io.Dir.cwd();
     const raw = try cwd.readFileAlloc(io, input_path, gpa, .limited(max_input_bytes));
     defer gpa.free(raw);
-    const storage = try gpa.alloc(i16, raw.len / 2);
-    defer gpa.free(storage);
-    const samples = try av.pcm.decodeS16(.little, raw, storage);
+    const stored_bytes: usize = codec.storage().bytesPerSample();
+    const frame_bytes = stored_bytes * channels;
+    if (raw.len % frame_bytes != 0) return error.IncompleteFrame;
+    // At most max_input_bytes bytes, so the count fits in u32.
+    const frames: u32 = @intCast(raw.len / frame_bytes);
+    // The input is little-endian; stored samples are in the target's order.
+    av.pcm.storedToLittle(codec.storage(), raw);
+    const frame_count: usize = frames;
+    const encoded = try gpa.alloc(u8, frame_count * channels * codec.bytesPerSample());
+    defer gpa.free(encoded);
+    if (frames > 0) {
+        const layout = try av.samples.Layout.init(codec.storage(), channels, frames, .{ .line = 1 });
+        _ = try av.pcm.encode(codec, try av.samples.Buffer.init(layout, raw), 0, frames, encoded);
+    }
 
+    const file = try cwd.createFile(io, output_path, .{});
+    defer file.close(io);
     var buffer: [av.file.default_buffer_len]u8 = undefined;
+    var file_writer = file.writerStreaming(io, &buffer);
     switch (container) {
-        .wav => try av.file.writePath(io, cwd, output_path, &buffer, format, samples, .{}),
-        .au => try writeAu(io, cwd, output_path, &buffer, format, samples),
+        .wav => {
+            var writer = try av.wav.Writer.begin(&file_writer.interface, codec, format, frames, .{});
+            try writer.writeData(encoded);
+            try writer.finish();
+        },
+        .au => {
+            // AU carries only pcm_s16be until TODO.md T22a.
+            if (codec != .s16be) return error.UnsupportedFormat;
+            var writer = try av.au.Writer.begin(&file_writer.interface, format, frames, .{});
+            try writer.writeData(encoded);
+            try writer.finish();
+        },
     }
 }
-
-fn writeAu(
-    io: std.Io,
-    dir: std.Io.Dir,
-    path: []const u8,
-    buffer: []u8,
-    format: av.audio.Format,
-    samples: []const i16,
-) !void {
-    const file = try dir.createFile(io, path, .{});
-    defer file.close(io);
-    var file_writer = file.writerStreaming(io, buffer);
-    var writer = try av.au.Writer.begin(&file_writer.interface, format, samples.len / format.channelCount(), .{});
-    try writer.writeFrames(samples);
-    try writer.finish();
-}
-
 fn printError(io: std.Io, comptime fmt: []const u8, args: anytype) void {
     var buffer: [256]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writerStreaming(io, &buffer);

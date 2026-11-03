@@ -130,6 +130,45 @@ const au_empty_data_report =
     \\
 ;
 
+const s24_report =
+    \\format=wav
+    \\codec=pcm_s24le
+    \\sample_fmt=s32
+    \\channels=2
+    \\channel_layout=stereo
+    \\sample_rate=48000
+    \\nb_samples=4
+    \\duration_num=4
+    \\duration_den=48000
+    \\
+;
+
+const f32_report =
+    \\format=wav
+    \\codec=pcm_f32le
+    \\sample_fmt=flt
+    \\channels=1
+    \\channel_layout=mono
+    \\sample_rate=8000
+    \\nb_samples=8
+    \\duration_num=8
+    \\duration_den=8000
+    \\
+;
+
+const alaw_report =
+    \\format=wav
+    \\codec=pcm_alaw
+    \\sample_fmt=s16
+    \\channels=1
+    \\channel_layout=mono
+    \\sample_rate=8000
+    \\nb_samples=8
+    \\duration_num=8
+    \\duration_den=8000
+    \\
+;
+
 /// T09: valid, empty, malformed, unsupported, I/O, resource-limit and usage
 /// cases, each checking stdout, stderr and the exit status. T12c adds the same
 /// for AU, including a pipe, and a non-AU magic that detection sends to WAV.
@@ -158,6 +197,11 @@ const probe_cases = [_]ProbeCase{
     .{ .name = "unknown AU size", .set = .au, .fixture = "au_unknown_size", .exit_code = 3, .stderr_contains = ": UnsupportedStreamingSize\n" },
     .{ .name = "AU rate limit", .set = .au, .fixture = "au_rate_over_limit", .exit_code = 5, .stderr_contains = ": LimitExceeded\n" },
     .{ .name = "truncated AU pipe", .set = .au, .args = &.{"-"}, .stdin_fixture = "au_truncated_data", .exit_code = 2, .stderr = "zffprobe: -: Truncated\n" },
+    // T21a: the WAV encodings report their codec and storage format.
+    .{ .name = "24-bit extensible", .fixture = "s24_stereo_48k_extensible", .exit_code = 0, .stdout = s24_report, .stderr = "" },
+    .{ .name = "float from a pipe", .args = &.{"-"}, .stdin_fixture = "f32_mono_8k", .exit_code = 0, .stdout = f32_report, .stderr = "" },
+    .{ .name = "A-law", .fixture = "alaw_mono_8k", .exit_code = 0, .stdout = alaw_report, .stderr = "" },
+    .{ .name = "an unknown extensible subformat", .fixture = "extensible_unknown_subformat", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
 };
 
 /// A zffmpeg process run: `args`, then the input fixture's path (or standard
@@ -194,7 +238,9 @@ const zffmpeg_usage = "usage: zffmpeg [-y | -n] -i <input | -> [-c copy] [-f wav
 const wav_mono_8k = @embedFile("zig/testing/fixtures/wav/mono_8k.wav");
 const wav_stereo_44k1 = @embedFile("zig/testing/fixtures/wav/stereo_44k1.wav");
 const wav_empty_data = @embedFile("zig/testing/fixtures/wav/empty_data.wav");
-const wav_mono_192k = @embedFile("zig/testing/fixtures/wav/mono_192k_rate_limit.wav");
+// Above 48 kHz the writer emits WAVE_FORMAT_EXTENSIBLE, as FFmpeg's does.
+const wav_mono_192k = @embedFile("zig/testing/fixtures/wav/s16_mono_192k_extensible.wav");
+const wav_s24_stereo = @embedFile("zig/testing/fixtures/wav/s24_stereo_48k_extensible.wav");
 const au_mono_8k = @embedFile("zig/testing/fixtures/au/au_mono_8k.au");
 const au_stereo_44k1 = @embedFile("zig/testing/fixtures/au/au_stereo_44k1.au");
 const au_empty_data = @embedFile("zig/testing/fixtures/au/au_empty_data.au");
@@ -222,6 +268,11 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "output format from the extension", .args = &.{"-i"}, .input = "mono_8k", .output_file = "out.au", .output_bytes = au_mono_8k, .exit_code = 0, .stderr = "" },
     .{ .name = "an uppercase extension", .set = .au, .args = &.{"-i"}, .input = "au_stereo_44k1", .output_file = "OUT.WAV", .output_bytes = wav_stereo_44k1, .exit_code = 0, .stderr = "" },
     .{ .name = "-f wins over the extension", .args = &.{"-i"}, .input = "mono_8k", .tail = &.{ "-f", "wav" }, .output_file = "out.au", .output_bytes = wav_mono_8k, .exit_code = 0, .stderr = "" },
+    // T21a: copy keeps any WAV encoding; transcoding needs samples stored as
+    // s16 until sample-format conversion (T23a).
+    .{ .name = "24-bit copy to WAV", .args = &.{"-i"}, .input = "s24_stereo_48k_extensible", .tail = &.{ "-c", "copy", "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_s24_stereo, .stderr = "" },
+    .{ .name = "24-bit transcode is rejected", .args = &.{"-i"}, .input = "s24_stereo_48k_extensible", .tail = &.{ "-f", "au", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
+    .{ .name = "A-law copy to AU is rejected", .args = &.{"-i"}, .input = "alaw_mono_8k", .tail = &.{ "-c", "copy", "-f", "au", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
     .{ .name = "an error after the data", .args = &.{"-i"}, .input = "duplicate_data", .tail = &.{ "-f", "au", "-" }, .exit_code = 2, .stderr_contains = ": InvalidWave\n" },
     .{ .name = "a truncated pipe", .set = .au, .args = &.{ "-i", "-" }, .stdin_input = "au_truncated_data", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stderr = "zffmpeg: -: Truncated\n" },
     .{ .name = "a malformed header", .args = &.{"-i"}, .input = "not_riff", .tail = &.{ "-f", "au", "-" }, .exit_code = 2, .stderr_contains = ": InvalidRiff\n" },

@@ -24,12 +24,60 @@ pub const Failure = enum {
     LimitExceeded,
 };
 
+/// The encodings the contracts accept, by FFmpeg codec name. Independent of
+/// `pcm.Codec`, so the manifests never depend on the implementation.
+pub const Codec = enum {
+    pcm_u8,
+    pcm_s16le,
+    pcm_s16be,
+    pcm_s24le,
+    pcm_s32le,
+    pcm_s64le,
+    pcm_f32le,
+    pcm_f64le,
+    pcm_alaw,
+    pcm_mulaw,
+};
+
+/// Decoded samples as FFmpeg stores them, tagged by sample format: integers by
+/// value, floats as their IEEE bit patterns, interleaved.
+pub const Samples = union(enum) {
+    u8: []const u8,
+    s16: []const i16,
+    s32: []const i32,
+    s64: []const i64,
+    flt: []const u32,
+    dbl: []const u64,
+
+    pub fn len(samples: Samples) usize {
+        return switch (samples) {
+            inline else => |values| values.len,
+        };
+    }
+
+    /// The samples serialized little-endian into the start of `out`, as
+    /// FFmpeg's `pcm_<storage>le` writes them; `out` must be large enough.
+    pub fn littleEndian(samples: Samples, out: []u8) []const u8 {
+        switch (samples) {
+            inline else => |values| {
+                const T = @typeInfo(@TypeOf(values)).pointer.child;
+                for (values, 0..) |value, i| std.mem.writeInt(T, out[i * @sizeOf(T) ..][0..@sizeOf(T)], value, .little);
+                return out[0 .. values.len * @sizeOf(T)];
+            },
+        }
+    }
+};
+
 /// A stream the parser must accept.
 pub const Stream = struct {
+    codec: Codec,
     channels: u16,
     sample_rate: u32,
-    /// Interleaved samples; the frame count is `samples.len / channels`.
-    samples: []const i16,
+    samples: Samples,
+
+    pub fn frameCount(stream: Stream) usize {
+        return stream.samples.len() / stream.channels;
+    }
 };
 
 pub const Expected = union(enum) {
@@ -111,7 +159,7 @@ fn expectConsistent(comptime Contract: type) void {
                 if (stream.channels != 1 and stream.channels != 2) {
                     @compileError("accepted fixtures are mono or stereo: " ++ fixture.name);
                 }
-                if (stream.samples.len % stream.channels != 0) {
+                if (stream.samples.len() % stream.channels != 0) {
                     @compileError("samples do not fill whole frames: " ++ fixture.name);
                 }
             },
