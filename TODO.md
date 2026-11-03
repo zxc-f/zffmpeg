@@ -147,8 +147,10 @@ agree with the [first WAV contract](port.md#first-wav-contract).
   in [run 41557433205](https://github.com/zxc-f/zffmpeg/actions/runs/41557433205)
   and [run 41557971301](https://github.com/zxc-f/zffmpeg/actions/runs/41557971301),
   gave the same exact-sample and normalized-metadata results. The environment is
-  GitHub's versioned runner image rather than a container digest; the job
-  prints the image version on every run.
+  GitHub's versioned runner image (`ubuntu24` 20261026.354.1 in
+  [run 41559086382](https://github.com/zxc-f/zffmpeg/actions/runs/41559086382), which restored the cached build with identical
+  hashes and results) rather than a container digest; the job prints the image
+  version on every run.
 
 - [x] **T04 — Implement the PCM sample conversion kernels.** Depends on T01 and
   T02. Add typed slice-based signed 16-bit decoding and encoding with explicit

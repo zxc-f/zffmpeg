@@ -65,7 +65,7 @@ environment and the reference build" step printed:
 
 | Item | Value |
 | --- | --- |
-| Runner | GitHub-hosted `ubuntu-24.04`: Ubuntu 24.04.5 LTS, Linux 7.0.0-1017-azure x86_64 |
+| Runner | GitHub-hosted `ubuntu-24.04`, image `ubuntu24` 20261026.354.1 (printed from run 41559086382 on): Ubuntu 24.04.5 LTS, Linux 7.0.0-1017-azure x86_64 |
 | Compiler | Ubuntu clang version 18.1.3 (1ubuntu1), the runner's `clang` |
 | Build tools | GNU Make 4.3, Python 3.12.3, Zig 0.17.0 |
 | FFmpeg | `ffmpeg version git-2026-11-02-5d5a38a` |
@@ -78,8 +78,10 @@ environment and the reference build" step printed:
 The binaries and `config.log` contain the absolute install prefix
 (`/home/runner/work/zffmpeg/zffmpeg/.references/ffmpeg-install` in CI), so
 their hashes identify that CI build. A build at another path has different
-hashes but must give the same comparison results. Later runs restore this
-build from the cache and print the same values.
+hashes but must give the same comparison results.
+[Run 41559086382](https://github.com/zxc-f/zffmpeg/actions/runs/41559086382)
+restored this build from the cache, printed the same versions and hashes, and
+gave the same results.
 
 ## What is compared
 
