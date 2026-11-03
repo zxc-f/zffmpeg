@@ -14,10 +14,12 @@ and CI compares them with a pinned FFmpeg build
 ([zig/testing/reference](zig/testing/reference/README.md)). This standalone
 repository tracks the port's own files. FFmpeg in `.references/ffmpeg` remains
 the behavioral reference. Verification is Linux-only during development;
-Windows and ARM wait for the platform milestone (TODO.md T62–T63). The AU
-contract and its 29 fixtures (T12a) and the [AU parser and
-writer](zig/format/au.zig) (T12b) are verified. AU probing (T12c) is next,
-then the conversion pipeline (T13).
+Windows and ARM wait for the platform milestone (TODO.md T62–T63). The second
+path, AU with signed 16-bit big-endian PCM (T12), is verified too: its
+[contract and 29 fixtures](zig/testing/fixtures/au/README.md), the [AU parser
+and writer](zig/format/au.zig), and `zffprobe`, which chooses WAV or AU by
+[content detection](zig/format/detect.zig). The conversion pipeline and the
+`zffmpeg` command (T13) are next.
 
 The goal is a native Zig multimedia library and tools, built incrementally from
 FFmpeg's functionality. Use idiomatic Zig APIs and explicit resource ownership.
@@ -759,11 +761,12 @@ stable report separate from T51's future FFprobe-compatible mode.
 T09's `zffprobe` reports stable UTF-8 `key=value` lines, in this order:
 `format`, `codec`, `sample_fmt`, `channels`, `channel_layout`, `sample_rate`,
 `nb_samples`, `duration_num`, `duration_den`. Use `wav` with `pcm_s16le`, or
-`au` with `pcm_s16be` (T12c), and `s16` and `mono`/`stereo` as canonical strings. `nb_samples` counts sample frames (samples
-per channel); duration is exact and unreduced in the stream's `1/sample_rate`
-time base: `duration_num = nb_samples` and `duration_den = sample_rate`, with no
-decimal rounding or fraction reduction. Empty data reports `duration_num=0` and
-the stream's sample rate as `duration_den`. Emit the report only after validation.
+`au` with `pcm_s16be` (T12c), and `s16` and `mono`/`stereo` as canonical
+strings. `nb_samples` counts sample frames (samples per channel); duration is
+exact and unreduced in the stream's `1/sample_rate` time base:
+`duration_num = nb_samples` and `duration_den = sample_rate`, with no decimal
+rounding or fraction reduction. Empty data reports `duration_num=0` and the
+stream's sample rate as `duration_den`. Emit the report only after validation.
 
 The container is detected from content, not the file name (T12c,
 `zig/format/detect.zig`): a stream that starts with `.snd` is AU, and anything
@@ -959,15 +962,15 @@ has passed TODO.md gates G2–G4 is implemented, and it becomes verified at G5.
 | Audio and time types | Verified | [zig/core/audio.zig](zig/core/audio.zig) and [zig/core/time.zig](zig/core/time.zig) (T05). Original, `LGPL-2.1-or-later`; rescaling follows `av_rescale_q_rnd` except for overflow and INT64_MIN (see [notes.md](notes.md)). Verified in [run 41553566007](https://github.com/zxc-f/zffmpeg/actions/runs/41553566007) against oracle-derived vectors. T10 compared the WAV path's time base and duration with FFmpeg; `rescale` has no direct FFmpeg differential. |
 | WAV fixture contract | Verified | [zig/testing/fixtures](zig/testing/fixtures/README.md): 52 fixtures generated independently of the Zig code by `generate.py` (original, `LGPL-2.1-or-later`), with expected results, boundary decisions and error precedence; integrity-tested by [fixtures.zig](zig/testing/fixtures.zig) in [run 41550661260](https://github.com/zxc-f/zffmpeg/actions/runs/41550661260). The parser (T06) and FFmpeg (T10) agree with every expected result. |
 | WAV + PCM s16le | Verified | [zig/format/wav.zig](zig/format/wav.zig) (bounded parser, `probe`, `decodeToRaw`, known-length `Writer`; T06, T08) and [zig/io/file.zig](zig/io/file.zig) (file and pipe adapters; T07). Original, `LGPL-2.1-or-later`; behavior follows `libavformat/wavdec.c`, `wavenc.c`, `riffdec.c` and `riffenc.c` at the pinned commit, with the stricter [first WAV contract](#first-wav-contract). Supported: little-endian RIFF/WAVE, 16- or 18-byte tag-1 `fmt `, signed 16-bit mono or stereo up to 192 kHz, known sizes, sequential input without seeking, no allocation. All 52 fixtures pass from memory, one-byte reads and files in Debug, ReleaseSafe and ReleaseFast, and FFmpeg decodes the same samples for every accepted fixture, including the writer-output files ([reference results](zig/testing/reference/README.md#results), [run 41557971301](https://github.com/zxc-f/zffmpeg/actions/runs/41557971301)). Limitations: no unknown-length, RF64/W64/RIFX, extensible or other sample formats; no seeking or resumable parsing; sustained fuzzing not run; native Windows not run. Scalar; not optimized. |
-| zffprobe | Verified | [zig/cli/probe.zig](zig/cli/probe.zig) (T09). Original, `LGPL-2.1-or-later`. Prints the [probe output](#initial-probe-output) for one WAV file or standard input, with exit codes 0–6. 15 process runs check stdout, stderr and the status in Debug, ReleaseSafe and ReleaseFast, and the reference comparison runs it on every fixture ([run 41557971301](https://github.com/zxc-f/zffmpeg/actions/runs/41557971301)). Our own output format, not ffprobe's. |
-| FFmpeg reference comparison | Verified | [zig/testing/reference](zig/testing/reference/README.md) (T03, T10): Clang build of the pinned commit with a minimal LGPL configuration, cached in CI, and `compare.py`. Accepted fixtures 12/12 identical in samples and compared metadata; rejected fixtures 40/40 with the contract's `zffprobe` status; intentional differences recorded. [run 41557971301](https://github.com/zxc-f/zffmpeg/actions/runs/41557971301). |
+| zffprobe | Verified | [zig/cli/probe.zig](zig/cli/probe.zig) (T09, T12c) with [zig/format/detect.zig](zig/format/detect.zig) and [prefix.zig](zig/format/prefix.zig). Original, `LGPL-2.1-or-later`. Prints the [probe output](#initial-probe-output) for one WAV or AU file or standard input, with exit codes 0–6; the container is detected from the first 4 bytes, which are replayed to the parser, so pipes lose nothing. 24 process runs (15 WAV, 9 AU) check stdout, stderr and the status in Debug, ReleaseSafe and ReleaseFast, and the reference comparison runs it on all 81 fixtures, as files and through pipes ([run 41660265753](https://github.com/zxc-f/zffmpeg/actions/runs/41660265753) at `3bbdcf9`; WAV first in [run 41557971301](https://github.com/zxc-f/zffmpeg/actions/runs/41557971301)). Our own output format, not ffprobe's; no scored probing yet (T16). |
+| FFmpeg reference comparison | Verified | [zig/testing/reference](zig/testing/reference/README.md) (T03, T10, T19a, T12): Clang build of the pinned commit with a minimal LGPL configuration (WAV and AU demuxers, s16le and s16be decoders), cached in CI, and `compare.py`. WAV: accepted 12/12 identical in samples and compared metadata, rejected 40/40 with the contract's `zffprobe` status. AU: accepted 9/9 (FFmpeg forced with `-f au`, detection recorded separately), rejected 20/20. FFmpeg reads 9/9 files written by the Zig write driver; `zffprobe` through a pipe equals the file result 81/81; nothing listed as not implemented. Intentional differences recorded. [run 41660265753](https://github.com/zxc-f/zffmpeg/actions/runs/41660265753). |
 | AU fixture contract | Verified | [AU contract and 29 fixtures](zig/testing/fixtures/au/README.md), T12a: 9 accepted and 20 rejected, with parser acceptance separate from content detection. Reference-only G5 at `d41c5a4`, [run 41579247329](https://github.com/zxc-f/zffmpeg/actions/runs/41579247329), before AU Zig code existed; full evidence stays in TODO.md. This does not verify the parser, writer or probe. |
-| AU + PCM s16be | Verified | [zig/format/au.zig](zig/format/au.zig), exported by `av.au`, and [write driver](zig/testing/write_driver.zig). Original, `LGPL-2.1-or-later`; behavior follows `libavformat/au.c` and `libavcodec/pcm.c` at the pinned revision. Known-length encoding 3, mono/stereo, through the existing PCM kernels; sequential input without seeking, no allocation. T12b's G5 at `043c3c3` ([run 41580174746](https://github.com/zxc-f/zffmpeg/actions/runs/41580174746)): all 29 AU fixtures pass from memory, one-byte reads and files in Debug, ReleaseSafe and ReleaseFast, and FFmpeg reads the 4 AU files the Zig writer produced, byte-identical to the writer-output fixtures; full evidence in TODO.md. Limitations: no unknown-length data, other encodings or metadata; sustained fuzzing not run. Scalar; not optimized. AU probe integration is T12c. |
+| AU + PCM s16be | Verified | [zig/format/au.zig](zig/format/au.zig), exported by `av.au`, and [write driver](zig/testing/write_driver.zig). Original, `LGPL-2.1-or-later`; behavior follows `libavformat/au.c` and `libavcodec/pcm.c` at the pinned revision. Known-length encoding 3, mono/stereo, through the existing PCM kernels; sequential input without seeking, no allocation. T12b's G5 at `043c3c3` ([run 41580174746](https://github.com/zxc-f/zffmpeg/actions/runs/41580174746)): all 29 AU fixtures pass from memory, one-byte reads and files in Debug, ReleaseSafe and ReleaseFast, and FFmpeg reads the 4 AU files the Zig writer produced, byte-identical to the writer-output fixtures; full evidence in TODO.md. Limitations: no unknown-length data, other encodings or metadata; sustained fuzzing not run. Scalar; not optimized. `zffprobe` reports AU since T12c ([run 41660265753](https://github.com/zxc-f/zffmpeg/actions/runs/41660265753)). |
 | zffmpeg | Planned | Conversion and stream-copy tool (T13). |
 
 The first complete path, WAV with signed 16-bit PCM, is verified on Linux.
-AU's contract and its parser and writer are verified; AU probing (T12c) remains
-unchecked. Other codecs, containers and the conversion tool are planned.
+AU with signed 16-bit PCM, including `zffprobe` detection, is verified as well
+(T12). Other codecs, containers and the conversion tool are planned.
 
 The authoritative next action is in [TODO.md](TODO.md). Let the first working
 path determine which shared infrastructure is necessary.
