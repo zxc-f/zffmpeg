@@ -1778,6 +1778,36 @@ names, not as an empty framework.
     stereo: native masks, named and custom orders. Ambisonics is excluded.
     Done when layout descriptions and parsing equal FFmpeg's
     (`av_channel_layout_describe` and `from_string` vectors).
+    The project owner widened it (notes.md "Channel layouts"): after the
+    layout library, every container carries N channels as FFmpeg reads and
+    writes them, in further parts.
+
+    ```text
+    ID / parent: T23b / T23
+    State: implementing
+    Supported behavior and explicit exclusions: part 1, the layout library:
+      FFmpeg's channels, native, custom and unspecified layouts, the named
+      layouts, describe, from_string, default and compare. Excluded:
+      ambisonics; custom layouts past 64 channels.
+    Needs (verified) / lands with / verified after: T20a.
+    Contract and source provenance: port.md "Channel layouts"; notes.md
+      "Channel layouts"; channel_layout.c and .h, opt.c, avstring.c.
+    Required fixtures / optional corpus: 662 vectors of the pinned
+      libavutil (layout_vectors.c); no optional corpus.
+    Ownership, state transitions and limits: layouts are values; no
+      allocation.
+    Comparison rule and intentional differences: exact; ambisonic text is
+      UnsupportedLayout, custom maps past 64 channels LimitExceeded.
+    Implementation files and test entry points: core/channel_layout.zig.
+    Evidence commit / Linux CI run / reference report: pending.
+    Required cases: part 1 vectors pass; the container parts are missing.
+    Optional cases: none
+    Fuzz seeds, budget and result: none yet.
+    Remaining work or blocker / next action: part 2, `audio.Format` with a
+      layout and multichannel WAV (plain and extensible masks), then AU,
+      AIFF, CAF `chan` and raw `-ch_layout`, zffprobe's layout strings and
+      fixtures.
+    ```
   - [ ] **T23c — Rematrixing.** Needs T23a and T23b. The default upmix and
     downmix matrices with center and surround mix levels and normalization.
     Done when generated matrices equal `swr_build_matrix` output for every

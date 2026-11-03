@@ -131,6 +131,13 @@ jobs:
             -lm -pthread -o pcm-vectors
           ./pcm-vectors | diff -u zig/testing/vectors/pcm.txt -
 
+      # The committed T23b oracle must be what this build's libavutil gives.
+      - name: Check the channel layout vectors (T23b)
+        run: |
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/layout_vectors.c \
+            .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o layout-vectors
+          ./layout-vectors | diff -u zig/testing/vectors/layout.txt -
+
       # The committed T23a oracle must be what this build's libswresample gives.
       - name: Check the sample conversion and dither vectors (T23a)
         run: |

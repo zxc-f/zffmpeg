@@ -8,6 +8,9 @@
 //! - `pcm`: signed 16-bit PCM sample conversion (`codec/pcm.zig`).
 //! - `audio`: channel layouts, sample formats, stream formats and borrowed
 //!   interleaved samples (`core/audio.zig`).
+//! - `channel_layout`: FFmpeg's channels and channel layouts (native,
+//!   custom, unspecified), their names, parsing and descriptions
+//!   (`core/channel_layout.zig`).
 //! - `time`: time bases and FFmpeg-compatible timestamp rescaling
 //!   (`core/time.zig`).
 //! - `samples`: decoded sample storage for every sample format, packed or
@@ -50,6 +53,7 @@
 
 pub const pcm = @import("codec/pcm.zig");
 pub const audio = @import("core/audio.zig");
+pub const channel_layout = @import("core/channel_layout.zig");
 pub const time = @import("core/time.zig");
 pub const samples = @import("core/samples.zig");
 pub const packet = @import("core/packet.zig");
@@ -74,6 +78,7 @@ test {
     _ = @import("codec/g711.zig");
     _ = @import("codec/registry.zig");
     _ = @import("core/audio.zig");
+    _ = @import("core/channel_layout.zig");
     _ = @import("core/time.zig");
     _ = @import("core/samples.zig");
     _ = @import("core/packet.zig");

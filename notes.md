@@ -216,6 +216,15 @@ port.md's contract table updated, and (after T06) the parser.
 | Dither in the pipeline | As FFmpeg's command line: only when the sample format changes (its filter graph inserts no converter otherwise, so s32 to a 24-bit encoder is not dithered), with `output_sample_bits` 24 for a 24-bit encoder, and with the noise following FFmpeg's call sizes, one call per demuxer packet (`ff_pcm_default_packet_size` for WAV, Wave64, AU and raw PCM; 4096 bytes of frames for AIFF and CAF), whatever packets the port reads. With an unknown length the last call counts as full, which can differ only for a packet size that does not divide the noise buffer, so not for WAV, AU or raw PCM. `-c copy` ignores the options, as FFmpeg does. | `ffmpegPacketFrames` and `Transcoder` in `convert.zig`; `Dither.setCalls`. |
 | Dither options | zffmpeg takes `-dither_method` (a name, or FFmpeg's number) and `-dither_scale` (a decimal from 0 to 2147483647) after `-i`; before it they are a usage error, where FFmpeg takes them as input options and ignores them. FFmpeg's option expressions are not parsed, and a bad value is a usage error before any output, where FFmpeg fails once its filter graph is configured. | `methodFromOption` and `scaleFromOption` in `dither.zig`; `zig/cli/ffmpeg.zig`. |
 
+## Channel layouts
+
+| Decision | Current choice and reason | To change it |
+| --- | --- | --- |
+| Scope (T23b) | The project owner chose the layout library first, then widening every container to N channels as FFmpeg reads and writes them, as further T23b parts. The library is `core/channel_layout.zig`: FFmpeg's channel ids, names and descriptions, native, custom and unspecified layouts, the 42 named layouts, and `describe`, `parse` (`from_string`), `default` and `eql` (`compare`), equal to FFmpeg's on 662 vectors of the pinned libavutil. | TODO.md T23b; `layout_vectors.c`. |
+| Ambisonics | Out of scope, as T23b says: an ambisonic layout or channel (`ambisonic N`, `AMBIn`, a `USR` id from 1024 to 2047) is `UnsupportedLayout`; names of ambisonic ids still print as FFmpeg's (`AMBI5`). | A task that needs them; `Layout` gains the order. |
+| Values, no allocation | A layout is a tagged union value; a custom one holds up to 64 channels inline (`LimitExceeded` beyond, where FFmpeg allocates any number), each label truncated to 15 bytes as FFmpeg's `name[16]` does. A channel text longer than 64 bytes is invalid (FFmpeg would read `USR` with that many leading zeros). | `max_custom_channels`, `max_token_len`. |
+| C number parsing | Masks (`strtoull` base 0), counts (`strtol` base 10), `USR` ids (`strtol` base 0) and `%d channels (...)` (`sscanf`) follow glibc on Linux x86-64, the reference platform: a 64-bit `long`, then C's truncation to `int`. The vectors avoid values past 32 bits, where Windows' 32-bit `long` differs. | `strtol`, `strtoull`, `scanChannels` in `channel_layout.zig`. |
+
 ## Raw PCM contract
 
 | Decision | Current choice and reason | To change it |

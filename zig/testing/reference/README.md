@@ -56,6 +56,13 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/dither_vect
 ./dither-vectors 2>/dev/null | diff -u zig/testing/vectors/dither.txt -
 ```
 
+The T23b channel layout vectors come from the reference's `libavutil`:
+
+```bash
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/layout_vectors.c .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o layout-vectors
+./layout-vectors | diff -u zig/testing/vectors/layout.txt -
+```
+
 On Windows (MSYS2 UCRT64 clang) link with `-lm -lbcrypt` instead of
 `-pthread` and strip the carriage returns MinGW's text output adds
 (`tr -d '\015'`) before comparing.
