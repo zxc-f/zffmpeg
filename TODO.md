@@ -2158,15 +2158,18 @@ names, not as an empty framework.
     Implementation files and test entry points: core/eval.zig,
       core/options.zig (expressions in option values), filter/filters.zig
       (volume's expression and variables); eval_vectors.c, vectors/eval.txt,
-      graph_vectors.c (now 109 cases: volume's per-frame variables,
-      expressions in aresample and aformat options).
+      graph_vectors.c (now 154 cases: volume's per-frame variables,
+      expressions in aresample and aformat options, 45 filtergraph texts);
+      filter/parse.zig and Graph.initText (part 2b).
     Evidence commit / Linux CI run / reference report: pending.
-    Required cases: part 1 passes (200/200, bit-exact); part 2a passes
-      (options' 136 texts, the 5 expressions among them; 109/109 graphs);
-      the graph text and part 3 to come.
+    Required cases: part 1 passes (200/200, bit-exact); part 2 passes
+      (options' 136 texts, the 5 expressions among them; 154/154 graphs,
+      the 18 syntax and expression messages the port reports equal to
+      FFmpeg's); part 3 to come.
     Optional cases: none
-    Fuzz seeds, budget and result: none yet.
-    Remaining work or blocker / next action: part 2b, the graph text.
+    Fuzz seeds, budget and result: graph.zig's filtergraph-text entry, 4
+      seeds, under zig build test; the local fuzzer fails as T25a records.
+    Remaining work or blocker / next action: part 3, atrim and asetpts.
     ```
   - [ ] **T25c — Several inputs and outputs.** Needs T25b. Scheduling with
     several inputs and outputs; amix, pan, channelmap, channelsplit and asplit.

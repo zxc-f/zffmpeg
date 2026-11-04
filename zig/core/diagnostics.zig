@@ -45,12 +45,15 @@ pub fn report(sink: ?Sink, level: Level, comptime format: []const u8, args: anyt
     if (sink) |s| s.log(level, format, args);
 }
 
-/// A sink that keeps the last message and counts them: for tests.
+/// A sink that keeps the first and last messages and counts them: for
+/// tests.
 pub const Recorder = struct {
     count: usize = 0,
     last_level: Level = .quiet,
     last: [1024]u8 = undefined,
     last_len: usize = 0,
+    first: [1024]u8 = undefined,
+    first_len: usize = 0,
 
     pub fn sink(r: *Recorder, level: Level) Sink {
         return .{ .context = r, .emit = emit, .level = level };
@@ -58,6 +61,10 @@ pub const Recorder = struct {
 
     fn emit(context: ?*anyopaque, level: Level, message: []const u8) void {
         const r: *Recorder = @ptrCast(@alignCast(context.?));
+        if (r.count == 0) {
+            r.first_len = message.len;
+            @memcpy(r.first[0..message.len], message);
+        }
         r.count += 1;
         r.last_level = level;
         r.last_len = message.len;
@@ -66,6 +73,10 @@ pub const Recorder = struct {
 
     pub fn lastMessage(r: *const Recorder) []const u8 {
         return r.last[0..r.last_len];
+    }
+
+    pub fn firstMessage(r: *const Recorder) []const u8 {
+        return r.first[0..r.first_len];
     }
 };
 

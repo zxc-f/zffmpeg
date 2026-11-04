@@ -24,6 +24,14 @@
 //   F <filter> <key>=<value> ...
 //       a filter of the chain, its options as avfilter_init_dict sets
 //       them, the values in hex
+//   T <text>
+//       instead of F lines, the chain as filtergraph text (hex): the source
+//       and the sink are created first, then avfilter_graph_parse_ptr links
+//       the text's filters between them (TODO.md T25b)
+//   E parse
+//   M <message>
+//       avfilter_graph_parse_ptr refused the text; FFmpeg's first error
+//       message (hex)
 //   X
 //       a graph the port refuses when it is created (time(), which reads
 //       the clock); nothing else follows
@@ -57,6 +65,21 @@
 #include "libavutil/frame.h"
 #include "libavutil/mem.h"
 #include "libavutil/samplefmt.h"
+
+#include <stdarg.h>
+
+static char first_error[1024];
+
+static void capture_log(void *avcl, int level, const char *fmt, va_list vl)
+{
+    (void)avcl;
+    if (level > AV_LOG_ERROR || first_error[0])
+        return;
+    vsnprintf(first_error, sizeof(first_error), fmt, vl);
+    size_t n = strlen(first_error);
+    while (n && first_error[n - 1] == '\n')
+        first_error[--n] = 0;
+}
 
 static uint64_t state;
 
@@ -111,6 +134,7 @@ struct graph_case {
     const char *sink_fmts, *sink_rates, *sink_layouts;
     const char *conv;        /* aresample_swr_opts */
     int refused;             /* the port refuses the graph (time()) */
+    const char *text;        /* filtergraph text instead of the chain */
     struct filt chain[MAX_CHAIN];
 };
 
@@ -201,9 +225,51 @@ static void run_case(const struct graph_case *c)
         }
         printf("\n");
     }
+    if (c->text) {
+        printf("T ");
+        hex(c->text);
+        printf("\n");
+    }
     if (c->refused) {
         printf("X\n");
         goto done;
+    }
+    if (c->text) {
+        AVFilterInOut *outputs = avfilter_inout_alloc(), *inputs = avfilter_inout_alloc();
+        src = avfilter_graph_alloc_filter(graph, avfilter_get_by_name("abuffer"), "in");
+        av_dict_set(&dict, "sample_fmt", av_get_sample_fmt_name(c->fmt), 0);
+        av_dict_set_int(&dict, "sample_rate", c->rate, 0);
+        av_dict_set(&dict, "channel_layout", c->layout, 0);
+        snprintf(text, sizeof(text), "%d/%d", tb_num, tb_den);
+        av_dict_set(&dict, "time_base", text, 0);
+        avfilter_init_dict(src, &dict);
+        av_dict_free(&dict);
+        sink = avfilter_graph_alloc_filter(graph, avfilter_get_by_name("abuffersink"), "out");
+        if (c->sink_fmts)
+            av_dict_set(&dict, "sample_formats", c->sink_fmts, 0);
+        if (c->sink_rates)
+            av_dict_set(&dict, "samplerates", c->sink_rates, 0);
+        if (c->sink_layouts)
+            av_dict_set(&dict, "channel_layouts", c->sink_layouts, 0);
+        avfilter_init_dict(sink, &dict);
+        av_dict_free(&dict);
+        if (c->conv)
+            graph->aresample_swr_opts = av_strdup(c->conv);
+        outputs->name = av_strdup("in");
+        outputs->filter_ctx = src;
+        inputs->name = av_strdup("out");
+        inputs->filter_ctx = sink;
+        first_error[0] = 0;
+        ret = avfilter_graph_parse_ptr(graph, c->text, &inputs, &outputs, NULL);
+        avfilter_inout_free(&inputs);
+        avfilter_inout_free(&outputs);
+        if (ret < 0) {
+            printf("E parse\nM ");
+            hex(first_error);
+            printf("\n");
+            goto done;
+        }
+        goto configure;
     }
 
     /* The source. */
@@ -261,6 +327,7 @@ static void run_case(const struct graph_case *c)
         }
         avfilter_link(prev, 0, sink, 0);
     }
+configure:
     if (avfilter_graph_config(graph, NULL) < 0) {
         printf("E config\n");
         goto done;
@@ -531,11 +598,57 @@ static const struct graph_case cases[] = {
                  F("aresample", { { "sample_rate", "48000" } }) } },
     { "chain_double_rates", AV_SAMPLE_FMT_S16, 44100, "mono", 0, 0, SIZES(300), 0,
       .chain = { F("aresample", { { "sample_rate", "48000" } }), F("aresample", { { "sample_rate", "44100" } }) } },
+    { "text_anull", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "anull" },
+    { "text_volume", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume=0.5" },
+    { "text_volume_keys", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume=volume=0.5:precision=fixed" },
+    { "text_shorthand", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume=0.5:fixed" },
+    { "text_shorthand_frame", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume=n/4+0.5:float:frame" },
+    { "text_keys_frame", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume=eval=frame:volume=n/4+0.5" },
+    { "text_quoted", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume='if(lt(t,0.001),0.25,2)':eval=frame" },
+    { "text_aformat_shorthand", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "aformat=s16p|flt:44100|48000:mono" },
+    { "text_chain", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "aformat=f=fltp,volume=0.5,aresample=22050" },
+    { "text_aresample", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "aresample=48000:osf=s16p" },
+    { "text_anull_twice", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "anull,anull" },
+    { "text_instance", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume@loud=2" },
+    { "text_spaces", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = " volume = 0.5 , anull " },
+    { "text_escaped_pipe", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "aformat=sample_fmts=s16\\|flt" },
+    { "text_trailing_comma", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume=0.5," },
+    { "text_sws_flags", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "sws_flags=bicubic;volume=0.5" },
+    { "text_last_wins", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume=volume=0.25:volume=2" },
+    { "text_quoted_values", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume='0.5':'fixed'" },
+    { "text_unterminated_quote", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume='0.5" },
+    { "text_newlines", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume=0.5\n,\tanull" },
+    { "text_volume_extra", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume=0.5 extra" },
+    { "text_escaped_comma", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume=1\\,5" },
+    { "text_empty", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "" },
+    { "text_blank", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "   " },
+    { "text_leading_comma", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = ",volume" },
+    { "text_unknown_filter", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "foo=1" },
+    { "text_unknown_option", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume=x=1" },
+    { "text_too_many", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume=0.5:fixed:once:drop:0:1:2" },
+    { "text_positional_after_key", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume=precision=fixed:0.5" },
+    { "text_name_with_space", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume 0.5" },
+    { "text_bracket_in_name", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "anull]" },
+    { "text_empty_filter", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume=0.5,,anull" },
+    { "text_sws_unterminated", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "sws_flags=bicubic" },
+    { "text_trailing_colon", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume=0.5:" },
+    { "text_empty_value", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume=:fixed" },
+    { "text_mismatched_label", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "[a" },
+    { "text_empty_label", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "[]volume" },
+    { "text_aresample_positional", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "aresample=48000:16" },
+    { "text_unknown_with_value", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume2=0.5" },
+    { "text_bad_value", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume=precision=half" },
+    { "text_unknown_then_bad", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume=gain=2,aformat=f=s17" },
+    { "text_two_chains", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume=0.5;anull", .refused = 1 },
+    { "text_labels", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "[in]volume=0.5[out]", .refused = 1 },
+    { "text_output_label", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume=0.5[x]", .refused = 1 },
+    { "text_time", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume=time(0)", .refused = 1 },
 };
 
 int main(void)
 {
     av_log_set_level(AV_LOG_QUIET);
+    av_log_set_callback(capture_log);
     for (int i = 0; i < (int)(sizeof(cases) / sizeof(*cases)); i++)
         run_case(&cases[i]);
     return 0;

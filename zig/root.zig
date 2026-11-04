@@ -48,8 +48,9 @@
 //!   every check made before output starts (`format/convert.zig`).
 //! - `filter`: the audio filter graph: a linear chain of anull, aformat,
 //!   volume and aresample between a buffer source and sink, negotiated and
-//!   run as FFmpeg's libavfilter does (`filter/graph.zig`, with
-//!   `filter/filters.zig` and `filter/formats.zig`).
+//!   run as FFmpeg's libavfilter does, built from filtergraph text too
+//!   (`filter/graph.zig`, with `filter/filters.zig`, `filter/formats.zig`
+//!   and `filter/parse.zig`).
 //! - `file`: file and stream adapters for the WAV and AU paths, with
 //!   borrowed-handle and path variants (`io/file.zig`).
 //!
@@ -112,6 +113,7 @@ test {
     _ = @import("resample/swr.zig");
     _ = @import("filter/formats.zig");
     _ = @import("filter/filters.zig");
+    _ = @import("filter/parse.zig");
     _ = @import("filter/graph.zig");
     _ = @import("format/registry.zig");
     _ = @import("format/detect.zig");

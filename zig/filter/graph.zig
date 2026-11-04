@@ -34,6 +34,7 @@ const diagnostics = @import("../core/diagnostics.zig");
 const Frame = @import("../core/frame.zig").Frame;
 const formats = @import("formats.zig");
 const filters = @import("filters.zig");
+const parse = @import("parse.zig");
 const Layout = channel_layout.Layout;
 const Channel = channel_layout.Channel;
 const SampleFormat = audio.SampleFormat;
@@ -77,6 +78,10 @@ pub const Options = struct {
 pub const InitError = filters.CreateError || error{
     /// More than libswresample's 64 channels.
     LimitExceeded,
+    /// Filtergraph text FFmpeg refuses (parse.zig).
+    InvalidSyntax,
+    /// Link labels or several chains (TODO.md T25c).
+    UnsupportedSyntax,
 };
 
 pub const ConfigureError = filters.CreateError || filters.VolumeRun.Error || filters.ResampleRun.Error || formats.CheckError || error{
@@ -170,6 +175,85 @@ pub const Graph = struct {
     /// Creates the source, the chain's filters with their options, and
     /// the sink, linked in that order.
     pub fn init(gpa: std.mem.Allocator, source: SourceSpec, chain: []const FilterSpec, sink: SinkSpec, opts: Options) InitError!Graph {
+        var g = try start(gpa, source, sink, opts);
+        errdefer g.deinit();
+        try g.addNode("in", .source);
+        for (chain) |spec| {
+            var f = try filters.Filter.create(gpa, spec.name, spec.options, opts.diagnostics);
+            g.addNode(spec.label orelse spec.name, .{ .filter = f }) catch |err| {
+                f.deinit(gpa);
+                return err;
+            };
+        }
+        try g.addNode("out", .sink);
+        for (0..g.nodes.items.len - 1) |i| try g.addLink(@intCast(i), @intCast(i + 1));
+        return g;
+    }
+
+    /// The chain of filtergraph `text` (parse.zig) between the source and
+    /// the sink, as `avfilter_graph_parse_ptr` builds it with them created
+    /// first: every filter created (`Parsed_<name>_<n>`, or
+    /// `<name>@<instance>`), then every filter's options set, an unknown
+    /// option failing only once all are set, then every filter
+    /// initialized. Link labels and several chains are `UnsupportedSyntax`
+    /// (T25c).
+    pub fn initText(gpa: std.mem.Allocator, source: SourceSpec, text: []const u8, sink: SinkSpec, opts: Options) InitError!Graph {
+        var g = try start(gpa, source, sink, opts);
+        errdefer g.deinit();
+        try g.addNode("in", .source);
+        try g.addNode("out", .sink);
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        const parsed = parse.parse(arena.allocator(), text, opts.diagnostics) catch |err| return switch (err) {
+            error.InvalidSyntax => error.InvalidSyntax,
+            error.OutOfMemory => error.OutOfMemory,
+        };
+        for (parsed.filters, 0..) |pf, i| {
+            var f = filters.Filter.alloc(pf.name) catch |err| {
+                diagnostics.report(opts.diagnostics, .err, "No such filter: '{s}'", .{pf.name});
+                return err;
+            };
+            const label = if (pf.instance) |inst|
+                try arena.allocator().print("{s}@{s}", .{ pf.name, inst })
+            else
+                try arena.allocator().print("Parsed_{s}_{d}", .{ pf.name, i });
+            g.addNode(label, .{ .filter = f }) catch |err| {
+                f.deinit(gpa);
+                return err;
+            };
+        }
+        if (parsed.labels or parsed.chains > 1) return error.UnsupportedSyntax;
+        // avfilter_graph_segment_apply_opts.
+        var unknown: ?Option = null;
+        for (parsed.filters, 2..) |pf, node| {
+            const f = &g.nodes.items[node].kind.filter;
+            for (pf.options) |o| {
+                f.set(gpa, o.name, o.value) catch |err| switch (err) {
+                    error.UnknownOption => {
+                        if (unknown == null) unknown = o;
+                    },
+                    else => |e| return e,
+                };
+            }
+        }
+        if (unknown) |o| {
+            diagnostics.report(opts.diagnostics, .err, "Could not set non-existent option '{s}' to value '{s}'", .{ o.name, o.value });
+            return error.UnknownOption;
+        }
+        for (2..g.nodes.items.len) |node| try g.nodes.items[node].kind.filter.init(gpa, opts.diagnostics);
+        // The source to the first filter, along the chain, the last to the sink.
+        var prev: u32 = 0;
+        for (2..g.nodes.items.len) |node| {
+            try g.addLink(prev, @intCast(node));
+            prev = @intCast(node);
+        }
+        try g.addLink(prev, 1);
+        return g;
+    }
+
+    /// A graph with no nodes yet, the sink's lists and the converter
+    /// options copied.
+    fn start(gpa: std.mem.Allocator, source: SourceSpec, sink: SinkSpec, opts: Options) InitError!Graph {
         if (source.format.channelCount() > 64) return error.LimitExceeded;
         // abuffersink's rates are ints.
         for (sink.sample_rates) |r| {
@@ -182,16 +266,6 @@ pub const Graph = struct {
             .diagnostics = opts.diagnostics,
         };
         errdefer g.deinit();
-        try g.addNode("in", .source);
-        for (chain) |spec| {
-            var f = try filters.Filter.create(gpa, spec.name, spec.options, opts.diagnostics);
-            g.addNode(spec.label orelse spec.name, .{ .filter = f }) catch |err| {
-                f.deinit(gpa);
-                return err;
-            };
-        }
-        try g.addNode("out", .sink);
-        for (0..g.nodes.items.len - 1) |i| try g.addLink(@intCast(i), @intCast(i + 1));
         g.sink_formats = try gpa.dupe(SampleFormat, sink.sample_formats);
         g.sink_rates = try gpa.dupe(u32, sink.sample_rates);
         g.sink_layouts = try gpa.dupe(Layout, sink.layouts);
@@ -1079,11 +1153,51 @@ test "fuzz: arbitrary option text never crashes a graph" {
     } });
 }
 
+fn fuzzText(context: void, smith: *std.testing.Smith) anyerror!void {
+    _ = context;
+    var input: [256]u8 = undefined;
+    const len = smith.slice(&input);
+    const gpa = testing.allocator;
+    const format = try audio.Format.init(8000, 2, .s16);
+    var g = Graph.initText(gpa, .{ .format = format }, input[0..len], .{}, .{}) catch return;
+    defer g.deinit();
+    // Any error is acceptable; nothing may crash or leak.
+    g.configure() catch return;
+    const values = [_]i16{ 1, 2, 3, 4 };
+    _ = try g.send(try Frame.fromS16(format, &values, 0));
+    while ((g.receive() catch return) == .output) {}
+}
+
+test "fuzz: arbitrary filtergraph text never crashes a graph" {
+    try std.testing.fuzz({}, fuzzText, .{ .corpus = &.{
+        "volume=0.5:fixed,aformat=s16p|flt:44100:mono",
+        "aresample=48000:osf=s16p, volume@a='if(lt(t,1),n,2)':eval=frame",
+        "[a]anull[b];volume",
+        "sws_flags=x;volume=1\\,5",
+    } });
+}
+
+fn textChain(gpa: std.mem.Allocator) !void {
+    const format = try audio.Format.init(44100, 2, .s16);
+    var g = try Graph.initText(gpa, .{ .format = format }, "aformat=cl=mono, volume=n+0.5:eval=frame , aresample=48000", .{ .sample_formats = &.{.s16} }, .{});
+    defer g.deinit();
+    try g.configure();
+    var values: [400]i16 = @splat(100);
+    _ = try g.send(try Frame.fromS16(format, &values, 0));
+    while (try g.receive() == .output) {}
+    g.finishInput();
+    while (try g.receive() == .output) {}
+}
+
+test "a graph from text leaks nothing when an allocation fails" {
+    try testing.checkAllAllocationFailures(testing.allocator, textChain, .{});
+}
+
 // zig/testing/vectors/graph.txt comes from the pinned FFmpeg's libavfilter
 // through zig/testing/reference/graph_vectors.c, which documents its
 // lines. Every case is run, and the count makes a truncated file fail.
 const vectors = @embedFile("../testing/vectors/graph.txt");
-const case_count = 109;
+const case_count = 154;
 const resample = @import("../resample/resample.zig");
 const native_endian = @import("builtin").cpu.arch.endian();
 
@@ -1188,7 +1302,12 @@ fn runCase(gpa: std.mem.Allocator, lines: []const []const u8) !void {
         }
     }
     at += 1;
-    // F
+    // F, or T
+    var text: ?[]const u8 = null;
+    if (std.mem.startsWith(u8, lines[at], "T ")) {
+        text = try arena.dupe(u8, try hexText(&buffer, lines[at][2..]));
+        at += 1;
+    }
     var chain: std.ArrayList(FilterSpec) = .empty;
     while (std.mem.startsWith(u8, lines[at], "F ")) : (at += 1) {
         fields = std.mem.tokenizeScalar(u8, lines[at], ' ');
@@ -1202,16 +1321,29 @@ fn runCase(gpa: std.mem.Allocator, lines: []const []const u8) !void {
         try chain.append(arena, .{ .name = name, .options = opts.items, .label = try arena.print("f{d}", .{chain.items.len}) });
     }
     const outcome = lines[at];
-    var g = Graph.init(gpa, .{ .format = format, .time_base = tb }, chain.items, sink, .{ .converter = converter.items }) catch |err| {
+    var recorder: diagnostics.Recorder = .{};
+    const graph_options: Options = .{ .converter = converter.items, .diagnostics = recorder.sink(.err) };
+    const created = if (text) |t|
+        Graph.initText(gpa, .{ .format = format, .time_base = tb }, t, sink, graph_options)
+    else
+        Graph.init(gpa, .{ .format = format, .time_base = tb }, chain.items, sink, graph_options);
+    var g = created catch |err| {
         if (std.mem.eql(u8, outcome, "X")) {
             if (err != error.UnsupportedFunction and err != error.UnsupportedSyntax) return err;
             return;
         }
         if (std.mem.eql(u8, outcome, "E init")) return;
+        if (std.mem.eql(u8, outcome, "E parse")) {
+            // FFmpeg's first message, where the port reports one: the
+            // syntax's and the expressions'; not av_opt_set's own.
+            const want = try hexText(&buffer, lines[at + 1][2..]);
+            if (recorder.count > 0) try testing.expectEqualStrings(want, recorder.firstMessage());
+            return;
+        }
         return err;
     };
     defer g.deinit();
-    if (std.mem.eql(u8, outcome, "X") or std.mem.eql(u8, outcome, "E init")) return error.TestUnexpectedResult;
+    if (std.mem.eql(u8, outcome, "X") or std.mem.eql(u8, outcome, "E init") or std.mem.eql(u8, outcome, "E parse")) return error.TestUnexpectedResult;
     g.configure() catch |err| {
         if (std.mem.eql(u8, outcome, "E config")) return;
         return err;
