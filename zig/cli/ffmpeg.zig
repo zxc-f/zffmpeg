@@ -161,13 +161,15 @@ fn run(init: std.process.Init) ExitStatus {
         .ok => |layout| layout,
         .failed => |exit| return exit,
     };
+    // FFmpeg's number syntax (`44.1k`, T17a); 0 keeps the input's rate, as
+    // FFmpeg's encoder then takes it.
     const output_rate: ?u32 = if (command.output_rate) |text| rate: {
-        const rate = std.fmt.parseInt(u32, text, 10) catch 0;
-        if (rate == 0) {
+        const rate = av.number.parseInt(text) catch -1;
+        if (rate < 0) {
             printError(io, "zffmpeg: {s}: invalid sample rate\n", .{text});
             return .usage;
         }
-        break :rate rate;
+        break :rate if (rate == 0) null else @intCast(rate);
     } else null;
     // The input's tags are carried, as FFmpeg's default -map_metadata does
     // (T21c, the project owner's choice).

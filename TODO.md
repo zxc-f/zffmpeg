@@ -1038,6 +1038,36 @@ names, not as an empty framework.
     evaluation arrives with T25b.
     Done when parsing matches FFmpeg's accepted and rejected forms for the
     supported options (vectors from `parseutils.c`).
+
+    ```text
+    ID / parent: T17a / T17
+    State: implementing
+    Supported behavior and explicit exclusions: part 1, FFmpeg's number
+      syntax (core/number.zig): av_strtod (C's strtod or strtoul for 0x, SI
+      prefixes, binary with i, dB, B) and fftools' parse_number, for
+      zffmpeg's -ar and -ac. Excluded so far: typed option descriptors, the
+      diagnostic sink, durations and sizes (no option takes them),
+      expressions (T25b).
+    Needs (verified) / lands with / verified after: T16 (verified); lands
+      with T24.
+    Contract and source provenance: port.md "Options and numbers";
+      notes.md "Options and numbers"; eval.c (av_strtod, si_prefixes),
+      cmdutils.c (parse_number).
+    Required fixtures / optional corpus: 107 texts, 214 vectors of the pinned
+      libavutil (number_vectors.c); no optional corpus.
+    Ownership, state transitions and limits: values; no allocation.
+    Comparison rule and intentional differences: exact; dB within Zig's
+      exp2; -ac 0 a usage error after -i too.
+    Implementation files and test entry points: core/number.zig,
+      cli/ffmpeg.zig, cli/status.zig; number_vectors.c, build.zig cases.
+    Evidence commit / Linux CI run / reference report: part 1 local Linux
+      runs; CI pending.
+    Required cases: part 1 passes; the descriptors and the sink are missing.
+    Optional cases: none
+    Fuzz seeds, budget and result: none yet.
+    Remaining work or blocker / next action: the descriptors and the
+      diagnostic sink.
+    ```
   - [x] **T17b — Metadata dictionary.** Needs T14a. Start with T21c.
     Reference: `libavutil/dict.c`.
     Container and stream tags with ordered, case-insensitive keys, an explicit
@@ -1959,8 +1989,8 @@ names, not as an empty framework.
     cases.
   Evidence commit / Linux CI run / reference report: part 1 local Linux
     runs; CI pending.
-  Required cases: parts 1 and 2 pass; T17a's number syntax for -ar is
-    missing.
+  Required cases: parts 1 and 2 pass, -ar in FFmpeg's number syntax
+    (T17a part 1).
   Optional cases: none
   Fuzz seeds, budget and result: none yet.
   Remaining work or blocker / next action: T17a, then T24's G5 record.

@@ -238,6 +238,13 @@ port.md's contract table updated, and (after T06) the parser.
 | Command line (part 2) | zffmpeg takes FFmpeg's output `-ac` and `-ch_layout` and nothing else of libswresample's mix (no `clev`, `slev`, `lfe_mix_level`, `rematrix_volume` or matrix encoding, which FFmpeg sets only through filter options); the library's `rematrix.Options` has them. A layout change with `-c copy` is refused (`UnsupportedOperation`), where FFmpeg ignores the option and copies, so that a requested layout is never silently dropped. | `cli/ffmpeg.zig`, `convert.Request.layout`. |
 | Comparison | `compare.py` compares the remixed samples as raw PCM, not whole WAV files, so container differences recorded elsewhere stay out of it; three fixtures whose input FFmpeg reads differently (trailing AU bytes, a layout chunk after the samples) are recorded. It also found that FFmpeg's WAV muxer writes a `fact` count of 1 for an empty non-PCM stream (its sample count is 0 − `INT64_MAX`, truncated to 32 bits) where the port writes 0, a WAV writer difference outside T23c. | `compare_remix`, reference README. |
 
+## Options and numbers
+
+| Decision | Current choice and reason | To change it |
+| --- | --- | --- |
+| Number syntax (T17a part 1) | `av_strtod` and `parse_number` exactly, quirks included (`0x1p3` is 1 pico, `1E` is 10^18, `nan` is not an integer), checked on 107 texts. `dB` goes through Zig's `exp2`, which may differ from glibc's in the last bit. | `core/number.zig`, `number_vectors.c`. |
+| `-ar 0`, `-ac 0` | zffmpeg's output `-ar 0` keeps the input's rate, as FFmpeg's encoder then does; `-ac 0` stays a usage error, before or after `-i` (FFmpeg rejects it before `-i` and ignores it after), as one rule for both. | `cli/ffmpeg.zig`, `status.layoutOption`. |
+
 ## Resampling
 
 | Decision | Current choice and reason | To change it |

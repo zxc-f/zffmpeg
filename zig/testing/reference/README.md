@@ -83,6 +83,14 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/remix_vecto
 ./remix-vectors | diff -u zig/testing/vectors/remix.txt -
 ```
 
+The T17a number vectors come from the reference's `libavutil` (`av_strtod`,
+and fftools' `parse_number` restated in the generator):
+
+```bash
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/number_vectors.c .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o number-vectors
+./number-vectors | diff -u zig/testing/vectors/number.txt -
+```
+
 The T24 resampling vectors come from the reference's `libswresample` with
 its default options (`swr_convert` on generated input, drained as FFmpeg's
 `aresample` drains it):

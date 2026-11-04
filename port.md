@@ -608,6 +608,22 @@ outputs, whose output bytes the port gives exactly (an FNV-1a hash of each);
 and `compare.py` rematrixes every accepted fixture into six layouts with
 FFmpeg and zffmpeg and compares the samples.
 
+### Options and numbers
+
+T17a's first part, [core/number.zig](zig/core/number.zig), is FFmpeg's
+number syntax for options, as `av_strtod` and fftools' `parse_number` read
+it:
+
+| Case | Behavior |
+| --- | --- |
+| Numbers | C's `strtod` in the C locale (white space, a sign, decimal or hexadecimal floats, `inf`, `nan`), or `strtoul` in base 16 for a text starting with `0x` (so `0x1p3` is 1 and the prefix `p`); rounding to nearest as glibc's. |
+| Suffixes | An SI prefix from `y` to `Y`, decimal, or binary with `i` (`44.1k` is 44100, `1Ki` 1024, `1E` 10^18), else `dB` (10^(x/20), through `exp2`, which may differ from the C library's in the last bit), then `B` (times 8). |
+| Options | `parse_number`: the whole text a number, within the option's range, an integer for an integer option (NaN is not). zffmpeg's `-ar` and `-ac` take it; `-ar 0` keeps the input's rate, as FFmpeg's encoder then does. |
+| Not yet | Typed option descriptors and the diagnostic sink (the rest of T17a); expressions (T25b); durations and sizes, which no option takes yet. |
+
+The oracle is [number_vectors.c](zig/testing/reference/number_vectors.c):
+107 texts through the pinned `av_strtod` and `parse_number`.
+
 ### Resampling
 
 T24 converts the sample rate as libswresample does with its defaults. Its
@@ -622,7 +638,7 @@ resampler:
 | Internal format | `swr_init`'s choice with a rate change: through float unless both sides together take 3 bytes or fewer a sample (u8 to u8 or s16), double for 64-bit input. |
 | Tolerance | The filter's `sin` (and `exp` past a Bessel argument of 15) is Zig's, which differs from the C library's in the last bit for about 3% of arguments (311,579 of 10,004,121 tested), so results may differ from FFmpeg's: at most 1 unit for integer output, 2^-23 for float, 2^-50 for double; on the vectors integer and float output is exact and double within 2^-52. Frame counts and delays are exact. The project owner chose this over porting the C library's `sin`. |
 | Pipeline | Part 2, [resample/swr.zig](zig/resample/swr.zig): a rate change runs as FFmpeg's `aresample` filter runs libswresample. The input is cut into FFmpeg's decoder frames, one `swr_convert` each with room for `n_in × ratio + 32` frames (more by the delay), then calls of 4096 without input while one fills its room, and flushing calls of 4096 at the end. The mix comes before or after the resampler by `resample_first`, then the dither, whose noise follows those calls, and the output format. `av.convert`'s `Request.sample_rate` (with `Request.gpa`, for the resampler's memory) asks for it; the output's frame count, which the known-length writers need first, comes from `resample.outputFrames`, the resampler's arithmetic without its samples. |
-| Not yet | Timestamp compensation (`async`, `min_comp`), soxr, and FFmpeg's number syntax for `-ar` (`44.1k`; T17a). |
+| Not yet | Timestamp compensation (`async`, `min_comp`), soxr. |
 
 The oracle is [resample_vectors.c](zig/testing/reference/resample_vectors.c):
 96 `swr_convert` runs over 12 rate pairs and 7 format pairs, stereo, and
@@ -1081,7 +1097,7 @@ zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate> | -ar <rate>]
 | Options | Exactly one `-i`. `-c copy` (or `-c:a copy`) asks for stream copy, `-c <encoder>` for that encoder (T23a); without `-c` the samples are transcoded to the output's default codec. `-f wav`, `-f w64` (Sony Wave64, since T21b), `-f au` or `-f aiff` (since T22b) names the output container, as does a raw PCM format's name (`-f s16le`, T22c). In FFmpeg an option before `-i` applies to the input: since T16 a `-f` there forces the input format (detection otherwise picks FFmpeg's winner, and an undetected input is `UnknownFormat`), since T22c the raw PCM options may go there, and any other option before `-i` is rejected rather than read as an output option. Nothing may follow the output. Repeated or unknown options are usage errors. |
 | Encoder | `-c copy` stream-copies; `-c <encoder>` (`-c:a`), FFmpeg's encoder name such as `pcm_s24le`, transcodes to that codec, which the output must carry (status 3 otherwise); an unknown name is a usage error. Without `-c` the output's default codec is used, and the sample format converts as FFmpeg's does (T23a). |
 | Dither | After `-i`, `-dither_method` (a libswresample method name, or FFmpeg's number for one, 0 for none) and `-dither_scale` (0 to 2147483647, default 1) dither the conversion as FFmpeg's would (T23a); `-c copy` ignores them, as FFmpeg does. A bad value is a usage error before any output (FFmpeg fails later, configuring its filter graph, and also takes option expressions); before `-i` they are a usage error, where FFmpeg takes them as input options and ignores them. |
-| Output rate | After `-i`, `-ar <rate>` (T24, a decimal number for now): the samples are resampled as FFmpeg's `aresample` does, within the declared tolerance (port.md "Resampling"; on every comparison so far, byte for byte). With `-c copy` a rate change is `UnsupportedOperation`. |
+| Output rate | After `-i`, `-ar <rate>` (T24, in FFmpeg's number syntax, `44.1k` included; 0 keeps the input's rate): the samples are resampled as FFmpeg's `aresample` does, within the declared tolerance (port.md "Resampling"; on every comparison so far, byte for byte). With `-c copy` a rate change is `UnsupportedOperation`. |
 | Output layout | After `-i`, `-ch_layout <layout>` or `-ac <channels>` (T23c): the samples are rematrixed into that layout as FFmpeg's libswresample mixes them, bit-exact (`-ac N` and a layout of a count alone take FFmpeg's default layout for the count, as its command line picks one for a PCM encoder), dithered after the mix when `-dither_method` asks. A layout libswresample cannot mix is `UnsupportedLayout` (status 3) before any output; with `-c copy` a layout change is `UnsupportedOperation`, where FFmpeg ignores the option. |
 | Raw PCM input | Before `-i`, `-sample_rate` (or `-ar`) and `-ch_layout` (or `-ac`, which gives `NC`, a count alone, as FFmpeg's command line does) describe a raw input, FFmpeg's defaults 44100 Hz mono otherwise (T22c); for another input they are a usage error. A raw file's size gives its frame count; from standard input it is unknown, so only raw PCM output can be written. |
 | Output container | `-f`, else the output name's extension as the muxers declare it: `.wav`, `.w64`, `.au`, `.aif`, `.aiff`, `.afc`, `.aifc`, and the raw formats' `.ub`, `.sb`, `.al`, `.ul` and `.sw`, without regard to case (as FFmpeg's `av_match_ext`).

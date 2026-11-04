@@ -119,12 +119,13 @@ pub fn layoutOption(io: std.Io, tool: []const u8, layout_text: ?[]const u8, chan
         return .{ .ok = layout };
     }
     if (channels_text) |text| {
-        const count = std.fmt.parseInt(u16, text, 10) catch 0;
-        if (count == 0) {
+        // FFmpeg's number syntax (T17a), within a channel count.
+        const value = av.number.parseInt(text) catch -1;
+        if (value <= 0 or value > std.math.maxInt(u16)) {
             printError(io, "{s}: {s}: invalid channel count\n", .{ tool, text });
             return .{ .failed = .usage };
         }
-        return .{ .ok = .{ .unspecified = count } };
+        return .{ .ok = .{ .unspecified = @intCast(value) } };
     }
     return .{ .ok = null };
 }

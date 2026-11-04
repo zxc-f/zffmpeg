@@ -60,6 +60,7 @@ pub const packet = @import("core/packet.zig");
 pub const frame = @import("core/frame.zig");
 pub const stage = @import("core/stage.zig");
 pub const metadata = @import("core/metadata.zig");
+pub const number = @import("core/number.zig");
 pub const wav = @import("format/wav.zig");
 pub const au = @import("format/au.zig");
 pub const aiff = @import("format/aiff.zig");
@@ -85,6 +86,7 @@ test {
     _ = @import("core/frame.zig");
     _ = @import("core/stage.zig");
     _ = @import("core/metadata.zig");
+    _ = @import("core/number.zig");
     _ = @import("format/wav.zig");
     _ = @import("format/au.zig");
     _ = @import("format/aiff.zig");
