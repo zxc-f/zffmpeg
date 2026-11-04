@@ -962,7 +962,8 @@ pub const DecodedReader = struct {
     /// The FLAC format's MD5 input: each sample unshifted, signed
     /// little-endian in the fewest whole bytes holding `bps`.
     fn hashSamples(r: *DecodedReader, data: []const u8, width: usize) void {
-        const shift: u5 = @intCast(@as(u8, @intCast(width * 8)) - r.bps);
+        const storage_bits: u8 = @intCast(width * 8);
+        const shift: u5 = @intCast(storage_bits - r.bps);
         const bytes_out = (r.bps + 7) / 8;
         var i: usize = 0;
         while (i < data.len) : (i += width) {
