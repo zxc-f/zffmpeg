@@ -2649,8 +2649,22 @@ names, not as an empty framework.
       durations; (5) the hash driver's stream copy to framecrc for Ogg,
       as the ffmpeg program's -c copy gives it; (6) compare.py's Ogg
       section (zffprobe against ffprobe, framecrc against ffmpeg -c copy).
-      Part 4: seeking (ogg_read_timestamp under ff_seek_frame_binary),
-      the seek oracle on the Ogg fixtures.
+      Part 3 done: 29780ea (Vorbis and Opus descriptors), 39f2e5f
+      (registry, detection, zffprobe), 2c1fb67 (framecrc copy, compare.py
+      20/20). Part 4a: seek_vectors.c without a decoder and
+      vectors/seek_ogg.txt (918 seeks), 4a7749f. Remaining, part 4b:
+      move ff_gen_search, ff_find_last_ts and ff_seek_frame_binary from
+      flac.zig into seek.zig, generic over a read_timestamp (one
+      implementation; seek_flac.txt guards FLAC); ogg.zig's
+      ogg_read_seek and ogg_read_timestamp and its reset after a
+      reposition (io_repositioned); demux.zig's ff_read_frame_flush,
+      generic index (av_add_index_entry for key packets),
+      seek_frame_generic (the index, then reading forward), seek_frame_byte,
+      avformat_seek_file's pre-roll target and start-time clamp, and
+      request_seek_discard with read_frame_internal's skip-samples
+      injection (initial padding on the first packet, else the pre-roll);
+      then the seek test against seek_ogg.txt. Then G5: local CI, docs,
+      ledger.
     ```
   - [ ] **T27b — Ogg mux.** Needs T27a.
     Done when FFmpeg demuxes our output to identical packets and timestamps.
