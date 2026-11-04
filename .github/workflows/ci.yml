@@ -255,6 +255,20 @@ jobs:
       - name: Build zffprobe, zffmpeg and the test tools
         run: zig build -Doptimize=ReleaseSafe install test-tools
 
+      # The optional FATE samples (T19c), kept between runs and checked
+      # against fate_samples.txt's SHA-256. Fetching them may fail (the
+      # rsync server is external): compare.py then reports their cases as
+      # skipped, never failed.
+      - name: Cache the optional FATE samples
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: .references/fate-suite
+          key: fate-suite-${{ hashFiles('zig/testing/reference/fate_samples.txt') }}
+
+      - name: Fetch the optional FATE samples (T19c)
+        continue-on-error: true
+        run: bash zig/testing/reference/fate_sync.sh
+
       - name: Compare with the reference (T10)
         run: |
           python3 zig/testing/reference/compare.py \
@@ -266,4 +280,14 @@ jobs:
             --registry zig-out/bin/registry-dump \
             --hasher zig-out/bin/hash-driver \
             --report reference-report.md
-          cat reference-report.md >> "$GITHUB_STEP_SUMMARY"
+
+      # The report, its coverage summary included, on the run's page,
+      # whether the comparison passed or not (T19c).
+      - name: Publish the reference report
+        if: always()
+        run: |
+          if [ -f reference-report.md ]; then
+            cat reference-report.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "The comparison wrote no report." >> "$GITHUB_STEP_SUMMARY"
+          fi

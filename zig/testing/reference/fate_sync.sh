@@ -2,34 +2,29 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 # Original file for this project.
 #
-# Fetches the FATE samples the optional FLAC coverage uses (TODO.md T26b,
-# T19c) into an ignored directory, as FFmpeg's `make fate-rsync` would, but
-# only these files:
+# Fetches the FATE samples the optional coverage uses (TODO.md T26b, T19c)
+# into an ignored directory, as FFmpeg's `make fate-rsync` would, but only
+# the files fate_samples.txt lists, then checks each against the SHA-256
+# recorded there (their provenance: rsync://fate-suite.ffmpeg.org/fate-suite/
+# at the time they were recorded):
 #
 #   bash zig/testing/reference/fate_sync.sh [<directory>]
 #
 # The default directory is .references/fate-suite. compare.py reads it with
-# --fate-suite; missing files are reported as skipped, never as failures.
+# --fate-suite; missing files are reported as skipped, never as failures,
+# and a file whose bytes differ from the record fails.
 set -euo pipefail
 
-root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+root=$(cd "$here/../../.." && pwd)
 dest=${1:-"$root/.references/fate-suite"}
-files=(
-    audio-reference/luckynight_2ch_44kHz_s16.wav
-    audio-reference/divertimenti_2ch_96kHz_s24.wav
-    audio-reference/drums_2ch_44kHz_s32_wastedbits.wav
-    audio-reference/chorusnoise_2ch_44kHz_s16.wav
-    cover_art/cover_art.flac
-    filter/hdcd-mix.flac
-    filter/hdcd-false-positive.flac
-    filter/hdcd-encoding-errors.flac
-    filter/hdcd-fake20bit.flac
-    filter/seq-3341-7_seq-3342-5-24bit.flac
-    filter/out-of-phase-1000hz.flac
-)
+manifest="$here/fate_samples.txt"
 mkdir -p "$dest"
-for f in "${files[@]}"; do
-    mkdir -p "$dest/$(dirname "$f")"
-    rsync -tLW --timeout=120 "rsync://fate-suite.ffmpeg.org/fate-suite/$f" "$dest/$f"
-done
-echo "synced ${#files[@]} files into $dest"
+count=0
+while read -r _ file; do
+    mkdir -p "$dest/$(dirname "$file")"
+    rsync -tLW --timeout=120 "rsync://fate-suite.ffmpeg.org/fate-suite/$file" "$dest/$file"
+    count=$((count + 1))
+done <"$manifest"
+(cd "$dest" && sha256sum --quiet -c "$manifest")
+echo "synced and checked $count files into $dest"

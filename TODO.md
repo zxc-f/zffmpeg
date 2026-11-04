@@ -44,8 +44,9 @@ and timestamp helpers; and T52a, the seek API with WAV and Wave64
 seeking; and T26b, complete FLAC decoding (4 to 32 bits, variable
 blocking, metadata blocks, MD5) and FLAC seeking; and T26c, FFmpeg's FLAC
 encoder and muxer packet for packet, as a zffmpeg output, with T18b's bit
-writer, which completes T26. **Next: T19c (the optional corpus report,
-whose FATE FLAC part T26b and T26c began), then T27a (Ogg demux). See
+writer, which completes T26; and T19c, the optional FATE corpus with
+recorded provenance and the comparison's coverage summary, which completes
+T19. **Next: T27a (Ogg demux). See
 [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
@@ -1178,7 +1179,7 @@ names, not as an empty framework.
     Done when exhaustive vectors over the supported range pass. Frame hashes
     need none of T18: they use the standard library's Adler-32 and MD5 (T19b).
 
-- [ ] **T19 — Differential harness.** Checked when T19a–T19c are. Reference:
+- [x] **T19 — Differential harness.** Checked when T19a–T19c are. Reference:
   `libavformat/framecrcenc.c`, `framehash.c`, `hashenc.c`,
   `tests/fate-run.sh`, `tests/Makefile`.
   - [x] **T19a — Comparison runner: oracle phase and WAV writer driver.** Lands
@@ -1233,12 +1234,26 @@ names, not as an empty framework.
     clang 23 inf and NaN samples. Metadata is compared field by field
     against ffprobe's default writer, normalized to zffprobe's keys,
     rather than `-of json`. `zffmpeg -f framecrc` waits for T53.
-  - [ ] **T19c — Optional corpus and coverage report.** Needs T19b. Start with
+  - [x] **T19c — Optional corpus and coverage report.** Needs T19b. Start with
     the first optional sample. An optional FATE sample sync on Linux with
     recorded provenance, and a report of required cases (passed, failed,
     missing) and optional cases (passed, failed, skipped, with reasons).
     Done when CI publishes the report and a missing optional sample is
     reported rather than failed.
+    Evidence (G5, local Linux runs): the FATE sync and its first samples
+    came with T26b (`019313a`) and T26c (`fb6fe52`, the encoder tests);
+    this commit adds [fate_samples.txt](zig/testing/reference/fate_samples.txt)
+    (each sample's SHA-256 from `rsync://fate-suite.ffmpeg.org/fate-suite/`,
+    which `fate_sync.sh` now syncs from and checks), compare.py's coverage
+    summary (`record` per section, `coverage_summary`) and CI's cached,
+    optional FATE fetch with the report published on the run's page even
+    when the comparison fails (`if: always()`). Local reference job:
+    required passed 5639, failed 176 (the known clang 23 inf/NaN samples),
+    missing 0; optional FATE FLAC passed 17, failed 0, skipped 0; with one
+    sample removed and one altered in a copy of the suite, the removed one
+    is reported as skipped with its path and the altered one fails against
+    its SHA-256. CI's step summary rather than an uploaded artifact: no
+    other action needs pinning.
 
 ## Milestone 5: audio formats and processing
 

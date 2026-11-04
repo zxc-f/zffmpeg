@@ -122,7 +122,10 @@ LC_ALL=C ./seek-vectors zig/testing/fixtures/flac/*.flac | diff -u zig/testing/v
 T26b runs the same generator on the FLAC fixtures (`seek_flac.txt`).
 
 T26b's optional FATE coverage reads FFmpeg's FATE samples, which
-`fate_sync.sh` fetches with rsync into the ignored `.references/fate-suite`:
+`fate_sync.sh` fetches with rsync into the ignored `.references/fate-suite`
+and checks against [fate_samples.txt](fate_samples.txt), their SHA-256 as
+recorded from `rsync://fate-suite.ffmpeg.org/fate-suite/` (T19c; CI keeps
+them in its cache, and a failed fetch only skips their cases):
 the reference samples of `tests/fate/flac.mak`, encoded by FFmpeg with each
 test's options and decoded by zffmpeg and FFmpeg, and since T26c also encoded
 by zffmpeg, which must give FFmpeg's bytes (a WAV sample the WAV contract
@@ -419,6 +422,12 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   FFmpeg's on a pipe (STREAMINFO as first written), and FFmpeg must decode
   it to the encoder's input. The report records the bytes per compression
   level.
+- **Coverage summary (T19c).** The report ends with each section's required
+  cases (passed, failed, missing input files, and how many pass as listed
+  differences) and the optional corpus' cases (passed, failed, skipped, with
+  each skip's reason); a FATE sample whose bytes differ from
+  `fate_samples.txt` fails. CI writes the report to the run's summary page
+  even when the comparison fails.
 - **Pipes.** `zffprobe -` reading each of the 223 WAV, AU, AIFF and raw PCM fixtures (raw ones forced) from a
   pipe must give the same status, report and error as reading the file, with
   the path shown as `-`.

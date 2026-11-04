@@ -66,8 +66,9 @@ T25, and T26a (FLAC demux and 16-bit decoding) with T18a (the bit reader
 and CRCs) and T19b (frame and stream hashes), T15 (rational arithmetic and
 timestamps) and T52a (the seek API and WAV seeking), and T26b (complete
 FLAC decoding and seeking) and T26c (the FLAC encoder and muxer, with
-T18b's bit writer), completing T26; TODO.md's near-term order names the
-next task, and it lays out the roadmap through T64.
+T18b's bit writer), completing T26, and T19c (the optional FATE corpus
+and the comparison's coverage summary), completing T19; T27a (Ogg demux)
+is next, and TODO.md lays out the roadmap through T64.
  When the state changes, update the current-state statements in
 README.md, port.md ("Status and scope"), the TODO.md introduction and this file
 together.

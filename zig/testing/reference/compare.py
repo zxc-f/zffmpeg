@@ -480,6 +480,53 @@ def w64_differences(data, codec, channels, frames, differences):
     return differences
 
 
+# The coverage summary (T19c): each section records its required cases,
+# and the optional corpus its cases with skips and their reasons.
+COVERAGE = []
+
+
+def record(section, passed, total, understood=0, missing=0, optional=False, skipped=0, reasons=()):
+    """One section's cases: `passed` of `total`, `understood` of them
+    passing as listed differences; for a required section `missing` input
+    files (failures), for the optional corpus `skipped` cases and why."""
+    COVERAGE.append({"section": section, "passed": passed, "total": total, "understood": understood,
+                     "missing": missing, "optional": optional, "skipped": skipped, "reasons": list(reasons)})
+
+
+def coverage_summary(lines, failures):
+    """The report's closing table: required cases passed, failed and
+    missing; optional cases passed, failed and skipped, with reasons."""
+    required = [c for c in COVERAGE if not c["optional"]]
+    optional = [c for c in COVERAGE if c["optional"]]
+    rows = []
+    for c in required:
+        failed = c["total"] - c["passed"] - c["skipped"]
+        rows.append(f"| {c['section']} | required | {c['passed']} | {failed} | {c['missing']} missing | "
+                    f"{c['understood']} understood |")
+    for c in optional:
+        failed = c["total"] - c["passed"] - c["skipped"]
+        why = "; ".join(c["reasons"]) or "-"
+        rows.append(f"| {c['section']} | optional | {c['passed']} | {failed} | {c['skipped']} skipped | {why} |")
+    req_passed = sum(c["passed"] for c in required)
+    req_total = sum(c["total"] for c in required)
+    req_missing = sum(c["missing"] for c in required)
+    opt_passed = sum(c["passed"] for c in optional)
+    opt_skipped = sum(c["skipped"] for c in optional)
+    opt_total = sum(c["total"] for c in optional)
+    lines += [
+        "",
+        "## Coverage summary (T19c)",
+        "",
+        f"Required cases: passed {req_passed}, failed {req_total - req_passed}, missing {req_missing}. "
+        f"Optional cases: passed {opt_passed}, failed {opt_total - opt_passed - opt_skipped}, skipped {opt_skipped} "
+        f"(a skipped optional case is reported, not failed; a passing run with skips is not complete coverage). "
+        f"Failure messages in all: {len(failures)}.",
+        "",
+        "| Section | Kind | Passed | Failed | Missing or skipped | Notes |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ] + rows
+
+
 def compare_accepted(fixture, args, path):
     stream = fixture.accept
     channels, rate, samples = stream
@@ -735,6 +782,7 @@ def compare_detection(args, lines, failures):
         f"Fixtures whose FFmpeg probe winner equals the manifest's: {agree}/{len(fixtures)} "
         f"({undetected} detected by no demuxer).",
     ]
+    record("Content detection (T16)", agree, len(fixtures))
 
 
 def compare_forced(args, lines, failures, container, title, build, field_differences, decode_differences):
@@ -783,6 +831,7 @@ def compare_forced(args, lines, failures, container, title, build, field_differe
         f"Rejected {title} fixtures that FFmpeg accepts with `-f {container}` (intentional differences): "
         f"{ffmpeg_accepts_rejected}/{rejected}.",
     ]
+    record(f"{title} fixtures", accepted_ok + rejected_ok, len(fixtures))
 
 
 def compare_raw(args, lines, failures):
@@ -884,6 +933,8 @@ def compare_raw(args, lines, failures):
         f"Named copies detected as their format by FFmpeg and zffprobe: {named_ok}/{named_total}.",
         f"Writer-output fixtures FFmpeg's raw muxers copy unchanged: {muxed_ok}/{muxed_total}.",
     ]
+    record("Raw PCM fixtures (T22c)", accepted_ok + rejected_ok + named_ok + muxed_ok,
+           len(fixtures) + named_total + muxed_total)
 
 
 def compare_writer(args, lines, failures):
@@ -960,6 +1011,7 @@ def compare_writer(args, lines, failures):
             passed += not problems
             failures.extend(f"writer {fixture.name}: {problem}" for problem in problems)
     lines += ["", f"Zig-written files FFmpeg reads as expected: {passed}/{len(streams)}."]
+    record("Zig-written files read by FFmpeg", passed, len(streams))
 
 
 def compare_zffmpeg(args, lines, failures):
@@ -1117,6 +1169,7 @@ def compare_zffmpeg(args, lines, failures):
         f"AU and AIFF outputs of untagged writer-output inputs equal to FFmpeg's own conversion: "
         f"{same_ok}/{same_total}.",
     ]
+    record("zffmpeg outputs (T13b, T23a)", read_ok + rejected_ok + same_ok, read_total + rejected_total + same_total)
 
 
 # zffmpeg's outputs in the matrix: every container with a header, and raw PCM
@@ -1266,6 +1319,7 @@ def compare_dither(args, lines, failures):
                 lines.append(f"| `{name}` | {encoder} | {len(settings)} | {result} |")
                 failures.extend(f"dither {name} to {encoder}: {problem}" for problem in problems)
     lines += ["", f"Dithered conversions equal to FFmpeg's: {same}/{total}."]
+    record("Dither (T23a)", same, total)
 
 
 def check_carried_tags(args, fixture, path, out, output, copy, work, notes):
@@ -1357,6 +1411,7 @@ def compare_ffmpeg_w64(args, lines, failures):
             lines.append(f"| `{fixture.name}` | {probe_text} | {copy_text} | {result} |")
             failures.extend(f"ffmpeg w64 {fixture.name}: {problem}" for problem in problems)
     lines += ["", f"FFmpeg-written Wave64 files read as expected: {passed}/{len(fixtures)}."]
+    record("FFmpeg-written Wave64 (T21b)", passed, len(fixtures))
 
 
 def compare_ffmpeg_muxer(args, lines, failures, container, title, build):
@@ -1386,6 +1441,7 @@ def compare_ffmpeg_muxer(args, lines, failures, container, title, build):
         "",
         f"{title} writer-output fixtures FFmpeg copies to identical bytes: {same}/{len(fixtures)}.",
     ]
+    record(f"FFmpeg's {title} muxer", same, len(fixtures))
 
 
 # Output rates for zffmpeg's resampler (T24), as FFmpeg's output options,
@@ -1462,6 +1518,7 @@ def compare_resample(args, lines, failures):
                             failures.append(f"resample {name} {label}: {result}")
                 lines.append(f"| `{name}` | {label} | {result} |")
     lines += ["", f"Resampled outputs equal to FFmpeg's: {exact}/{total}; within the tolerance: {within}."]
+    record("Resampling (T24)", exact + within, total, understood=within)
 
 
 # Inputs whose decoded samples FFmpeg reads differently, for reasons other
@@ -1547,6 +1604,7 @@ def compare_remix(args, lines, failures):
             lines.append(f"| `{fixture.name}` | {len(REMIX_OPTIONS)} layouts | {result} |")
             failures.extend(f"remix {fixture.name}: {problem}" for problem in problems)
     lines += ["", f"Rematrixed outputs equal to FFmpeg's: {same}/{total}; refused by both: {refused}."]
+    record("Rematrixing (T23c)", same + refused, total)
 
 
 def compare_pipes(args, lines, failures):
@@ -1574,6 +1632,7 @@ def compare_pipes(args, lines, failures):
         "",
         f"Fixtures whose pipe result (status, report and error) equals the file result: {same}/{len(cases)}.",
     ]
+    record("zffprobe through a pipe", same, len(cases))
 
 
 # FLAC fixtures zffmpeg converts differently from the ffmpeg program (T26a).
@@ -1680,6 +1739,7 @@ def compare_flac(args, lines, failures):
         lines.append(f"| `{fixture.name}` | {ours} | {theirs} | {conversion} | {result} |")
         failures.extend(f"{fixture.name}: {problem}" for problem in problems)
     lines += ["", f"FLAC fixtures matching the contract and FFmpeg: {matched}/{total}."]
+    record("FLAC fixtures (T26a, T26b)", matched, total)
 
 
 # Fixtures whose hash text differs from the ffmpeg program's for an
@@ -1766,6 +1826,7 @@ def compare_hashes(args, lines, failures):
         "| Fixture | Mode | Understood difference |",
         "| --- | --- | --- |",
     ]
+    record("Frame and stream hashes (T19b)", same + known, total, understood=known)
     lines += [f"| `{name}` | {mode} | {reason} |" for (name, mode), reason in KNOWN_HASH_DIFFERENCES.items()]
 
 
@@ -1927,6 +1988,7 @@ def compare_flac_output(args, lines, failures):
             result = "pass" if not problems else "**FAIL**: " + "; ".join(problems)
             rows.append(f"| `{name}` | {len(FLAC_OUTPUT_OPTIONS)} | {result} |")
             failures.extend(f"FLAC output {name}: {p}" for p in problems)
+    record("FLAC output (T26c)", same, total)
     lines += [
         "",
         "## FLAC output (T26c)",
@@ -1954,6 +2016,18 @@ def compare_fate(args, lines, failures):
     suite = pathlib.Path(args.fate_suite)
     rows = []
     passed = failed = skipped = 0
+    reasons = []
+    # Provenance (T19c): each sample's SHA-256 as fate_sync.sh fetched it;
+    # a present sample with other bytes fails.
+    recorded = {}
+    for entry in (HERE / "fate_samples.txt").read_text().splitlines():
+        digest, _, sample = entry.partition("  ")
+        recorded[sample] = digest
+    changed = set()
+    for sample, digest in recorded.items():
+        path = suite / sample
+        if path.exists() and hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            changed.add(path)
     with tempfile.TemporaryDirectory() as work:
         work = pathlib.Path(work)
         cases = [(name, suite / ref, opts, codec) for name, ref, opts, codec in FATE_FLAC]
@@ -1961,8 +2035,14 @@ def compare_fate(args, lines, failures):
         for name, source, opts, codec in cases:
             if not source.exists():
                 skipped += 1
-                rows.append(f"| {name} | skipped: `{source.relative_to(suite) if suite in source.parents else source}` "
-                            f"missing |")
+                where = source.relative_to(suite) if suite in source.parents else source
+                rows.append(f"| {name} | skipped: `{where}` missing |")
+                reasons.append(f"{name}: `{where}` missing")
+                continue
+            if source in changed:
+                failed += 1
+                rows.append(f"| {name} | **FAIL**: the sample differs from fate_samples.txt's SHA-256 |")
+                failures.append(f"{name}: the FATE sample differs from its recorded SHA-256")
                 continue
             flac = work / "in.flac"
             encoded = ""
@@ -2021,6 +2101,8 @@ def compare_fate(args, lines, failures):
         "| Case | Result |",
         "| --- | --- |",
     ] + rows
+    record("FATE FLAC (T26b, T26c)", passed, passed + failed + skipped, optional=True, skipped=skipped,
+           reasons=reasons)
 
 
 def compare_unknown_length(args, lines, failures):
@@ -2086,6 +2168,7 @@ def compare_unknown_length(args, lines, failures):
         failures.extend(f"{fixture.name} (unknown_length): {problem}" for problem in problems)
     lines += ["", f"Fixtures the option accepts that FFmpeg decodes the same, or rejects as recorded: "
                   f"{accepted_ok}/{len(accepted)}."]
+    record("Unknown length (T21b)", accepted_ok, len(accepted))
 
 
 def ffmpeg_help_fields(binary, kind, name):
@@ -2191,6 +2274,8 @@ def compare_registries(args, lines, failures):
         f"muxers' extensions, MIME types and default codecs equal to `ffmpeg -h muxer=...`: "
         f"{len(muxers)}. Result: {'pass' if not problems else '**FAIL**'}.",
     ]
+    entries = len(codecs) + len(formats) + len(demuxers) + len(muxers)
+    record("Registries (T16)", entries - min(len(problems), entries), entries)
 
 
 def main():
@@ -2221,11 +2306,12 @@ def main():
     ]
     failures = []
     fixtures = generate.build_fixtures()
-    accepted_ok = rejected_ok = ffmpeg_accepts_rejected = 0
+    accepted_ok = rejected_ok = ffmpeg_accepts_rejected = missing_fixtures = 0
     for fixture in fixtures:
         path = FIXTURES / "wav" / f"{fixture.name}.wav"
         if not path.exists():
             failures.append(f"{fixture.name}: fixture file is missing")
+            missing_fixtures += 1
             continue
         if path.read_bytes() != fixture.data:
             failures.append(f"{fixture.name}: fixture file differs from generate.py")
@@ -2243,6 +2329,7 @@ def main():
 
     accepted = sum(1 for fixture in fixtures if fixture.accept is not None)
     rejected = len(fixtures) - accepted
+    record("WAV fixtures (T02, T21)", accepted_ok + rejected_ok, len(fixtures), missing=missing_fixtures)
     lines += [
         "",
         f"Accepted fixtures matching FFmpeg and zffprobe: {accepted_ok}/{accepted}.",
@@ -2272,6 +2359,7 @@ def main():
     compare_flac_output(args, lines, failures)
     compare_hashes(args, lines, failures)
     compare_fate(args, lines, failures)
+    coverage_summary(lines, failures)
 
     if NOT_IMPLEMENTED:
         lines += ["", "## Not implemented", ""]
