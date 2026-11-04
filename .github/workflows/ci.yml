@@ -179,6 +179,15 @@ jobs:
             -lm -pthread -o resample-vectors
           ./resample-vectors | diff -u zig/testing/vectors/resample.txt -
 
+      # The committed T25a oracle must be what this build's libavfilter gives.
+      - name: Check the filter graph vectors (T25a)
+        run: |
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/graph_vectors.c \
+            .references/ffmpeg-install/lib/libavfilter.a .references/ffmpeg-install/lib/libswscale.a \
+            .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a \
+            -lm -pthread -o graph-vectors
+          ./graph-vectors | diff -u zig/testing/vectors/graph.txt -
+
       # The committed T23a oracle must be what this build's libswresample gives.
       - name: Check the sample conversion and dither vectors (T23a)
         run: |

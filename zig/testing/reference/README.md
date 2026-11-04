@@ -105,6 +105,17 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/resample_ve
 ./resample-vectors | diff -u zig/testing/vectors/resample.txt -
 ```
 
+The T25a filter graph vectors come from the reference's `libavfilter`:
+`graph_vectors.c` builds linear chains of `anull`, `aformat`, `volume` and
+`aresample` between a buffer source and a buffer sink through the public
+API, and prints the configured links, the converters FFmpeg inserts and
+the output frames for generated input:
+
+```bash
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/graph_vectors.c .references/ffmpeg-install/lib/libavfilter.a .references/ffmpeg-install/lib/libswscale.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o graph-vectors
+./graph-vectors | diff -u zig/testing/vectors/graph.txt -
+```
+
 The second T23c generator, `remix_vectors.c`, runs `swr_convert` with a layout change on
 generated input (1792 cases: 25 layout pairs, eight sample formats each
 way, and dithered ones) and prints a hash of each output.
@@ -131,7 +142,7 @@ with the install prefix and:
 --disable-network --disable-x86asm --disable-ffplay --disable-avdevice
 --enable-protocol=file,pipe --enable-demuxer=wav,w64,au,aiff,caf,$pcm_formats
 --enable-decoder=$pcm_codecs --enable-encoder=$pcm_codecs
---enable-muxer=wav,w64,au,aiff,$pcm_formats --enable-filter=aresample
+--enable-muxer=wav,w64,au,aiff,$pcm_formats --enable-filter=aresample,volume
 
 pcm_codecs=pcm_u8,pcm_s8,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,
   pcm_s32be,pcm_s64le,pcm_s64be,pcm_f32le,pcm_f32be,pcm_f64le,pcm_f64be,
@@ -151,8 +162,9 @@ whose copies of the AU writer-output fixtures must be byte-identical (T22a), the
 AIFF muxer, likewise for AIFF (T22b), the raw PCM demuxers and muxers of every
 codec FFmpeg has one for, all but s64 (T22c), and the
 `aresample` filter for the
-`ffmpeg` program's audio filter graph. The program itself selects the few other
-filters it always needs. There are no GPL, nonfree, external-library or
+`ffmpeg` program's audio filter graph, and the `volume` filter, which the
+T25a graph vectors run (`anull` and `aformat` come with the program, which
+selects the few other filters it always needs). There are no GPL, nonfree, external-library or
 hardware components, and autodetection is off. `--disable-x86asm` keeps the C
 code paths as the reference and avoids a NASM dependency. The broad FATE
 configuration is deliberately not used.

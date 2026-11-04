@@ -171,6 +171,8 @@ slowdowns of the default build.
 | `zig/core/diagnostics.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. The levels are `libavutil/log.h`'s. |
 | `zig/testing/reference/options_vectors.c` | `LGPL-2.1-or-later` (SPDX header) | Original reference tool: it calls the pinned FFmpeg's `av_opt_set` on libswresample's options to print the T17a option oracle; not part of the port. |
 | `zig/testing/vectors/options.txt` | Generated data | Printed by `options_vectors.c` from the pinned `libswresample` and `libavutil`; see the [reference README](testing/reference/README.md). |
+| `zig/testing/reference/graph_vectors.c` | `LGPL-2.1-or-later` (SPDX header) | Original reference tool: it builds filter graphs with the pinned FFmpeg's public `libavfilter` API to print the T25a graph oracle; not part of the port. |
+| `zig/testing/vectors/graph.txt` | Generated data | Printed by `graph_vectors.c` from the pinned `libavfilter`, `libswresample` and `libavutil`; see the [reference README](testing/reference/README.md). |
 | `zig/testing/vectors/rematrix.txt` | Generated data | Printed by `rematrix_vectors.c` from the pinned `libswresample`; see the [reference README](testing/reference/README.md). |
 | `zig/testing/vectors/chan.txt` | Generated data | Printed by `chan_vectors.c` from the pinned `libavformat`; see the [reference README](testing/reference/README.md). |
 | `zig/testing/vectors/dither.txt` | Generated data | Printed by `dither_vectors.c` from the pinned `libswresample`; see the [reference README](testing/reference/README.md). |

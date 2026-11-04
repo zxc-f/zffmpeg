@@ -2038,6 +2038,70 @@ names, not as an empty framework.
     Done when each filter's output equals the reference's on fixtures
     (bit-exact or within its declared tolerance), negotiation inserts the same
     conversions, and EOF and drain propagate.
+
+    ```text
+    ID / parent: T25a / T25
+    State: implementing
+    Supported behavior and explicit exclusions: a linear chain of audio
+      filters between a buffer source (one format: any of the 12 sample
+      formats, a rate, a native, custom or unspecified layout, a time base)
+      and a buffer sink (optional lists of sample formats, rates and
+      layouts), as av.filter. Filters are created by name with options set
+      from text as avfilter_init_dict sets them: anull; aformat
+      (sample_fmts/f, sample_rates/r, channel_layouts/cl, '|' lists);
+      volume with a constant (av_strtod's number once white space is
+      removed), precision fixed, float or double, eval once or frame, the
+      replaygain options accepted with no effect (frames carry no replay
+      gain); aresample with sample_rate and the libswresample options the
+      port implements (osr, osf, ochl and their long names, dither_method,
+      dither_scale, and T24's eight resampler options). Configuration
+      negotiates as avfilter_graph_config: each filter's lists, merging
+      along links, aresample converters inserted where lists cannot merge
+      (auto_aresample_<n>, with the graph's converter options), reduction,
+      the sample format, rate and layout swaps, then the pick; time bases
+      as the filters set them. The graph is a send/receive stage: output
+      frames equal FFmpeg's in count, size and pts, and the end of input
+      drains aresample. Excluded: graph syntax and expressions (T25b; such a
+      value is refused), several inputs or outputs (T25c), other
+      libswresample options (async, matrix, mix levels, soxr), a sink frame
+      size, commands, the EOF status pts (not in FFmpeg's public API),
+      replay-gain side data, timeline editing.
+    Needs (verified) / lands with / verified after: T14a, T17a, T23a, T24.
+    Contract and source provenance: libavfilter/avfiltergraph.c
+      (query_formats, reduce_formats, swap_*, pick_formats), formats.c
+      (lists and merging), avfilter.c (avfilter_insert_filter), buffersrc.c,
+      buffersink.c, audio.c, af_anull.c, af_aformat.c, af_volume.c,
+      af_aresample.c; libavutil/opt.c (array, sample format and layout
+      options), eval.c (white space, numbers); libswresample/swresample.c
+      (swr_next_pts, the unresampled path).
+    Required fixtures / optional corpus: graph_vectors.c's 92 cases
+      (zig/testing/vectors/graph.txt: 84 run, 7 refused by FFmpeg, 1
+      expression); no optional corpus.
+    Ownership, state transitions and limits: the graph owns its filters,
+      links, negotiation lists and frames; a sent frame is copied during
+      send; a received frame stays valid until the next call on the graph.
+      At most 64 channels; configuration before the first frame; a frame
+      whose format differs from the source's fails (FFmpeg's "Changing audio
+      frame properties on the fly is not supported"), except an unspecified
+      layout of the same count, which takes the link's.
+    Comparison rule and intentional differences: the configured chain
+      exact (filter names, each link's sample format, rate, layout
+      description and time base); output frames exact in count, size and
+      pts, samples exact except where a graph resamples, within T24's
+      declared tolerance. Differences: a fixed-precision volume whose 256
+      times does not fit an int is refused (FFmpeg's conversion is
+      undefined there); a custom layout with no channel in the mask but LFE
+      scores as no channels when layouts are compared (FFmpeg reads a
+      pointer's bits).
+    Implementation files and test entry points: graph_vectors.c,
+      vectors/graph.txt.
+    Evidence commit / Linux CI run / reference report: pending.
+    Required cases: passed 0 / failed 0 / missing 92
+    Optional cases: none
+    Fuzz seeds, budget and result: none yet.
+    Remaining work or blocker / next action: the negotiation, then the
+      filters and the frame path.
+    ```
   - [ ] **T25b — Filtergraph syntax and expressions.** Needs T25a. The
     filtergraph string syntax, the expression subset volume needs, atrim and
     asetpts.
