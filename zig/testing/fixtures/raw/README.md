@@ -43,10 +43,15 @@ raw demuxer options:
 | Option | Default | Rule |
 | --- | --- | --- |
 | `-sample_rate` (zffmpeg also `-ar`) | 44100 | 0 is `InvalidFormat`; above 192,000 Hz (configurable) is `LimitExceeded`. |
-| `-ch_layout` (zffmpeg also `-ac`) | `mono` | `mono` or `stereo` (`-ac` 1 or 2); another layout is unsupported (T23b). |
+| `-ch_layout` (zffmpeg also `-ac`) | `mono` | Since T23b any layout FFmpeg parses, of at most 64 channels (configurable `Limits.max_channels`; above it `LimitExceeded`, `raw_s16le_channels65`): a named one (`raw_s16le_5point1`), a count alone, which stays unspecified (`raw_s16le_6c`, `6C`), a custom order (`raw_s16le_custom`). Text FFmpeg rejects is a usage error (exit 1), an ambisonic layout unsupported (exit 3). zffmpeg's `-ac N` gives `NC`, as FFmpeg's command line does, and an `-ac` of 0 or not a number is a usage error. |
 
 Given for an input whose format has a header, these options are a usage error
 (`UnusedOption`, exit 1); FFmpeg ignores them with a warning.
+
+zffmpeg then treats the layout as FFmpeg's command line does: a `-ch_layout`
+names the stream's layout and is kept, `6C` unspecified; after `-ac`, an
+unspecified layout takes the default for its count (5.1 for 6) when one is
+named, as for any input (`av.convert`'s `Request.guess_layout`).
 
 ## Data
 
@@ -121,8 +126,13 @@ were used.
 | `raw_mulaw_mono_8k` | accepted | 8 | `-f mulaw`, 8000 Hz, 1 channel; accept: mono (1 channel), 8000 Hz, 8 frames, `pcm_mulaw`; writer output; not detected (probing picks no format) | µ-law; its negative zero (0x7F) is left out, as for WAV and AU. | `643fb89f0ee9fd1fc2e9cdad6d462c668b6e69b9e173d0af9ceb818f014b7a01` |
 | `raw_s16le_defaults` | accepted | 16 | `-f s16le`, defaults; accept: mono (1 channel), 44100 Hz, 8 frames; not detected (probing picks no format) | No parameters: FFmpeg's defaults, 44100 Hz mono. | `3a941550a1fc894651222384b4eb90f75cc14babfa16bce333ca6a29c03f4604` |
 | `raw_empty` | accepted | 0 | `-f s16le`, 8000 Hz, 1 channel; accept: mono (1 channel), 8000 Hz, 0 frames; writer output; not detected (probing picks no format) | No bytes: an empty stream of 0 frames. | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
+| `raw_s16le_5point1` | accepted | 24 | `-f s16le`, 8000 Hz, 6 channels; accept: 5.1 (6 channels), 8000 Hz, 2 frames; writer output; not detected (probing picks no format) | Six channels read as `5.1`. | `254a70f804f0b9da1d081ec8b836b3633d841f1b6cca8b3da1df14b5af5b2bdb` |
+| `raw_s16le_6c` | accepted | 24 | `-f s16le`, 8000 Hz, 6 channels; accept: 6 channels, 8000 Hz, 2 frames; writer output; not detected (probing picks no format) | Six channels read as `6C`, a count only: unspecified, as FFmpeg reads `-ac 6`. | `254a70f804f0b9da1d081ec8b836b3633d841f1b6cca8b3da1df14b5af5b2bdb` |
+| `raw_s16le_custom` | accepted | 12 | `-f s16le`, 8000 Hz, 3 channels; accept: 3 channels (FC+FL+FR) (3 channels), 8000 Hz, 2 frames; writer output; not detected (probing picks no format) | Three channels in a custom order, `FC+FL+FR`. | `071e5ef739014f873f5d17b11161f844325c6955705268b0bfc48012a7f95d9c` |
+| `raw_s16le_channels64` | accepted | 128 | `-f s16le`, 8000 Hz, 64 channels; accept: 64 channels, 8000 Hz, 1 frame; writer output; not detected (probing picks no format) | 64 channels, the default limit: one frame. | `9fc255d5fd4e649971af2a91564b36b269c193bbcc87e11f7d64f7030905d108` |
 | `raw_partial_frame` | rejected | 6 | `-f s16le`, 8000 Hz, 2 channels; reject: `Truncated`; not detected (probing picks no format) | Stereo 16-bit, 6 bytes: the input ends inside its second frame. FFmpeg decodes the whole frame. | `bec0b850f2b4fdd32b68f56dab3bbcd13f1ef527c113690eddef7f0fe53842bd` |
 | `raw_partial_sample` | rejected | 4 | `-f s24le`, 8000 Hz, 1 channel; reject: `Truncated`; not detected (probing picks no format) | 24-bit mono, 4 bytes: the input ends inside its second sample. | `df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119` |
 | `raw_rate_zero` | rejected | 8 | `-f s16le`, 0 Hz, 1 channel; reject: `InvalidFormat`; not detected (probing picks no format) | Sample rate 0. | `6f31e68b8986562065a3475c1f70ed4d945f799c49daa5778b4ca3a6d41540cd` |
 | `raw_rate_over_limit` | rejected | 8 | `-f s16le`, 192001 Hz, 1 channel; reject: `LimitExceeded`; not detected (probing picks no format) | Sample rate 192001 Hz, above the default limit. | `6f31e68b8986562065a3475c1f70ed4d945f799c49daa5778b4ca3a6d41540cd` |
+| `raw_s16le_channels65` | rejected | 130 | `-f s16le`, 8000 Hz, 65 channels; reject: `LimitExceeded`; not detected (probing picks no format) | 65 channels, above the default limit (FFmpeg reads them). | `e55a5c27736a8761c8e96acec072102325e08cb2d0dbb4d4702cfe38f8ab0709` |
 <!-- END GENERATED FIXTURE TABLE -->

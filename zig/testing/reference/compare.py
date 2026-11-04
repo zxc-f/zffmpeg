@@ -304,7 +304,11 @@ def raw_input_args(fmt, params):
     the parameters unless the defaults apply."""
     options = ["-f", fmt]
     if params is not None:
-        options += ["-sample_rate", str(params[0]), "-ch_layout", LAYOUT.get(params[1], f"{params[1]}C")]
+        # A fixture's (rate, channels, layout text), or a stream's (rate,
+        # channels), read with FFmpeg's names for mono and stereo, else
+        # the count alone.
+        layout = params[2] if len(params) > 2 else LAYOUT.get(params[1], f"{params[1]}C")
+        options += ["-sample_rate", str(params[0]), "-ch_layout", layout]
     return options
 
 
@@ -913,8 +917,10 @@ def compare_writer(args, lines, failures):
                 output = f"{len(written)} bytes, " + ("equal to the fixture" if written == fixture.data else "differs")
                 if written != fixture.data:
                     problems.append("output differs from the writer-output fixture")
-                expected = expected_stream(container, stream.codec, channels, rate, frames, stream.storage,
-                                           written_layout(container, stream.codec, rate, stream.layout, channels))
+                # Raw output is read back with the fixture's own -ch_layout.
+                layout = (stream.layout if container in generate.RAW_FORMATS
+                          else written_layout(container, stream.codec, rate, stream.layout, channels))
+                expected = expected_stream(container, stream.codec, channels, rate, frames, stream.storage, layout)
                 if container in generate.RAW_FORMATS:
                     stream_problems, notes = check_stream(args, fixture.name, out, expected, stream,
                                                           raw_input_args(container, fixture.params))
@@ -1036,8 +1042,11 @@ def compare_zffmpeg(args, lines, failures):
                         problems.append(f"through pipes zffmpeg exited {pipe_code} with different output")
                     codec = output_codec
                     # FFmpeg's command line guesses an unspecified layout, for copy
-                    # too, and the output keeps what its muxer can store (T23b).
-                    out_layout = written_layout(output, codec, rate, guessed_layout(stream.layout, channels), channels)
+                    # too, unless an input -ch_layout names it, as for raw PCM
+                    # here; the output keeps what its muxer can store (T23b).
+                    in_layout = (stream.layout if container in generate.RAW_FORMATS and fixture.params
+                                 else guessed_layout(stream.layout, channels))
+                    out_layout = written_layout(output, codec, rate, in_layout, channels)
                     expected = expected_stream(output, codec, channels, rate, frames, stream.storage, out_layout)
                     differences = dict(FIELD_DIFFERENCES.get(output, KNOWN_FIELD_DIFFERENCES))
                     # FFmpeg reads raw output with the stream's parameters.

@@ -6,7 +6,7 @@
 //! only) or raw PCM stream (TODO.md T13b, T21b, T22b, T22c, T22d).
 //!
 //!     zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate> | -ar <rate>]
-//!             [-ch_layout mono|stereo | -ac 1|2] -i <input | -> [-c copy|<encoder>]
+//!             [-ch_layout <layout> | -ac <channels>] -i <input | -> [-c copy|<encoder>]
 //!             [-dither_method <method>] [-dither_scale <scale>] [-f <format>] <output | ->
 //!
 //! The input container is detected from content as FFmpeg's probing would
@@ -40,13 +40,13 @@ const status = @import("status.zig");
 const ExitStatus = status.ExitStatus;
 const printError = status.printError;
 
-const usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout mono|stereo] -i <input | -> [-c copy|<encoder>] [-dither_method <method>] [-dither_scale <scale>] [-f <format>] <output | ->\n";
+const usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout <layout>] -i <input | -> [-c copy|<encoder>] [-dither_method <method>] [-dither_scale <scale>] [-f <format>] <output | ->\n";
 const help = usage ++
     \\
     \\Converts one WAV, Wave64, AU, AIFF, CAF (input only) or raw PCM stream
     \\(standard input or output with -). The input container is detected from content, or for raw
     \\PCM from the name (.sb, .ub, .al, .ul, .sw), or forced with -f before -i.
-    \\Before -i, -sample_rate (or -ar) and -ch_layout (or -ac 1|2) describe raw
+    \\Before -i, -sample_rate (or -ar) and -ch_layout (or -ac) describe raw
     \\PCM input, 44100 Hz mono by default. The output container is the -f after
     \\-i, or the output name's extension (.wav, .w64, .au, .aif, .aiff, .afc,
     \\.aifc, .sb, .ub, .al, .ul, .sw). Formats: wav, w64, au, aiff and the raw
@@ -155,6 +155,9 @@ fn run(init: std.process.Init) ExitStatus {
         .codec = command.encoder,
         .dither = command.dither,
         .input = .{ .format = input_container, .raw = raw_params },
+        // FFmpeg's input -ch_layout names the stream's layout, which its
+        // command line then leaves as it is; -ac gives a count it may name.
+        .guess_layout = command.input_layout == null,
         .tags = .{ .gpa = init.gpa, .dictionary = &tags },
     });
 }

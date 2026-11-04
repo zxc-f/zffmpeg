@@ -3,7 +3,7 @@
 //! zffprobe: validates one WAV, Wave64, AU, AIFF, CAF or raw PCM stream and reports
 //! it as `key=value` lines.
 //!
-//!     zffprobe [-f <format>] [-sample_rate <rate>] [-ch_layout mono|stereo] <file | ->
+//!     zffprobe [-f <format>] [-sample_rate <rate>] [-ch_layout <layout>] <file | ->
 //!
 //! The container is detected from content as FFmpeg's probing would
 //! (`av.detect`, T16), with the file name's extension as FFmpeg's fallback
@@ -25,7 +25,7 @@ const status = @import("status.zig");
 const ExitStatus = status.ExitStatus;
 const printError = status.printError;
 
-const usage = "usage: zffprobe [-f <format>] [-sample_rate <rate>] [-ch_layout mono|stereo] <file | ->\n";
+const usage = "usage: zffprobe [-f <format>] [-sample_rate <rate>] [-ch_layout <layout>] <file | ->\n";
 const help = usage ++
     \\
     \\Validates a WAV, Wave64, AU, AIFF, CAF or raw PCM stream (standard input with -)

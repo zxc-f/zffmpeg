@@ -93,6 +93,12 @@ pub const Request = struct {
     /// What the caller knows about the input: a forced format (FFmpeg's input
     /// `-f`, T16), its file name and length, raw PCM parameters (T22c).
     input: detect.Source = .{},
+    /// Give an unspecified input layout the default for its channel count,
+    /// as FFmpeg's command line does (`guess_input_channel_layout`, T23b),
+    /// so the output header records it. FFmpeg skips the guess when its
+    /// input `-ch_layout` names the layout, `6C` included; its `-ac` does
+    /// not.
+    guess_layout: bool = true,
     /// Carry the input's tags (T21c): `init` puts the tags FFmpeg's command
     /// would carry (`carriedTags`) from those before the input's `data` into
     /// the empty `tags.dictionary`, under FFmpeg's names, and a WAV output
@@ -129,8 +135,9 @@ pub const Summary = struct {
     /// or the output container's default codec.
     output_codec: pcm.Codec,
     /// The input's format, with the layout FFmpeg's command line gives it
-    /// (`audio.guessLayout`: an unspecified one becomes the default for its
-    /// channel count, as for a plain WAV); the output's has the same rate
+    /// (`audio.guessLayout`, unless `Request.guess_layout` is off: an
+    /// unspecified one becomes the default for its channel count, as for a
+    /// plain WAV); the output's has the same rate
     /// and layout, its sample format the output codec's storage
     /// (`outputFormat`).
     format: audio.Format,
@@ -221,7 +228,7 @@ pub const Conversion = struct {
                     },
                     .format = guessed: {
                         var format = info.format;
-                        format.layout = audio.guessLayout(format.layout);
+                        if (request.guess_layout) format.layout = audio.guessLayout(format.layout);
                         break :guessed format;
                     },
                     .frame_count = frame_count,
@@ -809,7 +816,7 @@ test "every accepted fixture gives its samples in every supported cell, and copy
         if (fixture.expected == .accept) {
             const stream = fixture.expected.accept;
             const bytes = fixtures.raw.bytes(fixture.name);
-            const source: detect.Source = .{ .raw = .{ .sample_rate = stream.sample_rate, .layout = .default(stream.channels) }, .length = bytes.len };
+            const source: detect.Source = .{ .raw = .{ .sample_rate = stream.sample_rate, .layout = stream.channelLayout() }, .length = bytes.len };
             const container = @field(Container, @tagName(fixture.format));
             expectEveryCell(container, false, source, bytes, stream, fixture.writer_output) catch |err| {
                 std.debug.print("fixture {s}\n", .{fixture.name});
@@ -1078,6 +1085,29 @@ test "unknown-length input is refused before any output by the writers that need
     var out: std.Io.Writer = .fixed(&buffer);
     const summary = try convert(&reader, &out, .{ .output = .wav, .mode = .copy }, limits);
     try std.testing.expectEqual(2, summary.frame_count);
+}
+
+test "an unspecified layout is guessed unless the request keeps it" {
+    const bytes = fixtures.raw.bytes("raw_s16le_6c");
+    const six: raw.Params = .{ .sample_rate = 8000, .layout = .{ .unspecified = 6 } };
+    var buffer: [256]u8 = undefined;
+    for ([_]bool{ true, false }) |guess| {
+        var reader: std.Io.Reader = .fixed(bytes);
+        var out: std.Io.Writer = .fixed(&buffer);
+        const summary = try convert(&reader, &out, .{
+            .output = .wav,
+            .mode = .transcode,
+            .input = .{ .format = .s16le, .raw = six, .length = bytes.len },
+            .guess_layout = guess,
+        }, .{});
+        // 5.1 as FFmpeg guesses it for `-ac 6`, written in an extensible
+        // header; kept unspecified for `-ch_layout 6C`, in a plain one.
+        const expected: audio.ChannelLayout = if (guess) .default(6) else .{ .unspecified = 6 };
+        try std.testing.expect(expected.eql(&summary.format.layout));
+        const header_len: usize = if (guess) 68 else 44;
+        try std.testing.expectEqual(header_len, wav.headerLen(.s16le, summary.format, .riff));
+        try std.testing.expectEqual(header_len + bytes.len, out.buffered().len);
+    }
 }
 
 test "an error found after samples were written fails the conversion" {

@@ -43,7 +43,12 @@ pub const Params = struct {
 /// Configurable policy limits; exceeding one is `error.LimitExceeded`.
 pub const Limits = struct {
     max_sample_rate: u32 = 192_000,
+    /// libswresample's `SWR_CH_MAX`: more channels than FFmpeg converts.
+    max_channels: u16 = max_channels,
 };
+
+/// The default channel limit of the parser.
+pub const max_channels = 64;
 
 pub const Info = struct {
     codec: pcm.Codec,
@@ -97,8 +102,12 @@ pub const Parser = struct {
         const rate = p.params.sample_rate;
         if (rate == 0) return error.InvalidFormat;
         if (rate > p.limits.max_sample_rate) return error.LimitExceeded;
+        // Checked before `Format.channelCount`, which needs a count in u16.
+        const channels = p.params.layout.channelCount();
+        if (channels == 0) return error.InvalidFormat;
+        if (channels > p.limits.max_channels) return error.LimitExceeded;
         const format: audio.Format = .{ .sample_rate = rate, .layout = p.params.layout, .sample_format = p.codec.storage() };
-        // At most 8 bytes times 2 channels.
+        // At most 8 bytes times 65535 channels: no overflow.
         const sample_bytes: u32 = p.codec.bytesPerSample();
         p.frame_bytes = sample_bytes * format.channelCount();
         var frame_count: ?u64 = null;
@@ -206,9 +215,14 @@ pub const DecodeError = Error || std.Io.Writer.Error;
 /// Decodes a raw stream and writes its samples to `out` as raw little-endian
 /// samples of its storage format, using fixed working storage. The caller
 /// flushes `out`. The frame count is counted when the length was not given.
+/// A frame wider than that storage (4 KiB, possible only with a channel limit
+/// above the default) is `LimitExceeded`.
 pub fn decodeToRaw(reader: *std.Io.Reader, out: *std.Io.Writer, codec: pcm.Codec, params: Params, length: ?u64, limits: Limits) DecodeError!Info {
     var parser: Parser = .init(reader, codec, params, length, limits);
     var info = try parser.readHeader();
+    // readData delivers nothing when a frame does not fit, which would end
+    // the loop below early; only a channel limit above the default allows it.
+    if (parser.frame_bytes > scratch_len) return error.LimitExceeded;
     var encoded: [scratch_len]u8 = undefined;
     // Storage is at most twice the encoded size (A-law and µ-law to s16).
     var stored: [2 * scratch_len]u8 = undefined;
@@ -283,8 +297,9 @@ pub const Writer = struct {
         var bytes: [scratch_len]u8 = undefined;
         var rest = samples;
         while (rest.len > 0) {
-            // scratch_len / 2 samples are whole mono and stereo frames and
-            // encode into at most scratch_len bytes.
+            // The frames were checked above, so a chunk need not end on a
+            // frame. scratch_len / 2 samples encode into at most scratch_len
+            // bytes.
             const take = @min(rest.len, scratch_len / 2);
             try w.out.writeAll(pcm.encodeFromS16(w.codec, rest[0..take], &bytes) catch unreachable);
             rest = rest[take..];
@@ -331,7 +346,8 @@ fn formatCodec(comptime format: fixtures.raw.Format) pcm.Codec {
 
 fn paramsOf(comptime given: ?fixtures.raw.Params) Params {
     const p = given orelse return .{};
-    return .{ .sample_rate = p.sample_rate, .layout = .default(p.channels) };
+    // The manifest's texts parse; checked at compile time.
+    return .{ .sample_rate = p.sample_rate, .layout = comptime audio.ChannelLayout.parse(p.layout) catch unreachable };
 }
 
 /// The parser error each fixture failure names. The manifest's `Failure` stays

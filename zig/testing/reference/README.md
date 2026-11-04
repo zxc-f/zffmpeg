@@ -306,6 +306,15 @@ build include the WAV muxer. Its first run, locally on Windows at commit
   s16) rejected before any output: **54/54**.
 - Fixtures whose pipe result equals the file result: **105/105**.
 
+T23b part 6 let raw PCM take any `-ch_layout` of at most 64 channels and
+made zffmpeg keep a layout an input `-ch_layout` names, as FFmpeg's command
+line does (only `-ac` is guessed). The run, locally on Linux x86-64 as for
+part 3, failed only the same 90 inf and NaN transcodes; raw fixtures
+**20/20** accepted and **5/5** rejected (`raw_s16le_channels65` by the
+limit, which FFmpeg reads), each read with its own
+`-ch_layout` (`5.1`, `6C` unspecified, `FC+FL+FR` custom, `64C`), and every
+zffmpeg output of them, with the input's layout unguessed, as FFmpeg's.
+
 T23b part 5 widened CAF to 64 channels with its `chan` chunk, read by the
 same code as AIFF's, with no reference configuration change. The run,
 locally on Linux x86-64 as for part 3, failed only the same 90 inf and NaN

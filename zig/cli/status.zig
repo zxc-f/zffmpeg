@@ -95,21 +95,16 @@ pub fn rawParams(io: std.Io, tool: []const u8, rate_text: ?[]const u8, layout_te
                 return .{ .failed = .unsupported };
             },
         };
-        if (params.layout.channelCount() > 2) {
-            printError(io, "{s}: {s}: unsupported channel layout\n", .{ tool, text });
-            return .{ .failed = .unsupported };
-        }
     }
     if (channels_text) |text| {
-        const count = std.fmt.parseInt(u16, text, 10) catch {
+        // FFmpeg's command line passes `-ac N` to a raw demuxer as the layout
+        // `NC`: N channels, unspecified, which its guess may then name.
+        const count = std.fmt.parseInt(u16, text, 10) catch 0;
+        if (count == 0) {
             printError(io, "{s}: {s}: invalid channel count\n", .{ tool, text });
             return .{ .failed = .usage };
-        };
-        if (count == 0 or count > 2) {
-            printError(io, "{s}: {s}: unsupported channel count\n", .{ tool, text });
-            return .{ .failed = .unsupported };
         }
-        params.layout = .default(count);
+        params.layout = .{ .unspecified = count };
     }
     return .{ .ok = params };
 }

@@ -1795,7 +1795,9 @@ names, not as an empty framework.
       both ways, unspecified as FFmpeg reads them. Part 4: Apple's `chan`
       reader and writer (format/mov_chan.zig) and AIFF with 1 to 64
       channels and `CHAN` both ways. Part 5: CAF with 1 to 64 channels and
-      `chan` before `data`. Excluded: ambisonics;
+      `chan` before `data`. Part 6: raw PCM with any `-ch_layout` of at most
+      64 channels, and FFmpeg's rule that an input `-ch_layout` turns the
+      layout guess off. Excluded: ambisonics;
       custom layouts past 64 channels; more than 64 channels.
     Needs (verified) / lands with / verified after: T20a.
     Contract and source provenance: port.md "Channel layouts"; notes.md
@@ -1808,7 +1810,10 @@ names, not as an empty framework.
       pinned libavformat (chan_vectors.c); 57 AIFF fixtures (part 4:
       aiff_channels3 now accepted, 13 new, 10 of them with `CHAN`); 58 CAF
       fixtures (part 5: caf_channels3 now accepted, 11 new, 8 of them with
-      `chan`; caf_chunks_around_data's `chan` now read); no optional corpus.
+      `chan`; caf_chunks_around_data's `chan` now read); 25 raw fixtures
+      (part 6: 5 new, a named, a count-only, a custom layout, 64 and 65
+      channels, each fixture carrying its `-ch_layout` text); no optional
+      corpus.
     Ownership, state transitions and limits: layouts are values; no
       allocation.
     Comparison rule and intentional differences: exact; ambisonic text is
@@ -1821,15 +1826,14 @@ names, not as an empty framework.
       format/caf.zig, format/mov_chan.zig, format/convert.zig, cli/probe.zig, generate.py,
       chan_vectors.c, compare.py.
     Evidence commit / Linux CI run / reference report: part 1 `1f4f41c`;
-      part 2 `45f1a7d` local Windows runs; parts 2 to 5 local Linux runs
+      part 2 `45f1a7d` local Windows runs; parts 2 to 6 local Linux runs
       of every CI step (Debug, ReleaseSafe, ReleaseFast; the vector
       generators; compare.py, whose only failures are the 90 inf and NaN
       conversions a clang 23 reference build gives 0 for); CI pending.
-    Required cases: parts 1 to 5 pass; raw is missing.
+    Required cases: parts 1 to 6 pass.
     Optional cases: none
     Fuzz seeds, budget and result: none yet.
-    Remaining work or blocker / next action: raw `-ch_layout` with any
-      layout (part 6), then T23b's G5.
+    Remaining work or blocker / next action: T23b's G5 record.
     ```
   - [ ] **T23c — Rematrixing.** Needs T23a and T23b. The default upmix and
     downmix matrices with center and surround mix levels and normalization.

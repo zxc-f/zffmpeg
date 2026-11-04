@@ -769,7 +769,7 @@ fn cDigits(text: []const u8, start: usize, base_in: u8) struct { magnitude: ?u64
     while (pos < text.len) : (pos += 1) {
         const digit = std.fmt.charToDigit(text[pos], base) catch break;
         if (magnitude) |m| {
-            const times = std.math.mul(u64, m, base) catch null;
+            const times: ?u64 = std.math.mul(u64, m, base) catch null;
             magnitude = if (times) |t| std.math.add(u64, t, digit) catch null else null;
         }
     }

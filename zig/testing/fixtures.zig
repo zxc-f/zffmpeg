@@ -293,10 +293,12 @@ pub const raw = struct {
     pub const Format = enum { u8, s8, s16le, s16be, s24le, s24be, s32le, s32be, f32le, f32be, f64le, f64be, alaw, mulaw };
 
     /// The stream parameters a fixture is read with (`-sample_rate`,
-    /// `-ch_layout` as a channel count).
+    /// `-ch_layout`): the channel count and the layout text.
     pub const Params = struct {
         sample_rate: u32,
         channels: u16,
+        /// FFmpeg's `-ch_layout` text, which `channel_layout.Layout.parse` reads.
+        layout: []const u8,
     };
 
     pub const Fixture = struct {

@@ -1582,29 +1582,42 @@ RAW_DEFAULT_RATE = 44100
 RAW_DEFAULT_CHANNELS = 1
 
 
+# The `-ch_layout` text of mono and stereo.
+RAW_LAYOUT_TEXT = {1: "mono", 2: "stereo"}
+
+
 @dataclasses.dataclass
 class RawFixture(Fixture):
     """A raw PCM file and the parameters it is read with (`params` None takes
     FFmpeg's defaults, 44100 Hz mono)."""
     format: str = None
-    params: tuple = None  # (sample_rate, channels)
+    params: tuple = None  # (sample_rate, channels, the -ch_layout text)
 
 
 def build_raw_fixtures():
     fx = []
 
-    def stream(fmt, payload, params):
-        rate, channels = params or (RAW_DEFAULT_RATE, RAW_DEFAULT_CHANNELS)
-        codec = RAW_FORMATS[fmt]
-        return Stream(codec, channels, rate, CODEC_STORAGE[codec], decode_stored(codec, payload))
+    def full(params):
+        """(rate, channels) takes the -ch_layout text of mono or stereo."""
+        if params is not None and len(params) == 2:
+            return params + (RAW_LAYOUT_TEXT[params[1]],)
+        return params
 
-    def ok(name, rule, fmt, payload, params, writer_output=True):
-        fx.append(RawFixture(name, "accepted", rule, payload, accept=stream(fmt, payload, params),
+    def stream(fmt, payload, params, layout):
+        rate, channels, _ = params or (RAW_DEFAULT_RATE, RAW_DEFAULT_CHANNELS, "mono")
+        codec = RAW_FORMATS[fmt]
+        accepted = Stream(codec, channels, rate, CODEC_STORAGE[codec], decode_stored(codec, payload))
+        accepted.layout = layout
+        return accepted
+
+    def ok(name, rule, fmt, payload, params, writer_output=True, layout=None):
+        params = full(params)
+        fx.append(RawFixture(name, "accepted", rule, payload, accept=stream(fmt, payload, params, layout),
                              writer_output=writer_output, format=fmt, params=params))
 
     def bad(name, rule, fmt, payload, params, error):
         assert error in RAW_ERRORS, error
-        fx.append(RawFixture(name, "rejected", rule, payload, reject=error, format=fmt, params=params))
+        fx.append(RawFixture(name, "rejected", rule, payload, reject=error, format=fmt, params=full(params)))
 
     def values(fmt, items):
         return b"".join(struct.pack(fmt, v) for v in items)
@@ -1640,6 +1653,15 @@ def build_raw_fixtures():
     ok("raw_s16le_defaults", "No parameters: FFmpeg's defaults, 44100 Hz mono.", "s16le", pcm(MONO), None,
        writer_output=False)
     ok("raw_empty", "No bytes: an empty stream of 0 frames.", "s16le", b"", (8000, 1))
+    # Channel layouts (T23b): any `-ch_layout` FFmpeg parses, up to the limit.
+    six = pcm(MONO + MONO[:4])
+    ok("raw_s16le_5point1", "Six channels read as `5.1`.", "s16le", six, (8000, 6, "5.1"), layout="5.1")
+    ok("raw_s16le_6c", "Six channels read as `6C`, a count only: unspecified, as FFmpeg reads `-ac 6`.", "s16le",
+       six, (8000, 6, "6C"), layout="unknown")
+    ok("raw_s16le_custom", "Three channels in a custom order, `FC+FL+FR`.", "s16le", pcm(MONO[:6]),
+       (8000, 3, "FC+FL+FR"), layout="3 channels (FC+FL+FR)")
+    ok("raw_s16le_channels64", f"{MAX_CHANNELS} channels, the default limit: one frame.", "s16le",
+       pcm([i - 32 for i in range(MAX_CHANNELS)]), (8000, MAX_CHANNELS, f"{MAX_CHANNELS}C"), layout="unknown")
 
     # Rejected.
     bad("raw_partial_frame", "Stereo 16-bit, 6 bytes: the input ends inside its second frame. FFmpeg decodes "
@@ -1649,6 +1671,8 @@ def build_raw_fixtures():
     bad("raw_rate_zero", "Sample rate 0.", "s16le", pcm(MONO[:4]), (0, 1), "InvalidFormat")
     bad("raw_rate_over_limit", f"Sample rate {MAX_RATE + 1} Hz, above the default limit.", "s16le",
         pcm(MONO[:4]), (MAX_RATE + 1, 1), "LimitExceeded")
+    bad("raw_s16le_channels65", f"{MAX_CHANNELS + 1} channels, above the default limit (FFmpeg reads them).",
+        "s16le", bytes(2 * (MAX_CHANNELS + 1)), (8000, MAX_CHANNELS + 1, f"{MAX_CHANNELS + 1}C"), "LimitExceeded")
 
     names = [f.name for f in fx]
     assert len(names) == len(set(names)), "duplicate raw fixture names"
@@ -1962,7 +1986,8 @@ def render_manifest(fixtures, entry_note):
         lines.append(f"        .detected = {'.' + detected if detected else 'null'},")
         if isinstance(f, RawFixture):
             lines.append(f"        .format = .{f.format},")
-            params = "null" if f.params is None else f".{{ .sample_rate = {f.params[0]}, .channels = {f.params[1]} }}"
+            params = "null" if f.params is None else (
+                f'.{{ .sample_rate = {f.params[0]}, .channels = {f.params[1]}, .layout = "{f.params[2]}" }}')
             lines.append(f"        .params = {params},")
         if f.writer_output:
             lines.append("        .writer_output = true,")

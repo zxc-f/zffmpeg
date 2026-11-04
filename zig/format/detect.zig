@@ -351,7 +351,8 @@ test "raw fixtures are found by no content probe, by their extension, and read w
         }
         const params: ?raw.Params = if (fixture.params) |p| .{
             .sample_rate = p.sample_rate,
-            .layout = .default(p.channels),
+            // The manifest's texts parse; checked at compile time.
+            .layout = comptime audio.ChannelLayout.parse(p.layout) catch unreachable,
         } else null;
         var forced: std.Io.Reader = .fixed(bytes);
         const got = probeWith(&forced, .{}, .{ .source = .{ .format = container, .raw = params } });
