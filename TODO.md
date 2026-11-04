@@ -25,9 +25,10 @@ with T17b's metadata dictionary), T22a, every AU PCM encoding and
 unknown-length AU, T16, the codec and format registries with FFmpeg's scored
 content probing, and T22, the remaining audio containers (T22a AU encodings,
 T22b AIFF and AIFF-C, T22c raw PCM with FFmpeg's extension fallback, T22d
-CAF demux), are verified, and so is T23a, sample format conversion with
-libswresample's dither. **Next: T23b (channel layouts). See
-[Near-term order](#near-term-order).**
+CAF demux), are verified, and so are T23a, sample format conversion with
+libswresample's dither, and T23b, FFmpeg's channel layouts in every
+container (1 to 64 channels, Apple's `chan` in AIFF and CAF). **Next: T23c
+(rematrixing). See [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
 [How tasks are completed](#how-tasks-are-completed) describes. Tasks and
@@ -1774,7 +1775,7 @@ names, not as an empty framework.
     (seven inputs, one per input container, ten methods and three scales,
     to `pcm_s16le`, `pcm_u8`, `pcm_s24le` and `pcm_s32le`); every other
     section as for T22d.
-  - [ ] **T23b — Channel layouts.** Needs T20a. Layouts beyond mono and
+  - [x] **T23b — Channel layouts.** Needs T20a. Layouts beyond mono and
     stereo: native masks, named and custom orders. Ambisonics is excluded.
     Done when layout descriptions and parsing equal FFmpeg's
     (`av_channel_layout_describe` and `from_string` vectors).
@@ -1784,7 +1785,7 @@ names, not as an empty framework.
 
     ```text
     ID / parent: T23b / T23
-    State: implementing
+    State: verified
     Supported behavior and explicit exclusions: part 1, the layout library:
       FFmpeg's channels, native, custom and unspecified layouts, the named
       layouts, describe, from_string, default and compare. Part 2: layouts in
@@ -1830,11 +1831,33 @@ names, not as an empty framework.
       of every CI step (Debug, ReleaseSafe, ReleaseFast; the vector
       generators; compare.py, whose only failures are the 90 inf and NaN
       conversions a clang 23 reference build gives 0 for); CI pending.
-    Required cases: parts 1 to 6 pass.
+    Required cases: passed all / failed 0 / missing 0
     Optional cases: none
-    Fuzz seeds, budget and result: none yet.
-    Remaining work or blocker / next action: T23b's G5 record.
+    Fuzz seeds, budget and result: the parsers' and the conversion's fuzz
+      tests, unchanged, over the widened channel counts.
+    Remaining work or blocker / next action: T23c.
     ```
+
+    Evidence (G5, local Linux x86-64 runs with Zig 0.17.0): commits
+    `1f4f41c` (the layout library), `45f1a7d` (layouts in streams, WAV),
+    `304ec5a` (compare.py's raw pipe rule), `3d3d785` (AU), `83e5557`
+    (`chan` and AIFF), `bf6d771` (CAF) and `a30a804` (raw PCM and the guess
+    rule). At `a30a804`: fmt, `generate.py --check`, the example check,
+    Debug and ReleaseSafe builds, `zig build test` with 166/166 steps and
+    215/215 tests in Debug, ReleaseSafe and ReleaseFast, and the three cross
+    builds passed; the five vector generators (the 662 layout and 2516
+    `chan` vectors among them) reproduce their files from FFmpeg `5d5a38a`.
+    `compare.py` against that reference, built with clang 23.1.4, passed
+    every section but 90 transcodes of the 15 float fixtures holding inf or
+    NaN, whose samples that compiler's FFmpeg converts to 0 where the CI's
+    clang 18 build, the committed T23a vectors and `zffmpeg` give -32768
+    (C leaves `lrintf` undefined for them): every accepted fixture's
+    `channel_layout` equal to ffprobe's (two recorded differences, layout
+    chunks after the samples), 1436 of the 1526 zffmpeg outputs with
+    FFmpeg's layout, 630/630 unsupported cells, 71/71 Zig-written files,
+    every writer output FFmpeg's muxers copy unchanged (AU 12, AIFF 16), AU
+    and AIFF outputs equal to FFmpeg's own conversion 170/170, dithered
+    conversions 416/416, detection and pipes 310/310.
   - [ ] **T23c — Rematrixing.** Needs T23a and T23b. The default upmix and
     downmix matrices with center and surround mix levels and normalization.
     Done when generated matrices equal `swr_build_matrix` output for every

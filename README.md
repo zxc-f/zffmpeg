@@ -22,7 +22,10 @@ library's synchronous pipeline (T13), which runs on packets, frames and
 send/receive stages (T14a), and FFmpeg reads every output it writes for the
 fixtures. Transcoding converts between every sample format as libswresample
 does, with `-c:a` to pick the encoder and every one of its dither methods,
-noise shaping included, bit-exact with FFmpeg's (T23a). [TODO.md](TODO.md) holds the completion
+noise shaping included, bit-exact with FFmpeg's (T23a). Every container
+carries 1 to 64 channels with FFmpeg's channel layouts, Apple's layout chunk
+in AIFF and CAF included, and `zffmpeg` names an unspecified layout as
+FFmpeg's command line does (T23b). [TODO.md](TODO.md) holds the completion
 evidence and the roadmap. Development is verified on Linux only. The compiler
 is **Zig 0.17.0**, enforced by the build.
 
