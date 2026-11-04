@@ -1738,3 +1738,138 @@ test "FFmpeg's Vorbis decoder opens the encoded fixtures and refuses the synthet
     }
     try testing.expectEqual(4, opened);
 }
+
+const vorbis_vectors = @embedFile("../testing/vectors/vorbis.txt");
+
+/// libavcodec's decode.c around a decoder (discard_samples): the samples
+/// still to skip, from the decoder's first frame or a packet's
+/// skip-samples side data, and the end padding a packet asks to drop.
+const Discard = struct {
+    skip: i64 = 0,
+
+    /// The kept part of a decoded frame of `n` samples, as [start, end);
+    /// null when the whole frame is dropped.
+    fn apply(x: *Discard, n: u32, side: ?[2]u32) ?[2]u32 {
+        var padding: u32 = 0;
+        if (side) |s| {
+            const skip: i32 = @bitCast(s[0]);
+            if (skip != 0) x.skip = skip;
+            x.skip = @max(0, x.skip);
+            padding = s[1];
+        }
+        var start: u32 = 0;
+        var count = n;
+        if (x.skip > 0) {
+            if (count <= x.skip) {
+                x.skip -= count;
+                return null;
+            }
+            start = @intCast(x.skip);
+            count -= start;
+            x.skip = 0;
+        }
+        if (padding > 0 and padding <= n) {
+            const drop = @min(padding, count);
+            if (drop == count) return null;
+            count -= drop;
+        }
+        return .{ start, start + count };
+    }
+};
+
+fn vorbisBlock(name: []const u8) ?[]const u8 {
+    const marker = "F ";
+    var start: ?usize = null;
+    var lines = std.mem.splitScalar(u8, vorbis_vectors, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, marker)) continue;
+        const at = @intFromPtr(line.ptr) - @intFromPtr(vorbis_vectors.ptr);
+        if (start) |s| return vorbis_vectors[s..at];
+        if (std.mem.eql(u8, line[2..], name)) start = at + line.len + 1;
+    }
+    return if (start) |s| vorbis_vectors[s..] else null;
+}
+
+test "every Vorbis fixture decodes as FFmpeg's decoder decodes it (vectors/vorbis.txt)" {
+    const gpa = testing.allocator;
+    var frames: usize = 0;
+    inline for (fixtures.ogg.all) |fixture| {
+        if (comptime std.mem.indexOf(u8, fixture.name, "vorbis") != null) {
+            const want = vorbisBlock(fixture.name) orelse return error.MissingVector;
+            var actual: std.ArrayList(u8) = .empty;
+            defer actual.deinit(gpa);
+            try decodeVorbisFixture(gpa, fixtures.ogg.bytes(fixture.name), &actual, &frames);
+            var expected_lines = std.mem.splitScalar(u8, want, '\n');
+            const open_line = expected_lines.next().?;
+            if (!std.mem.eql(u8, open_line, "O ok")) {
+                try testing.expectEqualStrings("O refused\n", actual.items);
+            } else {
+                testing.expectEqualStrings(want, actual.items) catch |err| {
+                    std.debug.print("vorbis fixture {s}\n", .{fixture.name});
+                    return err;
+                };
+            }
+        }
+    }
+    try testing.expectEqual(57, frames);
+}
+
+/// vorbis_vectors.c's lines for one file: the input opened as the ffmpeg
+/// program opens it, each Vorbis packet decoded, each frame's MD5.
+fn decodeVorbisFixture(gpa: std.mem.Allocator, bytes: []const u8, out: *std.ArrayList(u8), frames: *usize) !void {
+    var reader: std.Io.Reader = .fixed(bytes);
+    const d = Demuxer.initSeekable(gpa, &reader, .fixed(&reader)) catch return out.appendSlice(gpa, "O refused\n");
+    defer d.deinit();
+    var layer = demux.Layer(Demuxer).init(gpa, d);
+    defer layer.deinit();
+    try layer.findStreamInfo();
+    var index: ?usize = null;
+    for (0..d.streamCount()) |i| {
+        if (d.stream(i).codec == .vorbis) {
+            index = i;
+            break;
+        }
+    }
+    const stream_index = index orelse return out.appendSlice(gpa, "O refused\n");
+    var dec = vorbisdec.Decoder.init(gpa, d.stream(stream_index).extradata.items) catch return out.appendSlice(gpa, "O refused\n");
+    defer dec.deinit();
+    try out.appendSlice(gpa, "O ok\n");
+    const capacity = dec.blocksize[1] / 2;
+    const storage = try gpa.alloc(f32, capacity * dec.channels);
+    defer gpa.free(storage);
+    var planes: [255][]f32 = undefined;
+    for (0..dec.channels) |c| planes[c] = storage[c * capacity ..][0..capacity];
+    var discard: Discard = .{};
+    var line: [96]u8 = undefined;
+    while (try layer.next()) |p| {
+        if (p.stream != stream_index) continue;
+        const result = dec.decodePacket(p.data, planes[0..dec.channels]);
+        if (result) |samples| {
+            try out.appendSlice(gpa, try std.fmt.bufPrint(&line, "P {d} 0\n", .{p.data.len}));
+            if (samples) |n| {
+                // The decoder's first frame sets the skip, as
+                // avctx->internal->skip_samples.
+                if (dec.skip_samples != 0 and !dec.first_frame_consumed) {
+                    discard.skip = dec.skip_samples;
+                    dec.first_frame_consumed = true;
+                }
+                if (discard.apply(n, p.skip)) |kept| {
+                    var md5: std.crypto.hash.Md5 = .init(.{});
+                    for (planes[0..dec.channels]) |plane| {
+                        for (plane[kept[0]..kept[1]]) |v| {
+                            var le: [4]u8 = undefined;
+                            std.mem.writeInt(u32, &le, @bitCast(v), .little);
+                            md5.update(&le);
+                        }
+                    }
+                    var digest: [16]u8 = undefined;
+                    md5.final(&digest);
+                    try out.appendSlice(gpa, try std.fmt.bufPrint(&line, "D {d} {x}\n", .{ kept[1] - kept[0], digest }));
+                    frames.* += 1;
+                }
+            }
+        } else |_| {
+            try out.appendSlice(gpa, try std.fmt.bufPrint(&line, "P {d} INVALIDDATA\n", .{p.data.len}));
+        }
+    }
+}

@@ -224,6 +224,9 @@ pub const Decoder = struct {
     skip_samples: u32 = 0,
     /// Whether the setup header was parsed (FFmpeg's `vc->modes`).
     have_setup: bool = false,
+    /// The caller took `skip_samples` (libavcodec reads it once, after the
+    /// first frame).
+    first_frame_consumed: bool = false,
 
     /// vorbis_decode_init: the identification and setup headers from the
     /// stream's extradata, Xiph-laced as Ogg carries them.
@@ -643,6 +646,391 @@ pub const Decoder = struct {
             m.mapping = @intCast(try validated(r, 8, d.mappings.len));
         }
     }
+
+    // Audio packets ----------------------------------------------------
+
+    /// vorbis_decode_frame: an audio packet into `planes` (the output's
+    /// channel planes in FFmpeg's order, each holding blocksize[1] / 2
+    /// samples), returning the frame's sample count, or null for a packet
+    /// that gives no frame (a header packet in the stream, or a decode
+    /// that returned no samples). The first frame's count becomes
+    /// `skip_samples`, which libavcodec discards.
+    pub fn decodePacket(d: *Decoder, packet: []const u8, planes: []const []f32) Error!?u32 {
+        if (packet.len == 0) return null;
+        if (packet[0] == 1 and packet.len > 7) {
+            // An identification header in the stream starts over.
+            const first_frame = d.first_frame;
+            const skip = d.skip_samples;
+            d.free();
+            d.first_frame = first_frame;
+            d.skip_samples = skip;
+            var r = bits.LsbReader.init(packet[1..]) catch return error.InvalidData;
+            d.parseIdHeader(&r) catch |err| {
+                d.free();
+                d.first_frame = first_frame;
+                d.skip_samples = skip;
+                return err;
+            };
+            return null;
+        }
+        if (packet[0] == 3 and packet.len > 7) return null; // a comment header
+        if (packet[0] == 5 and packet.len > 7 and d.channel_residues.len != 0 and !d.have_setup) {
+            var r = bits.LsbReader.init(packet[1..]) catch return error.InvalidData;
+            d.parseSetupHeader(&r) catch |err| {
+                const first_frame = d.first_frame;
+                const skip = d.skip_samples;
+                d.free();
+                d.first_frame = first_frame;
+                d.skip_samples = skip;
+                return err;
+            };
+            return null;
+        }
+        if (d.channel_residues.len == 0 or !d.have_setup) return error.InvalidData; // before valid headers
+        std.debug.assert(planes.len == d.channels);
+        var floor_ptr: [255][]f32 = undefined;
+        for (planes, 0..) |plane, i| {
+            std.debug.assert(plane.len >= d.blocksize[1] / 2);
+            const ch = if (d.channels > 8) i else data.channel_layout_offsets[d.channels - 1][i];
+            floor_ptr[ch] = plane;
+        }
+        var r = bits.LsbReader.init(packet) catch return error.InvalidData;
+        const len = try d.parseAudioPacket(&r, floor_ptr[0..d.channels]);
+        if (len == 0) return null;
+        if (!d.first_frame) {
+            d.first_frame = true;
+            d.skip_samples = len;
+        }
+        return len;
+    }
+
+    /// vorbis_decode_flush: the overlap and the first-frame state cleared.
+    pub fn flush(d: *Decoder) void {
+        @memset(d.saved, 0);
+        d.previous_window = -1;
+        d.first_frame = false;
+    }
+
+    /// vorbis_parse_audio_packet: returns the samples the packet completes.
+    fn parseAudioPacket(d: *Decoder, r: *bits.LsbReader, floor_ptr: [][]f32) Error!u32 {
+        if (r.bit() == 1) return error.InvalidData; // not an audio packet
+        const mode_number: u32 = if (d.modes.len == 1) 0 else try validated(r, ilog(@intCast(d.modes.len - 1)), d.modes.len);
+        d.mode_number = @intCast(mode_number);
+        const mode = d.modes[mode_number];
+        const mapping = &d.mappings[mode.mapping];
+        const blockflag = mode.blockflag;
+        const blocksize = d.blocksize[blockflag];
+        const vlen = blocksize / 2;
+        var previous_window = d.previous_window;
+        if (blockflag == 1) {
+            const code = r.bits(2);
+            if (previous_window < 0) previous_window = @intCast(code >> 1);
+        } else if (previous_window < 0) previous_window = 0;
+        const channels: usize = d.channels;
+        @memset(d.channel_residues[0 .. channels * vlen], 0);
+        for (floor_ptr) |f| @memset(f[0..vlen], 0);
+
+        var no_residue: [255]u8 = undefined;
+        for (0..channels) |i| {
+            const floor_index = if (mapping.submaps > 1) mapping.submap_floor[mapping.mux[i]] else mapping.submap_floor[0];
+            no_residue[i] = switch (d.floors[floor_index]) {
+                .floor0 => |*f0| try d.floor0Decode(r, f0, floor_ptr[i]),
+                .floor1 => |*f1| try d.floor1Decode(r, f1, floor_ptr[i]),
+            };
+        }
+        // A coupled channel with a residue gives its partner one.
+        var step: usize = mapping.coupling_steps;
+        while (step > 0) {
+            step -= 1;
+            if (no_residue[mapping.magnitude[step]] & no_residue[mapping.angle[step]] == 0) {
+                no_residue[mapping.magnitude[step]] = 0;
+                no_residue[mapping.angle[step]] = 0;
+            }
+        }
+        var res_chan: [255]u8 = undefined;
+        var do_not_decode: [255]u8 = undefined;
+        var res_num: u32 = 0;
+        var ch_res_off: usize = 0;
+        var ch_left: u32 = d.channels;
+        for (0..mapping.submaps) |i| {
+            var ch: u32 = 0;
+            for (0..channels) |j| {
+                if (mapping.submaps == 1 or i == mapping.mux[j]) {
+                    res_chan[j] = @intCast(res_num);
+                    do_not_decode[ch] = if (no_residue[j] != 0) 1 else 0;
+                    ch += 1;
+                    res_num += 1;
+                }
+            }
+            const residue = &d.residues[mapping.submap_residue[i]];
+            if (ch_left < ch) return error.InvalidData;
+            if (ch != 0) try d.residueDecode(r, residue, ch, do_not_decode[0..ch], d.channel_residues[ch_res_off..], vlen, ch_left);
+            ch_res_off += @as(usize, ch) * vlen;
+            ch_left -= ch;
+        }
+        if (ch_left > 0) return error.InvalidData;
+        // Inverse coupling.
+        step = mapping.coupling_steps;
+        while (step > 0) {
+            step -= 1;
+            const mag = d.channel_residues[@as(usize, res_chan[mapping.magnitude[step]]) * vlen ..][0..vlen];
+            const ang = d.channel_residues[@as(usize, res_chan[mapping.angle[step]]) * vlen ..][0..vlen];
+            inverseCoupling(mag, ang);
+        }
+        // The floor times the residue, then the inverse MDCT.
+        const mdct = &d.mdct[blockflag].?;
+        var j: usize = channels;
+        while (j > 0) {
+            j -= 1;
+            const res = d.channel_residues[@as(usize, res_chan[j]) * vlen ..][0..vlen];
+            if (no_residue[j] != 0) {
+                @memset(res, 0);
+                continue;
+            }
+            const f = floor_ptr[j][0..vlen];
+            for (f, res) |*a, b| a.* = a.* * b;
+            mdct.run(res, f);
+        }
+        // Overlap-add with the saved half of the previous block.
+        const prev: u1 = @intCast(previous_window);
+        const retlen = (blocksize + d.blocksize[prev]) / 4;
+        const bs0 = d.blocksize[0];
+        const bs1 = d.blocksize[1];
+        for (0..channels) |c| {
+            const buf = d.channel_residues[@as(usize, res_chan[c]) * vlen ..][0..vlen];
+            const saved = d.saved[c * bs1 / 4 ..][0 .. bs1 / 4];
+            const ret = floor_ptr[c];
+            const win = d.win[blockflag & prev];
+            if (blockflag == prev) {
+                fmulWindow(ret, saved, buf, win, blocksize / 4);
+            } else if (blockflag > prev) {
+                fmulWindow(ret, saved, buf, win, bs0 / 4);
+                @memcpy(ret[bs0 / 2 ..][0 .. (bs1 - bs0) / 4], buf[bs0 / 4 ..][0 .. (bs1 - bs0) / 4]);
+            } else {
+                @memcpy(ret[0 .. (bs1 - bs0) / 4], saved[0 .. (bs1 - bs0) / 4]);
+                fmulWindow(ret[(bs1 - bs0) / 4 ..], saved[(bs1 - bs0) / 4 ..], buf, win, bs0 / 4);
+            }
+            @memcpy(saved[0 .. blocksize / 4], buf[blocksize / 4 ..][0 .. blocksize / 4]);
+        }
+        d.previous_window = @intCast(blockflag);
+        return retlen;
+    }
+
+    /// vorbis_floor0_decode: 1 for an unused channel. FFmpeg computes the
+    /// LSP curve in a mix of single and double precision, kept here.
+    fn floor0Decode(d: *Decoder, r: *bits.LsbReader, f: *Floor0, vec: []f32) Error!u8 {
+        const lsp = f.lsp;
+        const blockflag = d.modes[d.mode_number].blockflag;
+        if (f.amplitude_bits == 0) return 1;
+        // get_bits64 under BITSTREAM_READER_LE: the low 32 bits first.
+        var amplitude: u64 = undefined;
+        if (f.amplitude_bits <= 32) {
+            amplitude = r.bits(@intCast(f.amplitude_bits));
+        } else {
+            const low: u64 = r.bits(32);
+            amplitude = low | @as(u64, r.bits(@intCast(f.amplitude_bits - 32))) << 32;
+        }
+        if (amplitude == 0) return 1;
+        var last: f32 = 0;
+        var lsp_len: usize = 0;
+        var book_idx = r.bits(ilog(@intCast(f.book_list.len)));
+        if (book_idx >= f.book_list.len) book_idx = 0; // "booknumber too high"
+        const codebook = &d.codebooks[f.book_list[book_idx]];
+        const vectors = codebook.codevectors orelse return error.InvalidData;
+        while (lsp_len < f.order) {
+            const vec_off_raw = codebook.get(r);
+            if (vec_off_raw < 0) return error.InvalidData;
+            const vec_off = @as(usize, @intCast(vec_off_raw)) * codebook.dimensions;
+            if (vec_off + codebook.dimensions > vectors.len or lsp_len + codebook.dimensions > lsp.len) return error.InvalidData;
+            for (0..codebook.dimensions) |idx| lsp[lsp_len + idx] = vectors[vec_off + idx] + last;
+            last = lsp[lsp_len + codebook.dimensions - 1];
+            lsp_len += codebook.dimensions;
+        }
+        const order: usize = f.order;
+        const wstep: f32 = @floatCast(std.math.pi / @as(f64, @floatFromInt(f.bark_map_size)));
+        for (lsp[0..order]) |*v| v.* = @floatCast(2.0 * @cos(@as(f64, v.*)));
+        const map = f.map[blockflag];
+        var i: usize = 0;
+        while (i < f.map_size[blockflag]) {
+            const iter_cond = map[i];
+            var p: f32 = 0.5;
+            var q: f32 = 0.5;
+            const two_cos_w: f32 = @floatCast(2.0 * @cos(@as(f64, wstep * @as(f32, @floatFromInt(iter_cond)))));
+            var j: usize = 0;
+            while (j + 1 < order) : (j += 2) {
+                q *= lsp[j] - two_cos_w;
+                p *= lsp[j + 1] - two_cos_w;
+            }
+            if (j == order) {
+                p *= p * (2.0 - two_cos_w);
+                q *= q * (2.0 + two_cos_w);
+            } else {
+                q *= two_cos_w - lsp[j];
+                p *= p * (4.0 - two_cos_w * two_cos_w);
+                q *= q;
+            }
+            if (p + q == 0.0) return error.InvalidData;
+            const numerator: f64 = @floatFromInt(amplitude *% f.amplitude_offset);
+            const scale: f64 = @floatFromInt((@as(u64, 1) << @intCast(f.amplitude_bits)) - 1);
+            const exponent = (numerator / (scale * @sqrt(@as(f64, p + q))) - @as(f64, @floatFromInt(f.amplitude_offset))) * @as(f64, @as(f32, 0.11512925));
+            const value: f32 = @floatCast(@exp(exponent));
+            while (true) {
+                if (i >= vec.len) return error.InvalidData;
+                vec[i] = value;
+                i += 1;
+                if (map[i] != iter_cond) break;
+            }
+        }
+        return 0;
+    }
+
+    /// vorbis_floor1_decode: 1 for an unused channel.
+    fn floor1Decode(d: *Decoder, r: *bits.LsbReader, f: *Floor1, vec: []f32) Error!u8 {
+        const range_v = [4]u32{ 256, 128, 86, 64 };
+        const range = range_v[f.multiplier - 1];
+        var y: [258]u16 = undefined;
+        var y_final: [258]u16 = undefined;
+        var flag: [258]bool = undefined;
+        if (r.bit() == 0) return 1; // silence
+        y[0] = @intCast(r.bits(ilog(range - 1)));
+        y[1] = @intCast(r.bits(ilog(range - 1)));
+        var offset: usize = 2;
+        for (f.partition_class[0..f.partitions]) |pclass| {
+            const cdim = f.class_dimensions[pclass];
+            const cbits: u5 = @intCast(f.class_subclasses[pclass]);
+            const csub = (@as(u32, 1) << cbits) - 1;
+            var cval: u32 = 0;
+            if (cbits != 0) cval = @bitCast(d.codebooks[f.class_masterbook[pclass]].get(r));
+            for (0..cdim) |j| {
+                const book = f.subclass_books[pclass][cval & csub];
+                cval >>= cbits;
+                if (book > -1) {
+                    const v = d.codebooks[@intCast(book)].get(r);
+                    if (v < 0) return error.InvalidData;
+                    y[offset + j] = @intCast(v);
+                } else y[offset + j] = 0;
+            }
+            offset += cdim;
+        }
+        flag[0] = true;
+        flag[1] = true;
+        y_final[0] = y[0];
+        y_final[1] = y[1];
+        const list = f.list;
+        for (2..f.x_list_dim) |i| {
+            const low = list[i].low;
+            const high = list[i].high;
+            const dy: i32 = @as(i32, y_final[high]) - y_final[low];
+            const adx: i32 = @as(i32, list[high].x) - list[low].x;
+            const ady: i32 = @intCast(@abs(dy));
+            const err = ady * (@as(i32, list[i].x) - list[low].x);
+            const off = @divTrunc(err, adx);
+            const predicted: i32 = if (dy < 0) y_final[low] - off else y_final[low] + off;
+            // FFmpeg's unsigned room arithmetic.
+            const val: u32 = y[i];
+            const highroom: u32 = range -% @as(u32, @bitCast(predicted));
+            const lowroom: u32 = @bitCast(predicted);
+            const room: u32 = if (highroom < lowroom) highroom *% 2 else lowroom *% 2;
+            const p: u32 = @bitCast(predicted);
+            if (val != 0) {
+                flag[low] = true;
+                flag[high] = true;
+                flag[i] = true;
+                y_final[i] = clipU16(@bitCast(if (val >= room)
+                    (if (highroom > lowroom) val -% lowroom +% p else p -% val +% highroom -% 1)
+                else if (val & 1 != 0)
+                    p -% (val + 1) / 2
+                else
+                    p +% val / 2));
+            } else {
+                flag[i] = false;
+                y_final[i] = clipU16(predicted);
+            }
+        }
+        render(list[0..f.x_list_dim], y_final[0..f.x_list_dim], flag[0..f.x_list_dim], f.multiplier, vec, list[1].x);
+        return 0;
+    }
+
+    /// vorbis_residue_decode with setup_classifs.
+    fn residueDecode(d: *Decoder, r: *bits.LsbReader, vr: *Residue, ch: u32, do_not_decode: []u8, vec: []f32, vlen: u32, ch_left: u32) Error!void {
+        if (vr.kind > 2) return error.InvalidData;
+        const c_p_c: u32 = d.codebooks[vr.classbook].dimensions;
+        var max_output: u32 = (ch - 1) *% vlen;
+        var ptns_to_read: i32 = vr.ptns_to_read;
+        var libvorbis_bug = false;
+        var ch_used: u32 = ch;
+        if (vr.kind == 2) {
+            for (1..ch) |j| do_not_decode[0] &= do_not_decode[j];
+            if (do_not_decode[0] != 0) return;
+            ch_used = 1;
+            max_output +%= vr.end / ch;
+        } else max_output +%= vr.end;
+        if (max_output > ch_left *% vlen) {
+            if (max_output <= ch_left *% vlen +% vr.partition_size *% ch_used / ch) {
+                ptns_to_read -= 1;
+                libvorbis_bug = true;
+            } else return error.InvalidData; // "Insufficient output buffer"
+        }
+        var pass: u32 = 0;
+        while (pass <= vr.maxpass) : (pass += 1) {
+            var voffset: u32 = vr.begin;
+            var partition_count: i32 = 0;
+            while (partition_count < ptns_to_read) {
+                if (pass == 0) try d.setupClassifs(r, vr, do_not_decode, ch_used, partition_count, ptns_to_read);
+                var i: u32 = 0;
+                while (i < c_p_c and partition_count < ptns_to_read) : (i += 1) {
+                    var j_times: usize = 0;
+                    for (0..ch_used) |j| {
+                        defer j_times += @intCast(ptns_to_read);
+                        if (do_not_decode[j] != 0) continue;
+                        const vqclass = vr.classifs[j_times + @as(usize, @intCast(partition_count))];
+                        const vqbook = vr.books[vqclass][pass];
+                        if (vqbook < 0) continue;
+                        const codebook = &d.codebooks[@intCast(vqbook)];
+                        const vectors = codebook.codevectors orelse continue;
+                        const dim: u32 = codebook.dimensions;
+                        const step = fastdiv(vr.partition_size << 1, dim << 1);
+                        if (r.left() < 0) return; // "Overread"
+                        try decodePartition(r, codebook, vectors, vr.kind, ch, @intCast(j), dim, step, voffset, vec, vlen);
+                    }
+                    partition_count += 1;
+                    voffset +%= vr.partition_size;
+                }
+            }
+            if (libvorbis_bug and pass == 0) {
+                for (0..ch_used) |j| {
+                    if (do_not_decode[j] == 0) _ = d.codebooks[vr.classbook].get(r);
+                }
+            }
+        }
+    }
+
+    /// setup_classifs: each channel's partition classes from the class
+    /// book, `c_p_c` at a time.
+    fn setupClassifs(d: *Decoder, r: *bits.LsbReader, vr: *Residue, do_not_decode: []const u8, ch_used: u32, partition_count: i32, ptns_to_read: i32) Error!void {
+        const codebook = &d.codebooks[vr.classbook];
+        const c_p_c: i32 = codebook.dimensions;
+        const inverse_class = inverse[vr.classifications];
+        var p: usize = 0;
+        for (0..ch_used) |j| {
+            // FFmpeg steps by the partitions it reads, one less after the
+            // libvorbis workaround.
+            defer p += @intCast(ptns_to_read);
+            if (do_not_decode[j] != 0) continue;
+            var temp = codebook.get(r);
+            if (temp < 0) return error.InvalidData;
+            var i: i32 = partition_count + c_p_c - 1;
+            while (i >= partition_count) : (i -= 1) {
+                if (vr.classifications == 1) {
+                    if (i < ptns_to_read) vr.classifs[p + @as(usize, @intCast(i))] = 0;
+                } else {
+                    const temp2: i32 = @intCast((@as(u64, @intCast(temp)) * inverse_class) >> 32);
+                    if (i < ptns_to_read) vr.classifs[p + @as(usize, @intCast(i))] = @truncate(@as(u32, @bitCast(temp - temp2 * @as(i32, vr.classifications))));
+                    temp = temp2;
+                }
+            }
+        }
+    }
 };
 
 /// BARK: single-precision products, double-precision arctangents.
@@ -651,6 +1039,208 @@ fn bark(x: f32) f64 {
     const b: f64 = @as(f32, 1.85e-8) * x * x;
     const c: f32 = @as(f32, 1e-4) * x;
     return @as(f64, @as(f32, 13.1)) * std.math.atan(a) + @as(f64, @as(f32, 2.24)) * std.math.atan(b) + @as(f64, c);
+}
+
+fn clipU16(v: i32) u16 {
+    return @intCast(std.math.clamp(v, 0, 65535));
+}
+
+fn clipU8(v: i32) u8 {
+    return @intCast(std.math.clamp(v, 0, 255));
+}
+
+fn dbAt(y: i32) f32 {
+    return data.floor1_inverse_db_table[clipU8(y)];
+}
+
+/// render_line_unrolled: the common case of a shallow line.
+fn renderLineUnrolled(x_start: isize, y_start: i32, x1: i32, sy: i32, ady: i32, adx: i32, buf: []f32) void {
+    var err: i32 = -adx;
+    var y = y_start;
+    const base: isize = x1 - 1;
+    var x: isize = x_start - base;
+    while (true) {
+        x += 1;
+        if (!(x < 0)) break;
+        err += ady;
+        if (err >= 0) {
+            err += ady - adx;
+            y += sy;
+            buf[@intCast(base + x)] = dbAt(y);
+            x += 1;
+        }
+        buf[@intCast(base + x)] = dbAt(y);
+    }
+    if (x <= 0) {
+        if (err + ady >= 0) y += sy;
+        buf[@intCast(base + x)] = dbAt(y);
+    }
+}
+
+/// render_line: floor 1's segment from (x0, y0) to (x1, y1), x1 excluded.
+fn renderLine(x0: i32, y0: i32, x1: i32, y1: i32, buf: []f32) void {
+    const dy = y1 - y0;
+    const adx = x1 - x0;
+    var ady: i32 = @intCast(@abs(dy));
+    const sy: i32 = if (dy < 0) -1 else 1;
+    buf[@intCast(x0)] = dbAt(y0);
+    if (ady * 2 <= adx) {
+        renderLineUnrolled(x0, y0, x1, sy, ady, adx, buf);
+    } else {
+        const base = @divTrunc(dy, adx);
+        var x = x0;
+        var y = y0;
+        var err = -adx;
+        ady -= @as(i32, @intCast(@abs(base))) * adx;
+        while (true) {
+            x += 1;
+            if (!(x < x1)) break;
+            y += base;
+            err += ady;
+            if (err >= 0) {
+                err -= adx;
+                y += sy;
+            }
+            buf[@intCast(x)] = dbAt(y);
+        }
+    }
+}
+
+/// ff_vorbis_floor1_render_list: the floor's points joined by lines in x
+/// order, up to `samples`.
+fn render(list: []const Floor1Entry, y_list: []const u16, flag: []const bool, multiplier: u8, out: []f32, samples_in: u16) void {
+    const samples: i32 = samples_in;
+    var lx: i32 = 0;
+    var ly: i32 = @as(i32, y_list[0]) * multiplier;
+    for (1..list.len) |i| {
+        const pos = list[i].sort;
+        if (flag[pos]) {
+            const x1: i32 = list[pos].x;
+            const y1: i32 = @as(i32, y_list[pos]) * multiplier;
+            if (lx < samples) renderLine(lx, ly, @min(x1, samples), y1, out);
+            lx = x1;
+            ly = y1;
+        }
+        if (lx >= samples) break;
+    }
+    if (lx < samples) renderLine(lx, ly, samples, ly, out);
+}
+
+/// vorbis_inverse_coupling_c.
+fn inverseCoupling(mag: []f32, ang: []f32) void {
+    for (mag, ang) |*m, *a| {
+        const angi = a.*;
+        const magi = m.*;
+        if (magi > 0.0) {
+            if (angi > 0.0) {
+                a.* = magi - angi;
+            } else {
+                a.* = magi;
+                m.* = magi + angi;
+            }
+        } else {
+            if (angi > 0.0) {
+                a.* = magi + angi;
+            } else {
+                a.* = magi;
+                m.* = magi - angi;
+            }
+        }
+    }
+}
+
+/// vector_fmul_window_c: `dst[0 .. 2 * len]` from the end of the saved
+/// block and the start of the new one under the window `win[0 .. 2 * len]`.
+fn fmulWindow(dst: []f32, src0: []const f32, src1: []const f32, win: []const f32, len: usize) void {
+    for (0..len) |n| {
+        const m = 2 * len - 1 - n;
+        const s0 = src0[n];
+        const s1 = src1[len - 1 - n];
+        const wi = win[n];
+        const wj = win[m];
+        dst[n] = s0 * wj - s1 * wi;
+        dst[m] = s0 * wi + s1 * wj;
+    }
+}
+
+/// `vec[idx] += v`, refusing an index past the residues, where FFmpeg's
+/// earlier checks leave none.
+fn addAt(vec: []f32, idx: usize, v: f32) Error!void {
+    if (idx >= vec.len) return error.InvalidData;
+    vec[idx] += v;
+}
+
+/// One partition of one channel: `step` vectors of `dim` values each, added
+/// as the residue type lays them out.
+fn decodePartition(r: *bits.LsbReader, codebook: *const Codebook, vectors: []const f32, kind: u16, ch: u32, j: u32, dim: u32, step: u32, voffset: u32, vec: []f32, vlen: u32) Error!void {
+    const next = struct {
+        fn vector(rr: *bits.LsbReader, cb: *const Codebook, vs: []const f32, width: u32) Error![]const f32 {
+            const raw = cb.get(rr);
+            if (raw < 0) return error.InvalidData;
+            const start = @as(usize, @intCast(raw)) * width;
+            if (start + width > vs.len) return error.InvalidData;
+            return vs[start..][0..width];
+        }
+    }.vector;
+    if (kind == 0) {
+        const voffs: usize = voffset + j * vlen;
+        for (0..step) |k| {
+            const v = try next(r, codebook, vectors, dim);
+            for (0..dim) |l| try addAt(vec, voffs + k + l * step, v[l]);
+        }
+    } else if (kind == 1) {
+        var voffs: usize = voffset + j * vlen;
+        for (0..step) |_| {
+            const v = try next(r, codebook, vectors, dim);
+            for (0..dim) |l| {
+                try addAt(vec, voffs, v[l]);
+                voffs += 1;
+            }
+        }
+    } else if (ch == 2 and voffset & 1 == 0 and dim & 1 == 0) {
+        // The most frequent case, laid out directly.
+        var voffs: usize = voffset >> 1;
+        if (dim == 2) {
+            for (0..step) |k| {
+                const v = try next(r, codebook, vectors, 2);
+                try addAt(vec, voffs + k, v[0]);
+                try addAt(vec, voffs + k + vlen, v[1]);
+            }
+        } else if (dim == 4) {
+            for (0..step) |_| {
+                const v = try next(r, codebook, vectors, 4);
+                try addAt(vec, voffs, v[0]);
+                try addAt(vec, voffs + 1, v[2]);
+                try addAt(vec, voffs + vlen, v[1]);
+                try addAt(vec, voffs + vlen + 1, v[3]);
+                voffs += 2;
+            }
+        } else {
+            for (0..step) |_| {
+                const v = try next(r, codebook, vectors, dim);
+                var l: usize = 0;
+                while (l < dim) : (l += 2) {
+                    try addAt(vec, voffs, v[l]);
+                    try addAt(vec, voffs + vlen, v[l + 1]);
+                    voffs += 1;
+                }
+            }
+        }
+    } else {
+        var voffs_div: u32 = if (ch == 1) voffset else fastdiv(voffset, ch);
+        var voffs_mod: u32 = voffset -% voffs_div *% ch;
+        for (0..step) |_| {
+            const v = try next(r, codebook, vectors, dim);
+            for (0..dim) |l| {
+                try addAt(vec, @as(usize, voffs_div) + @as(usize, voffs_mod) * vlen, v[l]);
+                voffs_mod += 1;
+                if (voffs_mod == ch) {
+                    voffs_div += 1;
+                    voffs_mod = 0;
+                }
+            }
+        }
+    }
 }
 
 /// ff_vorbis_ready_floor1_list: each point's neighbours and the points'

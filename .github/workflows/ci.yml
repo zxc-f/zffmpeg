@@ -226,6 +226,16 @@ jobs:
             -lm -pthread -o flacenc-vectors
           ./flacenc-vectors | diff -u zig/testing/vectors/flacenc.txt -
 
+      # The committed T27d oracle must be what this build's Vorbis decoder
+      # makes of the Ogg Vorbis fixtures.
+      - name: Check the Vorbis vectors (T27d)
+        run: |
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/vorbis_vectors.c \
+            .references/ffmpeg-install/lib/libavformat.a .references/ffmpeg-install/lib/libavcodec.a \
+            .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a \
+            -lm -pthread -o vorbis-vectors
+          LC_ALL=C ./vorbis-vectors zig/testing/fixtures/ogg/*vorbis*.ogg | diff -u zig/testing/vectors/vorbis.txt -
+
       # The committed T18c oracle must be what this build's VLC builder makes.
       - name: Check the VLC vectors (T18c)
         run: |

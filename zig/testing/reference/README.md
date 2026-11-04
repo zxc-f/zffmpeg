@@ -180,6 +180,18 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/ogg_vectors
 LC_ALL=C ./ogg-vectors zig/testing/fixtures/ogg/*.ogg | diff -u zig/testing/vectors/ogg.txt -
 ```
 
+The T27d Vorbis vectors come from the reference's `libavformat` and
+`libavcodec`: `vorbis_vectors.c` opens each Ogg Vorbis fixture as the
+ffmpeg program opens an input, sends every packet of its Vorbis stream to
+the decoder and prints each result and each frame received (its sample
+count after libavcodec's discarding, and the MD5 of its float planes).
+`vorbis_fixtures.sh` makes the FFmpeg-encoded fixtures:
+
+```bash
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/vorbis_vectors.c .references/ffmpeg-install/lib/libavformat.a .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o vorbis-vectors
+LC_ALL=C ./vorbis-vectors zig/testing/fixtures/ogg/*vorbis*.ogg | diff -u zig/testing/vectors/vorbis.txt -
+```
+
 The T18c VLC vectors come from the reference's `libavcodec`:
 `vlc_vectors.c` builds decoding tables with `ff_vlc_init_sparse` (its
 prototype and the `VLC` struct restated, as `vlc.h` is not installed) for

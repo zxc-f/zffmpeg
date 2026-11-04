@@ -2805,9 +2805,21 @@ names, not as an empty framework.
       stream's headers, and demux.Setup.decoder models FFmpeg's open (none,
       FLAC, the format at open, refused: no channel count); ogg.txt (24
       fixtures) and seek_ogg.txt (1134 seeks) regenerated, all equal, in
-      Debug, ReleaseSafe and ReleaseFast. Remaining: part 2 (audio packets
-      and their oracle), part 3 (convert, zffprobe's fltp and refusal as
-      ffprobe's, compare.py with the encoder as a registry difference).
+      Debug, ReleaseSafe and ReleaseFast (243b8e6). Part 2: the audio
+      packet path in codec/vorbis.zig (floors 0 and 1 with render_line,
+      residues 0 to 2 with setup_classifs and the libvorbis workaround,
+      inverse coupling, the MDCT of T27c, vector_fmul_window's overlap-add,
+      in-stream header packets, the first frame's skip), with bounds checks
+      where FFmpeg relies on its earlier validation; vorbis_vectors.c
+      decodes the Ogg Vorbis fixtures through libavcodec (vectors/vorbis.txt,
+      57 frames): every packet result and frame MD5 equal bit for bit, with
+      decode.c's discarding restated in the test. A local check over FATE's
+      20 Vorbis samples (8658 frames: floor 0, residues 0 and 1, mono, 6
+      channels, chains) found every frame equal too; it becomes compare.py's
+      optional FATE coverage in part 3. Remaining: part 3 (av.convert and
+      zffmpeg from Ogg Vorbis, zffprobe's fltp and its refusal as
+      ffprobe's, compare.py with the encoder as a registry difference and
+      the FATE Vorbis tests).
     ```
 
 - [ ] **T28 — Opus decoder.** Checked when T28a–T28c are. Reference:
