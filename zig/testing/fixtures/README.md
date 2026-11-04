@@ -250,11 +250,11 @@ of the Zig tables.
 | `bw64` | rf64 | 88 | accept: 1 channel, 8000 Hz, 4 frames | BW64, the EBU's RF64 (rejected before T21b). | `e38fae0af5bfb6da5b3031f1c8e853c8f08d935cc663941af42c0dce82f2d616` |
 | `rf64_data_size_in_chunk` | rf64 | 88 | accept: 1 channel, 8000 Hz, 4 frames | RF64 whose small `data` chunk holds its own size: `ds64`'s is used only for 0xFFFFFFFF. | `9869cb2e55b60327c5414ad77734f62599bbfa23df77e81a7dbcc6843e34a851` |
 | `rf64_riff_size_not_sentinel` | rf64 | 88 | reject: `InvalidRiff` | RF64 with a 32-bit RIFF size other than 0xFFFFFFFF. FFmpeg ignores the field. | `8b035e483117536abba7dec3f5774a61a9362bfcfa42169c5e78dff995eb2dd7` |
-| `rf64_missing_ds64` | rf64 | 52 | reject: `InvalidRiff`; not detected (probing picks no format) | RF64 whose first chunk is `fmt `, not `ds64`. | `01eeb370eeda2363edc3e07c9af3449a5e81c494e290da65386e61da32a3c4e4` |
+| `rf64_missing_ds64` | rf64 | 52 | reject: `InvalidRiff` | RF64 whose first chunk is `fmt `, not `ds64`. | `01eeb370eeda2363edc3e07c9af3449a5e81c494e290da65386e61da32a3c4e4` |
 | `rf64_ds64_short` | rf64 | 84 | reject: `InvalidRiff` | A 24-byte `ds64` without the table count. FFmpeg accepts 24 bytes. | `25ec7abe69bac79d164fb55431d51412bb9cfff00cd6e0f848431ac62637dbb4` |
 | `rf64_ds64_table` | rf64 | 88 | reject: `UnsupportedFormat` | A `ds64` with one table entry (64-bit sizes of other chunks). | `2e0622a8b237f23435446ea211ffd10214422a1a80551ebda7f4ce21ac464ccf` |
 | `rf64_data_exceeds_extent` | rf64 | 88 | reject: `InvalidRiff` | `ds64` declares 64 data bytes, but the RF64 extent ends after 8. | `842d16c4389674b69a28bd5d74f59a6929300a3adf432223b5fac524ee6286ec` |
-| `rf64_truncated_ds64` | rf64 | 30 | reject: `Truncated`; not detected (probing picks no format) | Input ends inside `ds64`. | `396b56f69749b010a61d32aec205ffdbfd4aa5f9f4293a97fed1512004308d23` |
+| `rf64_truncated_ds64` | rf64 | 30 | reject: `Truncated` | Input ends inside `ds64`. | `396b56f69749b010a61d32aec205ffdbfd4aa5f9f4293a97fed1512004308d23` |
 | `w64_mono_8k` | w64 | 120 | accept: 1 channel, 8000 Hz, 8 frames; writer output | Wave64 as the writer emits it: the `fmt ` of WAV, sizes that count the 24-byte chunk header. | `f28cafb2b9124a673d72bc8716eaa2c57cb48279ef1a841341179aacd8491ff9` |
 | `w64_u8_odd` | w64 | 112 | accept: 1 channel, 8000 Hz, 3 frames, `pcm_u8`; writer output | Three u8 frames: `data` declares 27 bytes and 5 pad bytes follow, outside its size. | `411de02c8dce8ac243c6d761302f305299dcb967fdd9b76651c0c0a340f5a81a` |
 | `w64_alaw_mono_8k` | w64 | 152 | accept: 1 channel, 8000 Hz, 8 frames, `pcm_alaw`; writer output | A-law: the 18-byte `fmt ` is padded to 8 bytes, and a `fact` chunk holds a 64-bit count. | `7e8162072976ee575743aec27529b79022a34f0ba99b1451220f27c677ad8b72` |

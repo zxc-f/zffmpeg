@@ -709,8 +709,23 @@ pub fn Layer(comptime Source: type) type {
         /// (`has_b_frames` 0) and without a parser's reordering.
         fn computePktFields(l: *Self, pkt: *Held, setup: Setup) Error!void {
             const s = try l.state(pkt.stream);
-            // compute_frame_duration gives nothing for the supported
-            // codecs, whose frames vary in size.
+            // The duration as a fraction of a second, which the running
+            // timestamp advances by.
+            var inc: ?rational.Rational = null;
+            // compute_frame_duration: av_get_audio_frame_duration's fixed
+            // frame of an MPEG audio codec at the codec context's rate; for
+            // the other supported codecs, whose frames vary in size, none.
+            if (pkt.duration <= 0) if (s.codec) |ctx| {
+                const frame: i64 = switch (ctx.codec) {
+                    .mp1 => 384,
+                    .mp2 => 1152,
+                    .mp3 => if (ctx.sample_rate == 0) 0 else if (ctx.sample_rate <= 24000) 576 else 1152,
+                };
+                if (frame > 0 and ctx.sample_rate > 0) {
+                    inc = .{ .num = @intCast(frame), .den = @intCast(ctx.sample_rate) };
+                    pkt.duration = rational.rescaleRnd(1, frame * setup.time_base.den, @as(i64, ctx.sample_rate) * setup.time_base.num, .down);
+                }
+            };
             if (pkt.duration > 0 and l.heldList().len > 0) l.updateInitialDurations(pkt.stream, s, pkt.duration);
             const presentation_delayed = pkt.dts != nopts and pkt.pts != nopts and pkt.pts > pkt.dts;
             if (presentation_delayed) {
@@ -728,8 +743,8 @@ pub fn Layer(comptime Source: type) type {
                 pkt.dts = pkt.pts;
                 // The duration in seconds: av_mul_q of `(AVRational){
                 // pkt->duration, 1}`, whose int numerator truncates.
-                const inc = rational.mul(.{ .num = @truncate(pkt.duration), .den = 1 }, setup.time_base);
-                if (pkt.pts != nopts and inc.num >= 0) s.cur_dts = rational.addStable(setup.time_base, pkt.pts, inc, 1);
+                const step = inc orelse rational.mul(.{ .num = @truncate(pkt.duration), .den = 1 }, setup.time_base);
+                if (pkt.pts != nopts and step.num >= 0) s.cur_dts = rational.addStable(setup.time_base, pkt.pts, step, 1);
             }
             // The pts buffer of no delay: dts, else the pts.
             if (pkt.pts != nopts and pkt.dts == nopts) pkt.dts = pkt.pts;

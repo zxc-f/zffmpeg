@@ -65,6 +65,7 @@ const caf = @import("caf.zig");
 const flac = @import("flac.zig");
 const flacmux = @import("flacmux.zig");
 const oggdecode = @import("oggdecode.zig");
+const mp3 = @import("mp3.zig");
 const flacenc = @import("../codec/flacenc.zig");
 const seek = @import("seek.zig");
 const codecs = @import("../codec/registry.zig");
@@ -287,6 +288,18 @@ pub const Conversion = struct {
             else
                 .init(request.gpa orelse return error.UnsupportedOperation, source.reader(), null, request.diagnostics) },
             .raw => .{ .raw = source.rawParser(limits.raw) },
+            // The demuxer opens as FFmpeg's does, refusing what it refuses;
+            // with no MPEG audio decoder yet (T29b) the conversion is then
+            // refused, before any output.
+            .mp3 => {
+                const gpa = request.gpa orelse return error.UnsupportedOperation;
+                const d = if (source.source.seeker) |sk|
+                    try mp3.Demuxer.initSeekable(gpa, source.replay.source, sk, .{})
+                else
+                    try mp3.Demuxer.init(gpa, source.reader(), .{});
+                d.deinit();
+                return error.UnsupportedOperation;
+            },
         };
         errdefer deinitParser(&input);
         // The tags as the file stores them, renamed once the header is read.
@@ -369,7 +382,7 @@ pub const Conversion = struct {
             .pcm => |codec| codec,
             .flac => flacStorage(summary.format.sample_format),
             // No encoder: refused by the operation check below.
-            .vorbis, .opus => return error.UnsupportedOperation,
+            .vorbis, .opus, .mp1, .mp2, .mp3 => return error.UnsupportedOperation,
         };
         // FFmpeg's set_channel_layout: an unspecified request takes the
         // default for its count.
@@ -417,7 +430,7 @@ pub const Conversion = struct {
                 error.InvalidOption => error.InvalidOption,
                 error.TagsTooLong => error.LimitExceeded,
             },
-            .caf => unreachable, // no muxer: refused above as UnsupportedOperation
+            .caf, .mp3 => unreachable, // no muxer: refused above as UnsupportedOperation
         }
         const packet_frames = switch (input) {
             // FFmpeg's packets are the FLAC frames.
@@ -546,7 +559,7 @@ pub const Conversion = struct {
                 defer writer.deinit();
                 try c.transfer(flacmux.Writer, &writer);
             },
-            .caf => unreachable, // no muxer: `init` refused it
+            .caf, .mp3 => unreachable, // no muxer: `init` refused it
         }
         // Every frame was read: an unknown count is now known, and a FLAC
         // stream's decoded count replaces STREAMINFO's (equal unless raw
@@ -831,6 +844,7 @@ fn ffmpegPacketFrames(container: Container, codec: pcm.Codec, format: audio.Form
         .wav, .au, .raw => std.math.floorPowerOfTwo(u32, std.math.clamp(format.sample_rate / 10, 1, std.math.maxInt(i32) / block_align)),
         .flac => unreachable, // Conversion.init takes STREAMINFO's block size
         .ogg => unreachable, // Conversion.init takes the decoder's frames
+        .mp3 => unreachable, // Conversion.init refuses MPEG audio (T29b)
     };
 }
 
@@ -1085,7 +1099,7 @@ fn decodeOutput(container: Container, bytes: []const u8, storage: []i16, format:
             var parser: caf.Parser = .init(&reader, .{});
             return decodeWith(caf.Parser, &parser, storage);
         },
-        .flac, .ogg => unreachable, // not this test's outputs
+        .flac, .ogg, .mp3 => unreachable, // not this test's outputs
     }
 }
 
@@ -1147,7 +1161,7 @@ fn rawOf(container: Container, bytes: []const u8, out: []u8, format: audio.Forma
         .aiff => _ = try aiff.decodeToRaw(&reader, &writer, .{}),
         .caf => _ = try caf.decodeToRaw(&reader, &writer, .{}),
         .raw => _ = try raw.decodeToRaw(&reader, &writer, container.rawCodec().?, paramsOf(format), bytes.len, .{}), // a raw container has a codec
-        .flac, .ogg => unreachable, // not this test's outputs
+        .flac, .ogg, .mp3 => unreachable, // not this test's outputs
     }
     return writer.buffered();
 }
@@ -1368,13 +1382,14 @@ test "copy keeps the encoded data and timing but not the container's metadata" {
 /// with the error probing reports. The fixture contracts already pin that
 /// error, and for an input without the AU magic it is the WAV parser's.
 fn expectProbeError(bytes: []const u8, output: Container) !void {
+    const gpa = std.testing.allocator;
     var probe_reader: std.Io.Reader = .fixed(bytes);
-    const want = if (detect.probe(&probe_reader, .{})) |_| return error.TestExpectedError else |e| e;
+    const want = if (detect.probeWith(&probe_reader, .{}, .{ .gpa = gpa })) |_| return error.TestExpectedError else |e| e;
     for ([_]Mode{ .transcode, .copy }) |mode| {
         var reader: std.Io.Reader = .fixed(bytes);
         var buffer: [1024]u8 = undefined;
         var out: std.Io.Writer = .fixed(&buffer);
-        try std.testing.expectError(want, convert(&reader, &out, .{ .output = output, .mode = mode }, .{}));
+        try std.testing.expectError(want, convert(&reader, &out, .{ .output = output, .mode = mode, .gpa = gpa }, .{}));
     }
 }
 

@@ -164,7 +164,7 @@ pub const Fixture = struct {
 pub const WriterHeader = enum { riff, rf64, w64 };
 
 /// The formats content probing can choose (T16), by FFmpeg's names.
-pub const Container = enum { wav, w64, au, aiff, caf, flac };
+pub const Container = enum { wav, w64, au, aiff, caf, flac, mp3 };
 
 /// One tag as bytes: values may hold any byte but NUL.
 pub const Tag = struct {

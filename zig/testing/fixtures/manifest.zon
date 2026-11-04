@@ -364,7 +364,7 @@
         .name = "rf64_missing_ds64",
         .sha256 = "01eeb370eeda2363edc3e07c9af3449a5e81c494e290da65386e61da32a3c4e4",
         .expected = .{ .reject = .InvalidRiff },
-        .detected = null,
+        .detected = .mp3,
     },
     .{
         .name = "rf64_ds64_short",
@@ -388,7 +388,7 @@
         .name = "rf64_truncated_ds64",
         .sha256 = "396b56f69749b010a61d32aec205ffdbfd4aa5f9f4293a97fed1512004308d23",
         .expected = .{ .reject = .Truncated },
-        .detected = null,
+        .detected = .mp3,
     },
     .{
         .name = "w64_mono_8k",

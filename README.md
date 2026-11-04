@@ -63,7 +63,12 @@ since T28c), bit for bit as FFmpeg's decoder (its range decoder, packets,
 CELT, SILK with its resampling, the streams' sync buffers and channel
 mapping, FFmpeg's quirks included, as notes.md lists them): `zffmpeg`
 converts Ogg Opus, `zffprobe` reports it, and RFC 8251's twelve vectors
-decode as FFmpeg decodes them. [TODO.md](TODO.md) holds the completion
+decode as FFmpeg decodes them. MPEG audio demuxes since T29a as FFmpeg's
+mp3 demuxer and parser split it, its ID3v2 and ID3v1 tags, Xing, LAME,
+VBRI and iTunSMPB headers and gapless side data included, and detection
+follows FFmpeg's probe rounds and ID3v2 skip: `zffprobe` reports MP3 as
+ffprobe does without a decoder; decoding follows (T29b).
+[TODO.md](TODO.md) holds the completion
 evidence and the roadmap. Development is verified on Linux only. The compiler
 is **Zig 0.17.0**, enforced by the build.
 

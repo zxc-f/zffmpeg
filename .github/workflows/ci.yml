@@ -190,6 +190,7 @@ jobs:
           LC_ALL=C ./seek-vectors zig/testing/fixtures/wav/*.wav | diff -u zig/testing/vectors/seek.txt -
           LC_ALL=C ./seek-vectors zig/testing/fixtures/flac/*.flac | diff -u zig/testing/vectors/seek_flac.txt -
           LC_ALL=C ./seek-vectors zig/testing/fixtures/ogg/*.ogg | diff -u zig/testing/vectors/seek_ogg.txt -
+          LC_ALL=C ./seek-vectors zig/testing/fixtures/mp3/*.mp3 | diff -u zig/testing/vectors/seek_mp3.txt -
 
       # The committed T15 oracle must be what this build's libavutil gives.
       - name: Check the rational vectors (T15)

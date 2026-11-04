@@ -65,6 +65,8 @@ fn run(init: std.process.Init) Status {
         hashFlac(io, gpa, kind, mode, bytes, out)
     else if (head == .ogg)
         if (mode == .copy) hashOgg(gpa, kind, bytes, out) else error.OggNotDecoded
+    else if (head == .mp3)
+        if (mode == .copy) hashMp3(gpa, kind, bytes, out) else error.Mp3NotDecoded
     else if (kind != .streamhash)
         error.PcmNeedsStreamhash
     else
@@ -78,6 +80,48 @@ fn run(init: std.process.Init) Status {
         return .failure;
     };
     return .ok;
+}
+
+/// MPEG audio (T29a), `ffmpeg -i <input> -c copy -f <muxer>`: the frames
+/// the demuxer's parser splits, with the codec, rate and layout of the
+/// parser's context after the read-ahead, and the gapless side data.
+fn hashMp3(gpa: std.mem.Allocator, kind: av.framehash.Kind, bytes: []const u8, out: *std.Io.Writer) !void {
+    var reader: std.Io.Reader = .fixed(bytes);
+    const d = try av.mp3.Demuxer.initSeekable(gpa, &reader, .fixed(&reader), .{});
+    defer d.deinit();
+    var layer = av.demux.Layer(av.mp3.Demuxer).init(gpa, d);
+    defer layer.deinit();
+    try layer.findStreamInfo();
+    const params = try layer.codecParams(0);
+    const tb = av.mp3.time_base;
+    var w: av.framehash.Writer = .init(kind, out, .{
+        .time_base = .{ .num = @intCast(tb.num), .den = @intCast(tb.den) },
+        .codec = if (params.mpa_codec) |c| @tagName(c) else "mp3",
+        .sample_rate = params.sample_rate,
+        .layout = .default(params.channels),
+        .extradata = null,
+    });
+    try w.writeHeader();
+    while (layer.next() catch null) |p| {
+        var skip: [10]u8 = @splat(0);
+        var side: [1]av.framehash.SideData = undefined;
+        var n: usize = 0;
+        if (p.skip) |s| {
+            std.mem.writeInt(u32, skip[0..4], s[0], .little);
+            std.mem.writeInt(u32, skip[4..8], s[1], .little);
+            side[n] = .{ .name = "Skip Samples", .data = &skip };
+            n += 1;
+        }
+        try w.writePacketSide(.{
+            .data = p.data,
+            .time_base = .{ .num = @intCast(tb.num), .den = @intCast(tb.den) },
+            .pts = p.pts,
+            .dts = p.dts,
+            .duration = p.duration,
+            .flags = .{ .key = p.flags & 1 != 0 },
+        }, side[0..n]);
+    }
+    try w.finish();
 }
 
 /// Ogg (T27a), `ffmpeg -i <input> -c copy -f <muxer>`: the input read

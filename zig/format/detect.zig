@@ -43,18 +43,21 @@ const raw = @import("raw.zig");
 const caf = @import("caf.zig");
 const flac = @import("flac.zig");
 const ogg = @import("ogg.zig");
+const mp3 = @import("mp3.zig");
+const rational = @import("../core/rational.zig");
 const demux = @import("demux.zig");
 const seek = @import("seek.zig");
 const codecs = @import("../codec/registry.zig");
 const registry = @import("registry.zig");
 const Replay = @import("replay.zig").Replay;
+const id3v2 = @import("id3v2.zig");
 
 pub const Container = registry.Container;
 
 /// The WAV, AU, AIFF, raw PCM, CAF and FLAC contract errors, which share
 /// their common names, `UnknownFormat` for a stream no demuxer recognizes,
 /// and `UnusedOption`.
-pub const Error = wav.Error || au.Error || aiff.Error || raw.Error || caf.Error || flac.Error || ogg.Error || error{
+pub const Error = wav.Error || au.Error || aiff.Error || raw.Error || caf.Error || flac.Error || ogg.Error || mp3.Error || error{
     /// No demuxer's probe scored the stream, as FFmpeg's "Invalid data found
     /// when processing input"; force a format to parse it anyway.
     UnknownFormat,
@@ -96,6 +99,8 @@ pub const Source = struct {
     /// its start): Ogg's durations come from scans of the whole input, as
     /// FFmpeg's ogg_get_length makes them on a seekable input (T27a).
     seeker: ?seek.Seeker = null,
+    /// For a probe buffer past the first 2048 bytes (FFmpeg's retries).
+    gpa: ?std.mem.Allocator = null,
 };
 
 /// FFmpeg's first probe size (`PROBE_BUF_MIN`).
@@ -106,33 +111,85 @@ const max_score = 100;
 /// `AVPROBE_SCORE_EXTENSION`: a probe-less demuxer whose extension matches.
 const extension_score = 50;
 
-comptime {
-    for (registry.formats) |format| {
-        const demuxer = format.demuxer orelse continue;
-        if (demuxer.probe_bytes > probe_len) @compileError("a probe reads past the probe buffer: " ++ format.name);
+/// `PROBE_BUF_MAX`: probing's largest buffer.
+pub const probe_max = 1 << 20;
+/// `AVPROBE_SCORE_RETRY`: a score at most this asks for more data.
+const retry_score = max_score / 4;
+
+/// FFmpeg's winner for a stream whose bytes are all `head` (named
+/// `file_name`, null when it has none): `av_probe_input_buffer2`'s rounds
+/// over growing prefixes of it.
+pub fn probeHead(head: []const u8, file_name: ?[]const u8) ?Container {
+    var rounds: Rounds = .{};
+    while (true) {
+        const want = rounds.probe_size - rounds.buf_offset;
+        const got = @min(want, head.len - rounds.buf_offset);
+        if (rounds.step(head[0 .. rounds.buf_offset + got], got, want, file_name)) |result| return result;
     }
 }
 
-/// FFmpeg's winner for `head`, the first bytes of a stream named `file_name`
-/// (null when it has no name): the demuxer with the highest nonzero score, or
-/// none when no demuxer scores or the highest score is tied.
-pub fn probeHead(head: []const u8, file_name: ?[]const u8) ?Container {
-    return winner(&registry.formats, head[0..@min(head.len, probe_len)], file_name);
-}
+/// `av_probe_input_buffer2`'s loop: a probe buffer of 2048 bytes, doubled
+/// each round up to 1 MiB, the winner taken when it scores above 25, or
+/// above 0 once a read finds the end or the buffer is at its largest.
+const Rounds = struct {
+    probe_size: usize = probe_len,
+    buf_offset: usize = 0,
 
-/// The winner among `formats`, scored as `av_probe_input_format3` scores
-/// them. FFmpeg's order only matters for ties, which mean no winner whatever
-/// the order.
-fn winner(formats: []const registry.Format, head: []const u8, file_name: ?[]const u8) ?Container {
+    /// One round with `buf`, the bytes read so far, `got` of the `want`
+    /// this round asked for. Null asks for another round; otherwise the
+    /// outcome, a container or none.
+    fn step(r: *Rounds, buf: []const u8, got: usize, want: usize, file_name: ?[]const u8) ??Container {
+        var threshold: u8 = if (r.probe_size < probe_max) retry_score else 0;
+        // avio_read's AVERROR_EOF: nothing more to read.
+        const at_end = want > 0 and got == 0;
+        if (at_end) threshold = 0;
+        r.buf_offset += got;
+        const result = probeRound(&registry.formats, buf, file_name);
+        if (result.score > threshold) {
+            if (result.container) |c| return c;
+        }
+        if (at_end or r.probe_size >= probe_max) return @as(?Container, null);
+        r.probe_size = @min(r.probe_size * 2, probe_max);
+        return null;
+    }
+};
+
+const Round = struct { container: ?Container, score: u8 };
+
+/// `probe_input_format_internal`: the demuxers' scores for `buf` after the
+/// ID3v2 tags it can skip, the highest one's container (none on a tie), and
+/// the extension hints, which an ID3v2 tag longer than the buffer raises.
+fn probeRound(formats: []const registry.Format, buf_in: []const u8, file_name: ?[]const u8) Round {
+    const NoData = enum { no_id3, almost_greater, greater, greater_max };
+    var nodat: NoData = .no_id3;
+    var buf = buf_in;
+    while (buf.len > 10 and id3v2.match(buf)) {
+        const id3len = id3v2.tagLen(buf[0..id3v2.header_size]);
+        if (buf.len > @as(u64, id3len) + 16) {
+            if (buf.len < 2 * @as(u64, id3len) + 16) nodat = .almost_greater;
+            buf = buf[id3len..];
+        } else if (id3len >= probe_max) {
+            nodat = .greater_max;
+            break;
+        } else {
+            nodat = .greater;
+            break;
+        }
+    }
     var best: u8 = 0;
     var chosen: ?Container = null;
     for (formats) |format| {
         const demuxer = format.demuxer orelse continue;
         const named = if (file_name) |name| registry.matchesExtension(name, demuxer.extensions) else false;
-        const score: u8 = if (demuxer.probe) |score_head| score: {
-            const content = score_head(head);
-            break :score if (named) @max(content, 1) else content;
-        } else if (named) extension_score else 0;
+        var score: u8 = 0;
+        if (demuxer.probe) |score_buf| {
+            score = score_buf(buf);
+            if (named) score = switch (nodat) {
+                .no_id3 => @max(score, 1),
+                .greater, .almost_greater => @max(score, extension_score / 2 - 1),
+                .greater_max => @max(score, extension_score),
+            };
+        } else if (named) score = extension_score;
         std.debug.assert(score <= max_score);
         if (score > best) {
             best = score;
@@ -141,13 +198,17 @@ fn winner(formats: []const registry.Format, head: []const u8, file_name: ?[]cons
             chosen = null;
         }
     }
-    return chosen;
+    if (nodat == .greater) best = @min(extension_score / 2 - 1, best);
+    return .{ .container = chosen, .score = best };
 }
 
 /// A stream opened for parsing: its format, and a reader that replays the
 /// bytes probing read before the rest of the source.
 pub const Input = struct {
     head_buffer: [probe_len]u8,
+    /// The probe buffer once probing read more than `probe_len` bytes.
+    extra: ?[]u8 = null,
+    gpa: ?std.mem.Allocator = null,
     replay: Replay,
     container: Container,
     /// The container came from the caller, not from probing.
@@ -158,7 +219,12 @@ pub const Input = struct {
     /// reading anything. Fills `input` in place; it must not move afterward,
     /// because `reader` points into it. Only a failing reader, a stream no
     /// demuxer recognizes, or raw parameters for another format are errors.
-    pub fn open(input: *Input, reader_in: *std.Io.Reader, source: Source) error{ IoFailure, UnknownFormat, UnusedOption }!void {
+    ///
+    /// Probing reads more than the first `probe_len` bytes only for a
+    /// stream every demuxer scores at most 25 (FFmpeg's retries, up to
+    /// 1 MiB); that buffer comes from `source.gpa`, without which such a
+    /// stream is `OutOfMemory`. `deinit` frees it.
+    pub fn open(input: *Input, reader_in: *std.Io.Reader, source: Source) error{ IoFailure, UnknownFormat, UnusedOption, OutOfMemory }!void {
         if (source.format) |container| {
             input.* = .{
                 .head_buffer = undefined,
@@ -168,13 +234,59 @@ pub const Input = struct {
                 .source = source,
             };
         } else {
-            const len = reader_in.readSliceShort(&input.head_buffer) catch return error.IoFailure;
-            input.replay = .init(input.head_buffer[0..len], reader_in);
-            input.container = probeHead(input.head_buffer[0..len], source.file_name) orelse return error.UnknownFormat;
-            input.forced = false;
-            input.source = source;
+            input.* = .{
+                .head_buffer = undefined,
+                .gpa = source.gpa,
+                .replay = undefined,
+                .container = undefined,
+                .forced = false,
+                .source = source,
+            };
+            errdefer input.deinit();
+            var rounds: Rounds = .{};
+            var end_seen = false;
+            const chosen = while (true) {
+                const want = rounds.probe_size - rounds.buf_offset;
+                var got: usize = 0;
+                // A short read was the end: the next one reads nothing.
+                if (!end_seen) {
+                    const buf = try input.probeBuffer(rounds.probe_size);
+                    got = reader_in.readSliceShort(buf[rounds.buf_offset..rounds.probe_size]) catch return error.IoFailure;
+                    if (got < want) end_seen = true;
+                }
+                const bytes = input.probed(rounds.buf_offset + got);
+                if (rounds.step(bytes, got, want, source.file_name)) |result| break result;
+            };
+            input.replay = .init(input.probed(rounds.buf_offset), reader_in);
+            input.container = chosen orelse return error.UnknownFormat;
         }
         if (source.raw != null and input.container.family() != .raw) return error.UnusedOption;
+    }
+
+    pub fn deinit(input: *Input) void {
+        if (input.extra) |b| input.gpa.?.free(b);
+        input.extra = null;
+    }
+
+    /// The probe buffer with room for `size` bytes, its bytes kept.
+    fn probeBuffer(input: *Input, size: usize) error{OutOfMemory}![]u8 {
+        if (size <= probe_len) return &input.head_buffer;
+        const gpa = input.gpa orelse return error.OutOfMemory;
+        if (input.extra) |old| {
+            if (old.len >= size) return old;
+            const grown = try gpa.realloc(old, size);
+            input.extra = grown;
+            return grown;
+        }
+        const buf = try gpa.alloc(u8, size);
+        @memcpy(buf[0..probe_len], &input.head_buffer);
+        input.extra = buf;
+        return buf;
+    }
+
+    /// The first `len` bytes probing read.
+    fn probed(input: *const Input, len: usize) []const u8 {
+        return if (input.extra) |b| b[0..len] else input.head_buffer[0..len];
     }
 
     pub fn reader(input: *Input) *std.Io.Reader {
@@ -210,6 +322,14 @@ pub const Probed = struct {
     /// Sample frames in the stream; null for data of unknown length
     /// (`unknown_length`). Raw PCM is counted while validating.
     frame_count: ?u64,
+    /// False for a stream no decoder of the port reads yet (MPEG audio,
+    /// T29a): FFmpeg's reference build has none either, so its sample
+    /// format is unknown.
+    decoded: bool = true,
+    /// For a stream whose time base is not 1/rate (MPEG audio's
+    /// 1/14112000): its duration in that time base, ffprobe's
+    /// `duration_ts`; `frame_count` is it in samples, rounded.
+    time_base_duration: ?struct { ts: i64, den: u32 } = null,
 };
 
 pub const Options = struct {
@@ -234,7 +354,10 @@ pub fn probe(reader: *std.Io.Reader, limits: Limits) Error!Probed {
 /// `probe`, with what the caller knows about the source, or tags.
 pub fn probeWith(reader: *std.Io.Reader, limits: Limits, options: Options) Error!Probed {
     var input: Input = undefined;
-    try input.open(reader, options.source);
+    var source = options.source;
+    if (source.gpa == null) source.gpa = options.gpa orelse if (options.tags) |t| t.gpa else null;
+    try input.open(reader, source);
+    defer input.deinit();
     switch (input.container.family()) {
         .wav => {
             var parser = input.wavParser(limits.wav);
@@ -302,6 +425,7 @@ pub fn probeWith(reader: *std.Io.Reader, limits: Limits, options: Options) Error
             return probed;
         },
         .ogg => return probeOgg(reader, &input, options),
+        .mp3 => return probeMp3(reader, &input, options),
     }
 }
 
@@ -356,6 +480,44 @@ fn probeOgg(reader: *std.Io.Reader, input: *Input, options: Options) Error!Probe
     return error.UnsupportedFormat;
 }
 
+/// MPEG audio (T29a): the demuxer and libavformat's read-ahead, as ffprobe
+/// opens the input, without a decoder: the parser's codec, rate and
+/// channels (FFmpeg's default layout for the count), no sample format, and
+/// the duration in the stream's 1/14112000 time base. The format's tags
+/// (ID3v2, else ID3v1, and PRIV) are the input's.
+fn probeMp3(reader: *std.Io.Reader, input: *Input, options: Options) Error!Probed {
+    const gpa = options.gpa orelse if (options.tags) |t| t.gpa else return error.UnsupportedFormat;
+    const d = if (options.source.seeker) |sk| blk: {
+        sk.seekTo(0) catch return error.IoFailure;
+        break :blk try mp3.Demuxer.initSeekable(gpa, reader, sk, .{});
+    } else try mp3.Demuxer.init(gpa, input.reader(), .{});
+    defer d.deinit();
+    var layer = demux.Layer(mp3.Demuxer).init(gpa, d);
+    defer layer.deinit();
+    try layer.findStreamInfo();
+    const params = try layer.codecParams(0);
+    if (params.sample_rate == 0 or params.channels == 0) return error.UnsupportedFormat;
+    const codec: codecs.Codec = switch (params.mpa_codec orelse .mp3) {
+        .mp1 => .mp1,
+        .mp2 => .mp2,
+        .mp3 => .mp3,
+    };
+    if (options.tags) |t| {
+        std.debug.assert(t.dictionary.count() == 0);
+        std.mem.swap(metadata.Dictionary, t.dictionary, &d.tags);
+    }
+    const duration = d.info.duration;
+    return .{
+        .container = .mp3,
+        .codec = codec,
+        // No decoder: the sample format is unknown (`decoded` false).
+        .format = audio.Format.initLayout(params.sample_rate, .default(params.channels), .s16) catch return error.UnsupportedFormat,
+        .frame_count = if (duration >= 0) @intCast(rational.rescale(duration, params.sample_rate, mp3.time_base.den)) else null,
+        .decoded = false,
+        .time_base_duration = if (duration >= 0) .{ .ts = duration, .den = @intCast(mp3.time_base.den) } else null,
+    };
+}
+
 /// The bits per sample of an Ogg FLAC stream's STREAMINFO.
 fn flacBps(info: *const ogg.StreamInfo) u8 {
     const e = info.extradata.items;
@@ -399,7 +561,12 @@ fn expectDetection(comptime detected: ?fixtures.Container, bytes: []const u8, di
     source.artificial_limit = .limited(1);
     const got = probe(&source.interface, .{});
     if (detected == null) return std.testing.expectError(error.UnknownFormat, got);
-    // Not null: checked just above.
+    if (comptime detected.? == .mp3) {
+        // FFmpeg's MP3 probe claims a few tiny files of other formats
+        // (T29a); its demuxer, which allocates, then finds no frames.
+        var again: std.Io.Reader = .fixed(bytes);
+        return std.testing.expectError(error.InvalidMp3, probeWith(&again, .{}, .{ .gpa = std.testing.allocator }));
+    }
     const container = comptime containerOf(detected.?);
     try expectSameResult(direct, got, container);
     var forced: std.Io.Reader = .fixed(bytes);
@@ -472,8 +639,10 @@ test "raw fixtures are found by no content probe, by their extension, and read w
     inline for (fixtures.raw.all) |fixture| {
         const bytes = fixtures.raw.bytes(fixture.name);
         const container = @field(Container, @tagName(fixture.format));
-        try std.testing.expectEqual(null, probeHead(bytes, null));
-        try std.testing.expectEqual(null, probeHead(bytes, fixture.name ++ ".raw"));
+        // FFmpeg's MP3 probe claims two of them (T29a), as the manifest says.
+        const detected: ?Container = if (fixture.detected) |d| containerOf(d) else null;
+        try std.testing.expectEqual(detected, probeHead(bytes, null));
+        try std.testing.expectEqual(detected, probeHead(bytes, fixture.name ++ ".raw"));
         // Named with the format's extension, if it has one, the format is chosen.
         const extensions = container.format().demuxer.?.extensions; // every raw format has a demuxer
         if (extensions.len > 0) {
@@ -509,7 +678,9 @@ test "the probes need FFmpeg's minimum lengths and nonzero AU fields" {
     var rf64 = fixtures.bytes("rf64")[0..40].*;
     try std.testing.expectEqual(Container.wav, probeHead(&rf64, null));
     rf64[12] = 'x';
-    try std.testing.expectEqual(null, probeHead(&rf64, null));
+    // Without it, FFmpeg's MP3 probe finds a frame header in the bytes
+    // and, at the end of the input, wins with a score of 1 (T29a).
+    try std.testing.expectEqual(Container.mp3, probeHead(&rf64, null));
     // Wave64: 41 bytes, not 40.
     const w64_head = fixtures.bytes("w64_mono_8k");
     try std.testing.expectEqual(Container.w64, probeHead(w64_head[0..41], null));
@@ -546,14 +717,14 @@ test "a probe-less demuxer is chosen only by name, below every content probe" {
     try std.testing.expectEqual(Container.wav, probeHead(wav_bytes, "take.al"));
     try std.testing.expectEqual(Container.au, probeHead(fixtures.au.bytes("au_mono_8k"), "take.ub"));
     // Two demuxers scoring 100 for the same bytes tie: no winner.
-    const always: registry.Demuxer = .{ .probe = alwaysProbe, .probe_bytes = 0 };
+    const always: registry.Demuxer = .{ .probe = alwaysProbe };
     var both = [2]registry.Format{ Container.wav.format().*, Container.aiff.format().* };
     both[0].demuxer = always;
     both[1].demuxer = always;
-    try std.testing.expectEqual(null, winner(&both, wav_bytes, null));
+    try std.testing.expectEqual(null, probeRound(&both, wav_bytes, null).container);
     // Two probe-less demuxers claiming one extension tie too.
     const twins = [2]registry.Format{ Container.alaw.format().*, Container.alaw.format().* };
-    try std.testing.expectEqual(null, winner(&twins, undetected, "take.al"));
+    try std.testing.expectEqual(null, probeRound(&twins, undetected, "take.al").container);
 }
 
 test "a raw input takes FFmpeg's defaults, the given parameters, and its length" {
@@ -627,8 +798,9 @@ fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
         .caf => try expectSameResult(caf.probe(&direct, .{}), got, .caf),
         .wav => try expectSameResult(wav.probe(&direct, .{}), got, container),
         .flac => try expectSameResult(flacProbe(&direct), got, .flac),
-        // Ogg's demuxer needs an allocator, which this probe has not.
-        .ogg => try std.testing.expectError(error.UnsupportedFormat, got),
+        // Ogg's and MP3's demuxers need an allocator, which this probe has
+        // not.
+        .ogg, .mp3 => try std.testing.expectError(error.UnsupportedFormat, got),
         .raw => unreachable, // no content probe chooses raw PCM
     } else try std.testing.expectError(error.UnknownFormat, got);
 }

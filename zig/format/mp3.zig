@@ -67,6 +67,68 @@ pub const ReplayGain = struct {
     album_peak: u32,
 };
 
+/// `PROBE_BUF_MAX`, FFmpeg's largest probe buffer.
+pub const probe_buf_max = 1 << 20;
+
+/// mp3_read_probe on a probe buffer (after any ID3v2 tag probing skipped):
+/// the longest run of frames from each position, with fewer than three
+/// header emulations inside each, the first run's from the first nonzero
+/// byte, then FFmpeg's thresholds; a buffer that is mostly an ID3v2 tag
+/// scores 12, or 48 once the buffer is at its largest.
+pub fn probeScore(buf: []const u8) u8 {
+    if (buf.len < 4) return 0;
+    const end = buf.len - 4;
+    var buf0: usize = 0;
+    while (buf0 < end and buf[buf0] == 0) buf0 += 1;
+    var max_frames: u32 = 0;
+    var first_frames: u32 = 0;
+    var max_framesizes: u64 = 0;
+    var whole_used = false;
+    var start = buf0;
+    while (start < end) {
+        var pos = start;
+        var frames: u32 = 0;
+        var framesizes: u64 = 0;
+        while (pos < end) : (frames += 1) {
+            const header = std.mem.readInt(u32, buf[pos..][0..4], .big);
+            const h = mpegaudio.decodeHeader(header) orelse break;
+            if (h.freeFormat()) break;
+            const available = @min(h.frame_size, end - pos);
+            var emulations: u32 = 0;
+            var at = pos + 4;
+            while (at < pos + available) : (at += 1) {
+                const next_sync = std.mem.readInt(u32, buf[at..][0..4], .big);
+                if (next_sync & mpegaudio.mp3_mask == header & mpegaudio.mp3_mask) emulations += 1;
+            }
+            if (emulations > 2) break;
+            framesizes += h.frame_size;
+            if (available < h.frame_size) {
+                frames += 1;
+                break;
+            }
+            pos += h.frame_size;
+        }
+        max_frames = @max(max_frames, frames);
+        max_framesizes = @max(max_framesizes, framesizes);
+        if (start == buf0) {
+            first_frames = frames;
+            // The run ended exactly at the buffer's end.
+            if (pos == end + 4) whole_used = true;
+        }
+        start = pos + 1;
+    }
+    if (first_frames >= 7) return 50 + 2;
+    if (max_frames > 200 and buf.len < 2 * max_framesizes) return 50;
+    if (max_frames >= 4 and buf.len < 2 * max_framesizes) return 50 / 2;
+    var head: [id3v2.header_size]u8 = @splat(0);
+    const rest = buf[buf0..];
+    @memcpy(head[0..@min(rest.len, head.len)], rest[0..@min(rest.len, head.len)]);
+    if (id3v2.match(&head) and 2 * @as(u64, id3v2.tagLen(&head)) >= buf.len) return if (buf.len < probe_buf_max) 50 / 4 else 50 - 2;
+    if (first_frames > 1 and whole_used) return 5;
+    if (max_frames >= 1 and buf.len < 10 * max_framesizes) return 1;
+    return 0;
+}
+
 /// The stream FFmpeg's demuxer sets up.
 pub const StreamInfo = struct {
     duration: i64 = nopts,
@@ -762,4 +824,98 @@ test "every MP3 fixture demuxes as FFmpeg's demuxer and parser demux it (vectors
             };
         }
     }
+}
+
+const seek_vectors = @embedFile("../testing/vectors/seek_mp3.txt");
+
+fn seekBlock(name: []const u8) ?[]const u8 {
+    var start: ?usize = null;
+    var lines = std.mem.splitScalar(u8, seek_vectors, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "F ")) continue;
+        const at = @intFromPtr(line.ptr) - @intFromPtr(seek_vectors.ptr);
+        if (start) |s| return seek_vectors[s..at];
+        if (std.mem.eql(u8, line[2..], name)) start = at + line.len + 1;
+    }
+    return if (start) |s| seek_vectors[s..] else null;
+}
+
+/// The next packet's lines, as seek_vectors.c prints them; the reference
+/// build has no MPEG audio decoder (`D none`).
+fn nextAfterSeek(gpa: std.mem.Allocator, layer: anytype, out: *std.ArrayList(u8)) !void {
+    const p = try layer.next() orelse return out.appendSlice(gpa, "P EOF\n");
+    try out.appendSlice(gpa, "P");
+    try writeTs(out, gpa, p.pts);
+    try out.print(gpa, " {d} {d}\n", .{ p.pos, p.data.len });
+    if (p.skip) |skip| try out.print(gpa, "Z {d} {d}\n", .{ skip[0], skip[1] });
+    try out.appendSlice(gpa, "D none\n");
+}
+
+test "every MP3 fixture seeks as FFmpeg seeks it (vectors/seek_mp3.txt)" {
+    const gpa = testing.allocator;
+    var compared: usize = 0;
+    inline for (fixtures.mp3.all) |fixture| {
+        // FFmpeg queues the attached picture again after each seek, which
+        // the port does not model (notes.md "MP3").
+        if (comptime std.mem.eql(u8, fixture.name, "mp3_apic_chap")) continue;
+        const block_text = seekBlock(fixture.name) orelse return error.MissingVector;
+        var lines = std.mem.splitScalar(u8, block_text, '\n');
+        if (std.mem.eql(u8, lines.next().?, "O ok")) {
+            _ = lines.next(); // I
+            var pending = lines.next();
+            while (pending) |k_line| {
+                pending = lines.next();
+                if (k_line.len == 0) continue;
+                var expected: std.ArrayList(u8) = .empty;
+                defer expected.deinit(gpa);
+                var f = std.mem.tokenizeScalar(u8, k_line, ' ');
+                _ = f.next();
+                const api = f.next().?[0];
+                const stream_index = try std.fmt.parseInt(i32, f.next().?, 10);
+                const ts = try std.fmt.parseInt(i64, f.next().?, 10);
+                var min_ts: i64 = 0;
+                var max_ts: i64 = 0;
+                if (api == 's') {
+                    min_ts = try std.fmt.parseInt(i64, f.next().?, 10);
+                    max_ts = try std.fmt.parseInt(i64, f.next().?, 10);
+                }
+                const flag_bits = try std.fmt.parseInt(u8, f.next().?, 16);
+                const flags: seek.Flags = .{ .backward = flag_bits & 1 != 0, .byte = flag_bits & 2 != 0, .any = flag_bits & 4 != 0 };
+                const ret = f.next().?;
+                if (std.mem.eql(u8, ret, "0")) {
+                    while (pending) |next_line| {
+                        if (next_line.len == 0 or next_line[0] == 'K') break;
+                        try expected.appendSlice(gpa, next_line);
+                        try expected.append(gpa, '\n');
+                        pending = lines.next();
+                    }
+                }
+                var reader: std.Io.Reader = .fixed(fixtures.mp3.bytes(fixture.name));
+                const d = try Demuxer.initSeekable(gpa, &reader, .fixed(&reader), .{});
+                defer d.deinit();
+                var layer = demux.Layer(Demuxer).init(gpa, d);
+                defer layer.deinit();
+                try layer.findStreamInfo();
+                _ = try layer.next();
+                const result = if (api == 'f') layer.seekFrame(stream_index, ts, flags) else layer.seekFile(stream_index, min_ts, ts, max_ts, flags);
+                var actual: std.ArrayList(u8) = .empty;
+                defer actual.deinit(gpa);
+                if (result) |_| {
+                    try nextAfterSeek(gpa, &layer, &actual);
+                } else |err| switch (err) {
+                    error.InvalidStream => try actual.appendSlice(gpa, "EINVAL"),
+                    error.SeekFailed, error.InvalidRange => try actual.appendSlice(gpa, "-1"),
+                    else => return err,
+                }
+                const want = if (std.mem.eql(u8, ret, "0")) expected.items else ret;
+                testing.expectEqualStrings(want, actual.items) catch |err| {
+                    std.debug.print("fixture {s}: {s}\n", .{ fixture.name, k_line });
+                    return err;
+                };
+                compared += 1;
+            }
+        }
+    }
+    // Every seek of the fixtures FFmpeg opens, but the picture's.
+    try testing.expectEqual(2106, compared);
 }

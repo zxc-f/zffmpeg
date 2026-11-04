@@ -151,7 +151,8 @@ fn writeStream(out: *std.Io.Writer, info: av.detect.Probed) std.Io.Writer.Error!
     , .{
         info.container.name(),
         info.codec.name(),
-        format.sample_format.name(),
+        // As ffprobe without a decoder for the codec (MPEG audio, T29a).
+        if (info.decoded) format.sample_format.name() else "unknown",
         format.channelCount(),
     });
     // As ffprobe: `unknown` for an unspecified layout, else FFmpeg's description.
@@ -160,7 +161,10 @@ fn writeStream(out: *std.Io.Writer, info: av.detect.Probed) std.Io.Writer.Error!
         .native, .custom => try format.layout.describe(out),
     }
     try out.print("\nsample_rate={d}\n", .{format.sample_rate});
-    if (info.frame_count) |frames| {
+    if (info.time_base_duration) |d| {
+        // The duration in the stream's own time base, ffprobe's duration_ts.
+        try out.print("nb_samples={d}\nduration_num={d}\nduration_den={d}\n", .{ info.frame_count.?, d.ts, d.den });
+    } else if (info.frame_count) |frames| {
         try out.print("nb_samples={d}\nduration_num={d}\nduration_den={d}\n", .{ frames, frames, format.sample_rate });
     } else {
         // Unknown-length data, which zffprobe does not enable yet: no count

@@ -30,6 +30,7 @@ const raw = @import("raw.zig");
 const caf = @import("caf.zig");
 const flac = @import("flac.zig");
 const ogg = @import("ogg.zig");
+const mp3 = @import("mp3.zig");
 
 pub const Container = enum {
     wav,
@@ -47,6 +48,8 @@ pub const Container = enum {
     /// FFmpeg's Ogg Audio and Ogg Opus muxers (T27b): Ogg, written only.
     oga,
     opus,
+    /// MPEG audio (T29a), read only, not decoded yet.
+    mp3,
     // Raw PCM (T22c), one format per codec FFmpeg has a raw format for, named
     // as the codec: every PCM codec but s64.
     u8,
@@ -65,7 +68,7 @@ pub const Container = enum {
     mulaw,
 
     /// The parser and writer family that reads and writes a container.
-    pub const Family = enum { wav, au, aiff, caf, flac, ogg, raw };
+    pub const Family = enum { wav, au, aiff, caf, flac, ogg, mp3, raw };
 
     pub fn family(container: Container) Family {
         return switch (container) {
@@ -75,6 +78,7 @@ pub const Container = enum {
             .caf => .caf,
             .flac => .flac,
             .ogg, .oga, .opus => .ogg,
+            .mp3 => .mp3,
             // Checked below: exactly the raw formats, each named as its codec.
             else => .raw,
         };
@@ -83,7 +87,7 @@ pub const Container = enum {
     /// The codec of a raw PCM format, which shares its name; null otherwise.
     pub fn rawCodec(container: Container) ?pcm.Codec {
         return switch (container) {
-            .wav, .w64, .au, .aiff, .caf, .flac, .ogg, .oga, .opus => null,
+            .wav, .w64, .au, .aiff, .caf, .flac, .ogg, .oga, .opus, .mp3 => null,
             // Compiles only if every other tag names a codec.
             inline else => |tag| @field(pcm.Codec, @tagName(tag)),
         };
@@ -126,13 +130,11 @@ pub const Container = enum {
 };
 
 pub const Demuxer = struct {
-    /// FFmpeg's `read_probe`: a score from 0 to 100 for the first bytes of a
-    /// stream, which are fewer than the probe buffer only when the stream is.
-    /// Null for a format without a content signature, which content alone
-    /// never chooses.
+    /// FFmpeg's `read_probe`: a score from 0 to 100 for the probe buffer
+    /// (the stream's first bytes, after any ID3v2 tag probing skipped; FFmpeg
+    /// pads it with zeros). Null for a format without a content signature,
+    /// which content alone never chooses.
     probe: ?*const fn (head: []const u8) u8,
-    /// The most bytes `probe` reads.
-    probe_bytes: usize,
     /// FFmpeg's `extensions`, lowercase without the dot: a file-name hint for
     /// detection (`detect.zig`).
     extensions: []const []const u8 = &.{},
@@ -162,28 +164,28 @@ pub const formats = [_]Format{
         .container = .wav,
         .name = "wav",
         .long_name = "WAV / WAVE (Waveform Audio)",
-        .demuxer = .{ .probe = wav.probeScore, .probe_bytes = wav.probe_bytes },
+        .demuxer = .{ .probe = wav.probeScore },
         .muxer = .{ .extensions = &.{"wav"}, .mime_type = "audio/x-wav", .audio_codec = .{ .pcm = .s16le }, .carries = pcmOnly(wav.carries) },
     },
     .{
         .container = .w64,
         .name = "w64",
         .long_name = "Sony Wave64",
-        .demuxer = .{ .probe = wav.w64ProbeScore, .probe_bytes = wav.w64_probe_bytes },
+        .demuxer = .{ .probe = wav.w64ProbeScore },
         .muxer = .{ .extensions = &.{"w64"}, .mime_type = null, .audio_codec = .{ .pcm = .s16le }, .carries = pcmOnly(wav.carries) },
     },
     .{
         .container = .au,
         .name = "au",
         .long_name = "Sun AU",
-        .demuxer = .{ .probe = au.probeScore, .probe_bytes = au.probe_bytes },
+        .demuxer = .{ .probe = au.probeScore },
         .muxer = .{ .extensions = &.{"au"}, .mime_type = "audio/basic", .audio_codec = .{ .pcm = .s16be }, .carries = pcmOnly(au.carries) },
     },
     .{
         .container = .aiff,
         .name = "aiff",
         .long_name = "Audio IFF",
-        .demuxer = .{ .probe = aiff.probeScore, .probe_bytes = aiff.probe_bytes },
+        .demuxer = .{ .probe = aiff.probeScore },
         .muxer = .{
             .extensions = &.{ "aif", "aiff", "afc", "aifc" },
             .mime_type = "audio/aiff",
@@ -195,7 +197,7 @@ pub const formats = [_]Format{
         .container = .caf,
         .name = "caf",
         .long_name = "Apple CAF (Core Audio Format)",
-        .demuxer = .{ .probe = caf.probeScore, .probe_bytes = caf.probe_bytes },
+        .demuxer = .{ .probe = caf.probeScore },
         // FFmpeg's CAF muxer is not ported (T22d is demux only).
         .muxer = null,
     },
@@ -203,7 +205,7 @@ pub const formats = [_]Format{
         .container = .flac,
         .name = "flac",
         .long_name = "raw FLAC",
-        .demuxer = .{ .probe = flac.probeScore, .probe_bytes = flac.probe_bytes, .extensions = &.{"flac"} },
+        .demuxer = .{ .probe = flac.probeScore, .extensions = &.{"flac"} },
         // FFmpeg's FLAC muxer (T26c), which carries FLAC only.
         .muxer = .{ .extensions = &.{"flac"}, .mime_type = "audio/x-flac", .audio_codec = .flac, .carries = flacOnly },
     },
@@ -211,7 +213,7 @@ pub const formats = [_]Format{
         .container = .ogg,
         .name = "ogg",
         .long_name = "Ogg",
-        .demuxer = .{ .probe = ogg.probeScore, .probe_bytes = ogg.probe_bytes, .extensions = &.{"ogg"} },
+        .demuxer = .{ .probe = ogg.probeScore, .extensions = &.{"ogg"} },
         // FFmpeg's Ogg muxer (T27b). Its extensions take those of the Ogg
         // Video and Speex muxers, which the reference build does not have;
         // its default is FLAC, the reference build having no libvorbis.
@@ -232,6 +234,14 @@ pub const formats = [_]Format{
         // Opus by default, which no encoder here writes; ogg_init takes
         // every Ogg codec whatever the muxer's name.
         .muxer = .{ .extensions = &.{"opus"}, .mime_type = "audio/ogg", .audio_codec = .opus, .carries = oggCodecs },
+    },
+    .{
+        .container = .mp3,
+        .name = "mp3",
+        .long_name = "MP2/3 (MPEG audio layer 2/3)",
+        // FFmpeg's mp3 demuxer (T29a); the reference build has no mp3 muxer.
+        .demuxer = .{ .probe = mp3.probeScore, .extensions = &.{ "mp2", "mp3", "m2a", "mpa" } },
+        .muxer = null,
     },
     rawFormat(.u8, "PCM unsigned 8-bit", &.{"ub"}),
     rawFormat(.s8, "PCM signed 8-bit", &.{"sb"}),
@@ -260,7 +270,7 @@ fn rawFormat(comptime container: Container, long_name: []const u8, extensions: [
         .container = container,
         .name = @tagName(container),
         .long_name = long_name,
-        .demuxer = .{ .probe = null, .probe_bytes = 0, .extensions = extensions },
+        .demuxer = .{ .probe = null, .extensions = extensions },
         .muxer = .{ .extensions = extensions, .mime_type = null, .audio_codec = .{ .pcm = codec }, .carries = onlyCodec(codec) },
     };
 }
@@ -279,7 +289,7 @@ fn pcmOnly(comptime carries: fn (pcm.Codec) bool) *const fn (codecs.Codec) bool 
         fn f(codec: codecs.Codec) bool {
             return switch (codec) {
                 .pcm => |p| carries(p),
-                .flac, .vorbis, .opus => false,
+                .flac, .vorbis, .opus, .mp1, .mp2, .mp3 => false,
             };
         }
     }.f;
@@ -294,7 +304,7 @@ fn flacOnly(codec: codecs.Codec) bool {
 fn oggCodecs(codec: codecs.Codec) bool {
     return switch (codec) {
         .flac, .opus, .vorbis => true,
-        .pcm => false,
+        .pcm, .mp1, .mp2, .mp3 => false,
     };
 }
 
@@ -344,15 +354,7 @@ comptime {
         if (format.container.rawCodec()) |codec| {
             if (!raw.carries(codec)) @compileError("FFmpeg has no raw format for this codec: " ++ format.name);
         }
-        if (format.demuxer) |demuxer| {
-            // FFmpeg reads more and probes again while the best score is at
-            // most 25 (detect.zig). That cannot change the winner as long as
-            // every probe reads a fixed number of bytes within the first
-            // probe buffer, which detect.zig checks: a low score, such as a
-            // probing demuxer's extension match (1) or raw FLAC's 13, wins
-            // after the retries exactly when it wins at once.
-            checkExtensions(demuxer.extensions, format.name);
-        }
+        if (format.demuxer) |demuxer| checkExtensions(demuxer.extensions, format.name);
         const muxer = format.muxer orelse continue;
         if (!muxer.carries(muxer.audio_codec)) @compileError("a muxer does not carry its default codec: " ++ format.name);
         checkExtensions(muxer.extensions, format.name);
@@ -390,7 +392,9 @@ pub fn matchesExtension(file_name: []const u8, extensions: []const []const u8) b
 test "formats are found by name, with a demuxer or a muxer" {
     try std.testing.expectEqual(Container.aiff, findDemuxer("aiff"));
     try std.testing.expectEqual(Container.w64, findMuxer("w64"));
-    try std.testing.expectEqual(null, findDemuxer("mp3"));
+    try std.testing.expectEqual(Container.mp3, findDemuxer("mp3"));
+    try std.testing.expectEqual(null, findDemuxer("aac"));
+    try std.testing.expectEqual(null, findMuxer("mp3")); // read only (T29a)
     try std.testing.expectEqual(null, findMuxer("WAV")); // names are exact, as FFmpeg's
     try std.testing.expectEqualStrings("Audio IFF", Container.aiff.format().long_name);
     try std.testing.expectEqualStrings("au", Container.au.name());

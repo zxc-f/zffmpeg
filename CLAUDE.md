@@ -29,7 +29,8 @@ FLAC encoded into Ogg (T27b), and FFmpeg's float FFT and MDCT (T27c), the
 LSB-first reader and VLC tables (T18c) and the Vorbis decoder, with Ogg
 decoded in zffmpeg (T27d), and the Opus decoder for CELT frames, with
 Ogg Opus decoded (T28a), SILK frames (T28b), and hybrid frames and
-multistream packets (T28c). The `av`
+multistream packets (T28c), and the MP3 demuxer with its parser, ID3
+tags and FFmpeg's probe rounds, without decoding (T29a). The `av`
 module (rooted at `zig/root.zig`) exports `pcm` (the PCM encodings,
 kernels and decoder/encoder stages), `audio`, `channel_layout` (FFmpeg's
 channel layouts), `time`, `samples` (decoded sample storage
@@ -47,7 +48,9 @@ metadata blocks and seeking), `flacenc` and `flacmux` (FFmpeg's FLAC
 encoder, packet for packet, and its muxer as a PCM writer), `ogg`
 (FFmpeg's Ogg demuxer and mappings), `oggmux` (its Ogg muxer), `oggdecode` (an Ogg stream decoded), `tx` (FFmpeg's float FFT
 and MDCT), `vlc` (VLC tables), `vorbis` (the Vorbis decoder), `opusdec` (the Opus
-decoder: CELT, SILK and hybrid frames, multistream packets), `demux` (libavformat's generic layer:
+decoder: CELT, SILK and hybrid frames, multistream packets), `mp3` (FFmpeg's MPEG
+audio demuxer), `mpegaudio` (frame headers and the mpegaudio parser), `id3v2` and
+`id3v1` (ID3 tags), `demux` (libavformat's generic layer:
 timestamps, the stream-info read-ahead, timings and seeking),
 `bits` (an MSB-first bit reader and writer and FLAC's CRCs), `framehash` (FFmpeg's
 framecrc, framemd5 and streamhash text), `rational` (FFmpeg's rational
@@ -57,11 +60,11 @@ arithmetic and timestamp helpers), `seek` (the seek API),
 probes and extension fallback), `audioconvert` and `dither` (sample format
 conversion, T23a), `convert` (the synchronous T13a conversion and
 stream-copy pipeline) and `file` (file and pipe adapters). Two tools sit on it:
-`zffprobe` probes WAV, Wave64, AU, AIFF, CAF, FLAC, Ogg and raw PCM, tags included, and `zffmpeg` (T13b)
+`zffprobe` probes WAV, Wave64, AU, AIFF, CAF, FLAC, Ogg, MP3 and raw PCM, tags included, and `zffmpeg` (T13b)
 converts and stream-copies between them (CAF as input only; Ogg Vorbis, Opus
 and FLAC decoded as input, FLAC written as output), carrying tags,
 with `-c:a`, FFmpeg's dither options and its FLAC encoder options. Tests cover 129 WAV,
-41 AU, 57 AIFF, 25 raw PCM, 58 CAF, 56 FLAC and 33 Ogg fixtures, process runs of both tools, and a CI comparison against a
+41 AU, 57 AIFF, 25 raw PCM, 58 CAF, 56 FLAC, 33 Ogg and 42 MP3 fixtures, process runs of both tools, and a CI comparison against a
 pinned FFmpeg build that also reads every `zffmpeg` output. Verification is
 Linux-only during development; Windows and ARM wait for T62–T63. T13, T14a
 (packets, frames and stages), T17b (the metadata dictionary), T20a (decoded
@@ -84,8 +87,8 @@ demux, with libavformat's generic layer and Ogg seeking), T27b (Ogg
 mux, FLAC into Ogg), T27c (FFT and MDCT), T18c (VLC tables) and T27d
 (Vorbis decoding), completing T27, and T28a (the range decoder, CELT and
 Ogg Opus decoding), T28b (SILK) and T28c (hybrid frames and
-multistream), completing T28; T29a (the MPEG audio demuxer and parser) is
-next,
+multistream), completing T28, and T29a (the MPEG audio demuxer and
+parser); T29b (the Layer III decoder) is next,
 and TODO.md lays out the roadmap through T64.
  When the state changes, update the current-state statements in
 README.md, port.md ("Status and scope"), the TODO.md introduction and this file

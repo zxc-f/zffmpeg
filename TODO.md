@@ -58,7 +58,9 @@ FFmpeg's, with Ogg Opus of CELT frames decoded by zffmpeg and RFC 8251's
 CELT-only test vectors passing opus_compare; and T28b, SILK bit for bit
 FFmpeg's with its resampling, and T28c, hybrid frames and multistream
 packets, RFC 8251's twelve vectors decoded as FFmpeg decodes them, which
-completes T28. **Next: T29a (the MPEG audio demuxer and parser). See
+completes T28; and T29a, FFmpeg's MP3 demuxer and mpegaudio parser with
+ID3 tags, the gapless headers and FFmpeg's probe rounds, without
+decoding. **Next: T29b (the Layer III decoder). See
 [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as

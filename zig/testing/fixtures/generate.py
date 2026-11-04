@@ -1944,17 +1944,105 @@ def render_expected(accept, reject):
             f".sample_rate = {accept.rate}, .samples = .{{ .{accept.storage} = .{sample_list} }} }} }}")
 
 
-def ffmpeg_detect(data):
-    """The format FFmpeg's content probing picks for `data`, or None (T16).
+def mp3_probe_score(buf):
+    """mp3dec.c's mp3_read_probe on a probe buffer (T29a): runs of frames
+    from every position, a run ending at a header that fails
+    ff_mpa_check_header, is free format, or is emulated more than twice
+    inside the frame."""
+    if len(buf) < 4:
+        return 0
+    end = len(buf) - 4
+    mask = 0xFFFE0CCF
+    buf0 = 0
+    while buf0 < end and buf[buf0] == 0:
+        buf0 += 1
+    max_frames = max_framesizes = first_frames = 0
+    start = buf0
+    while start < end:
+        pos, frames, framesizes = start, 0, 0
+        while pos < end:
+            header = struct.unpack(">I", buf[pos:pos + 4])[0]
+            size = mpa_header_frame_size(header)
+            if size is None:
+                break
+            available = min(size, end - pos)
+            emu = sum(1 for at in range(pos + 4, pos + available)
+                      if struct.unpack(">I", buf[at:at + 4])[0] & mask == header & mask)
+            if emu > 2:
+                break
+            framesizes += size
+            if available < size:
+                frames += 1
+                break
+            pos += size
+            frames += 1
+        max_frames = max(max_frames, frames)
+        max_framesizes = max(max_framesizes, framesizes)
+        if start == buf0:
+            first_frames = frames
+        start = pos + 1
+    if first_frames >= 7:
+        return 52
+    if max_frames > 200 and len(buf) < 2 * max_framesizes:
+        return 50
+    if max_frames >= 4 and len(buf) < 2 * max_framesizes:
+        return 25
+    head = (buf[buf0:] + bytes(10))[:10]
+    if id3v2_match(head) and 2 * id3v2_tag_len(head) >= len(buf):
+        return 12 if len(buf) < 1 << 20 else 48
+    if max_frames >= 1 and len(buf) < 10 * max_framesizes:
+        return 1
+    return 0
 
-    An independent reading of the probes in wavdec.c (wav_probe, w64_probe),
-    au.c (au_probe), aiffdec.c (aiff_probe), cafdec.c (probe) and flacdec.c
-    (flac_probe, raw_flac_probe) and of format.c's choice: the highest nonzero score wins, a
-    tie at the highest means none. The first probe buffer holds 2048 bytes, and
-    these probes never ask for more. File-name extensions (T22c) play no part:
-    no fixture's extension is a raw format's."""
-    head = data[:2048]
-    scores = {"wav": 0, "w64": 0, "au": 0, "aiff": 0, "caf": 0}
+
+def mpa_header_frame_size(header):
+    """ff_mpegaudio_decode_header's frame size, or None for a header
+    ff_mpa_check_header refuses or free format."""
+    if header & 0xFFE00000 != 0xFFE00000 or header & (3 << 19) == 1 << 19 or header & (3 << 17) == 0 \
+            or header & (0xF << 12) == 0xF << 12 or header & (3 << 10) == 3 << 10:
+        return None
+    if header & (1 << 20):
+        lsf, mpeg25 = (0 if header & (1 << 19) else 1), 0
+    else:
+        lsf, mpeg25 = 1, 1
+    layer = 4 - ((header >> 17) & 3)
+    rate = MPA_FREQS[(header >> 10) & 3] >> (lsf + mpeg25)
+    index = (header >> 12) & 0xF
+    if index == 0:
+        return None
+    kbps = MPA_BITRATES[lsf][layer - 1][index]
+    padding = (header >> 9) & 1
+    if layer == 1:
+        return (kbps * 12000 // rate + padding) * 4
+    if layer == 2:
+        return kbps * 144000 // rate + padding
+    return kbps * 144000 // (rate << lsf) + padding
+
+
+def id3v2_match(buf):
+    return (len(buf) >= 10 and buf[:3] == b"ID3" and buf[3] != 0xFF and buf[4] != 0xFF
+            and all(b & 0x80 == 0 for b in buf[6:10]))
+
+
+def id3v2_tag_len(buf):
+    length = ((buf[6] & 0x7F) << 21) + ((buf[7] & 0x7F) << 14) + ((buf[8] & 0x7F) << 7) + (buf[9] & 0x7F) + 10
+    return length + 10 if buf[5] & 0x10 else length
+
+
+def ffmpeg_probe_round(buf):
+    """probe_input_format_internal for one probe buffer, without file names
+    (no fixture's extension is a demuxer's): the ID3v2 tags skipped, each
+    probe's score, the best one's format (None on a tie) and score."""
+    nodat = None
+    while len(buf) > 10 and id3v2_match(buf):
+        id3len = id3v2_tag_len(buf)
+        if len(buf) > id3len + 16:
+            buf = buf[id3len:]
+        else:
+            nodat = "greater" if id3len < 1 << 20 else "greater_max"
+            break
+    scores = {"wav": 0, "w64": 0, "au": 0, "aiff": 0, "caf": 0, "flac": 0, "mp3": mp3_probe_score(buf)}
+    head = buf[:2048]
     if len(head) > 32 and head[8:12] == b"WAVE":
         if head[:4] in (b"RIFF", b"RIFX"):
             scores["wav"] = 99
@@ -1975,7 +2063,6 @@ def ffmpeg_detect(data):
         scores["caf"] = 100
     # flacdec.c's flac_probe and raw_flac_probe (T26a), on the padded buffer.
     padded = head + bytes(32)
-    scores["flac"] = 0
     if len(head) and (struct.unpack(">H", padded[:2])[0] & 0xFFFE) == 0xFFF8:
         if ((padded[2] & 0xF0) != 0 and (padded[2] & 0x0F) != 0x0F and (padded[3] & 0xF0) < (8 + 2) << 4
                 and (padded[3] & 0x06) != 0x06 and (padded[3] & 0x01) == 0):
@@ -1991,7 +2078,38 @@ def ffmpeg_detect(data):
             scores["flac"] = 50
     best = max(scores.values())
     winners = [name for name, score in scores.items() if score == best]
-    return winners[0] if best > 0 and len(winners) == 1 else None
+    if nodat == "greater":
+        best = min(24, best)
+    return (winners[0] if len(winners) == 1 and best > 0 else None), best
+
+
+def ffmpeg_detect(data):
+    """The format FFmpeg's content probing picks for `data`, or None (T16,
+    T29a).
+
+    An independent reading of the probes in wavdec.c (wav_probe, w64_probe),
+    au.c (au_probe), aiffdec.c (aiff_probe), cafdec.c (probe), flacdec.c
+    (flac_probe, raw_flac_probe) and mp3dec.c (mp3_read_probe), and of
+    format.c's choice: probe_input_format_internal skips leading ID3v2 tags,
+    the highest nonzero score wins, a tie at the highest means none; and
+    av_probe_input_buffer2's rounds, a buffer of 2048 bytes doubled up to
+    1 MiB, a winner taken above 25, or above 0 once a read finds nothing
+    more or the buffer is at its largest. File-name extensions (T22c) play
+    no part: no fixture's extension is a demuxer's."""
+    probe_size, offset = 2048, 0
+    while True:
+        threshold = 25 if probe_size < 1 << 20 else 0
+        want = probe_size - offset
+        got = min(want, len(data) - offset)
+        if got == 0:
+            threshold = 0
+        offset += got
+        fmt, score = ffmpeg_probe_round(data[:offset])
+        if score > threshold and fmt is not None:
+            return fmt
+        if got == 0 or probe_size >= 1 << 20:
+            return None
+        probe_size = min(probe_size * 2, 1 << 20)
 
 
 def render_manifest(fixtures, entry_note):

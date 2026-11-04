@@ -118,6 +118,7 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/seek_vector
 LC_ALL=C ./seek-vectors zig/testing/fixtures/wav/*.wav | diff -u zig/testing/vectors/seek.txt -
 LC_ALL=C ./seek-vectors zig/testing/fixtures/flac/*.flac | diff -u zig/testing/vectors/seek_flac.txt -
 LC_ALL=C ./seek-vectors zig/testing/fixtures/ogg/*.ogg | diff -u zig/testing/vectors/seek_ogg.txt -
+LC_ALL=C ./seek-vectors zig/testing/fixtures/mp3/*.mp3 | diff -u zig/testing/vectors/seek_mp3.txt -
 ```
 
 T26b runs the same generator on the FLAC fixtures (`seek_flac.txt`), and

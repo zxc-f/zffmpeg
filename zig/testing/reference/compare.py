@@ -71,6 +71,7 @@ EXIT_STATUS = {
     "InvalidAiff": 2,
     "InvalidCaf": 2,
     "InvalidFlac": 2,
+    "InvalidMp3": 2,
     "FrameCountMismatch": 2,
     "InvalidWave": 2,
     "InvalidFormat": 2,
@@ -364,8 +365,18 @@ def detected_format(binary, path):
 
 def forced_input(fixture, container):
     """zffprobe's and zffmpeg's `-f` for a fixture FFmpeg's probing does not
-    detect (T16), so its parser still reads it; nothing for the others."""
-    return [] if generate.ffmpeg_detect(fixture.data) else ["-f", container]
+    detect as its own format (T16), so its parser still reads it; nothing
+    for the others."""
+    return [] if generate.ffmpeg_detect(fixture.data) == container else ["-f", container]
+
+
+def detection_error(fixture):
+    """What zffprobe reports for a fixture probing does not give its own
+    parser: `UnknownFormat` when no format wins, else the winner's refusal
+    (T29a: FFmpeg's MP3 probe claims a few tiny files, whose frames its
+    demuxer then does not find)."""
+    detected = generate.ffmpeg_detect(fixture.data)
+    return {None: "UnknownFormat", "mp3": "InvalidMp3"}[detected]
 
 
 def zffprobe(binary, path, input_args=()):
@@ -570,8 +581,9 @@ def compare_accepted(fixture, args, path):
     input_args = forced_input(fixture, container)
     if input_args:
         undetected_code, _, undetected_err = zffprobe(args.zffprobe, path)
-        if undetected_code != 3 or not undetected_err.endswith(": UnknownFormat"):
-            problems.append(f"undetected, zffprobe exited {undetected_code} ({undetected_err}), expected UnknownFormat")
+        error = detection_error(fixture)
+        if undetected_code != EXIT_STATUS[error] or not undetected_err.endswith(f": {error}"):
+            problems.append(f"undetected, zffprobe exited {undetected_code} ({undetected_err}), expected {error}")
     code, fields, err = zffprobe(args.zffprobe, path, input_args)
     z_expected = {
         "format": container,
@@ -621,8 +633,10 @@ def compare_rejected(fixture, args, path):
     problems = check_rejection(args.zffprobe, path, fixture.reject, input_args)
     ours = f"exit {EXIT_STATUS[fixture.reject]}"
     if input_args:
-        problems += check_rejection(args.zffprobe, path, "UnknownFormat")
-        ours = f"undetected: exit 3; {' '.join(input_args)}: {ours}"
+        error = detection_error(fixture)
+        problems += check_rejection(args.zffprobe, path, error)
+        ours = f"{'undetected' if error == 'UnknownFormat' else 'detected as mp3'}: exit {EXIT_STATUS[error]}; " \
+               f"{' '.join(input_args)}: {ours}"
     want = EXIT_STATUS[fixture.reject]
     return problems, f"`{fixture.reject}` (exit {want})", ours, ffmpeg_verdict(args, path)
 
@@ -2281,6 +2295,82 @@ KNOWN_OGG_COPY_DIFFERENCES = {
 }
 
 
+# MP3 stream copies that differ from the ffmpeg program's for an understood
+# reason.
+_MP3_START_SHIFT = ("the same packets; the program's copy shifts the timestamps by the stream's start time, "
+                    "the gapless skip (the program's timestamps, T53)")
+KNOWN_MP3_COPY_DIFFERENCES = {
+    "mp3_apic_chap": "FFmpeg's attached-picture stream, which the port does not model",
+    "mp3_info_lame": _MP3_START_SHIFT,
+    "mp3_itunsmpb": _MP3_START_SHIFT,
+    "mp3_xing_bad_crc": _MP3_START_SHIFT,
+    "mp3_xing_lame": _MP3_START_SHIFT,
+    "mp3_xing_lavf": _MP3_START_SHIFT,
+    "mp3_xing_mpeg2_mono": _MP3_START_SHIFT,
+    "mp3_xing_size_mismatch": _MP3_START_SHIFT,
+}
+
+
+def compare_mp3(args, lines, failures):
+    """The MP3 fixtures (T29a): zffprobe against ffprobe's first audio
+    stream (codec, sample format, channels, layout, rate, and the duration
+    in the stream's time base), or the same refusal, and the hash driver's
+    stream copy against `ffmpeg -c copy -f framecrc`."""
+    rows = []
+    passed = 0
+    fixtures = sorted((FIXTURES / "mp3").glob("*.mp3"))
+    for path in fixtures:
+        name = path.stem
+        problems = []
+        theirs = run(args.ffprobe, "-v", "error", "-select_streams", "a:0", "-show_entries",
+                     "stream=codec_name,sample_fmt,channels,channel_layout,sample_rate,duration_ts,time_base", "-of",
+                     "default=nw=1", path)
+        ours = run(args.zffprobe, path)
+        if theirs.returncode != 0 or not theirs.stdout.strip():
+            if ours.returncode == 0:
+                problems.append("zffprobe accepts what ffprobe refuses")
+        elif ours.returncode != 0:
+            problems.append(f"zffprobe refuses: {first_line(text(ours.stderr))}")
+        else:
+            f = dict(line.split("=", 1) for line in text(theirs.stdout).splitlines() if "=" in line)
+            o = dict(line.split("=", 1) for line in text(ours.stdout).splitlines() if "=" in line)
+            den = f.get("time_base", "1/0").split("/")[1]
+            want = {"codec": f.get("codec_name"), "sample_fmt": f.get("sample_fmt"), "channels": f.get("channels"),
+                    "channel_layout": f.get("channel_layout"), "sample_rate": f.get("sample_rate"),
+                    "duration_num": f.get("duration_ts"), "duration_den": den if f.get("duration_ts") != "N/A" else "N/A"}
+            for key, value in want.items():
+                if o.get(key) != value:
+                    problems.append(f"{key}: zffprobe {o.get(key)}, ffprobe {value}")
+        ref = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", path, "-c", "copy", "-fflags", "+bitexact", "-f",
+                  "framecrc", "-")
+        mine = run(args.hasher, "framecrc", "copy", path)
+        if ref.returncode == 0 and ref.stdout:
+            if (mine.returncode != 0 or mine.stdout != ref.stdout) and name not in KNOWN_MP3_COPY_DIFFERENCES:
+                problems.append("the framecrc copy differs" if mine.returncode == 0
+                                else f"the hash driver fails: {first_line(text(mine.stderr))}")
+        elif mine.returncode == 0:
+            problems.append("the hash driver copies what FFmpeg refuses")
+        if problems:
+            failures.extend(f"mp3 {name}: {p}" for p in problems)
+            rows.append(f"| `{name}` | **FAIL**: {'; '.join(problems)} |")
+        else:
+            passed += 1
+            note = KNOWN_MP3_COPY_DIFFERENCES.get(name)
+            rows.append(f"| `{name}` | pass{' (copy: ' + note + ')' if note else ''} |")
+    lines += [
+        "",
+        "## MP3 fixtures (T29a)",
+        "",
+        f"MP3 fixtures whose zffprobe report equals ffprobe's (or both refuse) and whose copy equals "
+        f"`ffmpeg -c copy -f framecrc`: {passed}/{len(fixtures)} (vectors/mp3.txt holds every packet "
+        f"av_read_frame gives, vectors/seek_mp3.txt every seek).",
+        "",
+        "| Fixture | Result |",
+        "| --- | --- |",
+    ] + rows
+    record("MP3 fixtures (T29a)", passed, len(fixtures), understood=sum(1 for p in fixtures if p.stem in KNOWN_MP3_COPY_DIFFERENCES))
+
+
 def compare_ogg(args, lines, failures):
     """The Ogg fixtures (T27a): zffprobe against ffprobe's first audio
     stream (codec, sample format, channels, layout, rate, duration), and
@@ -2522,8 +2612,6 @@ KNOWN_REGISTRY_DIFFERENCES = {
     ("format only in FFmpeg", "framecrc"): ((None, None), "written by av.framehash for the hash comparison (T19b)"),
     ("format only in FFmpeg", "framemd5"): ((None, None), "written by av.framehash for the hash comparison (T19b)"),
     ("format only in FFmpeg", "streamhash"): ((None, None), "written by av.framehash for the hash comparison (T19b)"),
-    ("format only in FFmpeg", "mp3"): ((None, None), "the MP3 demuxer the reference enables for T29a's oracle, "
-                                                     "registered with the port's demuxer (T29a part 3)"),
     ("codec", "vorbis"): (("D.AIL.", "DEAIL."), "FFmpeg's native Vorbis encoder makes the Vorbis fixtures (T27d); "
                           "the port has no Vorbis encoder"),
     ("codec", "opus"): (("D.AIL.", "DEAIL."), "FFmpeg's native Opus encoder makes the Opus fixtures (T28a); "
@@ -2708,6 +2796,7 @@ def main():
     compare_flac_output(args, lines, failures)
     compare_ogg_output(args, lines, failures)
     compare_ogg(args, lines, failures)
+    compare_mp3(args, lines, failures)
     compare_ogg_decode(args, lines, failures)
     compare_opus_vectors(args, lines, failures)
     compare_hashes(args, lines, failures)

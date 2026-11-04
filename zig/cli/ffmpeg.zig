@@ -396,6 +396,8 @@ fn convert(io: std.Io, command: Command, request: av.convert.Request) ExitStatus
     if (!isStdio(command.input)) input.file_name = command.input;
     input.length = length;
     if (length != null) input.seeker = .file(&reader);
+    // Probing past its first 2048 bytes (FFmpeg's retries) allocates.
+    input.gpa = request.gpa;
     source.open(&reader.interface, input) catch |err| {
         if (err == error.UnusedOption) {
             printError(io, "zffmpeg: {s}: -sample_rate and -ch_layout apply only to raw PCM input\n", .{command.input});
@@ -403,6 +405,7 @@ fn convert(io: std.Io, command: Command, request: av.convert.Request) ExitStatus
         }
         return fail(io, command.input, withReadCause(err, &reader));
     };
+    defer source.deinit();
 
     var conversion = av.convert.Conversion.init(&source, request, .{}) catch |err| {
         return fail(io, command.input, withReadCause(err, &reader));
