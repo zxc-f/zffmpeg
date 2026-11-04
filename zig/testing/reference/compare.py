@@ -2225,9 +2225,13 @@ def compare_registries(args, lines, failures):
         match = re.match(r"^ ([D.][E.][VASDT.][I.][L.][S.]) (\S+)\s+(.*)$", line)
         if match:
             their_codecs[match.group(2)] = (match.group(1), match.group(3))
+    # The codecs both decode and encode must be the same; a codec only a
+    # demuxer names (T27a's Vorbis and Opus) is listed with its
+    # descriptor's flags, checked below.
     enabled = {name for name, (flags, _) in their_codecs.items() if flags.startswith("DE")}
-    if enabled != set(codecs):
-        problems.append(f"codecs FFmpeg decodes and encodes {sorted(enabled)}, the registry {sorted(codecs)}")
+    ours_enabled = {name for name, (flags, _) in codecs.items() if flags.startswith("DE")}
+    if enabled != ours_enabled:
+        problems.append(f"codecs FFmpeg decodes and encodes {sorted(enabled)}, the registry {sorted(ours_enabled)}")
     for name, value in codecs.items():
         theirs = their_codecs.get(name)
         known = KNOWN_REGISTRY_DIFFERENCES.get(("codec", name))

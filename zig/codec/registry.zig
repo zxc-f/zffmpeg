@@ -35,16 +35,19 @@ pub const Props = struct {
     lossless: bool = false,
 };
 
-/// A codec the port implements.
+/// A codec the port knows: one it decodes or encodes, or, for Vorbis and
+/// Opus, one only a demuxer names (T27a), as FFmpeg's descriptor does.
 pub const Codec = union(enum) {
     pcm: pcm.Codec,
     flac,
+    vorbis,
+    opus,
 
     /// FFmpeg's codec name, such as `pcm_s16le` or `flac`.
     pub fn name(c: Codec) []const u8 {
         return switch (c) {
             .pcm => |p| p.name(),
-            .flac => "flac",
+            .flac, .vorbis, .opus => @tagName(c),
         };
     }
 
@@ -52,14 +55,14 @@ pub const Codec = union(enum) {
     pub fn pcmCodec(c: Codec) ?pcm.Codec {
         return switch (c) {
             .pcm => |p| p,
-            .flac => null,
+            .flac, .vorbis, .opus => null,
         };
     }
 
     pub fn eql(a: Codec, b: Codec) bool {
         return switch (a) {
             .pcm => |p| b == .pcm and b.pcm == p,
-            .flac => b == .flac,
+            .flac, .vorbis, .opus => std.meta.activeTag(a) == std.meta.activeTag(b),
         };
     }
 };
@@ -81,7 +84,7 @@ const linear: Props = .{ .intra_only = true, .lossless = true };
 /// G.711 companding: every packet decodes alone, with quantization loss.
 const companded: Props = .{ .intra_only = true, .lossy = true };
 
-/// One per `pcm.Codec`, in its order, then FLAC.
+/// One per `pcm.Codec`, in its order, then FLAC, Vorbis and Opus.
 pub const descriptors = [_]Descriptor{
     pcmDescriptor(.u8, "PCM unsigned 8-bit", linear),
     pcmDescriptor(.s8, "PCM signed 8-bit", linear),
@@ -101,7 +104,13 @@ pub const descriptors = [_]Descriptor{
     pcmDescriptor(.mulaw, "PCM mu-law / G.711 mu-law", companded),
     // Every FLAC frame decodes alone, exactly.
     .{ .codec = .flac, .media_type = .audio, .long_name = "FLAC (Free Lossless Audio Codec)", .props = .{ .intra_only = true, .lossless = true } },
+    // Named by the Ogg demuxer (T27a); not decoded.
+    .{ .codec = .vorbis, .media_type = .audio, .long_name = "Vorbis", .props = .{ .intra_only = true, .lossy = true } },
+    .{ .codec = .opus, .media_type = .audio, .long_name = "Opus (Opus Interactive Audio Codec)", .props = .{ .intra_only = true, .lossy = true } },
 };
+
+/// The descriptors after the PCM ones, in their order.
+const compressed = [_]std.meta.Tag(Codec){ .flac, .vorbis, .opus };
 
 fn pcmDescriptor(codec: pcm.Codec, long_name: []const u8, props: Props) Descriptor {
     return .{ .codec = .{ .pcm = codec }, .media_type = .audio, .long_name = long_name, .props = props };
@@ -110,7 +119,7 @@ fn pcmDescriptor(codec: pcm.Codec, long_name: []const u8, props: Props) Descript
 pub fn descriptor(codec: Codec) *const Descriptor {
     return switch (codec) {
         .pcm => |p| &descriptors[@backingInt(p)],
-        .flac => &descriptors[descriptors.len - 1],
+        .flac, .vorbis, .opus => &descriptors[pcm_count + std.mem.findScalar(std.meta.Tag(Codec), &compressed, std.meta.activeTag(codec)).?],
     };
 }
 
@@ -170,11 +179,11 @@ fn findIn(list: []const Implementation, name: []const u8) ?*const Implementation
 
 comptime {
     @setEvalBranchQuota(10_000);
-    if (descriptors.len != pcm_count + 1) @compileError("every codec needs exactly one descriptor");
+    if (descriptors.len != pcm_count + compressed.len) @compileError("every codec needs exactly one descriptor");
     for (descriptors, 0..) |d, i| {
         switch (d.codec) {
             .pcm => |p| if (@backingInt(p) != i) @compileError("descriptors must follow pcm.Codec's order: " ++ d.name()),
-            .flac => if (i != descriptors.len - 1) @compileError("FLAC's descriptor comes last"),
+            .flac, .vorbis, .opus => if (i < pcm_count or compressed[i - pcm_count] != std.meta.activeTag(d.codec)) @compileError("the compressed codecs' descriptors follow the PCM ones in order"),
         }
         if (d.props.lossy and d.props.lossless) @compileError("a codec is lossy or lossless, not both: " ++ d.name());
     }

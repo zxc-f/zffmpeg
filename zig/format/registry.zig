@@ -246,7 +246,7 @@ fn pcmOnly(comptime carries: fn (pcm.Codec) bool) *const fn (codecs.Codec) bool 
         fn f(codec: codecs.Codec) bool {
             return switch (codec) {
                 .pcm => |p| carries(p),
-                .flac => false,
+                .flac, .vorbis, .opus => false,
             };
         }
     }.f;

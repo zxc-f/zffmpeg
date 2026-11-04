@@ -347,6 +347,8 @@ pub const Conversion = struct {
         summary.output_codec = switch (summary.output_stream) {
             .pcm => |codec| codec,
             .flac => flacStorage(summary.format.sample_format),
+            // No encoder: refused by the operation check below.
+            .vorbis, .opus => return error.UnsupportedOperation,
         };
         // FFmpeg's set_channel_layout: an unspecified request takes the
         // default for its count.
