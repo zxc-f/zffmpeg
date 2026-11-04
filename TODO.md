@@ -2863,6 +2863,30 @@ names, not as an empty framework.
   - [ ] **T28a — Range decoder and CELT.** Needs T27a and T27c.
     Done when the CELT-only test vectors meet `opus_compare` and match the
     reference within tolerance.
+
+    ```text
+    ID / parent: T28a / T28
+    State: G1 (planned)
+    Plan: part 0, the corpus: FATE's Opus samples are Matroska rewraps
+      (.mka), which the port cannot demux yet, so the RFC 6716/8251 test
+      vectors themselves (opus_testvectors-rfc8251, their .bit packet
+      format: a 32-bit size, the encoder's final range and the packet)
+      are fetched like the FATE samples, with recorded SHA-256s, as
+      optional coverage, and opus_compare is ported into the harness;
+      required fixtures come from FFmpeg's native Opus encoder (CELT
+      only, experimental) in Ogg, committed and checked by hash, with an
+      oracle decoding them through libavcodec (the reference build adds
+      the Opus decoder, which needs libswresample, and its encoder). Part
+      1, T27c's PFA transforms for CELT's MDCT lengths (120 * 2^k: the
+      15-point codelet and mdct_pfa_15xM), against tx_vectors.c. Part 2,
+      opus/rc.c's range decoder and opus/parse.c's packet parsing (TOC,
+      frame counts and sizes), with the final range checked against the
+      vectors'. Part 3, CELT (opus/celt.c, dec_celt.c, pvq.c, dsp.c,
+      tab.c): energy, allocation, PVQ, folding, the post-filter, the
+      MDCT and the de-emphasis, bit for bit the reference's where its C
+      code allows. Part 4, Opus in av.convert, zffmpeg and zffprobe, and
+      compare.py.
+    ```
   - [ ] **T28b — SILK.** Needs T28a.
     Done when the SILK-only test vectors meet `opus_compare`.
   - [ ] **T28c — Hybrid mode, multistream and trimming.** Needs T28b. Hybrid
