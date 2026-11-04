@@ -94,6 +94,7 @@ test {
     _ = @import("codec/bits.zig");
     _ = @import("codec/flac.zig");
     _ = @import("codec/flac_parser.zig");
+    _ = @import("codec/flacdec.zig");
     _ = @import("core/audio.zig");
     _ = @import("core/channel_layout.zig");
     _ = @import("core/time.zig");

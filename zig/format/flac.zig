@@ -488,3 +488,77 @@ test "the demuxer's packets do not depend on the reader's buffer" {
     while (try d.next()) |_| count += 1;
     try testing.expectEqual(std.mem.count(u8, whole.items, "\n"), count);
 }
+
+const flacdec = @import("../codec/flacdec.zig");
+
+/// The `P`, `D` and `X` lines of flac_vectors.c for `bytes`, and the SHA-256
+/// and count of every decoded sample.
+fn decodeLines(gpa: std.mem.Allocator, bytes: []const u8, out: *std.ArrayList(u8), pcm: *std.crypto.hash.sha2.Sha256, frames: *u64) !void {
+    var reader: std.Io.Reader = .fixed(bytes);
+    var d = try Demuxer.init(gpa, &reader);
+    defer d.deinit();
+    var dec = try flacdec.Decoder.init(gpa, d.info.stream_info);
+    defer dec.deinit();
+    var line_buf: [128]u8 = undefined;
+    while (try d.next()) |p| {
+        var a: [24]u8 = undefined;
+        var b: [24]u8 = undefined;
+        try out.appendSlice(gpa, try std.fmt.bufPrint(&line_buf, "P {d} {s} {s} {d} 0x{x} 0x{x:0>8}\n", .{
+            p.data.len, formatTs(&a, p.pts), formatTs(&b, p.dts), p.duration orelse 0, @as(u32, if (p.flags.key) 1 else 0), std.hash.Adler32.permute(0, p.data),
+        }));
+        dec.send(p.data, p.pts);
+        while (true) {
+            const frame = dec.receive() catch |err| {
+                try out.appendSlice(gpa, switch (err) {
+                    error.InvalidData => "X INVALIDDATA\n",
+                    error.UnsupportedFormat => "X UNSUPPORTED\n",
+                });
+                continue;
+            } orelse break;
+            var adler: std.hash.Adler32 = .{ .adler = 0 };
+            for (frame.samples) |s| {
+                var le: [2]u8 = undefined;
+                std.mem.writeInt(i16, &le, s, .little);
+                adler.update(&le);
+                pcm.update(&le);
+            }
+            frames.* += frame.nb_samples;
+            try out.appendSlice(gpa, try std.fmt.bufPrint(&line_buf, "D {d} {s} 0x{x:0>8}\n", .{ frame.nb_samples, formatTs(&a, frame.pts), adler.adler }));
+        }
+    }
+}
+
+test "every fixture decodes as FFmpeg decodes it, accepted ones to their samples" {
+    const gpa = testing.allocator;
+    inline for (fixtures.flac.all) |fixture| {
+        switch (fixture.expected) {
+            .reject => {},
+            .accept, .damaged => {
+                const block = vectorBlock(fixture.name) orelse return error.MissingVector;
+                var expected: std.ArrayList(u8) = .empty;
+                defer expected.deinit(gpa);
+                var lines = std.mem.splitScalar(u8, block, '\n');
+                while (lines.next()) |line| {
+                    if (line.len < 2 or std.mem.findScalar(u8, "PDX", line[0]) == null or line[1] != ' ') continue;
+                    try expected.appendSlice(gpa, line);
+                    try expected.append(gpa, '\n');
+                }
+                var actual: std.ArrayList(u8) = .empty;
+                defer actual.deinit(gpa);
+                var sha: std.crypto.hash.sha2.Sha256 = .init(.{});
+                var frames: u64 = 0;
+                try decodeLines(gpa, fixtures.flac.bytes(fixture.name), &actual, &sha, &frames);
+                testing.expectEqualStrings(expected.items, actual.items) catch |err| {
+                    std.debug.print("fixture {s}\n", .{fixture.name});
+                    return err;
+                };
+                if (fixture.expected == .accept) {
+                    const stream = fixture.expected.accept;
+                    try testing.expectEqual(stream.frames, frames);
+                    const digest = std.fmt.bytesToHex(sha.finalResult(), .lower);
+                    try testing.expectEqualStrings(stream.pcm_sha256, &digest);
+                }
+            },
+        }
+    }
+}
