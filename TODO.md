@@ -2493,6 +2493,48 @@ names, not as an empty framework.
     Done when FFmpeg decodes our output to the original samples at every level,
     and the compressed size at each level is recorded against FFmpeg's.
 
+    ```text
+    ID / parent: T26c / T26
+    State: G3 (the encoder verified packet for packet; the muxer, the
+      pipeline and zffmpeg's -c:a flac remain)
+    Supported behavior and explicit exclusions: port.md "FLAC contract",
+      Encoder and Writing rows: FFmpeg's encoder on s16 and s32 input,
+      16, 24 and (strict experimental) 32 bits per sample, 1 to 8
+      channels, every rate FFmpeg codes, levels 0 to 12 and every encoder
+      option. Excluded: lpc_coeff_precision 0 (FFmpeg's arithmetic is
+      undefined there), attached pictures in the muxer.
+    Needs (verified) / lands with / verified after: T26b; T18b.
+    Contract and source provenance: port.md "FLAC contract";
+      libavcodec/flacenc.c, flacdsp_lpc_template.c, lpc.c,
+      lpc_functions.h, put_bits.h, libavutil/lls.c, libavformat/flacenc.c,
+      flacenc_header.c, vorbiscomment.c, fftools/ffmpeg_enc.c (the block
+      size the ffmpeg program sets).
+    Required fixtures / optional corpus: vectors/flacenc.txt (80 cases of
+      generated signals: 73 encodes, 290 packets, 7 refusals); the WAV,
+      AU, AIFF, CAF, raw and FLAC fixtures through zffmpeg to come.
+    Ownership, state transitions and limits: the encoder copies each
+      frame and lends its packet until the next call; buffers sized for
+      the block size at init.
+    Comparison rule and intentional differences: every packet's bytes
+      (MD5), timestamp and duration and both STREAMINFOs exact.
+    Implementation files and test entry points: codec/bits.zig
+      (BitWriter: "the writer round-trips every width at every offset",
+      signed, Rice, overflow), codec/lpc.zig, codec/flacenc.zig ("every
+      case encodes as FFmpeg's encoder does", refusals and allocation
+      failure).
+    Evidence commit / Linux CI run / reference report: parts 0-3 (this
+      card's commit) / local Linux runs / to come.
+    Required cases: encoder vectors passed 80 / failed 0.
+    Optional cases: none yet
+    Fuzz seeds, budget and result: none yet.
+    Remaining work or blocker / next action: part 4, FFmpeg's FLAC
+      muxer (STREAMINFO rewritten on a seekable output), the conversion
+      pipeline (the ffmpeg program's sample format, bits_per_raw_sample
+      and block size), zffmpeg's -c:a flac with the encoder options, and
+      compare.py: byte-identical files, FFmpeg's decoding of ours, sizes
+      per level.
+    ```
+
 - [ ] **T27 — Ogg, transforms and Vorbis.** Checked when T27a–T27d are.
   Reference: `libavformat/oggdec.c`, `oggparse*.c`, `oggenc.c`,
   `libavcodec/vorbisdec.c`, `vorbis.c`, `libavutil/tx.c`;

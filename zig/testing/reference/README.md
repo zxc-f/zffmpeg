@@ -155,6 +155,18 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/flac_vector
 LC_ALL=C ./flac-vectors zig/testing/fixtures/flac/*.flac | diff -u zig/testing/vectors/flac.txt -
 ```
 
+The T26c FLAC encoder vectors come from the reference's `libavcodec`
+through its public API: `flacenc_vectors.c` encodes deterministic integer
+signals (the Zig test regenerates them from the printed parameters) at
+every compression level and with every encoder option, and prints the
+STREAMINFO after opening, each packet's size and MD5, and the final
+STREAMINFO the flush gives:
+
+```bash
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/flacenc_vectors.c .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o flacenc-vectors
+./flacenc-vectors | diff -u zig/testing/vectors/flacenc.txt -
+```
+
 The FFmpeg-made FLAC fixtures (`flac_ffmpeg_*`) come from the reference's
 FLAC encoder; `flac_fixtures.sh` remakes them and prints their hashes, which
 `generate.py` records:

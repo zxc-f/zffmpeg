@@ -28,7 +28,10 @@
 //!   duplicate-key policies (`core/metadata.zig`).
 //! - `eval`: FFmpeg's expression evaluator (`core/eval.zig`).
 //! - `bits`: an MSB-first bit reader with FFmpeg's over-read rules, Rice
-//!   codes, and the CRC-8 and CRC-16 FLAC uses (`codec/bits.zig`).
+//!   codes, a bit writer, and the CRC-8 and CRC-16 FLAC uses
+//!   (`codec/bits.zig`).
+//! - `flacenc`: FFmpeg's FLAC encoder, packet for packet, with its LPC
+//!   analysis (`codec/flacenc.zig`, `codec/lpc.zig`).
 //! - `wav`: bounded RIFF/WAVE, RF64/BW64 and Sony Wave64 parsing and
 //!   known-length writing for the WAV PCM encodings (`format/wav.zig`).
 //! - `au`: bounded Sun AU parsing and known-length writing for s16 big-endian
@@ -93,6 +96,7 @@ pub const aiff = @import("format/aiff.zig");
 pub const raw = @import("format/raw.zig");
 pub const caf = @import("format/caf.zig");
 pub const flac = @import("format/flac.zig");
+pub const flacenc = @import("codec/flacenc.zig");
 pub const framehash = @import("format/framehash.zig");
 pub const seek = @import("format/seek.zig");
 pub const audioconvert = @import("resample/audioconvert.zig");
@@ -112,6 +116,8 @@ test {
     _ = @import("codec/flac.zig");
     _ = @import("codec/flac_parser.zig");
     _ = @import("codec/flacdec.zig");
+    _ = @import("codec/flacenc.zig");
+    _ = @import("codec/lpc.zig");
     _ = @import("core/audio.zig");
     _ = @import("core/channel_layout.zig");
     _ = @import("core/time.zig");

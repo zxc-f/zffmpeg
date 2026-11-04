@@ -206,6 +206,15 @@ jobs:
             -lm -pthread -o flac-vectors
           LC_ALL=C ./flac-vectors zig/testing/fixtures/flac/*.flac | diff -u zig/testing/vectors/flac.txt -
 
+      # The committed T26c oracle must be what this build's FLAC encoder makes
+      # of the generated signals.
+      - name: Check the FLAC encoder vectors (T26c)
+        run: |
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/flacenc_vectors.c \
+            .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libavutil.a \
+            -lm -pthread -o flacenc-vectors
+          ./flacenc-vectors | diff -u zig/testing/vectors/flacenc.txt -
+
       # The committed T25c oracle must be what this build's libavfilter gives.
       - name: Check the multi-graph vectors (T25c)
         run: |

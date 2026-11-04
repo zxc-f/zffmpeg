@@ -3,11 +3,14 @@
 // libavcodec/get_bits.h (the checked, uncached reader: get_bits,
 // get_bits_long, get_bits1, get_sbits_long, show_bits_long, skip_bits,
 // skip_bits_long, align_get_bits, get_bits_left), unary.h (get_unary),
-// golomb.h (get_ur_golomb_jpegls, get_sr_golomb_flac) and libavutil/crc.c
+// golomb.h (get_ur_golomb_jpegls, get_sr_golomb_flac), put_bits.h
+// (put_bits, put_sbits, put_bits32, put_bits63, put_sbits63,
+// flush_put_bits), flacenc.c (set_sr_golomb_flac) and libavutil/crc.c
 // (AV_CRC_8_ATM, AV_CRC_16_ANSI) at the pinned reference revision describe
 // the behavior, restated here.
 //! An MSB-first bit reader over a borrowed slice (TODO.md T18a), with the
-//! over-read rules of FFmpeg's checked reader, and the CRCs FLAC uses.
+//! over-read rules of FFmpeg's checked reader, its writer counterpart
+//! (T18b), and the CRCs FLAC uses.
 //!
 //! FFmpeg's input buffers carry zero padding past their end, and its
 //! checked reader stops its bit count 8 bits past the end. This reader
@@ -176,6 +179,99 @@ pub const BitReader = struct {
 };
 
 const testing = std.testing;
+
+/// An MSB-first bit writer over a caller's slice (TODO.md T18b), FFmpeg's
+/// `PutBitContext` as the FLAC encoder uses it. Bits gather in a small
+/// accumulator and whole bytes go to the slice; `flush` pads the last byte
+/// with zeros. A write that would pass the end of the slice is dropped and
+/// sets `overflow`, as FFmpeg's writer drops it with an error, so no write
+/// touches memory past the slice in any optimize mode.
+pub const BitWriter = struct {
+    bytes: []u8,
+    /// Whole bytes written to `bytes`.
+    pos: usize = 0,
+    /// Bits not yet in `bytes`, right-aligned: fewer than 8 between calls.
+    acc: u64 = 0,
+    acc_len: u6 = 0,
+    /// A write was dropped for lack of room.
+    overflow: bool = false,
+
+    pub fn init(bytes: []u8) BitWriter {
+        return .{ .bytes = bytes };
+    }
+
+    /// `put_bits_count`: the bits written so far.
+    pub fn count(w: *const BitWriter) usize {
+        return w.pos * 8 + w.acc_len;
+    }
+
+    /// The low `n` bits (0 to 56) of `value`, which must not have higher
+    /// bits set (FFmpeg's `put_bits` assumes the same).
+    fn putShort(w: *BitWriter, n: u6, value: u64) void {
+        std.debug.assert(n <= 56);
+        std.debug.assert(value >> n == 0);
+        if (n == 0) return;
+        if (w.count() + n > w.bytes.len * 8) {
+            w.overflow = true;
+            return;
+        }
+        w.acc = (w.acc << n) | value;
+        var len: u7 = @as(u7, w.acc_len) + n;
+        while (len >= 8) {
+            len -= 8;
+            w.bytes[w.pos] = @truncate(w.acc >> @intCast(len));
+            w.pos += 1;
+        }
+        w.acc_len = @intCast(len);
+        w.acc &= (@as(u64, 1) << w.acc_len) - 1;
+    }
+
+    /// `put_bits`, `put_bits32` and `put_bits63`: the low `n` bits (0 to
+    /// 64) of `value`, the high part first.
+    pub fn bits(w: *BitWriter, n: u7, value: u64) void {
+        std.debug.assert(n <= 64);
+        std.debug.assert(n == 64 or value >> @intCast(n) == 0);
+        if (n > 32) {
+            w.putShort(@intCast(n - 32), value >> 32);
+            w.putShort(32, value & 0xffff_ffff);
+        } else {
+            w.putShort(@intCast(n), value);
+        }
+    }
+
+    /// `put_sbits` and `put_sbits63`: the low `n` bits (0 to 64) of a
+    /// signed value, two's complement.
+    pub fn signed(w: *BitWriter, n: u7, value: i64) void {
+        const raw: u64 = @bitCast(value);
+        const mask: u64 = if (n == 64) std.math.maxInt(u64) else (@as(u64, 1) << @intCast(n)) - 1;
+        w.bits(n, raw & mask);
+    }
+
+    /// `set_sr_golomb_flac`: FLAC's Rice code of `value` with parameter
+    /// `k`: the folded value's quotient in unary (zeros then a one), then
+    /// its low `k` bits.
+    pub fn riceFlac(w: *BitWriter, value: i32, k: u5) void {
+        const v: u32 = @bitCast((value << 1) ^ (value >> 31));
+        // FFmpeg's `e` is unsigned; a 64-bit count keeps the impossible
+        // all-ones value with k = 0 from wrapping.
+        var e: u64 = (@as(u64, v) >> k) + 1;
+        while (e > 31) : (e -= 31) w.bits(31, 0);
+        w.bits(@intCast(e), 1);
+        if (k != 0) w.bits(k, v & ((@as(u32, 1) << k) - 1));
+    }
+
+    /// `flush_put_bits`: pads the last byte with zero bits.
+    pub fn flush(w: *BitWriter) void {
+        if (w.acc_len == 0) return;
+        const pad: u6 = 8 - w.acc_len;
+        w.putShort(pad, 0);
+    }
+
+    /// The bytes written; after `flush`, every bit.
+    pub fn written(w: *const BitWriter) []u8 {
+        return w.bytes[0..w.pos];
+    }
+};
 
 /// The bit at `at` of `bytes`, MSB first, 0 past the end: the reference the
 /// reader is checked against.
@@ -366,4 +462,85 @@ test "the CRCs equal FFmpeg's on the standard check input" {
     @memcpy(framed[0..7], &with_crc);
     std.mem.writeInt(u16, framed[7..9], value, .big);
     try testing.expectEqual(0, Crc16.hash(&framed));
+}
+
+test "the writer round-trips every width at every offset through the reader" {
+    var buffer: [64]u8 = undefined;
+    var x: u64 = 7;
+    for (0..8) |offset| {
+        for (0..65) |width| {
+            @memset(&buffer, 0xaa);
+            var w: BitWriter = .init(&buffer);
+            const n: u7 = @intCast(width);
+            w.bits(@intCast(offset), 0);
+            var values: [3]u64 = undefined;
+            for (&values) |*v| {
+                x = x *% 6364136223846793005 +% 1442695040888963407;
+                v.* = if (n == 64) x else x & ((@as(u64, 1) << @intCast(n)) - 1);
+                w.bits(n, v.*);
+            }
+            try testing.expectEqual(offset + 3 * width, w.count());
+            w.flush();
+            try testing.expect(!w.overflow);
+            try testing.expectEqual((offset + 3 * width + 7) / 8, w.written().len);
+            var r = try BitReader.init(w.written());
+            r.skip(offset);
+            for (values) |v| try testing.expectEqual(v, r.bits64(n));
+            // flush pads with zeros, never with what the buffer held.
+            try testing.expectEqual(0, r.bits64(@intCast(r.left())));
+        }
+    }
+}
+
+test "signed writes round-trip, 33-bit samples included" {
+    var buffer: [32]u8 = undefined;
+    var w: BitWriter = .init(&buffer);
+    const values = [_]struct { u7, i64 }{ .{ 1, -1 }, .{ 5, -16 }, .{ 5, 15 }, .{ 16, -32768 }, .{ 32, std.math.minInt(i32) }, .{ 33, -(1 << 32) }, .{ 33, (1 << 32) - 1 }, .{ 64, std.math.minInt(i64) } };
+    for (values) |v| w.signed(v[0], v[1]);
+    w.flush();
+    var r = try BitReader.init(w.written());
+    for (values) |v| try testing.expectEqual(v[1], r.signed64(v[0]));
+}
+
+test "Rice writes round-trip through the reader for every parameter" {
+    const values = [_]i32{ 0, 1, -1, 2, -2, 7, -8, 100, -100, 1000, -1000, 32767, -32768, 65535, -65536, 1 << 20, -(1 << 20) };
+    for (0..31) |kk| {
+        const k: u5 = @intCast(kk);
+        var buffer: [16384]u8 = undefined;
+        var w: BitWriter = .init(&buffer);
+        var expected: [values.len]i32 = undefined;
+        var n: usize = 0;
+        for (values) |v| {
+            const folded: u32 = @bitCast((v << 1) ^ (v >> 31));
+            if (folded >> k > 3000) continue;
+            if (@as(i64, folded >> k) >= flacLimit(k) - 1) continue;
+            w.riceFlac(v, k);
+            expected[n] = v;
+            n += 1;
+        }
+        const bits_written = w.count();
+        w.flush();
+        try testing.expect(!w.overflow);
+        var r = try BitReader.init(w.written());
+        for (expected[0..n]) |v| try testing.expectEqual(v, r.riceFlac(k, flacLimit(k), 1));
+        try testing.expectEqual(bits_written, r.count());
+    }
+    // A quotient past 31 is written in runs of 31 zeros, as FFmpeg's is.
+    var buffer: [16]u8 = undefined;
+    var w: BitWriter = .init(&buffer);
+    w.riceFlac(40, 0);
+    try testing.expectEqual(81, w.count());
+}
+
+test "a write past the end is dropped and flagged, nothing past the slice touched" {
+    var backing = [_]u8{ 0, 0, 0x55 };
+    var w: BitWriter = .init(backing[0..2]);
+    w.bits(12, 0xabc);
+    w.bits(4, 0xd);
+    try testing.expect(!w.overflow);
+    w.bits(1, 1);
+    try testing.expect(w.overflow);
+    try testing.expectEqual(16, w.count());
+    w.flush();
+    try testing.expectEqualSlices(u8, &.{ 0xab, 0xcd, 0x55 }, &backing);
 }
