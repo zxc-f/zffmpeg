@@ -15,7 +15,9 @@
 //! `-c:a flac`, the default for a `.flac` output, encodes as FFmpeg's FLAC
 //! encoder and muxer do (T26c), with its options after `-i` in FFmpeg's
 //! syntax; a file output gets the encoder's final STREAMINFO, standard
-//! output the first, as FFmpeg's muxer does on a pipe.
+//! output the first, as FFmpeg's muxer does on a pipe. It is also the
+//! default for `.ogg` and `.oga` outputs, which FFmpeg's Ogg muxer writes
+//! (T27b).
 //!
 //! The input container is detected from content as FFmpeg's probing would
 //! (T16), with the file name's extension as FFmpeg's fallback for raw PCM
@@ -54,16 +56,17 @@ const printError = status.printError;
 const usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout <layout>] -i <input | -> [-c copy|<encoder>] [-ar <rate>] [-ac <channels> | -ch_layout <layout>] [-dither_method <method>] [-dither_scale <scale>] [FLAC encoder options] [-f <format>] <output | ->\n";
 const help = usage ++
     \\
-    \\Converts one WAV, Wave64, AU, AIFF, CAF (input only), FLAC or raw PCM
-    \\stream (standard input or output with -). The input container is detected
+    \\Converts one WAV, Wave64, AU, AIFF, CAF (input only), FLAC, Ogg (output
+    \\only) or raw PCM stream (standard input or output with -). The input container is detected
     \\from content, or for raw PCM from the name (.sb, .ub, .al, .ul, .sw), or
     \\forced with -f before -i.
     \\Before -i, -sample_rate (or -ar) and -ch_layout (or -ac) describe raw
     \\PCM input, 44100 Hz mono by default. The output container is the -f after
     \\-i, or the output name's extension (.wav, .w64, .au, .aif, .aiff, .afc,
-    \\.aifc, .flac, .sb, .ub, .al, .ul, .sw). Formats: wav, w64, au, aiff, flac
-    \\and the raw formats u8, s8, s16le, s16be, s24le, s24be, s32le, s32be,
-    \\f32le, f32be, f64le, f64be, alaw and mulaw.
+    \\.aifc, .flac, .ogg, .oga, .opus, .sb, .ub, .al, .ul, .sw). Formats: wav,
+    \\w64, au, aiff, flac, ogg, oga, opus and the raw formats u8, s8, s16le,
+    \\s16be, s24le, s24be, s32le, s32be, f32le, f32be, f64le, f64be, alaw and
+    \\mulaw.
     \\After -i, -ac <channels> or -ch_layout <layout> remixes into that layout
     \\as FFmpeg does (-ac takes the default layout for the count), and -ar
     \\<rate> resamples as FFmpeg's aresample does.
@@ -74,8 +77,9 @@ const help = usage ++
     \\f_weighted, modified_e_weighted, improved_e_weighted, shibata,
     \\low_shibata, high_shibata, or FFmpeg's number) and -dither_scale (0 to
     \\2147483647, default 1) dither the conversion as FFmpeg does.
-    \\-c flac (the default for .flac) encodes FLAC as FFmpeg does, with its
-    \\options: -compression_level (0 to 12, default 5), -lpc_type (none,
+    \\-c flac (the default for .flac, .ogg and .oga) encodes FLAC as FFmpeg
+    \\does, into FLAC or Ogg, with its options: -compression_level (0 to 12,
+    \\default 5), -lpc_type (none,
     \\fixed, levinson, cholesky), -lpc_passes, -lpc_coeff_precision,
     \\-min_prediction_order, -max_prediction_order, -prediction_order_method
     \\(estimation, 2level, 4level, 8level, search, log), -min_partition_order,

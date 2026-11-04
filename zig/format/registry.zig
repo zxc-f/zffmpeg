@@ -42,8 +42,11 @@ pub const Container = enum {
     caf,
     /// Native FLAC (T26a), written since T26c.
     flac,
-    /// Ogg, read only (T27a).
+    /// Ogg, read since T27a and written since T27b.
     ogg,
+    /// FFmpeg's Ogg Audio and Ogg Opus muxers (T27b): Ogg, written only.
+    oga,
+    opus,
     // Raw PCM (T22c), one format per codec FFmpeg has a raw format for, named
     // as the codec: every PCM codec but s64.
     u8,
@@ -71,7 +74,7 @@ pub const Container = enum {
             .aiff => .aiff,
             .caf => .caf,
             .flac => .flac,
-            .ogg => .ogg,
+            .ogg, .oga, .opus => .ogg,
             // Checked below: exactly the raw formats, each named as its codec.
             else => .raw,
         };
@@ -80,7 +83,7 @@ pub const Container = enum {
     /// The codec of a raw PCM format, which shares its name; null otherwise.
     pub fn rawCodec(container: Container) ?pcm.Codec {
         return switch (container) {
-            .wav, .w64, .au, .aiff, .caf, .flac, .ogg => null,
+            .wav, .w64, .au, .aiff, .caf, .flac, .ogg, .oga, .opus => null,
             // Compiles only if every other tag names a codec.
             inline else => |tag| @field(pcm.Codec, @tagName(tag)),
         };
@@ -209,8 +212,26 @@ pub const formats = [_]Format{
         .name = "ogg",
         .long_name = "Ogg",
         .demuxer = .{ .probe = ogg.probeScore, .probe_bytes = ogg.probe_bytes, .extensions = &.{"ogg"} },
-        // FFmpeg's Ogg muxer comes with T27b.
-        .muxer = null,
+        // FFmpeg's Ogg muxer (T27b). Its extensions take those of the Ogg
+        // Video and Speex muxers, which the reference build does not have;
+        // its default is FLAC, the reference build having no libvorbis.
+        .muxer = .{ .extensions = &.{ "ogg", "ogv", "spx" }, .mime_type = "application/ogg", .audio_codec = .flac, .carries = oggCodecs },
+    },
+    .{
+        .container = .oga,
+        .name = "oga",
+        .long_name = "Ogg Audio",
+        .demuxer = null,
+        .muxer = .{ .extensions = &.{"oga"}, .mime_type = "audio/ogg", .audio_codec = .flac, .carries = oggCodecs },
+    },
+    .{
+        .container = .opus,
+        .name = "opus",
+        .long_name = "Ogg Opus",
+        .demuxer = null,
+        // Opus by default, which no encoder here writes; ogg_init takes
+        // every Ogg codec whatever the muxer's name.
+        .muxer = .{ .extensions = &.{"opus"}, .mime_type = "audio/ogg", .audio_codec = .opus, .carries = oggCodecs },
     },
     rawFormat(.u8, "PCM unsigned 8-bit", &.{"ub"}),
     rawFormat(.s8, "PCM signed 8-bit", &.{"sb"}),
@@ -266,6 +287,15 @@ fn pcmOnly(comptime carries: fn (pcm.Codec) bool) *const fn (codecs.Codec) bool 
 
 fn flacOnly(codec: codecs.Codec) bool {
     return codec == .flac;
+}
+
+/// The Ogg muxers' codecs (ogg_init): FLAC, Opus and Vorbis, of those the
+/// port names.
+fn oggCodecs(codec: codecs.Codec) bool {
+    return switch (codec) {
+        .flac, .opus, .vorbis => true,
+        .pcm => false,
+    };
 }
 
 /// The container FFmpeg names `name`, if it has a demuxer (an input `-f`).

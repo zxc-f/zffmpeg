@@ -675,6 +675,11 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "FLAC copy into FLAC is unsupported", .set = .flac, .args = &.{"-i"}, .input = "flac_ffmpeg_level5_stereo", .tail = &.{ "-c", "copy", "-f", "flac", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
     .{ .name = "a FLAC first frame under 16 samples", .args = &.{"-i"}, .input = "mono_8k", .tail = &.{ "-f", "flac", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedFormat\n" },
     .{ .name = "an invalid FLAC encoder option value", .args = &.{ "-i", "a.wav", "-lpc_type", "burg", "b.flac" }, .exit_code = 1, .stderr_contains = "invalid value for: -lpc_type\n" },
+    // T27b: FLAC encoded into Ogg; compare.py checks the bytes against FFmpeg's.
+    .{ .name = "FLAC into Ogg on standard output", .set = .flac, .args = &.{"-i"}, .input = "flac_ffmpeg_level5_stereo", .tail = &.{ "-f", "ogg", "-" }, .exit_code = 0, .stdout_contains = "OggS\x00\x02", .stderr = "" },
+    .{ .name = "FLAC into Ogg Audio carries the encoder tag", .set = .flac, .args = &.{"-i"}, .input = "flac_ffmpeg_level5_stereo", .tail = &.{ "-f", "oga", "-" }, .exit_code = 0, .stdout_contains = "\x11\x00\x00\x00encoder=Lavc flac", .stderr = "" },
+    .{ .name = "Ogg Opus asks for an Opus encoder", .set = .flac, .args = &.{"-i"}, .input = "flac_ffmpeg_level5_stereo", .tail = &.{ "-f", "opus", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
+    .{ .name = "PCM in Ogg is unsupported", .set = .flac, .args = &.{"-i"}, .input = "flac_ffmpeg_level5_stereo", .tail = &.{ "-c:a", "pcm_s16le", "-f", "ogg", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
     .{ .name = "FLAC encoder options FFmpeg refuses together", .set = .flac, .args = &.{"-i"}, .input = "flac_ffmpeg_level5_stereo", .tail = &.{ "-min_prediction_order", "9", "-max_prediction_order", "8", "-f", "flac", "-" }, .exit_code = 1, .stderr_contains = ": InvalidOption\n" },
 };
 

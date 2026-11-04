@@ -2008,6 +2008,106 @@ def compare_flac_output(args, lines, failures):
          for name, per in sizes.items()]
 
 
+OGG_OUTPUT_OPTIONS = [[], ["-compression_level", "0"], ["-compression_level", "8"],
+                      ["-compression_level", "12", "-strict", "-2"], ["-ar", "22050"], ["-ac", "1"]]
+
+
+def ogg_output_inputs(work):
+    """The Ogg output comparison's own inputs (T27b): a WAV with LIST/INFO
+    tags, which the Ogg muxer writes after the encoder's stream tag, and
+    three seconds of mono, which fill several pages."""
+    import math
+    paths = {}
+    for name, channels, frames, info in (("s16_stereo_tagged", 2, 9000, True), ("s16_mono_3s", 1, 132300, False)):
+        data = bytearray()
+        for i in range(frames):
+            for c in range(channels):
+                data += struct.pack("<h", int(math.sin(i * (0.01 + 0.004 * c)) * 12000))
+
+        def chunk(tag, body):
+            return tag + struct.pack("<I", len(body)) + body + (b"\0" if len(body) % 2 else b"")
+        body = b"WAVE" + chunk(b"fmt ", struct.pack("<HHIIHH", 1, channels, 44100, 44100 * channels * 2, channels * 2, 16))
+        if info:
+            body += chunk(b"LIST", b"INFO" + chunk(b"INAM", b"Title\0") + chunk(b"IART", b"Artist\0")
+                          + chunk(b"ICMT", b"A comment\0"))
+        body += chunk(b"data", bytes(data))
+        path = work / f"{name}.wav"
+        path.write_bytes(b"RIFF" + struct.pack("<I", len(body)) + body)
+        paths[name] = path
+    return paths
+
+
+def compare_ogg_output(args, lines, failures):
+    """zffmpeg's Ogg output (T27b): FLAC encoded into Ogg, against the
+    ffmpeg program's with `-bitexact`, as `.ogg` and `.oga` files and on a
+    pipe (`-f ogg`, `-f oga`): the same bytes, so FFmpeg demuxes ours to
+    its own packets and timestamps; and FFmpeg's decoding of ours equal to
+    its decoding of the same conversion to FLAC."""
+    rows = []
+    same = total = 0
+    with tempfile.TemporaryDirectory() as work:
+        work = pathlib.Path(work)
+        inputs = flac_output_inputs(work)
+        inputs.update(ogg_output_inputs(work))
+        inputs["flac_ffmpeg_level5_stereo"] = FIXTURES / "flac" / "flac_ffmpeg_level5_stereo.flac"
+        for name, source in inputs.items():
+            problems = []
+            for opts in OGG_OUTPUT_OPTIONS:
+                label = " ".join(opts) or "defaults"
+                for ext, fmt in (("ogg", "ogg"), ("oga", "oga")):
+                    total += 1
+                    theirs, ours = work / f"theirs.{ext}", work / f"ours.{ext}"
+                    for path in (theirs, ours):
+                        path.unlink(missing_ok=True)
+                    tp = run(args.ffmpeg, "-nostdin", "-v", "error", "-y", "-i", source, "-bitexact", *opts, theirs)
+                    zp = run(args.zffmpeg, "-y", "-i", source, *opts, ours)
+                    if tp.returncode != 0 or zp.returncode != 0:
+                        problems.append(f"{label} .{ext}: FFmpeg {tp.returncode}, zffmpeg {zp.returncode} "
+                                        f"({first_line(text(zp.stderr))})")
+                        continue
+                    if theirs.read_bytes() != ours.read_bytes():
+                        problems.append(f"{label} .{ext}: the files differ")
+                        continue
+                    tpipe = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", source, "-bitexact", *opts, "-f", fmt, "-")
+                    zpipe = run(args.zffmpeg, "-i", source, *opts, "-f", fmt, "-")
+                    if tpipe.stdout != zpipe.stdout or zpipe.stdout != ours.read_bytes():
+                        problems.append(f"{label} -f {fmt}: the piped output differs")
+                        continue
+                    decoded = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", ours, "-f", "s32le", "-").stdout
+                    flac = work / "ours.flac"
+                    flac.unlink(missing_ok=True)
+                    run(args.zffmpeg, "-y", "-i", source, *opts, flac)
+                    expected = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", flac, "-f", "s32le", "-").stdout
+                    if not decoded or decoded != expected:
+                        problems.append(f"{label} .{ext}: FFmpeg's decoding differs from the FLAC output's")
+                        continue
+                    same += 1
+            result = "pass" if not problems else "**FAIL**: " + "; ".join(problems)
+            rows.append(f"| `{name}` | {2 * len(OGG_OUTPUT_OPTIONS)} | {result} |")
+            failures.extend(f"Ogg output {name}: {p}" for p in problems)
+        # -f opus asks for the Opus encoder, which neither build has.
+        total += 1
+        tp = run(args.ffmpeg, "-nostdin", "-v", "error", "-y", "-i", inputs["s16_stereo_44k1"], "-bitexact",
+                 work / "theirs.opus")
+        zp = run(args.zffmpeg, "-y", "-i", inputs["s16_stereo_44k1"], work / "ours.opus")
+        if tp.returncode != 0 and zp.returncode == 3 and not (work / "ours.opus").exists():
+            same += 1
+        else:
+            failures.append(f"Ogg output: .opus: FFmpeg {tp.returncode}, zffmpeg {zp.returncode}")
+    record("Ogg output (T27b)", same, total)
+    lines += [
+        "",
+        "## Ogg output (T27b)",
+        "",
+        f"zffmpeg's FLAC in Ogg equal to the ffmpeg program's (`-bitexact`) as `.ogg` and `.oga` files and on "
+        f"pipes, and decoded by FFmpeg as the same conversion to FLAC; `.opus`, whose default encoder neither "
+        f"has, refused before any output: {same}/{total}.",
+        "",
+        "| Input | Outputs | Result |",
+        "| --- | --- | --- |",
+    ] + rows
+
+
 # Ogg fixtures whose copy the ffmpeg program changes past libavformat
 # (T27a): ogg.txt holds what av_read_frame gives for every one.
 KNOWN_OGG_COPY_DIFFERENCES = {
@@ -2430,6 +2530,7 @@ def main():
     compare_pipes(args, lines, failures)
     compare_flac(args, lines, failures)
     compare_flac_output(args, lines, failures)
+    compare_ogg_output(args, lines, failures)
     compare_ogg(args, lines, failures)
     compare_hashes(args, lines, failures)
     compare_fate(args, lines, failures)

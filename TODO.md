@@ -2643,8 +2643,9 @@ names, not as an empty framework.
 
     ```text
     ID / parent: T27b / T27
-    State: G3 (the muxer equals FFmpeg's on every oracle case; zffmpeg's
-      Ogg output and the comparison remain)
+    State: G4 (the muxer equals FFmpeg's on every oracle case, and
+      zffmpeg's Ogg output the ffmpeg program's; local CI and the docs
+      remain)
     Plan: part 1, the muxer: oggenc.c for FLAC, Opus and Vorbis streams
       under -fflags +bitexact (headers, serials, lacing, page_duration,
       the page list, end of stream), with an oracle muxing generated
@@ -2665,7 +2666,16 @@ names, not as an empty framework.
       shared with flacmux.zig (vorbiscomment.zig's toNative, length and
       write); vectors/oggmux.txt from oggmux_vectors.c, 28 cases (25
       outputs, 3 refusals), every page and MD5 equal in Debug,
-      ReleaseSafe and ReleaseFast.
+      ReleaseSafe and ReleaseFast (285a03b). Part 2: the ogg, oga and
+      opus formats in the registry (compare.py's registry check passes);
+      flacmux.Writer's Ogg sink and convert.zig's Ogg output with the
+      `encoder=Lavc flac` stream tag; compare.py's Ogg output section,
+      145/145: 12 inputs (the FLAC output inputs, a tagged WAV, three
+      seconds of mono, an FFmpeg-made FLAC) times 6 option sets as .ogg
+      and .oga files and pipes, byte for byte the ffmpeg program's with
+      -bitexact and decoded by FFmpeg as the same conversion to FLAC, and
+      .opus refused before output; 4 zffmpeg process runs. Part 3 (stream
+      copy) moved to T53 (notes.md "Ogg output scope").
     ```
   - [ ] **T27c — FFT and MDCT.** Needs T01. Lands with T27d. A native transform
     module for the sizes the audio codecs need.

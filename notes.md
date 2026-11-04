@@ -288,6 +288,14 @@ port.md's contract table updated, and (after T06) the parser.
 | Hash muxers | framecrc, framemd5 and streamhash (T19b) are `av.framehash`, used by the hash driver, and not registered formats or zffmpeg outputs yet: zffmpeg's output path writes PCM containers only, and the comparison needs the text, not a CLI. | `compare.py`'s `KNOWN_REGISTRY_DIFFERENCES`; register them with a zffmpeg output (T53). |
 | Probe retry | FFmpeg reprobes with more data while the best score is at most 25. Every registered probe reads a fixed few bytes, so the retry cannot change a winner and is not ported; raw FLAC's 13 and a probing demuxer's extension match (1) win at once where FFmpeg accepts them after the retries. | `detect.zig`, `registry.zig`'s check; port the loop with the first probe that looks further. |
 
+## Ogg
+
+| Decision | Current choice and reason | To change it |
+| --- | --- | --- |
+| libavformat's generic layer (T27a) | Ogg reads through `demux.Layer`, a port of `av_read_frame`'s timestamp fix-ups, `avformat_find_stream_info`'s read-ahead and libavformat's seeking, rather than per-demuxer shortcuts: Ogg's packets lack timestamps until a page ends, and FFmpeg's results (relative timestamps, the start time, skip samples after a seek) come from that layer. FLAC keeps its own copy of the parts it needs from T26a; the seek search and index are shared in `seek.zig`. | `format/demux.zig`; move FLAC onto the layer when a second parsed format needs it. |
+| Encoder stream tag (T27b) | An Ogg output carries `encoder=Lavc flac` as its stream tag, before the carried format tags: the ffmpeg program sets it under `-bitexact` (`set_encoder_id`), and Ogg is the first muxer here that writes stream tags, so FFmpeg's bytes need it. zffmpeg follows `-fflags +bitexact` elsewhere too (the vendor `ffmpeg`, the derived serials, no format `encoder` tag). | `Conversion.stream_tags` in `convert.zig`; compare.py's Ogg output section. |
+| Ogg output scope (T27b) | FLAC encoded into Ogg only. Stream copy into Ogg needs a packet-copy pipeline (the conversion copies PCM bytes) and the ffmpeg program's muxing timestamp fix-ups, which T53 ports; several streams per output, chaining on new metadata and the `-page_duration` and `-serial_offset` options wait for a consumer. The muxer itself takes Opus and Vorbis streams, verified by oggmux.txt. | `Conversion.init`'s operation matrix; T53. |
+
 ## Seeking
 
 | Decision | Current choice and reason | To change it |

@@ -247,6 +247,9 @@ pub const Conversion = struct {
     packet_frames: u32,
     /// The FLAC encoder's options, for a FLAC output (T26c).
     flac_options: flacenc.Options = .{},
+    /// An Ogg output's stream tags (T27b): the `encoder` tag the ffmpeg
+    /// program sets under `-bitexact`; owned (`gpa`).
+    stream_tags: metadata.Dictionary = .empty,
 
     /// One parser per format family; the WAV parser also reads Wave64. A
     /// FLAC input reads as its decoded frames.
@@ -391,7 +394,14 @@ pub const Conversion = struct {
                 error.InvalidOption => error.InvalidOption,
                 error.TagsTooLong => error.LimitExceeded,
             },
-            .caf, .ogg => unreachable, // no muxer: refused above as UnsupportedOperation
+            // FLAC encoded into Ogg (T27b); no other encoder writes an Ogg codec.
+            .ogg => flacmux.Writer.check(request.gpa.?, summary.output_codec, summary.outputFormat(), sourceBits(summary, &input), .{ .encoder = request.flac, .tags = tags, .container = .{ .ogg = .{} } }) catch |err| return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                error.UnsupportedFormat => error.UnsupportedFormat,
+                error.InvalidOption => error.InvalidOption,
+                error.TagsTooLong => error.LimitExceeded,
+            },
+            .caf => unreachable, // no muxer: refused above as UnsupportedOperation
         }
         const packet_frames = switch (input) {
             // FFmpeg's packets are the FLAC frames.
@@ -403,12 +413,20 @@ pub const Conversion = struct {
         // decodes to another count converts as FFmpeg converts it; the
         // summary's counts are the decoded ones once `run` returns.
         switch (input) {
-            .flac => |*reader| if (request.output.family() == .raw or request.output.family() == .flac) {
+            .flac => |*reader| if (request.output.family() == .raw or request.output.family() == .flac or request.output.family() == .ogg) {
                 reader.expected = null;
                 // The dither's calls still follow STREAMINFO's count.
                 summary.output_frame_count = null;
             },
             .wav, .au, .aiff, .caf, .raw => {},
+        }
+        var stream_tags: metadata.Dictionary = .empty;
+        if (request.output.family() == .ogg) {
+            // The ffmpeg program's set_encoder_id under -bitexact.
+            stream_tags.put(request.gpa.?, "encoder", "Lavc flac", .replace) catch |err| return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                error.InvalidTag => unreachable, // a constant
+            };
         }
         return .{
             .input = input,
@@ -419,11 +437,13 @@ pub const Conversion = struct {
             .gpa = request.gpa,
             .packet_frames = packet_frames,
             .flac_options = request.flac,
+            .stream_tags = stream_tags,
         };
     }
 
     /// Frees what a FLAC input allocated; nothing for the others.
     pub fn deinit(c: *Conversion) void {
+        if (c.gpa) |gpa| c.stream_tags.deinit(gpa);
         deinitParser(&c.input);
     }
 
@@ -481,7 +501,18 @@ pub const Conversion = struct {
                 defer writer.deinit();
                 try c.transfer(flacmux.Writer, &writer);
             },
-            .caf, .ogg => unreachable, // no muxer: `init` refused it
+            // FLAC into Ogg (T27b): the FLAC writer's encoder before
+            // FFmpeg's Ogg muxer, which rewrites nothing at the end.
+            .ogg => {
+                const first: ?u32 = if (s.output_rate != s.format.sample_rate) null else switch (c.input) {
+                    .flac => |*reader| try reader.firstFrameSamples(),
+                    else => c.packet_frames,
+                };
+                var writer = flacmux.Writer.begin(c.gpa.?, out, null, s.output_codec, s.outputFormat(), sourceBits(s, &c.input), first, .{ .encoder = c.flac_options, .tags = c.tags, .container = .{ .ogg = .{ .stream_tags = &c.stream_tags } } }) catch |err| return outputFailure(err);
+                defer writer.deinit();
+                try c.transfer(flacmux.Writer, &writer);
+            },
+            .caf => unreachable, // no muxer: `init` refused it
         }
         // Every frame was read: an unknown count is now known, and a FLAC
         // stream's decoded count replaces STREAMINFO's (equal unless raw

@@ -22,6 +22,12 @@
 //! final STREAMINFO (sample count, frame sizes, MD5) replaces the first
 //! when the output can seek back, as FFmpeg's muxer rewrites a seekable
 //! output's; on a pipe it stays as first written, as FFmpeg's does.
+//!
+//! The same encoder feeds FFmpeg's Ogg muxer (T27b, format/oggmux.zig)
+//! when `WriteOptions.container` is `ogg`: the first STREAMINFO becomes
+//! the stream's header, each frame a packet with its timestamp and
+//! duration, and nothing is rewritten at the end, as FFmpeg's Ogg muxer
+//! ignores the encoder's final STREAMINFO.
 
 const std = @import("std");
 const audio = @import("../core/audio.zig");
@@ -32,6 +38,7 @@ const flac = @import("../codec/flac.zig");
 const flacenc = @import("../codec/flacenc.zig");
 const seek = @import("seek.zig");
 const vorbiscomment = @import("vorbiscomment.zig");
+const oggmux = @import("oggmux.zig");
 
 pub const WriteOptions = struct {
     encoder: flacenc.Options = .{},
@@ -39,8 +46,17 @@ pub const WriteOptions = struct {
     /// FFmpeg's default of 8192 bytes, 0 none.
     padding: ?u24 = null,
     /// The tags, under FFmpeg's generic names (VORBIS_COMMENT's are
-    /// restored); null for none.
+    /// restored); null for none. In Ogg, the format's tags.
     tags: ?*const metadata.Dictionary = null,
+    container: Container = .flac,
+
+    pub const Container = union(enum) {
+        /// FFmpeg's FLAC muxer (`padding` and the channel-mask tag apply).
+        flac,
+        /// FFmpeg's Ogg muxer, with the stream's own tags, which come
+        /// before the format's.
+        ogg: struct { stream_tags: ?*const metadata.Dictionary = null },
+    };
 };
 
 pub const HeaderError = error{
@@ -139,6 +155,8 @@ pub const Writer = struct {
     /// The encoder's input for one block.
     block: Block = .{ .s16 = &.{} },
     encoder: ?*flacenc.Encoder = null,
+    /// The Ogg muxer, once the encoder is open, for an Ogg container.
+    ogg: ?oggmux.Muxer = null,
     /// Where STREAMINFO's bytes start in the output.
     streaminfo_offset: u64 = 0,
     pts: i64 = 0,
@@ -149,9 +167,11 @@ pub const Writer = struct {
     };
 
     /// What `begin` checks, without a writer: the encoder's stream and
-    /// options (the block size aside) and the tags' size.
+    /// options (the block size aside) and, in FLAC's container, the tags'
+    /// size (Ogg's comment packet has no 24-bit bound).
     pub fn check(gpa: std.mem.Allocator, codec: pcm.Codec, format: audio.Format, bits_per_raw_sample: u8, options: WriteOptions) (HeaderError || error{OutOfMemory})!void {
         try flacenc.Encoder.validate(try encoderParams(codec, format, bits_per_raw_sample, 0), options.encoder);
+        if (options.container != .flac) return;
         var tags = muxerTags(gpa, options.tags, format.layout) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             // The tags came from a dictionary, which holds no NUL.
@@ -166,10 +186,11 @@ pub const Writer = struct {
     /// 24 encodes 32 bits under `strict_experimental`). Writes nothing yet.
     pub fn begin(gpa: std.mem.Allocator, out: *std.Io.Writer, seeker: ?seek.OutputSeeker, codec: pcm.Codec, format: audio.Format, bits_per_raw_sample: u8, first_frame: ?u32, options: WriteOptions) (HeaderError || error{OutOfMemory})!Writer {
         try check(gpa, codec, format, bits_per_raw_sample, options);
-        const tags = muxerTags(gpa, options.tags, format.layout) catch |err| switch (err) {
+        // Ogg's muxer takes the caller's tags as they are.
+        const tags: metadata.Dictionary = if (options.container == .flac) muxerTags(gpa, options.tags, format.layout) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidTag => unreachable,
-        };
+        } else .empty;
         return .{
             .gpa = gpa,
             .out = out,
@@ -183,6 +204,7 @@ pub const Writer = struct {
     }
 
     pub fn deinit(w: *Writer) void {
+        if (w.ogg) |*m| m.deinit();
         if (w.encoder) |e| e.deinit();
         switch (w.block) {
             inline else => |b| w.gpa.free(b),
@@ -227,9 +249,22 @@ pub const Writer = struct {
             .s32 => .{ .s32 = try w.gpa.alloc(i32, count) },
         };
         w.encoder = e;
-        if (w.seeker) |s| w.streaminfo_offset = s.position() + 8;
         const streaminfo = e.initialStreaminfo();
-        try writeHeader(w.out, &streaminfo, &w.tags, w.options.padding orelse 8192);
+        switch (w.options.container) {
+            .flac => {
+                if (w.seeker) |s| w.streaminfo_offset = s.position() + 8;
+                try writeHeader(w.out, &streaminfo, &w.tags, w.options.padding orelse 8192);
+            },
+            .ogg => |o| {
+                const streams = [_]oggmux.Stream{.{ .codec = .flac, .sample_rate = w.params.sample_rate, .extradata = &streaminfo, .tags = o.stream_tags }};
+                w.ogg = oggmux.Muxer.init(w.gpa, w.out, &streams, .{ .format_tags = w.options.tags }) catch |err| return switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    error.TagsTooLong => error.TagsTooLong,
+                    error.InvalidExtradata => unreachable, // a whole STREAMINFO
+                };
+                try w.ogg.?.writeHeader();
+            },
+        }
     }
 
     /// Encodes whole blocks, and at the end what is left; opens the encoder
@@ -280,7 +315,9 @@ pub const Writer = struct {
             // The writer gives whole blocks, the last one shorter.
             error.InvalidFrame => unreachable,
         };
-        try w.out.writeAll(packet.data);
+        if (w.ogg) |*m| {
+            try m.writePacket(0, packet.data, packet.pts, packet.duration);
+        } else try w.out.writeAll(packet.data);
         w.pts += n;
         w.pending_start += bytes.len;
     }
@@ -290,6 +327,7 @@ pub const Writer = struct {
     pub fn finish(w: *Writer) WriteError!void {
         try w.drain(true);
         const final = w.encoder.?.flush();
+        if (w.ogg) |*m| return m.finish();
         try w.out.flush();
         if (w.seeker) |s| {
             const end = s.position();
