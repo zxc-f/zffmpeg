@@ -112,5 +112,11 @@ int main(void)
         for (int inv = 0; inv < 2; inv++)
             for (int s = 0; s < 4; s++)
                 run(AV_TX_FLOAT_MDCT, len, inv, scales[s]);
+    /* Opus CELT's inverse MDCTs (T28a): 15 << (3 + i) coefficients with
+     * scale -1/32768, through the 15-point prime-factor codelet. */
+    const float pfa_scales[] = { -1.0f / 32768.0f, 1.0f, -1.0f };
+    for (int len = 60; len <= 1920; len *= 2)
+        for (int s = 0; s < 3; s++)
+            run(AV_TX_FLOAT_MDCT, len, 1, pfa_scales[s]);
     return 0;
 }

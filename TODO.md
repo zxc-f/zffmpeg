@@ -2866,7 +2866,7 @@ names, not as an empty framework.
 
     ```text
     ID / parent: T28a / T28
-    State: G2 (part 0 done)
+    State: G3 (parts 0 and 1 done)
     Plan: part 0, the corpus: FATE's Opus samples are Matroska rewraps
       (.mka), which the port cannot demux yet, so the RFC 6716/8251 test
       vectors themselves (opus_testvectors-rfc8251, their .bit packet
@@ -2897,7 +2897,14 @@ names, not as an empty framework.
       seek, so seek_ogg.txt (1404 seeks) has their samples, which the Ogg
       seek test leaves out until the decoder lands. Interim, until part 4:
       compare.py's registry (Opus decoder and encoder) and zffprobe's Opus
-      report (fltp as ffprobe now gives) differ.
+      report (fltp as ffprobe now gives) differ (14b3723). Part 1:
+      codec/tx.zig's inverse MDCT for 30 * 2^k coefficients through
+      mdct_pfa_15xM_inv (fft3, the 5-point kernels, fft15, the compound
+      maps with the embedded 3 x 5 order, the split-radix sub-FFTs);
+      tx_vectors.c adds 60 to 1920 coefficients at three scales (CELT's
+      -1/32768 among them): all 156 cases of tx.txt bit for bit, and the
+      float64 definitions within the declared error, in Debug, ReleaseSafe
+      and ReleaseFast.
     ```
   - [ ] **T28b — SILK.** Needs T28a.
     Done when the SILK-only test vectors meet `opus_compare`.

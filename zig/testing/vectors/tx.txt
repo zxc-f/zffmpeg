@@ -550,3 +550,75 @@ T mdct 16384 1 -0x1p+1
 C mdct_inv 16384
 C fft8192_ns 8192
 O 16384 9b38e942949b6dc4a68cd90073dc1eac 0x1.6a388p+1 0x1.7bcdf4p-3 0x1.e8ab16p-1 -0x1.e47b1ep+1
+T mdct 60 1 -0x1p-15
+C mdct_pfa_15xM_inv 60
+C fft2_ns 2
+O 60 dddb4ec55b601b1a6aef1f29c6d6788b 0x1.0a35bap-14 -0x1.52638p-15 -0x1.08740cp-18 -0x1.97fa2cp-15
+T mdct 60 1 0x1p+0
+C mdct_pfa_15xM_inv 60
+C fft2_ns 2
+O 60 6253d28e28e42a7cc0f291c6dad60360 -0x1.0a35bep+1 0x1.526386p+0 0x1.0873fp-3 0x1.97fa1cp+0
+T mdct 60 1 -0x1p+0
+C mdct_pfa_15xM_inv 60
+C fft2_ns 2
+O 60 2717a0ff7ce0c816e42b6a1b43e04ccf 0x1.0a35bep+1 -0x1.526386p+0 -0x1.0873fp-3 -0x1.97fa1cp+0
+T mdct 120 1 -0x1p-15
+C mdct_pfa_15xM_inv 120
+C fft4_ns 4
+O 120 884eb1975b93cd9db4b88e83938eaafa -0x1.94586p-15 0x1.6f5ecp-15 0x1.94a72ep-17 -0x1.e466dap-20
+T mdct 120 1 0x1p+0
+C mdct_pfa_15xM_inv 120
+C fft4_ns 4
+O 120 f5a624259796e3fc6d31f09b2f6274b0 0x1.94585ep+0 -0x1.6f5eb6p+0 -0x1.94a71ep-2 0x1.e466b8p-5
+T mdct 120 1 -0x1p+0
+C mdct_pfa_15xM_inv 120
+C fft4_ns 4
+O 120 a6125da864ff511b6ae1db74729b4dd8 -0x1.94585ep+0 0x1.6f5eb6p+0 0x1.94a71ep-2 -0x1.e466b8p-5
+T mdct 240 1 -0x1p-15
+C mdct_pfa_15xM_inv 240
+C fft8_ns 8
+O 240 a9a3b3e451e6301af7cccd826bc75467 0x1.c48b4p-16 -0x1.26cd22p-16 0x1.6efb6ep-14 0x1.7db73ep-15
+T mdct 240 1 0x1p+0
+C mdct_pfa_15xM_inv 240
+C fft8_ns 8
+O 240 43fc42c8655a35dfd1a0fd59389be93f -0x1.c48b4ap-1 0x1.26cd6p-1 -0x1.6efb5ep+1 -0x1.7db74p+0
+T mdct 240 1 -0x1p+0
+C mdct_pfa_15xM_inv 240
+C fft8_ns 8
+O 240 bcef708cae0f7733a36bd8f1300b65f0 0x1.c48b4ap-1 -0x1.26cd6p-1 0x1.6efb5ep+1 0x1.7db74p+0
+T mdct 480 1 -0x1p-15
+C mdct_pfa_15xM_inv 480
+C fft16_ns 16
+O 480 89a6164d3ac89f991689e37ba315fe31 -0x1.2472fap-14 0x1.3a7d48p-14 -0x1.212608p-14 0x1.739848p-14
+T mdct 480 1 0x1p+0
+C mdct_pfa_15xM_inv 480
+C fft16_ns 16
+O 480 f3d62cb10c344486405430b5d84f6b44 0x1.2472fap+1 -0x1.3a7d3ep+1 0x1.212602p+1 -0x1.739842p+1
+T mdct 480 1 -0x1p+0
+C mdct_pfa_15xM_inv 480
+C fft16_ns 16
+O 480 15dd0f9e9b1edf137dee92a50634c933 -0x1.2472fap+1 0x1.3a7d3ep+1 -0x1.212602p+1 0x1.739842p+1
+T mdct 960 1 -0x1p-15
+C mdct_pfa_15xM_inv 960
+C fft32_ns 32
+O 960 fe59cf3c4429d4244b356929fdc47433 -0x1.0a30b6p-16 0x1.0fa958p-17 -0x1.8da7f4p-16 0x1.15f56cp-21
+T mdct 960 1 0x1p+0
+C mdct_pfa_15xM_inv 960
+C fft32_ns 32
+O 960 88c5285ac434d587831b038585dfd124 0x1.0a30bap-1 -0x1.0fa94p-2 0x1.8da866p-1 -0x1.15f462p-6
+T mdct 960 1 -0x1p+0
+C mdct_pfa_15xM_inv 960
+C fft32_ns 32
+O 960 60c013d83bda8f1b8f04062a8345b7b0 -0x1.0a30bap-1 0x1.0fa94p-2 -0x1.8da866p-1 0x1.15f462p-6
+T mdct 1920 1 -0x1p-15
+C mdct_pfa_15xM_inv 1920
+C fft64_ns 64
+O 1920 eb52ee3fc64aa6ce45e47ec5bb4b80a2 -0x1.577466p-18 0x1.ac2eb8p-15 -0x1.7a3ff2p-18 -0x1.eebd58p-17
+T mdct 1920 1 0x1p+0
+C mdct_pfa_15xM_inv 1920
+C fft64_ns 64
+O 1920 ea8ee8b4696ab81b46279fbe704ba337 0x1.5774c4p-3 -0x1.ac2ea6p+0 0x1.7a3cb4p-3 0x1.eebceep-2
+T mdct 1920 1 -0x1p+0
+C mdct_pfa_15xM_inv 1920
+C fft64_ns 64
+O 1920 9fe6204b330244dd389e6325bd900244 -0x1.5774c4p-3 0x1.ac2ea6p+0 -0x1.7a3cb4p-3 -0x1.eebceep-2

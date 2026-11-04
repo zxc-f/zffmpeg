@@ -217,6 +217,111 @@ fn fftSr(t: *const Tables, z: []Complex) void {
     }
 }
 
+/// ff_tx_mdct_gen_exp: the post-rotation's twiddles (`len2` of them,
+/// after the pre-rotation's in `pre_tab`'s order when the inverse has one),
+/// computed in double precision and rounded once.
+fn genExp(gpa: std.mem.Allocator, len2: usize, scale: f32, pre_tab: ?[]const u32) error{OutOfMemory}![]Complex {
+    const exp = try gpa.alloc(Complex, if (pre_tab != null) 2 * len2 else len2);
+    const scale_d: f64 = scale;
+    const theta = (if (scale_d < 0) @as(f64, @floatFromInt(len2)) else 0) + 1.0 / 8.0;
+    const magnitude = @sqrt(@abs(scale_d));
+    const off: usize = if (pre_tab != null) len2 else 0;
+    for (0..len2) |i| {
+        const alpha = std.math.pi / 2.0 * (@as(f64, @floatFromInt(i)) + theta) / @as(f64, @floatFromInt(len2));
+        exp[off + i] = .{ .re = @floatCast(@cos(alpha) * magnitude), .im = @floatCast(@sin(alpha) * magnitude) };
+    }
+    if (pre_tab) |map| {
+        for (0..len2) |i| exp[i] = exp[len2 + map[i]];
+    }
+    return exp;
+}
+
+/// mulinv: x with n * x = 1 modulo m.
+fn mulinv(n_in: usize, m: usize) usize {
+    const n = n_in % m;
+    for (1..m) |x| {
+        if ((n * x) % m == 1) return x;
+    }
+    unreachable; // coprime by construction (15 and a power of two)
+}
+
+/// ff_tx_tab_53: the 5- and 3-point transforms' constants.
+fn tab53() [12]f32 {
+    const pi = std.math.pi;
+    const c5: f32 = @floatCast(@cos(2.0 * pi / 5.0));
+    const c10: f32 = @floatCast(@cos(2.0 * pi / 10.0));
+    const s5: f32 = @floatCast(@sin(2.0 * pi / 5.0));
+    const s10: f32 = @floatCast(@sin(2.0 * pi / 10.0));
+    const c12: f32 = @floatCast(@cos(2.0 * pi / 12.0));
+    return .{ c5, c5, c10, c10, s5, s5, s10, s10, c12, c12, @floatCast(@cos(2.0 * pi / 6.0)), @floatCast(@cos(8.0 * pi / 6.0)) };
+}
+
+/// fft3: three points `in` to `out[o + k * stride]`.
+fn fft3(out: []Complex, o: usize, in: [3]Complex, stride: usize, tab: *const [12]f32) void {
+    const t0 = in[0];
+    var t1: Complex = .{ .re = in[1].im - in[2].im, .im = in[1].re - in[2].re };
+    var t2: Complex = .{ .re = in[1].re + in[2].re, .im = in[1].im + in[2].im };
+    out[o].re = t0.re + t2.re;
+    out[o].im = t0.im + t2.im;
+    t1.re = tab[8] * t1.re;
+    t1.im = tab[9] * t1.im;
+    t2.re = tab[10] * t2.re;
+    t2.im = tab[10] * t2.im;
+    out[o + stride] = .{ .re = t0.re - t2.re + t1.re, .im = t0.im - t2.im - t1.im };
+    out[o + 2 * stride] = .{ .re = t0.re - t2.re - t1.re, .im = t0.im - t2.im + t1.im };
+}
+
+/// DECL_FFT5: five points `in` to `out[o + d[k] * stride]`.
+fn fft5(out: []Complex, o: usize, in: *const [5]Complex, stride: usize, d: [5]usize, tab: *const [12]f32) void {
+    const dc = in[0];
+    var t: [6]Complex = undefined;
+    t[1].im = in[1].re - in[4].re;
+    t[0].re = in[1].re + in[4].re;
+    t[1].re = in[1].im - in[4].im;
+    t[0].im = in[1].im + in[4].im;
+    t[3].im = in[2].re - in[3].re;
+    t[2].re = in[2].re + in[3].re;
+    t[3].re = in[2].im - in[3].im;
+    t[2].im = in[2].im + in[3].im;
+    out[o + d[0] * stride] = .{ .re = dc.re + t[0].re + t[2].re, .im = dc.im + t[0].im + t[2].im };
+    // SMUL and CMUL, each reading the old value it overwrites second.
+    const t4re = tab[0] * t[2].re - tab[2] * t[0].re;
+    t[0].re = tab[0] * t[0].re - tab[2] * t[2].re;
+    t[4].re = t4re;
+    const t4im = tab[0] * t[2].im - tab[2] * t[0].im;
+    t[0].im = tab[0] * t[0].im - tab[2] * t[2].im;
+    t[4].im = t4im;
+    const t5re = tab[4] * t[3].re - tab[6] * t[1].re;
+    t[1].re = tab[4] * t[1].re + tab[6] * t[3].re;
+    t[5].re = t5re;
+    const t5im = tab[4] * t[3].im - tab[6] * t[1].im;
+    t[1].im = tab[4] * t[1].im + tab[6] * t[3].im;
+    t[5].im = t5im;
+    var z: [4]Complex = undefined;
+    z[0].re = t[0].re - t[1].re;
+    z[3].re = t[0].re + t[1].re;
+    z[0].im = t[0].im - t[1].im;
+    z[3].im = t[0].im + t[1].im;
+    z[2].re = t[4].re - t[5].re;
+    z[1].re = t[4].re + t[5].re;
+    z[2].im = t[4].im - t[5].im;
+    z[1].im = t[4].im + t[5].im;
+    out[o + d[1] * stride] = .{ .re = dc.re + z[3].re, .im = dc.im + z[0].im };
+    out[o + d[2] * stride] = .{ .re = dc.re + z[2].re, .im = dc.im + z[1].im };
+    out[o + d[3] * stride] = .{ .re = dc.re + z[1].re, .im = dc.im + z[2].im };
+    out[o + d[4] * stride] = .{ .re = dc.re + z[0].re, .im = dc.im + z[3].im };
+}
+
+/// fft15: five 3-point transforms, then three 5-point ones writing the
+/// outputs in the prime-factor order.
+fn fft15(out: []Complex, o: usize, in: *const [15]Complex, stride: usize, tab: *const [12]f32) void {
+    var tmp: [15]Complex = undefined;
+    for (0..5) |i| fft3(&tmp, i, in[i * 3 ..][0..3].*, 5, tab);
+    fft5(out, o, tmp[0..5], stride, .{ 0, 6, 12, 3, 9 }, tab);
+    fft5(out, o, tmp[5..10], stride, .{ 10, 1, 7, 13, 4 }, tab);
+    fft5(out, o, tmp[10..15], stride, .{ 5, 11, 2, 8, 14 }, tab);
+}
+
 pub const InitError = error{
     /// Not a power of two the transform supports.
     UnsupportedLength,
@@ -267,38 +372,112 @@ pub const Mdct = struct {
     tables: Tables,
     /// The sub-FFT's buffer, FFmpeg's in-place output.
     z: []Complex,
+    /// The 15-point prime-factor transform's state, for a length of 30
+    /// times a power of two (`mdct_pfa_15xM_inv`).
+    pfa: ?Pfa = null,
 
-    /// ff_tx_mdct_init: `len` a power of two from 4 to 2 * max_fft_len;
-    /// `scale` FFmpeg's (a negative scale shifts the phase by a half
-    /// turn, as ff_tx_mdct_gen_exp's theta does).
+    const Pfa = struct {
+        /// The sub-FFTs' length.
+        m: usize,
+        /// The post-rotation's input order (the CRT output map).
+        out_map: []u32,
+        /// Where each 15-point transform's outputs start (the sub-FFT's
+        /// scatter map).
+        sub_map: []u32,
+        /// The 15-point transforms' output, the sub-FFTs' buffer.
+        tmp: []Complex,
+        tab53: [12]f32,
+    };
+
+    /// ff_tx_mdct_init (`len` a power of two from 4 to 2 * max_fft_len) or,
+    /// inverse only, ff_tx_mdct_pfa_init (`len` 30 times a power of two
+    /// from 2, Opus CELT's 120 to 960); `scale` FFmpeg's (a negative scale
+    /// shifts the phase by a half turn, as ff_tx_mdct_gen_exp's theta
+    /// does).
     pub fn init(gpa: std.mem.Allocator, len: usize, inv: bool, scale: f32) InitError!Mdct {
+        if (len % 30 == 0 and len / 30 >= 2 and std.math.isPowerOfTwo(len / 30) and isLength(len / 30)) {
+            if (!inv) return error.UnsupportedLength;
+            return initPfa(gpa, len, scale);
+        }
         if (len < 4 or !isLength(len / 2) or !std.math.isPowerOfTwo(len)) return error.UnsupportedLength;
         const len2 = len / 2;
         var tables: Tables = try .init(gpa, len2);
         errdefer tables.deinit(gpa);
         const map = try revtab(gpa, len2, inv, if (inv) .gather else .scatter);
         errdefer gpa.free(map);
-        const exp = try gpa.alloc(Complex, if (inv) 2 * len2 else len2);
+        const exp = try genExp(gpa, len2, scale, if (inv) map else null);
         errdefer gpa.free(exp);
-        // ff_tx_mdct_gen_exp.
-        const scale_d: f64 = scale;
-        const theta = (if (scale_d < 0) @as(f64, @floatFromInt(len2)) else 0) + 1.0 / 8.0;
-        const magnitude = @sqrt(@abs(scale_d));
-        const off: usize = if (inv) len2 else 0;
-        for (0..len2) |i| {
-            const alpha = std.math.pi / 2.0 * (@as(f64, @floatFromInt(i)) + theta) / @as(f64, @floatFromInt(len2));
-            exp[off + i] = .{ .re = @floatCast(@cos(alpha) * magnitude), .im = @floatCast(@sin(alpha) * magnitude) };
-        }
-        if (inv) {
-            for (0..len2) |i| exp[i] = exp[len2 + map[i]];
-            // "Saves a multiply in a hot path."
-            for (map) |*m| m.* <<= 1;
-        }
+        // "Saves a multiply in a hot path."
+        if (inv) for (map) |*m| {
+            m.* <<= 1;
+        };
         const z = try gpa.alloc(Complex, len2);
         return .{ .gpa = gpa, .len = len, .inv = inv, .map = map, .exp = exp, .tables = tables, .z = z };
     }
 
+    /// ff_tx_mdct_pfa_init for 15 * m complex points: the compound
+    /// (Ruritanian and CRT) maps, the 15-point transform's own 3 x 5 input
+    /// order embedded, the twiddles in that order, and an m-point
+    /// split-radix sub-FFT.
+    fn initPfa(gpa: std.mem.Allocator, len: usize, scale: f32) InitError!Mdct {
+        const n = 15;
+        const len2 = len / 2;
+        const m = len2 / n;
+        var tables: Tables = try .init(gpa, m);
+        errdefer tables.deinit(gpa);
+        const map = try gpa.alloc(u32, len2);
+        errdefer gpa.free(map);
+        const out_map = try gpa.alloc(u32, len2);
+        errdefer gpa.free(out_map);
+        // ff_tx_gen_compound_mapping, gathering (the codelet's own options).
+        const m_inv = mulinv(m, n);
+        const n_inv = mulinv(n, m);
+        for (0..m) |j| {
+            for (0..n) |i| {
+                map[j * n + i] = @intCast((i * m + j * n) % len2);
+                out_map[(i * m * m_inv + j * n * n_inv) % len2] = @intCast(i * m + j);
+            }
+        }
+        // The inverse reverses each group but its DC.
+        for (0..m) |i| {
+            const group = map[i * n + 1 ..][0 .. n - 1];
+            for (0..(n - 1) >> 1) |j| std.mem.swap(u32, &group[j], &group[n - j - 2]);
+        }
+        // TX_EMBED_INPUT_PFA_MAP(map, len2, 3, 5).
+        var k: usize = 0;
+        while (k < len2) : (k += n) {
+            var tmp: [n]u32 = undefined;
+            @memcpy(&tmp, map[k..][0..n]);
+            for (0..5) |mm| {
+                for (0..3) |nn| map[k + mm * 3 + nn] = tmp[(mm * 3 + nn * 5) % n];
+            }
+        }
+        const exp = try genExp(gpa, len2, scale, map);
+        errdefer gpa.free(exp);
+        for (map) |*x| x.* <<= 1;
+        const sub_map = try revtab(gpa, m, true, .scatter);
+        errdefer gpa.free(sub_map);
+        const tmp = try gpa.alloc(Complex, len2);
+        errdefer gpa.free(tmp);
+        const z = try gpa.alloc(Complex, len2);
+        return .{
+            .gpa = gpa,
+            .len = len,
+            .inv = true,
+            .map = map,
+            .exp = exp,
+            .tables = tables,
+            .z = z,
+            .pfa = .{ .m = m, .out_map = out_map, .sub_map = sub_map, .tmp = tmp, .tab53 = tab53() },
+        };
+    }
+
     pub fn deinit(m: *Mdct) void {
+        if (m.pfa) |p| {
+            m.gpa.free(p.out_map);
+            m.gpa.free(p.sub_map);
+            m.gpa.free(p.tmp);
+        }
         m.gpa.free(m.map);
         m.gpa.free(m.exp);
         m.gpa.free(m.z);
@@ -309,7 +488,48 @@ pub const Mdct = struct {
     /// The inverse: `len` coefficients in `src` to `len` samples in `dst`;
     /// the forward: 2 * len samples to `len` coefficients.
     pub fn run(m: *const Mdct, dst: []f32, src: []const f32) void {
+        if (m.pfa) |*p| return m.inversePfa(p, dst, src);
         if (m.inv) m.inverse(dst, src) else m.forward(dst, src);
+    }
+
+    /// ff_tx_mdct_pfa_15xM_inv: each group of 15 pre-rotated inputs
+    /// through the 15-point transform into the sub-FFTs' buffer, the 15
+    /// sub-FFTs, then the post-rotation in the CRT order.
+    fn inversePfa(m: *const Mdct, p: *const Pfa, dst: []f32, src: []const f32) void {
+        const n = 15;
+        const len2 = m.len / 2;
+        const len4 = m.len / 4;
+        std.debug.assert(dst.len == m.len and src.len == m.len);
+        var fin: [n]Complex = undefined;
+        var group: usize = 0;
+        while (group * n < len2) : (group += 1) {
+            const in_map = m.map[group * n ..][0..n];
+            const exp = m.exp[group * n ..][0..n];
+            for (&fin, in_map, exp) |*c, k, e| {
+                const tmp: Complex = .{ .re = src[m.len - 1 - k], .im = src[k] };
+                c.* = .{ .re = tmp.re * e.re - tmp.im * e.im, .im = tmp.re * e.im + tmp.im * e.re };
+            }
+            fft15(p.tmp, p.sub_map[group], &fin, p.m, &p.tab53);
+        }
+        for (0..n) |i| fftSr(&m.tables, p.tmp[p.m * i ..][0..p.m]);
+        const exp = m.exp[len2..];
+        const z = m.z;
+        for (0..len4) |i| {
+            const j0 = len4 + i;
+            const j1 = len4 - i - 1;
+            const s0 = p.out_map[j0];
+            const s1 = p.out_map[j1];
+            const src1: Complex = .{ .re = p.tmp[s1].im, .im = p.tmp[s1].re };
+            const src0: Complex = .{ .re = p.tmp[s0].im, .im = p.tmp[s0].re };
+            z[j1].re = src1.re * exp[j1].im - src1.im * exp[j1].re;
+            z[j0].im = src1.re * exp[j1].re + src1.im * exp[j1].im;
+            z[j0].re = src0.re * exp[j0].im - src0.im * exp[j0].re;
+            z[j1].im = src0.re * exp[j0].re + src0.im * exp[j0].im;
+        }
+        for (z, 0..) |c, i| {
+            dst[2 * i] = c.re;
+            dst[2 * i + 1] = c.im;
+        }
     }
 
     /// ff_tx_mdct_inv.
@@ -450,8 +670,9 @@ test "every transform equals FFmpeg's bit for bit (vectors/tx.txt)" {
         };
         cases += 1;
     }
-    // 17 FFT lengths and 13 MDCT lengths, both directions, four scales.
-    try testing.expectEqual(17 * 2 + 13 * 2 * 4, cases);
+    // 17 FFT lengths and 13 MDCT lengths, both directions, four scales;
+    // six prime-factor inverse MDCT lengths at three scales.
+    try testing.expectEqual(17 * 2 + 13 * 2 * 4 + 6 * 3, cases);
 }
 
 /// The relative RMS error of `ours` against `exact`.
@@ -504,9 +725,13 @@ test "the transforms equal their float64 definitions within the declared error" 
             try testing.expect(relativeError(ours, exact) <= declared_error);
         }
     }
-    n = 4;
-    while (n <= 2048) : (n *= 2) {
-        for ([_]bool{ false, true }) |inv| {
+    // The power-of-two lengths both ways, then the prime-factor ones
+    // (inverse only).
+    const lengths = [_]usize{ 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 60, 120, 240, 480, 960 };
+    for (lengths) |len| {
+        n = len;
+        const directions: []const bool = if (std.math.isPowerOfTwo(n)) &.{ false, true } else &.{true};
+        for (directions) |inv| {
             for ([_]f32{ 1, -1, 1.0 / 32768.0 }) |scale| {
                 var m: Mdct = try .init(gpa, n, inv, scale);
                 defer m.deinit();
