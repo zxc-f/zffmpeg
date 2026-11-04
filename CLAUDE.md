@@ -348,6 +348,12 @@ Makefile feature/dependency entries, and relevant tests before porting behavior.
 Port a small working path at a time. The first path is a bounded RIFF/WAV PCM
 signed 16-bit little-endian reader/decoder/writer, then the zffprobe CLI.
 
+Match FFmpeg, its bugs and quirks included, even where a specification or the
+codec's own reference library (libopus, libvorbis, ...) behaves otherwise.
+Record every such behavior kept on purpose in [notes.md](notes.md) in the same
+change, in the feature's section: the FFmpeg code, what the other behavior is,
+and the checks that pin it ("Reference behavior" in its port design policy).
+
 For implemented multimedia behavior, use hand-checked vectors and differential
 tests against a recorded FFmpeg revision/configuration. Check decoded content,
 metadata, timestamps, failure cases, and resource cleanup. Bit-exact results are
