@@ -1863,6 +1863,36 @@ names, not as an empty framework.
     Done when generated matrices equal `swr_build_matrix` output for every
     supported layout pair and rematrixed output matches the reference.
 
+    ```text
+    ID / parent: T23c / T23
+    State: implementing
+    Supported behavior and explicit exclusions: part 1, the matrix
+      (`swr_build_matrix2`): native and custom layouts of up to 64 channels,
+      libswresample's mix rules, the center, surround and LFE mix levels,
+      Dolby and Dolby Pro Logic II matrix encodings, maxval scaling and the
+      rematrix volume. Part 2: applying it to samples as libswresample does
+      in its internal format, and zffmpeg's output -ac/-ch_layout. Excluded:
+      custom matrices, rematrix_maxval and internal_sample_fmt options,
+      ambisonic layouts.
+    Needs (verified) / lands with / verified after: T23a, T23b (verified).
+    Contract and source provenance: port.md "Rematrixing"; notes.md
+      "Rematrixing"; rematrix.c, options.c, swresample_internal.h.
+    Required fixtures / optional corpus: 4833 matrices of the pinned
+      libswresample (rematrix_vectors.c); no optional corpus.
+    Ownership, state transitions and limits: a caller-owned 64 x 64 matrix;
+      nothing allocates.
+    Comparison rule and intentional differences: bit for bit; none.
+    Implementation files and test entry points: resample/rematrix.zig;
+      rematrix_vectors.c.
+    Evidence commit / Linux CI run / reference report: part 1 local Linux
+      runs; CI pending.
+    Required cases: part 1 passes; part 2 is missing.
+    Optional cases: none
+    Fuzz seeds, budget and result: none yet.
+    Remaining work or blocker / next action: part 2, the rematrix kernels in
+      libswresample's internal formats and the output layout options.
+    ```
+
 - [ ] **T24 — Resampling.** Needs T17a and T23a.
   Reference: `libswresample/resample.c`, `resample_dsp.c` (soxr is external
   and excluded).

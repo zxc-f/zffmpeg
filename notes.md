@@ -228,6 +228,14 @@ port.md's contract table updated, and (after T06) the parser.
 | Apple's `chan` (part 4) | AIFF's `CHAN` and CAF's `chan` share one reader and writer, `format/mov_chan.zig`, FFmpeg's `ff_mov_read_chan` and `ff_mov_write_chan` with their tables restated. Their oracle calls those internal functions from the static `libavformat` (`chan_vectors.c`), since no public API reaches them; the vectors sweep every tag number from 98 to 185 with every count up to 24, bitmaps and description lists. Two stricter choices: a body too short for the descriptions it declares is `InvalidFormat` (FFmpeg keeps the layout and goes on reading inside the AIFF chunk; in CAF it seeks past it on a seekable file), and an AIFF `CHAN` after `SSND` or a CAF `chan` after `data` is skipped (FFmpeg reads a seekable file's), as a sequential reader has reported the stream. `compare.py` copies writer outputs through FFmpeg's muxer with `-guess_layout_max 0`, so its command line does not give an unspecified layout a `CHAN`. | `mov_chan.zig`, `aiff.zig`, `caf.zig`, `chan_vectors.c`, `compare.py`. |
 | C number parsing | Masks (`strtoull` base 0), counts (`strtol` base 10), `USR` ids (`strtol` base 0) and `%d channels (...)` (`sscanf`) follow glibc on Linux x86-64, the reference platform: a 64-bit `long`, then C's truncation to `int`. The vectors avoid values past 32 bits, where Windows' 32-bit `long` differs. | `strtol`, `strtoull`, `scanChannels` in `channel_layout.zig`. |
 
+## Rematrixing
+
+| Decision | Current choice and reason | To change it |
+| --- | --- | --- |
+| Parts (T23c) | Part 1 is the matrix builder alone, `swr_build_matrix2`, checked on 4833 matrices of the pinned libswresample (every pair of the 42 named layouts for integer and float output, option sets on 13 downmixes, 36 custom layouts against 10 others both ways); part 2 applies it to samples and gives zffmpeg the output `-ac`/`-ch_layout`. | TODO.md T23c. |
+| Option values | The mix levels and the rematrix volume are libswresample's `float` options, so `Options` takes the value a `float` holds: the default `C_30DB` is `(float)M_SQRT1_2`, which every default matrix's coefficients show. `maxval` is the caller's, as `auto_matrix` picks it: 1 for integer output, `INT_MAX` for float. | `rematrix.Options`, `rematrix_vectors.c`. |
+| Vector size | About 1 MB, nonzero coefficients as C99 hex floats; the named pairs are kept whole, as the rules branch on every channel combination. | `rematrix_vectors.c`. |
+
 ## Raw PCM contract
 
 | Decision | Current choice and reason | To change it |

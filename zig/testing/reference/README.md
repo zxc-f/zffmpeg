@@ -73,6 +73,14 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/chan_vector
 ./chan-vectors | diff -u zig/testing/vectors/chan.txt -
 ```
 
+The T23c rematrix vectors come from the reference's `libswresample`
+(`swr_build_matrix2`):
+
+```bash
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/rematrix_vectors.c .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o rematrix-vectors
+./rematrix-vectors | diff -u zig/testing/vectors/rematrix.txt -
+```
+
 On Windows (MSYS2 UCRT64 clang) link with `-lm -lbcrypt` instead of
 `-pthread` and strip the carriage returns MinGW's text output adds
 (`tr -d '\015'`) before comparing.

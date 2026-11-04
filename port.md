@@ -573,12 +573,31 @@ when only the format changes ([resample/audioconvert.zig](zig/resample/audioconv
 | Dither | `dither_method` (rectangular, triangular, triangular high-pass, and the noise-shaping lipshitz, f-, modified-e- and improved-e-weighted, shibata, low and high shibata), `dither_scale` and `output_sample_bits`: FFmpeg's internal format, its seeded noise sequence and noise buffer, wrapping integer addition, and the shaping filters in its float arithmetic, falling back to triangular high-pass when no filter is within 5% of the rate. No dither where FFmpeg's scale is 0 (to a float, or to an integer as wide). |
 | Pipeline | As FFmpeg's command line: a dither only when the sample format changes, `output_sample_bits` 24 for a 24-bit encoder, and noise that follows FFmpeg's packet sizes for the input (one libswresample call per packet), not the port's. |
 | API | `audioconvert.convert(dst, src, dst_offset, src_offset, count)` and `dither.Dither` (`init`, `setCalls`, `convert` with caller scratch) over `samples.Buffer`; `audioconvert.Converter` is a stage, dithered or not. Nothing allocates. |
-| Not yet | Resampling (T24), rematrixing (T23c), libswresample's SIMD kernels (FFmpeg's C paths are the reference), and more than 64 channels. |
+| Not yet | Resampling (T24), rematrixing (T23c, [below](#rematrixing)), libswresample's SIMD kernels (FFmpeg's C paths are the reference), and more than 64 channels. |
 
 The oracles are FFmpeg's `libswresample`: [sampleconv_vectors.c](zig/testing/reference/sampleconv_vectors.c)
 and [dither_vectors.c](zig/testing/reference/dither_vectors.c) record its
 conversions, and `compare.py` compares `zffmpeg`'s converted and dithered
 outputs with FFmpeg's.
+
+### Rematrixing
+
+T23c mixes one channel layout into another as libswresample does. Its first
+part, [resample/rematrix.zig](zig/resample/rematrix.zig), builds the matrix
+(`swr_build_matrix2`):
+
+| Case | Behavior |
+| --- | --- |
+| Layouts | Native and custom, of at most 64 channels. A layout with one channel in use, other than front center, mixes as mono, in its place; the stereo downmix pair alone mixes as stereo unless the other layout has downmix channels too. When the channels change, each layout needs a front channel, no channel past bit 63 and no lone half of a pair (front, side, back, front center pairs, top front, top back, top side, bottom front); an unspecified layout never mixes. Otherwise `UnsupportedLayout`. |
+| Rules | Shared channels pass through; every other one goes to its nearest outputs by libswresample's rules, the ITU-R BS.2127-1 and IAMF ones for the height channels included, at the center, surround and LFE mix levels, or as Dolby or Dolby Pro Logic II matrixed stereo. |
+| Scaling | The largest sum of an output channel's coefficients is brought down to `maxval` (1 for integer output, which libswresample's command-line path clips at; never for float output, whose `maxval` is `INT_MAX`), or to the absolute value of a negative rematrix volume, then a positive rematrix volume multiplies the matrix. |
+| Options | libswresample's defaults: center and surround mix levels `C_30DB` and LFE 0, as its `float` options store them, so `(float)M_SQRT1_2`; rematrix volume 1. |
+| Not yet | Applying the matrix to samples and zffmpeg's output `-ac`/`-ch_layout` (part 2); custom matrices, `rematrix_maxval`, `internal_sample_fmt`. |
+
+The oracle is [rematrix_vectors.c](zig/testing/reference/rematrix_vectors.c):
+4833 matrices from the pinned `libswresample`, every pair of named layouts
+for integer and float output, option sets on downmixes and custom layouts,
+equal coefficient by coefficient, bit for bit.
 
 ## Modern Zig metaprogramming
 

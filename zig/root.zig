@@ -93,6 +93,7 @@ test {
     _ = @import("format/mov_chan.zig");
     _ = @import("resample/audioconvert.zig");
     _ = @import("resample/dither.zig");
+    _ = @import("resample/rematrix.zig");
     _ = @import("format/registry.zig");
     _ = @import("format/detect.zig");
     _ = @import("format/replay.zig");

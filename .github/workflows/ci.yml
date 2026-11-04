@@ -148,6 +148,14 @@ jobs:
             -lm -pthread -o chan-vectors
           ./chan-vectors | diff -u zig/testing/vectors/chan.txt -
 
+      # The committed T23c oracle must be what this build's libswresample gives.
+      - name: Check the rematrix vectors (T23c)
+        run: |
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/rematrix_vectors.c \
+            .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a \
+            -lm -pthread -o rematrix-vectors
+          ./rematrix-vectors | diff -u zig/testing/vectors/rematrix.txt -
+
       # The committed T23a oracle must be what this build's libswresample gives.
       - name: Check the sample conversion and dither vectors (T23a)
         run: |
