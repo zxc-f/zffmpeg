@@ -3076,6 +3076,48 @@ names, not as an empty framework.
     LAME and VBRI headers for duration and gapless delay and padding.
     Done when packets, duration and gapless parameters equal the reference's,
     without decoding.
+
+    ```text
+    ID / parent: T29a / T29
+    State: G0 (planned)
+    Scope: FFmpeg's mp3 demuxer (mp3dec.c) on libavformat's generic layer
+      (demux.zig), as the ffmpeg program opens an input: the ID3v2 tag
+      read before the demuxer (FF_INFMT_FLAG_ID3V2_AUTO, id3v2.c: versions
+      2.2 to 2.4, unsynchronisation, extended headers, the text encodings,
+      text, TXXX, COMM and PRIV frames, the metadata conversions), ID3v1
+      at the end when there is no ID3v2 (id3v1.c), the Xing/Info tag with
+      LAME's extension (delay, padding, its CRC, the encoder tag), VBRI and
+      iTunSMPB for duration, bit rate and the gapless start and end
+      (start_skip_samples, first and last discard samples: skip-samples
+      side data and discard padding from the generic layer), the resync
+      to two consecutive frames, 1024-byte raw reads split by FFmpeg's
+      mpegaudio parser (ff_combine_frame, the header decoding of
+      mpegaudiodecheader.c, codec mp1, mp2 or mp3 by layer), the ID3v1
+      and APE footers it drops at the end; estimate_timings' durations;
+      detection by mp3_read_probe with av_probe_input_format3's ID3v2
+      skip and av_probe_input_buffer2's retry with more data (the probe
+      buffer grows to 1 MiB); seeking through the generic index (mp3_seek
+      falls back to it without usetoc or fastseek). zffprobe reports MP3;
+      the framecrc stream copy as T27a's.
+    Exclusions: decoding (T29b, T29c), so no conversion from MP3 and the
+      reference build enables no MPEG audio decoder yet; APIC pictures and
+      CHAP chapters (an attached-picture stream and chapters in FFmpeg,
+      recorded differences as FLAC's pictures); compressed ID3v2 frames
+      (the reference build has no zlib, so FFmpeg skips them too); MP3ADU;
+      the usetoc and fastseek options; the mp3 muxer.
+    Plan: part 0, the contract (port.md "MP3 contract"), the reference
+      build's mp3 demuxer and mpegaudio parser, the registry's mp3 format
+      and mp1, mp2 and mp3 descriptors, generated fixtures (frames of every
+      MPEG version, layer, rate, bit rate, padding and channel mode with
+      arbitrary payloads, free format, junk, resyncs, every tag kind, Xing
+      with and without LAME, VBRI, iTunSMPB, truncated and damaged
+      streams) and an oracle printing libavformat's streams, tags and
+      packets (mp3_vectors.c, as ogg_vectors.c); part 1, ID3v2 and ID3v1;
+      part 2, the frame header, the parser and the generic layer's
+      full-raw parsing and gapless side data; part 3, the demuxer, its
+      probe and detection's ID3v2 skip and probe retry; part 4, zffprobe,
+      the framecrc copy in compare.py and seeking (seek_vectors.c).
+    ```
   - [ ] **T29b — Layer III decoder.** Needs T18c and T29a. Huffman decoding,
     requantization, stereo modes, IMDCT, alias reduction and polyphase
     synthesis.
