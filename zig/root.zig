@@ -92,6 +92,8 @@ test {
     _ = @import("codec/g711.zig");
     _ = @import("codec/registry.zig");
     _ = @import("codec/bits.zig");
+    _ = @import("codec/flac.zig");
+    _ = @import("codec/flac_parser.zig");
     _ = @import("core/audio.zig");
     _ = @import("core/channel_layout.zig");
     _ = @import("core/time.zig");
@@ -109,6 +111,7 @@ test {
     _ = @import("format/aiff.zig");
     _ = @import("format/raw.zig");
     _ = @import("format/caf.zig");
+    _ = @import("format/flac.zig");
     _ = @import("format/mov_chan.zig");
     _ = @import("resample/audioconvert.zig");
     _ = @import("resample/dither.zig");
