@@ -56,9 +56,9 @@ FFmpeg's, with Ogg Vorbis and Ogg FLAC decoded by zffmpeg, which completes
 T27; and T28a, the Opus range decoder, packet parsing and CELT bit for bit
 FFmpeg's, with Ogg Opus of CELT frames decoded by zffmpeg and RFC 8251's
 CELT-only test vectors passing opus_compare; and T28b, SILK bit for bit
-FFmpeg's with its resampling, RFC 8251's vectors without hybrid frames
-decoded as FFmpeg decodes them. **Next: T28c (hybrid frames, multistream
-and trimming). See
+FFmpeg's with its resampling, and T28c, hybrid frames and multistream
+packets, RFC 8251's twelve vectors decoded as FFmpeg decodes them, which
+completes T28. **Next: T29a (the MPEG audio demuxer and parser). See
 [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
@@ -2861,7 +2861,7 @@ names, not as an empty framework.
       raw PCM, FLAC and Ogg outputs.
     ```
 
-- [ ] **T28 — Opus decoder.** Checked when T28a–T28c are. Reference:
+- [x] **T28 — Opus decoder.** Checked when T28a–T28c are. Reference:
   `libavcodec/opus/`, `libavformat/oggparseopus.c`; RFC 6716, RFC 7845 and
   RFC 8251 test vectors; `tests/fate/opus.mak`. The RFC's `opus_compare`
   check is ported natively into the harness.
@@ -3015,10 +3015,56 @@ names, not as an empty framework.
     Limitations: hybrid frames and SILK in multistream packets (T28c);
       FFmpeg's SILK quality as is (opus_compare not met on every vector).
     ```
-  - [ ] **T28c — Hybrid mode, multistream and trimming.** Needs T28b. Hybrid
+  - [x] **T28c — Hybrid mode, multistream and trimming.** Needs T28b. Hybrid
     frames, channel mapping families, pre-skip and end trimming at 48 kHz.
-    Done when every RFC test vector meets `opus_compare` and Ogg Opus timing
-    matches the reference.
+    Done when every RFC test vector decodes as FFmpeg decodes it (revised
+    from `opus_compare`, as T28b's was: notes.md "Opus") and Ogg Opus
+    timing matches the reference.
+
+    ```text
+    ID / parent: T28c / T28
+    State: G5 (verified)
+    Plan: dec.c's hybrid path (SILK at 16 kHz resampled, CELT from band 17
+      added, the CELT samples past the resampled SILK held back in
+      celt_delay, the hybrid redundancy flag and size) and
+      opus_decode_packet's multistream handling (the sync buffers, the
+      dummy outputs of unmapped channels, the maps' output pointers); pre-
+      skip and end trimming already decode as FFmpeg's since T28a.
+    Evidence: codec/opusdec.zig decodes hybrid frames and multistream
+      packets as dec.c does, with FFmpeg's behaviors kept and each recorded
+      in notes.md "Opus" (the sync buffers' lost samples and 32-sample
+      limit, a silenced map taking stream 0's first channel; the one
+      undefined case, a channel FFmpeg leaves unwritten, made silence);
+      the range decoder reads past a frame into the rest of the packet as
+      FFmpeg's checked reader does (codec/bits.zig BitReader.initIn,
+      codec/opus_rc.zig RangeDecoder.initIn), found by comparing the
+      SILK state of a code 3 hybrid packet frame by frame against the
+      reference's ff_silk_decode_superframe; the conversion keeps the
+      Opus and Vorbis decoders' own layout over the program's guess;
+      UnsupportedMode and UnsupportedOpusMode removed. Three generated
+      fixtures: ogg_opus_hybrid (hybrid packets with redundancy frames
+      before and after, seeds found by decoding, SILK and CELT packets
+      between, a code 3 packet), ogg_opus_multistream (5.1, family 1,
+      four streams of mixed modes and SILK rates) and ogg_opus_mapped
+      (family 255, a gain, a silenced, a copied channel and an unmapped
+      stream) (b78ea58). G5 on local Linux runs at b78ea58: zig fmt, the
+      fixture check (33 Ogg fixtures), zig build test 353/353 in Debug,
+      ReleaseSafe and ReleaseFast (218 steps), the cross builds, and
+      .references/local-ci.sh: every vector check passes (ogg.txt,
+      seek_ogg.txt and opus.txt regenerated for the new fixtures), the
+      Ogg Opus fixtures' 244 frames and 1620 seeks bit for bit, the
+      comparison 6069 passed with only the 176 known clang 23 inf/NaN
+      failures, zffprobe and the copies 33/33, the Ogg decoding 243/243
+      (14 understood: the program's decoded timestamps into Ogg, T53),
+      and the optional cases 61/61 with none skipped: FATE 37/37 and all
+      24 decodings of RFC 8251's 12 vectors, stereo and mono, equal to
+      FFmpeg's (opus_compare passing 01, 02, 05, 07, 08, 09, 10, 11 and
+      12 in stereo, 01, 07, 11 and 12 in mono, as FFmpeg's decoding
+      does).
+    Limitations: mapping family 2 (ambisonics); an output channel FFmpeg
+      leaves unwritten is silence; the ffmpeg program's decoded
+      timestamps into Ogg (T53); no Opus encoder; not optimized.
+    ```
 
 - [ ] **T29 — MPEG audio: MP1, MP2 and MP3.** Checked when T29a–T29d are.
   Reference: `libavformat/mp3dec.c`, `mp3enc.c`,
