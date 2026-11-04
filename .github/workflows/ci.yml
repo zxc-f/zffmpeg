@@ -276,6 +276,16 @@ jobs:
             -lm -pthread -o vorbis-vectors
           LC_ALL=C ./vorbis-vectors zig/testing/fixtures/ogg/*vorbis*.ogg | diff -u zig/testing/vectors/vorbis.txt -
 
+      # The committed T28a oracle must be what this build's Opus decoder
+      # makes of every Ogg fixture's first Opus stream.
+      - name: Check the Opus decoder vectors (T28a)
+        run: |
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/opus_vectors.c \
+            .references/ffmpeg-install/lib/libavformat.a .references/ffmpeg-install/lib/libavcodec.a \
+            .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a \
+            -lm -pthread -o opus-vectors
+          LC_ALL=C ./opus-vectors zig/testing/fixtures/ogg/*.ogg | diff -u zig/testing/vectors/opus.txt -
+
       # The committed T18c oracle must be what this build's VLC builder makes.
       - name: Check the VLC vectors (T18c)
         run: |
@@ -355,6 +365,10 @@ jobs:
         continue-on-error: true
         run: bash zig/testing/reference/fate_sync.sh
 
+      - name: Fetch the optional Opus test vectors (T28a)
+        continue-on-error: true
+        run: bash zig/testing/reference/opus_vectors_sync.sh
+
       - name: Compare with the reference (T10)
         run: |
           python3 zig/testing/reference/compare.py \
@@ -365,6 +379,7 @@ jobs:
             --zffmpeg zig-out/bin/zffmpeg \
             --registry zig-out/bin/registry-dump \
             --hasher zig-out/bin/hash-driver \
+            --opus-vector-driver zig-out/bin/opus-vector-driver \
             --report reference-report.md
 
       # The report, its coverage summary included, on the run's page,

@@ -21,6 +21,7 @@ const std = @import("std");
 const flac = @import("../codec/flac.zig");
 const flacdec = @import("../codec/flacdec.zig");
 const vorbisdec = @import("../codec/vorbis.zig");
+const opusdec = @import("../codec/opusdec.zig");
 const metadata = @import("../core/metadata.zig");
 const rational = @import("../core/rational.zig");
 const vorbiscomment = @import("vorbiscomment.zig");
@@ -88,8 +89,9 @@ pub const StreamInfo = struct {
     initial_padding: u32 = 0,
     seek_preroll: u32 = 0,
     bit_rate: i64 = 0,
-    /// FFmpeg's Vorbis decoder refuses the stream's headers (T27d), so
-    /// avformat_find_stream_info cannot open it.
+    /// FFmpeg's Vorbis decoder refuses the stream's headers (T27d), or its
+    /// Opus decoder the OpusHead (T28a), so avformat_find_stream_info
+    /// cannot open it.
     decoder_refuses: bool = false,
 
     fn deinit(s: *StreamInfo, gpa: std.mem.Allocator) void {
@@ -443,6 +445,12 @@ pub const Demuxer = struct {
         }
         // What avformat_find_stream_info's decoder makes of the headers.
         for (d.streams.items) |*os| {
+            if (os.info.codec == .opus) {
+                _ = opusdec.Head.parse(os.info.extradata.items) catch {
+                    os.info.decoder_refuses = true;
+                };
+                continue;
+            }
             if (os.info.codec != .vorbis) continue;
             if (vorbisdec.Decoder.init(gpa, os.info.extradata.items)) |dec| {
                 var v = dec;
@@ -624,11 +632,9 @@ pub const Demuxer = struct {
             .sample_rate = info.sample_rate,
             .channels = info.channels,
             .parse_flac = info.codec == .flac,
-            // The reference build decodes FLAC and Vorbis, not Opus.
             .decoder = if (info.codec) |codec| switch (codec) {
                 .flac => .flac,
-                .vorbis => if (info.decoder_refuses) .refuses else .format_at_open,
-                .opus => .none,
+                .vorbis, .opus => if (info.decoder_refuses) .refuses else .format_at_open,
             } else .none,
             .bit_rate = info.bit_rate,
             .initial_padding = info.initial_padding,
@@ -1595,9 +1601,9 @@ fn seekBlock(name: []const u8) ?[]const u8 {
     return if (start) |s| seek_vectors[s..] else null;
 }
 
-/// The next packet's line and, for FLAC, its first 16 decoded sample
-/// frames, as seek_vectors.c prints them (the reference build decodes
-/// neither Opus nor Vorbis).
+/// The next packet's line and, for FLAC and Opus, its first 16 decoded
+/// sample frames, as seek_vectors.c prints them (the reference build
+/// decodes Vorbis only from its headers on, which a seek does not resend).
 fn nextAfterSeek(gpa: std.mem.Allocator, layer: anytype, d: *Demuxer, out: *std.ArrayList(u8)) !void {
     const p = try layer.next() orelse return out.appendSlice(gpa, "P EOF\n");
     var a: [24]u8 = undefined;
@@ -1610,10 +1616,10 @@ fn nextAfterSeek(gpa: std.mem.Allocator, layer: anytype, d: *Demuxer, out: *std.
         defer gpa.free(z);
         try out.appendSlice(gpa, z);
     }
-    const info = d.stream(p.stream);
-    // Opus decodes with T28; until then its decoded samples are not
-    // compared (the test drops the oracle's D line for them).
-    if (info.codec == .opus) return out.appendSlice(gpa, "D opus\n");
+    // seek_vectors.c opens the first stream's decoder and sends it every
+    // packet, of whichever stream.
+    const info = d.stream(0);
+    if (info.codec == .opus) return opusAfterSeek(gpa, info, p, out);
     if (info.codec != .flac or info.extradata.items.len != flac.streaminfo_size) return out.appendSlice(gpa, "D none\n");
     var dec = try flacdec.Decoder.init(gpa, flac.StreamInfo.parse(info.extradata.items[0..flac.streaminfo_size]));
     defer dec.deinit();
@@ -1637,9 +1643,47 @@ fn nextAfterSeek(gpa: std.mem.Allocator, layer: anytype, d: *Demuxer, out: *std.
     try out.append(gpa, '\n');
 }
 
+/// An Opus packet after a seek, as seek_vectors.c decodes it: a flushed
+/// decoder, libavcodec's discarding, then the first 16 sample frames'
+/// bytes of the first plane (FFmpeg's `frame->data[0]`, so a stereo
+/// frame's line holds 32 samples of its first channel).
+fn opusAfterSeek(gpa: std.mem.Allocator, info: *const StreamInfo, p: demux.Packet, out: *std.ArrayList(u8)) !void {
+    var dec = opusdec.Decoder.init(gpa, info.extradata.items, true) catch return out.appendSlice(gpa, "D none\n");
+    defer dec.deinit();
+    const channels = dec.channels();
+    const storage = try gpa.alloc(f32, @as(usize, channels) * opusdec.max_frame);
+    defer gpa.free(storage);
+    var planes: [255][]f32 = undefined;
+    for (0..channels) |c| planes[c] = storage[c * opusdec.max_frame ..][0..opusdec.max_frame];
+    const n = dec.decodePacket(p.data, planes[0..channels]) catch |err| switch (err) {
+        // SILK and hybrid frames decode with T28b and T28c.
+        error.UnsupportedMode => return out.appendSlice(gpa, "D pending\n"),
+        error.InvalidData => return out.appendSlice(gpa, "D none\n"),
+    };
+    // avcodec_open2 starts the skip at avctx->delay, the pre-skip, and a
+    // flush keeps it.
+    var discard: Discard = .{ .skip = dec.head.pre_skip };
+    const kept = discard.apply(n, p.skip) orelse return out.appendSlice(gpa, "D none\n");
+    const count = kept[1] - kept[0];
+    const header = try std.fmt.allocPrint(gpa, "D {d} ", .{count});
+    defer gpa.free(header);
+    try out.appendSlice(gpa, header);
+    // av_samples_copy moved the kept samples to the plane's start; past
+    // them the plane keeps what the decoder wrote there.
+    for (0..@min(count, 16) * channels) |j| {
+        const v = if (j < count) planes[0][kept[0] + j] else planes[0][j];
+        var le: [4]u8 = undefined;
+        std.mem.writeInt(u32, &le, @bitCast(v), .little);
+        const hex = std.fmt.bytesToHex(le, .lower);
+        try out.appendSlice(gpa, &hex);
+    }
+    try out.append(gpa, '\n');
+}
+
 test "every Ogg fixture seeks as FFmpeg seeks it (vectors/seek_ogg.txt)" {
     const gpa = testing.allocator;
     var compared: usize = 0;
+    var pending_modes: usize = 0;
     inline for (fixtures.ogg.all) |fixture| {
         const block_text = seekBlock(fixture.name) orelse return error.MissingVector;
         var lines = std.mem.splitScalar(u8, block_text, '\n');
@@ -1690,12 +1734,13 @@ test "every Ogg fixture seeks as FFmpeg seeks it (vectors/seek_ogg.txt)" {
                     error.SeekFailed, error.InvalidRange => try actual.appendSlice(gpa, "-1"),
                     else => return err,
                 }
-                // Pending T28: an Opus packet's decoded samples.
-                if (std.mem.endsWith(u8, actual.items, "D opus\n")) {
+                // Pending T28b and T28c: a SILK or hybrid packet's samples.
+                if (std.mem.endsWith(u8, actual.items, "D pending\n")) {
                     const at = std.mem.lastIndexOf(u8, expected.items, "\nD ") orelse 0;
                     const start = if (at == 0 and std.mem.startsWith(u8, expected.items, "D ")) 0 else at + 1;
                     expected.shrinkRetainingCapacity(start);
-                    try expected.appendSlice(gpa, "D opus\n");
+                    try expected.appendSlice(gpa, "D pending\n");
+                    pending_modes += 1;
                 }
                 const want = if (std.mem.eql(u8, ret, "0")) expected.items else ret;
                 testing.expectEqualStrings(want, actual.items) catch |err| {
@@ -1708,6 +1753,8 @@ test "every Ogg fixture seeks as FFmpeg seeks it (vectors/seek_ogg.txt)" {
     }
     // Every seek of the fixtures FFmpeg opens.
     try testing.expectEqual(1404, compared);
+    // ogg_opus_frame_counts' SILK and hybrid packets (T28b, T28c).
+    try testing.expectEqual(17, pending_modes);
 }
 
 test "a demuxer that cannot seek fails a seek instead of repositioning" {
@@ -1848,5 +1895,101 @@ fn decodeVorbisFixture(gpa: std.mem.Allocator, bytes: []const u8, out: *std.Arra
         } else |_| {
             try out.appendSlice(gpa, try std.fmt.bufPrint(&line, "P {d} INVALIDDATA\n", .{p.data.len}));
         }
+    }
+}
+
+const opus_vectors = @embedFile("../testing/vectors/opus.txt");
+
+fn opusBlock(name: []const u8) ?[]const u8 {
+    var start: ?usize = null;
+    var lines = std.mem.splitScalar(u8, opus_vectors, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "F ")) continue;
+        const at = @intFromPtr(line.ptr) - @intFromPtr(opus_vectors.ptr);
+        if (start) |s| return opus_vectors[s..at];
+        if (std.mem.eql(u8, line[2..], name)) start = at + line.len + 1;
+    }
+    return if (start) |s| opus_vectors[s..] else null;
+}
+
+test "every Ogg fixture's Opus stream decodes as FFmpeg's decoder decodes it (vectors/opus.txt)" {
+    const gpa = testing.allocator;
+    var frames: usize = 0;
+    inline for (fixtures.ogg.all) |fixture| {
+        const want = opusBlock(fixture.name) orelse return error.MissingVector;
+        var actual: std.ArrayList(u8) = .empty;
+        defer actual.deinit(gpa);
+        if (decodeOpusFixture(gpa, fixtures.ogg.bytes(fixture.name), &actual, &frames)) {
+            var expected_lines = std.mem.splitScalar(u8, want, '\n');
+            if (!std.mem.eql(u8, expected_lines.next().?, "O ok")) {
+                try testing.expectEqualStrings("O refused\n", actual.items);
+            } else {
+                testing.expectEqualStrings(want, actual.items) catch |err| {
+                    std.debug.print("opus fixture {s}\n", .{fixture.name});
+                    return err;
+                };
+            }
+        } else |err| switch (err) {
+            // Its SILK and hybrid packets decode with T28b and T28c.
+            error.UnsupportedMode => try testing.expectEqualStrings("ogg_opus_frame_counts", fixture.name),
+            else => return err,
+        }
+    }
+    try testing.expectEqual(199, frames);
+}
+
+/// opus_vectors.c's lines for one file: the input opened as the ffmpeg
+/// program opens it, the first Opus stream's packets decoded, each frame's
+/// MD5 after libavcodec's discarding (from the pre-skip, avctx->delay, and
+/// the packets' skip-samples side data).
+fn decodeOpusFixture(gpa: std.mem.Allocator, bytes: []const u8, out: *std.ArrayList(u8), frames: *usize) !void {
+    var reader: std.Io.Reader = .fixed(bytes);
+    const d = Demuxer.initSeekable(gpa, &reader, .fixed(&reader)) catch return out.appendSlice(gpa, "O refused\n");
+    defer d.deinit();
+    var layer = demux.Layer(Demuxer).init(gpa, d);
+    defer layer.deinit();
+    try layer.findStreamInfo();
+    var index: ?usize = null;
+    for (0..d.streamCount()) |i| {
+        if (d.stream(i).codec == .opus) {
+            index = i;
+            break;
+        }
+    }
+    const stream_index = index orelse return out.appendSlice(gpa, "O refused\n");
+    var dec = opusdec.Decoder.init(gpa, d.stream(stream_index).extradata.items, true) catch return out.appendSlice(gpa, "O refused\n");
+    defer dec.deinit();
+    try out.appendSlice(gpa, "O ok\n");
+    const channels = dec.channels();
+    const storage = try gpa.alloc(f32, @as(usize, channels) * opusdec.max_frame);
+    defer gpa.free(storage);
+    var planes: [255][]f32 = undefined;
+    for (0..channels) |c| planes[c] = storage[c * opusdec.max_frame ..][0..opusdec.max_frame];
+    var discard: Discard = .{ .skip = dec.head.pre_skip };
+    var line: [96]u8 = undefined;
+    // A read error ends the oracle's av_read_frame loop.
+    while (layer.next() catch null) |p| {
+        if (p.stream != stream_index) continue;
+        const n = dec.decodePacket(p.data, planes[0..channels]) catch |err| switch (err) {
+            error.InvalidData => {
+                try out.appendSlice(gpa, try std.fmt.bufPrint(&line, "P {d} INVALIDDATA\n", .{p.data.len}));
+                continue;
+            },
+            error.UnsupportedMode => return error.UnsupportedMode,
+        };
+        try out.appendSlice(gpa, try std.fmt.bufPrint(&line, "P {d} 0\n", .{p.data.len}));
+        const kept = discard.apply(n, p.skip) orelse continue;
+        var md5: std.crypto.hash.Md5 = .init(.{});
+        for (planes[0..channels]) |plane| {
+            for (plane[kept[0]..kept[1]]) |v| {
+                var le: [4]u8 = undefined;
+                std.mem.writeInt(u32, &le, @bitCast(v), .little);
+                md5.update(&le);
+            }
+        }
+        var digest: [16]u8 = undefined;
+        md5.final(&digest);
+        try out.appendSlice(gpa, try std.fmt.bufPrint(&line, "D {d} {x}\n", .{ kept[1] - kept[0], digest }));
+        frames.* += 1;
     }
 }

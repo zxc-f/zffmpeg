@@ -4,10 +4,11 @@
 // fftools' input opening (avformat_find_stream_info, then the decoder) at
 // the pinned reference revision describe the behavior, restated here.
 //! An Ogg stream decoded as the ffmpeg program decodes it (TODO.md T27d):
-//! the demuxer through libavformat's generic layer, FFmpeg's Vorbis or
-//! FLAC decoder, and libavcodec's discarding of the samples a decoder or
-//! the demuxer asks to skip, delivered as packed little-endian samples
-//! (Vorbis' planar floats interleaved as f32le).
+//! the demuxer through libavformat's generic layer, FFmpeg's Vorbis, Opus
+//! (CELT frames, T28a) or FLAC decoder, and libavcodec's discarding of the
+//! samples a decoder or the demuxer asks to skip, delivered as packed
+//! little-endian samples (Vorbis' and Opus' planar floats interleaved as
+//! f32le).
 //!
 //! On a seekable input the stream is decoded once ahead to count its
 //! samples, the count FFmpeg's muxers write when they rewrite a header at
@@ -26,6 +27,7 @@ const codecs = @import("../codec/registry.zig");
 const flac = @import("../codec/flac.zig");
 const flacdec = @import("../codec/flacdec.zig");
 const vorbis = @import("../codec/vorbis.zig");
+const opusdec = @import("../codec/opusdec.zig");
 const ogg = @import("ogg.zig");
 const demux = @import("demux.zig");
 const seek = @import("seek.zig");
@@ -37,14 +39,19 @@ pub const ReadError = ogg.Error || error{
     /// More than two thirds of the decodes failed: the ffmpeg program's
     /// `-max_error_rate` (2/3), which fails the decoding.
     DecodeErrorRate,
+    /// An Opus SILK or hybrid frame, which FFmpeg decodes and the port
+    /// does not yet (T28b, T28c).
+    UnsupportedOpusMode,
 };
 
 /// What opening can fail with, and reading.
 pub const Error = ReadError || error{
     /// FFmpeg's Vorbis decoder refuses the stream's headers.
     InvalidVorbis,
-    /// No stream the port decodes (Opus has no decoder yet), or several:
-    /// the ffmpeg program's choice among them is not ported.
+    /// FFmpeg's Opus decoder refuses the OpusHead.
+    InvalidOpus,
+    /// No stream the port decodes, or several: the ffmpeg program's choice
+    /// among them is not ported.
     UnsupportedOperation,
 };
 
@@ -94,9 +101,10 @@ pub const DecodedReader = struct {
     demuxer: ?*ogg.Demuxer = null,
     layer: ?Layer = null,
     stream: usize = 0,
-    decoder: union(enum) { none, vorbis: vorbis.Decoder, flac: flacdec.Decoder } = .none,
+    decoder: union(enum) { none, vorbis: vorbis.Decoder, opus: opusdec.Decoder, flac: flacdec.Decoder } = .none,
     channels: u8 = 0,
-    /// Vorbis' output planes, blocksize[1] / 2 samples each.
+    /// Vorbis' output planes, blocksize[1] / 2 samples each, or Opus'
+    /// (`opusdec.max_frame`).
     plane_storage: []f32 = &.{},
     planes: [255][]f32 = undefined,
     /// The current frame's samples not yet delivered: a range of the
@@ -139,6 +147,7 @@ pub const DecodedReader = struct {
         switch (r.decoder) {
             .none => {},
             .vorbis => |*d| d.deinit(),
+            .opus => |*d| d.deinit(),
             .flac => |*d| d.deinit(),
         }
         r.gpa.free(r.plane_storage);
@@ -182,7 +191,25 @@ pub const DecodedReader = struct {
         r.channels = info.channels;
         r.expected = counted;
         switch (info.codec.?) {
-            .opus => return error.UnsupportedOperation,
+            .opus => {
+                r.decoder = .{ .opus = opusdec.Decoder.init(r.gpa, info.extradata.items, true) catch |err| return switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    error.InvalidData => error.InvalidOpus,
+                    error.UnsupportedFormat => error.UnsupportedFormat,
+                } };
+                const dec = &r.decoder.opus;
+                const n = dec.channels();
+                r.plane_storage = try r.gpa.alloc(f32, @as(usize, opusdec.max_frame) * n);
+                for (0..n) |c| r.planes[c] = r.plane_storage[c * opusdec.max_frame ..][0..opusdec.max_frame];
+                r.pending = .{ .planes = .{ 0, 0 } };
+                // avcodec_open2 starts the skip at avctx->delay, the
+                // pre-skip.
+                r.discard.skip = dec.head.pre_skip;
+                const format = audio.Format.initLayout(opusdec.sample_rate, dec.head.layout, .flt) catch return error.UnsupportedFormat;
+                r.bits = 32;
+                r.max_frame = opusdec.max_frame;
+                return .{ .stream = .opus, .codec = .f32le, .format = format, .frame_count = r.expected, .bits = 32 };
+            },
             .vorbis => {
                 r.decoder = .{ .vorbis = vorbis.Decoder.init(r.gpa, info.extradata.items) catch |err| return switch (err) {
                     error.OutOfMemory => error.OutOfMemory,
@@ -332,6 +359,23 @@ pub const DecodedReader = struct {
                         r.discard.skip = dec.skip_samples;
                         dec.first_frame_consumed = true;
                     }
+                    const kept = r.discard.apply(n, p.skip) orelse continue;
+                    r.frames_decoded += 1;
+                    r.pending = .{ .planes = kept };
+                    return true;
+                },
+                .opus => |*dec| {
+                    const n = dec.decodePacket(p.data, r.planes[0..r.channels]) catch |err| switch (err) {
+                        error.InvalidData => {
+                            diagnostics.report(r.sink, .err, "Decoding error: Invalid data found when processing input", .{});
+                            r.decode_errors += 1;
+                            continue;
+                        },
+                        error.UnsupportedMode => {
+                            diagnostics.report(r.sink, .err, "Opus SILK and hybrid frames are not decoded yet", .{});
+                            return error.UnsupportedOpusMode;
+                        },
+                    };
                     const kept = r.discard.apply(n, p.skip) orelse continue;
                     r.frames_decoded += 1;
                     r.pending = .{ .planes = kept };

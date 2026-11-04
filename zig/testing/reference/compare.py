@@ -2104,21 +2104,101 @@ FATE_VORBIS = ["1.0.1-test_small", "1.0-test_small", "beta3-test_small", "beta4-
                "rc3-test_small", "sleepzor_small", "test-short2_small", "6"]
 
 
+# Ogg fixtures FFmpeg decodes and the port does not yet: zffmpeg must
+# refuse them with UnsupportedOpusMode, before any output.
+PENDING_OGG_DECODE = {
+    "ogg_opus_frame_counts": "SILK and hybrid frames (T28b, T28c)",
+}
+
+
+# Ogg decodes that differ from the ffmpeg program's for an understood
+# reason: (fixture, options or None for every output) -> reason.
+KNOWN_OGG_DECODE_DIFFERENCES = {
+    ("ogg_chained_opus", "-f ogg"): "the same samples; the first page's granule differs: the chain's timestamps "
+                                    "restart and the program's muxing fixes them up (mux_fixup_ts, T53)",
+    ("ogg_page_without_granule", None): "the demuxer fails mid-stream (a granule above 2^62): the ffmpeg program "
+                                        "ends the input there and exits 0, zffmpeg fails (port.md: a late parse "
+                                        "error stays a failure), before any output from a file",
+}
+
+
+def compare_opus_vectors(args, lines, failures):
+    """RFC 6716's test vectors as updated by RFC 8251 (T28a, optional): each
+    `.bit` decoded by av.opusdec into stereo and into mono, every packet's
+    final range equal to the encoder's, and opus_compare's quality against
+    the references (mono against testvectorNN.dec or testvectorNNm.dec, as
+    libopus' run_vectors.sh accepts either). Vectors with SILK or hybrid
+    frames wait for T28b and T28c and are reported as skipped."""
+    folder = pathlib.Path(args.opus_vectors)
+    rows = []
+    passed = failed = skipped = 0
+    reasons = set()
+    for number in range(1, 13):
+        name = f"testvector{number:02d}"
+        bit = folder / f"{name}.bit"
+        refs = {"stereo": [folder / f"{name}.dec"], "mono": [folder / f"{name}.dec", folder / f"{name}m.dec"]}
+        for channels, label in ((2, "stereo"), (1, "mono")):
+            if not bit.exists() or not all(r.exists() for r in refs[label]):
+                skipped += 1
+                reasons.add("test vectors missing (opus_vectors_sync.sh)")
+                rows.append(f"| {name} | {label} | skipped: missing |")
+                continue
+            p = run(args.opus_vector_driver, bit, str(channels), *refs[label])
+            out = text(p.stdout).strip()
+            if p.returncode == 0:
+                passed += 1
+                rows.append(f"| {name} | {label} | pass: {out} |")
+            elif p.returncode == 3:
+                skipped += 1
+                reasons.add("SILK and hybrid frames (T28b, T28c)")
+                rows.append(f"| {name} | {label} | skipped: SILK or hybrid frames (T28b, T28c) |")
+            else:
+                failed += 1
+                why = out or first_line(text(p.stderr))
+                rows.append(f"| {name} | {label} | **FAIL**: {why} |")
+                failures.append(f"Opus test vector {name} {label}: {why}")
+    record("RFC 8251 Opus test vectors (T28a)", passed, passed + failed + skipped, optional=True, skipped=skipped,
+           reasons=sorted(reasons))
+    lines += [
+        "",
+        "## RFC 8251 Opus test vectors (T28a)",
+        "",
+        f"Test vectors decoded by av.opusdec, final ranges equal to the encoder's and opus_compare passing "
+        f"(optional): {passed} passed, {failed} failed, {skipped} skipped.",
+        "",
+        "| Vector | Output | Result |",
+        "| --- | --- | --- |",
+    ] + rows
+
+
 def compare_ogg_decode(args, lines, failures):
-    """Ogg decoded (T27d): every Ogg fixture FFmpeg decodes (Vorbis, FLAC in
-    Ogg) converted by zffmpeg and by the ffmpeg program with `-bitexact`
+    """Ogg decoded (T27d, T28a): every Ogg fixture FFmpeg decodes (Vorbis,
+    Opus, FLAC in Ogg) converted by zffmpeg and by the ffmpeg program with `-bitexact`
     into each output, byte for byte; then FATE's Vorbis decode tests
     (optional), as `tests/fate/vorbis.mak` runs them (s16le), byte for
     byte against the ffmpeg program's."""
     rows = []
-    same = total = 0
+    same = total = pending = 0
+    understood_notes = set()
     with tempfile.TemporaryDirectory() as work:
         work = pathlib.Path(work)
         for path in sorted((FIXTURES / "ogg").glob("*.ogg")):
             probe = run(args.ffprobe, "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name",
                         "-of", "default=nw=1:nk=1", path)
             codec = text(probe.stdout).strip()
-            if probe.returncode != 0 or codec not in ("vorbis", "flac") or path.stem == "ogg_multiplexed":
+            if probe.returncode != 0 or codec not in ("vorbis", "flac", "opus") or path.stem == "ogg_multiplexed":
+                continue
+            if path.stem in PENDING_OGG_DECODE:
+                # FFmpeg decodes it; the port stops with UnsupportedOpusMode.
+                for opts, ext in OGG_DECODE_OUTPUTS:
+                    total += 1
+                    zp = run(args.zffmpeg, "-y", "-i", path, *opts, work / f"ours.{ext}")
+                    if zp.returncode == 3 and b"UnsupportedOpusMode" in zp.stderr:
+                        same += 1
+                        pending += 1
+                    else:
+                        failures.append(f"Ogg decode {path.stem}: zffmpeg {zp.returncode}, expected UnsupportedOpusMode")
+                rows.append(f"| `{path.stem}` | {codec} | pending: {PENDING_OGG_DECODE[path.stem]} |")
                 continue
             problems = []
             for opts, ext in OGG_DECODE_OUTPUTS:
@@ -2129,7 +2209,13 @@ def compare_ogg_decode(args, lines, failures):
                 tp = run(args.ffmpeg, "-nostdin", "-v", "error", "-y", "-i", path, "-bitexact", *opts, theirs)
                 zp = run(args.zffmpeg, "-y", "-i", path, *opts, ours)
                 label = " ".join(opts)
-                if tp.returncode != 0 and zp.returncode != 0 and not ours.exists():
+                known = (KNOWN_OGG_DECODE_DIFFERENCES.get((path.stem, label))
+                         or KNOWN_OGG_DECODE_DIFFERENCES.get((path.stem, None)))
+                if known and (tp.returncode != 0 or zp.returncode != 0 or theirs.read_bytes() != ours.read_bytes()):
+                    same += 1
+                    pending += 1
+                    understood_notes.add(f"`{path.stem}`: {known}")
+                elif tp.returncode != 0 and zp.returncode != 0 and not ours.exists():
                     # Both refuse (a decode error rate past -max_error_rate),
                     # zffmpeg before any output.
                     same += 1
@@ -2143,7 +2229,7 @@ def compare_ogg_decode(args, lines, failures):
             result = "pass" if not problems else "**FAIL**: " + "; ".join(problems)
             rows.append(f"| `{path.stem}` | {codec} | {result} |")
             failures.extend(f"Ogg decode {path.stem}: {p}" for p in problems)
-    record("Ogg decoding (T27d)", same, total)
+    record("Ogg decoding (T27d, T28a)", same, total, understood=pending)
     suite = pathlib.Path(args.fate_suite)
     fate_rows = []
     passed = failed = skipped = 0
@@ -2167,10 +2253,13 @@ def compare_ogg_decode(args, lines, failures):
            reasons=["FATE samples missing"] if skipped else ())
     lines += [
         "",
-        "## Ogg decoding (T27d)",
+        "## Ogg decoding (T27d, T28a)",
         "",
         f"Ogg fixtures decoded by zffmpeg into WAV, AU, AIFF, FLAC, Ogg and raw PCM (and resampled, and downmixed) "
-        f"equal to the ffmpeg program's with `-bitexact`: {same}/{total}.",
+        f"equal to the ffmpeg program's with `-bitexact`: {same}/{total}, {pending} of them as understood "
+        f"differences or pending decoders:",
+        "",
+    ] + [f"- {note}" for note in sorted(understood_notes)] + [
         "",
         "| Fixture | Codec | Result |",
         "| --- | --- | --- |",
@@ -2436,6 +2525,8 @@ KNOWN_REGISTRY_DIFFERENCES = {
     ("format only in FFmpeg", "streamhash"): ((None, None), "written by av.framehash for the hash comparison (T19b)"),
     ("codec", "vorbis"): (("D.AIL.", "DEAIL."), "FFmpeg's native Vorbis encoder makes the Vorbis fixtures (T27d); "
                           "the port has no Vorbis encoder"),
+    ("codec", "opus"): (("D.AIL.", "DEAIL."), "FFmpeg's native Opus encoder makes the Opus fixtures (T28a); "
+                        "the port has no Opus encoder"),
 }
 
 
@@ -2540,6 +2631,10 @@ def main():
     parser.add_argument("--zffmpeg", required=True)
     parser.add_argument("--registry", required=True, help="the registry dump (zig build test-tools)")
     parser.add_argument("--hasher", required=True, help="the hash driver (zig build test-tools)")
+    parser.add_argument("--opus-vector-driver", required=True,
+                        help="the RFC test vector driver (zig build test-tools)")
+    parser.add_argument("--opus-vectors", default=str(HERE.parent.parent.parent / ".references" / "opus-testvectors"),
+                        help="the RFC 8251 Opus test vectors (opus_vectors_sync.sh); missing ones are skipped")
     parser.add_argument("--fate-suite", default=str(HERE.parent.parent.parent / ".references" / "fate-suite"),
                         help="FATE samples for the optional coverage (fate_sync.sh); missing ones are skipped")
     parser.add_argument("--report", help="also write the Markdown report to this file")
@@ -2613,6 +2708,7 @@ def main():
     compare_ogg_output(args, lines, failures)
     compare_ogg(args, lines, failures)
     compare_ogg_decode(args, lines, failures)
+    compare_opus_vectors(args, lines, failures)
     compare_hashes(args, lines, failures)
     compare_fate(args, lines, failures)
     coverage_summary(lines, failures)

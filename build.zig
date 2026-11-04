@@ -434,7 +434,8 @@ const probe_cases = [_]ProbeCase{
     .{ .name = "a truncated FLAC header from a pipe", .set = .flac, .args = &.{"-"}, .stdin_fixture = "flac_truncated_metadata", .exit_code = 2, .stderr = "zffprobe: -: Truncated\n" },
     // T27a: Ogg's first known stream; without a decoder, no sample format
     // or layout; a file's duration from the demuxer's scans, a pipe's none.
-    .{ .name = "Ogg Opus", .set = .ogg, .fixture = "ogg_opus_stereo", .exit_code = 0, .stdout = "format=ogg\ncodec=opus\nsample_fmt=unknown\nchannels=2\nchannel_layout=unknown\nsample_rate=48000\nnb_samples=11520\nduration_num=11520\nduration_den=48000\n", .stderr = "" },
+    .{ .name = "Ogg Opus", .set = .ogg, .fixture = "ogg_opus_stereo", .exit_code = 0, .stdout = "format=ogg\ncodec=opus\nsample_fmt=fltp\nchannels=2\nchannel_layout=stereo\nsample_rate=48000\nnb_samples=11520\nduration_num=11520\nduration_den=48000\n", .stderr = "" },
+    .{ .name = "Ogg Opus mono", .set = .ogg, .fixture = "ogg_opus_ffmpeg_mono", .exit_code = 0, .stdout_contains = "sample_fmt=fltp\nchannels=1\nchannel_layout=mono\n", .stderr = "" },
     .{ .name = "Ogg Opus from a pipe", .set = .ogg, .args = &.{"-"}, .stdin_fixture = "ogg_opus_stereo", .exit_code = 0, .stdout_contains = "nb_samples=N/A\n", .stderr = "" },
     .{ .name = "Ogg Vorbis", .set = .ogg, .fixture = "ogg_vorbis_ffmpeg_44k", .exit_code = 0, .stdout = "format=ogg\ncodec=vorbis\nsample_fmt=fltp\nchannels=2\nchannel_layout=stereo\nsample_rate=44100\nnb_samples=30000\nduration_num=30000\nduration_den=44100\n", .stderr = "" },
     .{ .name = "Ogg Vorbis whose setup header the decoder refuses", .set = .ogg, .fixture = "ogg_vorbis_stereo", .exit_code = 2, .stderr_contains = ": InvalidVorbis\n" },
@@ -681,7 +682,9 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "Ogg Vorbis from a pipe to raw PCM", .set = .ogg, .args = &.{ "-i", "-" }, .stdin_input = "ogg_vorbis_ffmpeg_22k_short", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout_contains = "", .stderr = "" },
     .{ .name = "Ogg Vorbis from a pipe has no count for WAV", .set = .ogg, .args = &.{ "-i", "-" }, .stdin_input = "ogg_vorbis_ffmpeg_22k_short", .tail = &.{ "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedStreamingSize\n" },
     .{ .name = "Ogg Vorbis copy is unsupported", .set = .ogg, .args = &.{"-i"}, .input = "ogg_vorbis_ffmpeg_22k_short", .tail = &.{ "-c", "copy", "-f", "ogg", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
-    .{ .name = "Ogg Opus has no decoder", .set = .ogg, .args = &.{"-i"}, .input = "ogg_opus_stereo", .tail = &.{ "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
+    .{ .name = "Ogg Opus to WAV", .set = .ogg, .args = &.{"-i"}, .input = "ogg_opus_ffmpeg_stereo", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt ", .stderr = "" },
+    .{ .name = "Ogg Opus from a pipe to raw PCM", .set = .ogg, .args = &.{ "-i", "-" }, .stdin_input = "ogg_opus_ffmpeg_mono", .tail = &.{ "-f", "f32le", "-" }, .exit_code = 0, .stdout_contains = "", .stderr = "" },
+    .{ .name = "Ogg Opus SILK and hybrid frames are not decoded yet", .set = .ogg, .args = &.{"-i"}, .input = "ogg_opus_frame_counts", .tail = &.{ "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOpusMode\n" },
     .{ .name = "Ogg FLAC whose frames all fail to decode", .set = .ogg, .args = &.{"-i"}, .input = "ogg_lost_continued_page", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stdout = "", .stderr_contains = ": DecodeErrorRate\n" },
     // T27b: FLAC encoded into Ogg; compare.py checks the bytes against FFmpeg's.
     .{ .name = "FLAC into Ogg on standard output", .set = .flac, .args = &.{"-i"}, .input = "flac_ffmpeg_level5_stereo", .tail = &.{ "-f", "ogg", "-" }, .exit_code = 0, .stdout_contains = "OggS\x00\x02", .stderr = "" },
@@ -825,8 +828,26 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "av", .module = av }},
         }),
     });
+    const opus_vector_driver = b.addExecutable(.{
+        .name = "opus-vector-driver",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("zig/testing/opus_vector_driver.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "av", .module = av }},
+        }),
+    });
+    const opus_compare_tests = b.addTest(.{
+        .name = "opus-compare",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("zig/testing/opus_compare.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(opus_compare_tests).step);
     const test_tools = b.step("test-tools", "Install the test tools that compare.py runs");
-    for ([_]*std.Build.Step.Compile{ write_driver, registry_dump, hash_driver }) |tool| {
+    for ([_]*std.Build.Step.Compile{ write_driver, registry_dump, hash_driver, opus_vector_driver }) |tool| {
         test_tools.dependOn(&b.addInstallArtifact(tool, .{}).step);
         test_step.dependOn(&tool.step);
     }

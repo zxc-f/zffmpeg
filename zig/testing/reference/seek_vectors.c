@@ -62,9 +62,10 @@ static int open_file(const char *path, struct Opened *o)
     }
     AVCodecParameters *par = o->fmt->streams[0]->codecpar;
     const AVCodec *codec = avcodec_find_decoder(par->codec_id);
-    // Without a decoder (T27a's Opus), or with one that refuses the stream's
-    // headers (the synthetic Vorbis fixtures, T27d), the packets are still
-    // read and seeked; nothing is decoded.
+    // Without a decoder, or with one that refuses the stream's headers (the
+    // synthetic Vorbis fixtures, T27d), the packets are still read and
+    // seeked; nothing is decoded. The decoder is the first stream's, and
+    // every packet read after a seek goes to it.
     if (!codec)
         return 0;
     o->dec = avcodec_alloc_context3(codec);

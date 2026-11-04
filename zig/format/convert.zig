@@ -260,7 +260,7 @@ pub const Conversion = struct {
         aiff: aiff.Parser,
         caf: caf.Parser,
         flac: flac.DecodedReader,
-        /// Ogg decoded (T27d): Vorbis, or FLAC in Ogg.
+        /// Ogg decoded (T27d, T28a): Vorbis, Opus, or FLAC in Ogg.
         ogg: oggdecode.DecodedReader,
         raw: raw.Parser,
     };
@@ -277,8 +277,8 @@ pub const Conversion = struct {
             .caf => .{ .caf = .init(source.reader(), limits.caf) },
             // The demuxer and decoder allocate.
             .flac => .{ .flac = .init(request.gpa orelse return error.UnsupportedOperation, source.reader(), request.diagnostics) },
-            // No Vorbis or Opus decoder, and no Ogg stream copy yet (T27a).
-            // The demuxer reads the input from its start, through the seekable
+            // Decoded: Vorbis, Opus (CELT frames) or FLAC; no Ogg stream
+            // copy yet. The demuxer reads the input from its start, through the seekable
             // reader when the input can seek (its durations), else after
             // detection's replay.
             .ogg => .{ .ogg = if (source.source.seeker) |sk|

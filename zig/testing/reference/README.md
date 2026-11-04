@@ -26,7 +26,7 @@ zig build -Doptimize=ReleaseSafe install test-tools
 ```
 
 ```bash
-python3 zig/testing/reference/compare.py --ffmpeg .references/ffmpeg-install/bin/ffmpeg --ffprobe .references/ffmpeg-install/bin/ffprobe --zffprobe zig-out/bin/zffprobe --writer zig-out/bin/write-driver --zffmpeg zig-out/bin/zffmpeg --registry zig-out/bin/registry-dump
+python3 zig/testing/reference/compare.py --ffmpeg .references/ffmpeg-install/bin/ffmpeg --ffprobe .references/ffmpeg-install/bin/ffprobe --zffprobe zig-out/bin/zffprobe --writer zig-out/bin/write-driver --zffmpeg zig-out/bin/zffmpeg --registry zig-out/bin/registry-dump --hasher zig-out/bin/hash-driver --opus-vector-driver zig-out/bin/opus-vector-driver
 ```
 
 The T20a sample-storage vectors come from the same build. The generator is
@@ -226,6 +226,21 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/celt_vector
 ./celt-vectors | diff -u zig/testing/vectors/celt.txt -
 clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/libm_vectors.c .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o libm-vectors
 ./libm-vectors | diff -u zig/testing/vectors/libm.txt -
+```
+
+`opus_vectors.c` is `vorbis_vectors.c` for Opus: the first Opus stream of
+every Ogg fixture opened as the ffmpeg program opens it, its packets sent
+to FFmpeg's Opus decoder, each frame's sample count and MD5 after
+libavcodec's discarding. The RFC 8251 vectors run in compare.py through
+`opus-vector-driver` (`zig build test-tools`), which decodes a `.bit` file
+with `av.opusdec`, checks each packet's final range against the encoder's
+and runs the native port of libopus' `opus_compare`:
+
+```bash
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/opus_vectors.c .references/ffmpeg-install/lib/libavformat.a .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o opus-vectors
+LC_ALL=C ./opus-vectors zig/testing/fixtures/ogg/*.ogg | diff -u zig/testing/vectors/opus.txt -
+bash zig/testing/reference/opus_vectors_sync.sh
+./zig-out/bin/opus-vector-driver .references/opus-testvectors/testvector01.bit 2 .references/opus-testvectors/testvector01.dec
 ```
 
 The T18c VLC vectors come from the reference's `libavcodec`:

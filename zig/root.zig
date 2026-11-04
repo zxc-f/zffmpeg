@@ -58,6 +58,8 @@
 //! - `vlc`: FFmpeg's VLC decoding tables and lookup, for the LSB-first
 //!   reader in `bits` (`codec/vlc.zig`).
 //! - `vorbis`: FFmpeg's Vorbis decoder, bit for bit (`codec/vorbis.zig`).
+//! - `opusdec`: FFmpeg's Opus decoder for CELT frames, bit for bit
+//!   (`codec/opusdec.zig`, with `codec/celt.zig`).
 //! - `oggdecode`: an Ogg stream decoded as the ffmpeg program decodes it
 //!   (`format/oggdecode.zig`).
 //! - `framehash`: FFmpeg's framecrc, framemd5 and streamhash muxers' text
@@ -120,6 +122,7 @@ pub const oggmux = @import("format/oggmux.zig");
 pub const tx = @import("codec/tx.zig");
 pub const vlc = @import("codec/vlc.zig");
 pub const vorbis = @import("codec/vorbis.zig");
+pub const opusdec = @import("codec/opusdec.zig");
 pub const oggdecode = @import("format/oggdecode.zig");
 pub const framehash = @import("format/framehash.zig");
 pub const seek = @import("format/seek.zig");
@@ -176,6 +179,7 @@ test {
     _ = @import("core/libm.zig");
     _ = @import("codec/float_dsp.zig");
     _ = @import("codec/celt.zig");
+    _ = @import("codec/opusdec.zig");
     _ = @import("format/framehash.zig");
     _ = @import("format/seek.zig");
     _ = @import("format/mov_chan.zig");

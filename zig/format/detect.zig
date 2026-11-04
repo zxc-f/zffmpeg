@@ -61,6 +61,12 @@ pub const Error = wav.Error || au.Error || aiff.Error || raw.Error || caf.Error 
     /// FFmpeg's Vorbis decoder refuses the stream's headers, so ffprobe
     /// cannot open it ("Could not open codec", T27d).
     InvalidVorbis,
+    /// FFmpeg's Opus decoder refuses the OpusHead, so ffprobe cannot open
+    /// it (T28a).
+    InvalidOpus,
+    /// An Opus SILK or hybrid frame, which FFmpeg decodes and the port
+    /// does not yet (T28b, T28c).
+    UnsupportedOpusMode,
     /// More than two thirds of an Ogg stream's decodes failed, which the
     /// ffmpeg program's `-max_error_rate` fails (T27d).
     DecodeErrorRate,
@@ -207,10 +213,6 @@ pub const Probed = struct {
     /// Sample frames in the stream; null for data of unknown length
     /// (`unknown_length`). Raw PCM is counted while validating.
     frame_count: ?u64,
-    /// A decoder gives the stream's samples. Not for Vorbis and Opus
-    /// (T27a): FFmpeg leaves their sample format and layout unknown, and
-    /// `format` has only their rate and channel count.
-    decoded: bool = true,
 };
 
 pub const Options = struct {
@@ -332,18 +334,19 @@ fn probeOgg(reader: *std.Io.Reader, input: *Input, options: Options) Error!Probe
             .opus => .opus,
         };
         // ffprobe opens the decoder: FLAC's gives its storage and layout,
-        // Vorbis' planar float and its layout, and refuses what it cannot
-        // parse; Opus has none here.
+        // Vorbis' and Opus' planar float and their layouts, and refuse
+        // what they cannot parse.
         if (codec == .vorbis and info.decoder_refuses) return error.InvalidVorbis;
-        const decoded = codec == .flac or codec == .vorbis;
+        if (codec == .opus and info.decoder_refuses) return error.InvalidOpus;
         const sample_format: audio.SampleFormat = switch (codec) {
             .flac => if (flacBps(info) > 16) .s32 else .s16,
-            .vorbis => .fltp,
+            .vorbis, .opus => .fltp,
             else => .s16,
         };
         const layout: audio.ChannelLayout = switch (codec) {
             .flac => flac_codec.channelLayout(info.channels),
             .vorbis => vorbis_codec.channelLayout(info.channels),
+            .opus => (opus_dec.Head.parse(info.extradata.items) catch return error.UnsupportedFormat).layout,
             else => .{ .unspecified = info.channels },
         };
         return .{
@@ -351,7 +354,6 @@ fn probeOgg(reader: *std.Io.Reader, input: *Input, options: Options) Error!Probe
             .codec = codec,
             .format = audio.Format.initLayout(info.sample_rate, layout, sample_format) catch return error.UnsupportedFormat,
             .frame_count = if (info.duration >= 0) @intCast(info.duration) else null,
-            .decoded = decoded,
         };
     }
     return error.UnsupportedFormat;
@@ -366,6 +368,7 @@ fn flacBps(info: *const ogg.StreamInfo) u8 {
 
 const flac_codec = @import("../codec/flac.zig");
 const vorbis_codec = @import("../codec/vorbis.zig");
+const opus_dec = @import("../codec/opusdec.zig");
 
 pub fn flacFormat(info: flac.Info) error{UnsupportedFormat}!audio.Format {
     return audio.Format.initLayout(info.sample_rate, info.layout, info.sampleFormat()) catch error.UnsupportedFormat;

@@ -299,6 +299,16 @@ port.md's contract table updated, and (after T06) the parser.
 | Decode error rate (T27d) | A decoding where more than two thirds of the decodes fail is refused (`DecodeErrorRate`), as the ffmpeg program's `-max_error_rate` default fails it; from a file the counting pass finds it before any output, where FFmpeg leaves an empty output. Native FLAC input keeps T26b's behavior. | `oggdecode.DecodedReader.checkErrorRate`; a `-max_error_rate` option. |
 | Ogg output scope (T27b) | FLAC encoded into Ogg only. Stream copy into Ogg needs a packet-copy pipeline (the conversion copies PCM bytes) and the ffmpeg program's muxing timestamp fix-ups, which T53 ports; several streams per output, chaining on new metadata and the `-page_duration` and `-serial_offset` options wait for a consumer. The muxer itself takes Opus and Vorbis streams, verified by oggmux.txt. | `Conversion.init`'s operation matrix; T53. |
 
+## Opus
+
+| Decision | Current choice and reason | To change it |
+| --- | --- | --- |
+| SILK and hybrid frames (T28a) | Until T28b and T28c the decoder refuses a SILK or hybrid frame with `UnsupportedOpusMode` (zffmpeg status 3, before any output from a file) instead of decoding it differently from FFmpeg. The tests and compare.py mark those cases pending: `ogg_opus_frame_counts` (its decode, 17 of its seeks, 9 conversions) and the RFC 8251 vectors with such frames (18 of 24 decodings, optional). | T28b and T28c remove the refusal; the pending counts in ogg.zig's tests and `PENDING_OGG_DECODE` go to zero. |
+| Pre-skip | The decoder's pre-skip starts libavcodec's discard (`avcodec_open2` sets `skip_samples` from `avctx->delay`, which the OpusHead sets) and a flush keeps it, so a decoder opened and fed a packet after a seek drops the pre-skip as FFmpeg's does; the first packet's skip-samples side data repeats the same value. | `oggdecode.DecodedReader`, ogg.zig's Opus tests. |
+| FFmpeg's quirks kept | An output channel that copies another (a decoded channel feeding several) takes the head's gain twice, as FFmpeg's loop copies after the source's gain; a frame of at most one byte is decoded as FFmpeg decodes it, where libopus conceals it (only its final range is 0 for the RFC check, as libopus reports). | `opusdec.Decoder.decodePacket`. |
+| Mapping families | 0, 1 (Vorbis order and layouts) and 255 (unspecified layout) as FFmpeg's; family 2 (ambisonics) is `UnsupportedFormat`: the channel layouts here have no ambisonic order. | `opusdec.Head.parse` with an ambisonic layout in `core/channel_layout.zig`. |
+| RFC test vectors (T28a) | Optional coverage, as FATE's samples are: `opus_vectors_sync.sh` fetches RFC 8251's archive (recorded SHA-256s), and compare.py runs `opus-vector-driver`, a test tool with a native port of libopus' `opus_compare` (BSD-3-Clause), over every vector in stereo and mono. A vector passes when every packet's final range equals the encoder's and opus_compare passes; mono passes against testvectorNN.dec or testvectorNNm.dec, as libopus' `run_vectors.sh` accepts either. 16-bit output rounds as libopus' float build (scaled, clamped, rounded). | `zig/testing/opus_vector_driver.zig`, `compare_opus_vectors`. |
+
 ## Floating-point library
 
 | Decision | Current choice and reason | To change it |

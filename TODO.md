@@ -53,7 +53,9 @@ muxer, with FLAC encoded into Ogg by zffmpeg byte for byte as the ffmpeg
 program writes it; and T27c, FFmpeg's float FFT and MDCT, T18c, the
 LSB-first reader and VLC tables, and T27d, the Vorbis decoder bit for bit
 FFmpeg's, with Ogg Vorbis and Ogg FLAC decoded by zffmpeg, which completes
-T27. **Next: T28a (range decoder and CELT). See
+T27; and T28a, the Opus range decoder, packet parsing and CELT bit for bit
+FFmpeg's, with Ogg Opus of CELT frames decoded by zffmpeg and RFC 8251's
+CELT-only test vectors passing opus_compare. **Next: T28b (SILK). See
 [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as

@@ -57,7 +57,11 @@ FFmpeg seeks it, over 20 Ogg fixtures; and `zffmpeg` writes FLAC into Ogg
 `-bitexact` output. Vorbis decodes since T27d, bit for bit as FFmpeg's
 decoder (with FFmpeg's FFT and MDCT, T27c, and VLC tables, T18c): `zffmpeg`
 converts Ogg Vorbis and Ogg FLAC to every output as the ffmpeg program does,
-and `zffprobe` reports them as ffprobe does. [TODO.md](TODO.md) holds the completion
+and `zffprobe` reports them as ffprobe does. Opus decodes since T28a for
+CELT frames, bit for bit as FFmpeg's decoder (its range decoder, packets,
+CELT and channel mapping): `zffmpeg` converts Ogg Opus, `zffprobe` reports
+it, and RFC 8251's CELT-only test vectors pass `opus_compare` with every
+final range equal; SILK and hybrid frames follow (T28b, T28c). [TODO.md](TODO.md) holds the completion
 evidence and the roadmap. Development is verified on Linux only. The compiler
 is **Zig 0.17.0**, enforced by the build.
 

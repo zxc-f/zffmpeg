@@ -155,10 +155,12 @@ fn pcmImplementations() [pcm_count]Implementation {
     return list;
 }
 
-/// The PCM decoders, then FLAC's (T26a) and Vorbis' (T27d).
+/// The PCM decoders, then FLAC's (T26a), Vorbis' (T27d) and Opus' (T28a,
+/// CELT frames).
 pub const decoders = pcmImplementations() ++ [_]Implementation{
     .{ .name = "flac", .codec = .flac, .stage = false },
     .{ .name = "vorbis", .codec = .vorbis, .stage = false },
+    .{ .name = "opus", .codec = .opus, .stage = false },
 };
 /// The PCM encoders, then FLAC's (T26c).
 pub const encoders = pcmImplementations() ++ [_]Implementation{.{ .name = "flac", .codec = .flac, .stage = false }};
