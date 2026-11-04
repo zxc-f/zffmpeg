@@ -2904,7 +2904,13 @@ names, not as an empty framework.
       tx_vectors.c adds 60 to 1920 coefficients at three scales (CELT's
       -1/32768 among them): all 156 cases of tx.txt bit for bit, and the
       float64 definitions within the declared error, in Debug, ReleaseSafe
-      and ReleaseFast.
+      and ReleaseFast (1f3040d). Part 2: codec/opus_rc.zig, the range
+      decoder (symbols from the front, raw bits from the end, tell and
+      tell_frac), and codec/opus.zig's packet parsing (TOC, codes 0 to 3,
+      self-delimited, FFmpeg's checks and its negative sizes for a padding
+      past the end); opus_rc_vectors.c (108 frames of mixed operations)
+      and opus_parse_vectors.c (2000 packets, 985 parsed) call the
+      reference's internal functions: every result equal.
     ```
   - [ ] **T28b — SILK.** Needs T28a.
     Done when the SILK-only test vectors meet `opus_compare`.

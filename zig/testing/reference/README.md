@@ -192,6 +192,22 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/vorbis_vect
 LC_ALL=C ./vorbis-vectors zig/testing/fixtures/ogg/*vorbis*.ogg | diff -u zig/testing/vectors/vorbis.txt -
 ```
 
+The T28a Opus vectors come from the reference's `libavcodec`, its internal
+functions called through restated structs (the headers are not
+installed): `opus_rc_vectors.c` drives the range decoder (CDF symbols,
+log-scaled bits, uniform, stepped and triangular integers, Laplace values,
+raw bits, bit counts) over generated frames and prints a digest of every
+result and the decoder's final state; `opus_parse_vectors.c` parses
+generated packets of every code, plain and self-delimited. The RFC 8251
+test vectors are optional coverage, fetched by `opus_vectors_sync.sh`:
+
+```bash
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/opus_rc_vectors.c .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o opus-rc-vectors
+./opus-rc-vectors | diff -u zig/testing/vectors/opus_rc.txt -
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/opus_parse_vectors.c .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o opus-parse-vectors
+./opus-parse-vectors | diff -u zig/testing/vectors/opus_parse.txt -
+```
+
 The T18c VLC vectors come from the reference's `libavcodec`:
 `vlc_vectors.c` builds decoding tables with `ff_vlc_init_sparse` (its
 prototype and the `VLC` struct restated, as `vlc.h` is not installed) for

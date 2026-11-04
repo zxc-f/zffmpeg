@@ -226,6 +226,19 @@ jobs:
             -lm -pthread -o flacenc-vectors
           ./flacenc-vectors | diff -u zig/testing/vectors/flacenc.txt -
 
+      # The committed T28a oracles must be what this build's Opus range
+      # decoder and packet parser give.
+      - name: Check the Opus range decoder and packet vectors (T28a)
+        run: |
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/opus_rc_vectors.c \
+            .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libavutil.a \
+            -lm -pthread -o opus-rc-vectors
+          ./opus-rc-vectors | diff -u zig/testing/vectors/opus_rc.txt -
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/opus_parse_vectors.c \
+            .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libavutil.a \
+            -lm -pthread -o opus-parse-vectors
+          ./opus-parse-vectors | diff -u zig/testing/vectors/opus_parse.txt -
+
       # The committed T27d oracle must be what this build's Vorbis decoder
       # makes of the Ogg Vorbis fixtures.
       - name: Check the Vorbis vectors (T27d)
