@@ -436,7 +436,8 @@ const probe_cases = [_]ProbeCase{
     // or layout; a file's duration from the demuxer's scans, a pipe's none.
     .{ .name = "Ogg Opus", .set = .ogg, .fixture = "ogg_opus_stereo", .exit_code = 0, .stdout = "format=ogg\ncodec=opus\nsample_fmt=unknown\nchannels=2\nchannel_layout=unknown\nsample_rate=48000\nnb_samples=11520\nduration_num=11520\nduration_den=48000\n", .stderr = "" },
     .{ .name = "Ogg Opus from a pipe", .set = .ogg, .args = &.{"-"}, .stdin_fixture = "ogg_opus_stereo", .exit_code = 0, .stdout_contains = "nb_samples=N/A\n", .stderr = "" },
-    .{ .name = "Ogg Vorbis", .set = .ogg, .fixture = "ogg_vorbis_stereo", .exit_code = 0, .stdout_contains = "codec=vorbis\nsample_fmt=unknown\n", .stderr = "" },
+    .{ .name = "Ogg Vorbis", .set = .ogg, .fixture = "ogg_vorbis_ffmpeg_44k", .exit_code = 0, .stdout = "format=ogg\ncodec=vorbis\nsample_fmt=fltp\nchannels=2\nchannel_layout=stereo\nsample_rate=44100\nnb_samples=30000\nduration_num=30000\nduration_den=44100\n", .stderr = "" },
+    .{ .name = "Ogg Vorbis whose setup header the decoder refuses", .set = .ogg, .fixture = "ogg_vorbis_stereo", .exit_code = 2, .stderr_contains = ": InvalidVorbis\n" },
     .{ .name = "Ogg FLAC", .set = .ogg, .fixture = "ogg_flac_stereo", .exit_code = 0, .stdout_contains = "codec=flac\nsample_fmt=s16\nchannels=2\nchannel_layout=stereo\n", .stderr = "" },
     .{ .name = "Ogg beside an unknown stream", .set = .ogg, .fixture = "ogg_unknown_codec", .exit_code = 0, .stdout_contains = "codec=opus\n", .stderr = "" },
     .{ .name = "Ogg without a page", .set = .ogg, .fixture = "ogg_no_pages", .exit_code = 2, .stderr_contains = ": Truncated\n" },

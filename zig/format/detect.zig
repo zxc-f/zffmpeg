@@ -58,6 +58,9 @@ pub const Error = wav.Error || au.Error || aiff.Error || raw.Error || caf.Error 
     /// No demuxer's probe scored the stream, as FFmpeg's "Invalid data found
     /// when processing input"; force a format to parse it anyway.
     UnknownFormat,
+    /// FFmpeg's Vorbis decoder refuses the stream's headers, so ffprobe
+    /// cannot open it ("Could not open codec", T27d).
+    InvalidVorbis,
     /// Raw PCM parameters were given for an input whose format has its own.
     UnusedOption,
 };
@@ -325,9 +328,21 @@ fn probeOgg(reader: *std.Io.Reader, input: *Input, options: Options) Error!Probe
             .vorbis => .vorbis,
             .opus => .opus,
         };
-        const decoded = codec == .flac;
-        const sample_format: audio.SampleFormat = if (decoded and flacBps(info) > 16) .s32 else .s16;
-        const layout: audio.ChannelLayout = if (decoded) flac_codec.channelLayout(info.channels) else .{ .unspecified = info.channels };
+        // ffprobe opens the decoder: FLAC's gives its storage and layout,
+        // Vorbis' planar float and its layout, and refuses what it cannot
+        // parse; Opus has none here.
+        if (codec == .vorbis and info.decoder_refuses) return error.InvalidVorbis;
+        const decoded = codec == .flac or codec == .vorbis;
+        const sample_format: audio.SampleFormat = switch (codec) {
+            .flac => if (flacBps(info) > 16) .s32 else .s16,
+            .vorbis => .fltp,
+            else => .s16,
+        };
+        const layout: audio.ChannelLayout = switch (codec) {
+            .flac => flac_codec.channelLayout(info.channels),
+            .vorbis => vorbis_codec.channelLayout(info.channels),
+            else => .{ .unspecified = info.channels },
+        };
         return .{
             .container = .ogg,
             .codec = codec,
@@ -347,6 +362,7 @@ fn flacBps(info: *const ogg.StreamInfo) u8 {
 }
 
 const flac_codec = @import("../codec/flac.zig");
+const vorbis_codec = @import("../codec/vorbis.zig");
 
 pub fn flacFormat(info: flac.Info) error{UnsupportedFormat}!audio.Format {
     return audio.Format.initLayout(info.sample_rate, info.layout, info.sampleFormat()) catch error.UnsupportedFormat;

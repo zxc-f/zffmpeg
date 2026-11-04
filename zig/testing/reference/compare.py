@@ -2358,6 +2358,8 @@ KNOWN_REGISTRY_DIFFERENCES = {
     ("format only in FFmpeg", "framecrc"): ((None, None), "written by av.framehash for the hash comparison (T19b)"),
     ("format only in FFmpeg", "framemd5"): ((None, None), "written by av.framehash for the hash comparison (T19b)"),
     ("format only in FFmpeg", "streamhash"): ((None, None), "written by av.framehash for the hash comparison (T19b)"),
+    ("codec", "vorbis"): (("D.AIL.", "DEAIL."), "FFmpeg's native Vorbis encoder makes the Vorbis fixtures (T27d); "
+                          "the port has no Vorbis encoder"),
 }
 
 
@@ -2396,8 +2398,10 @@ def compare_registries(args, lines, failures):
     # The codecs both decode and encode must be the same; a codec only a
     # demuxer names (T27a's Vorbis and Opus) is listed with its
     # descriptor's flags, checked below.
-    enabled = {name for name, (flags, _) in their_codecs.items() if flags.startswith("DE")}
-    ours_enabled = {name for name, (flags, _) in codecs.items() if flags.startswith("DE")}
+    # A codec whose flags differ for a known reason is checked below.
+    known_codecs = {name for (kind, name) in KNOWN_REGISTRY_DIFFERENCES if kind == "codec"}
+    enabled = {name for name, (flags, _) in their_codecs.items() if flags.startswith("DE") and name not in known_codecs}
+    ours_enabled = {name for name, (flags, _) in codecs.items() if flags.startswith("DE") and name not in known_codecs}
     if enabled != ours_enabled:
         problems.append(f"codecs FFmpeg decodes and encodes {sorted(enabled)}, the registry {sorted(ours_enabled)}")
     for name, value in codecs.items():

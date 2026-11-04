@@ -28,7 +28,7 @@ pub const Error = av.convert.Error ||
 /// `Error` is an I/O failure.
 pub fn of(err: Error) ExitStatus {
     return switch (err) {
-        error.InvalidRiff, error.InvalidWave, error.InvalidAu, error.InvalidAiff, error.InvalidCaf, error.InvalidFlac, error.InvalidOgg, error.InvalidFormat, error.Truncated, error.FrameCountMismatch => .invalid,
+        error.InvalidRiff, error.InvalidWave, error.InvalidAu, error.InvalidAiff, error.InvalidCaf, error.InvalidFlac, error.InvalidOgg, error.InvalidVorbis, error.InvalidFormat, error.Truncated, error.FrameCountMismatch => .invalid,
         error.UnsupportedFormat, error.UnsupportedStreamingSize, error.UnsupportedOperation, error.UnknownFormat, error.UnsupportedLayout => .unsupported,
         error.LimitExceeded,
         error.SizeOverflow,

@@ -2816,10 +2816,15 @@ names, not as an empty framework.
       decode.c's discarding restated in the test. A local check over FATE's
       20 Vorbis samples (8658 frames: floor 0, residues 0 and 1, mono, 6
       channels, chains) found every frame equal too; it becomes compare.py's
-      optional FATE coverage in part 3. Remaining: part 3 (av.convert and
-      zffmpeg from Ogg Vorbis, zffprobe's fltp and its refusal as
-      ffprobe's, compare.py with the encoder as a registry difference and
-      the FATE Vorbis tests).
+      optional FATE coverage in part 3 (0e5c0ea). Part 3a: zffprobe
+      reports Vorbis as ffprobe does (fltp, ff_vorbis_ch_layouts) and
+      refuses a stream FFmpeg's decoder refuses (InvalidVorbis, status 2);
+      the registry has the Vorbis decoder, and compare.py records FFmpeg's
+      encoder as a known registry difference; the registry and Ogg
+      sections pass (24/24). Remaining, part 3b: av.convert and zffmpeg
+      decoding Ogg (Vorbis, and FLAC in Ogg) to every PCM output and to
+      FLAC as the ffmpeg program does, compared by compare.py, with the
+      FATE Vorbis tests as optional coverage.
     ```
 
 - [ ] **T28 — Opus decoder.** Checked when T28a–T28c are. Reference:

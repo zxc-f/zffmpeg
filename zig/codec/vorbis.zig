@@ -29,6 +29,7 @@ const vlc = @import("vlc.zig");
 const tx = @import("tx.zig");
 const xiph = @import("xiph.zig");
 const data = @import("vorbis_data.zig");
+const channel_layout = @import("../core/channel_layout.zig");
 
 pub const Error = error{
     /// FFmpeg's AVERROR_INVALIDDATA (and the -1 and EINVAL its header
@@ -1031,6 +1032,25 @@ pub const Decoder = struct {
             }
         }
     }
+};
+
+/// ff_vorbis_ch_layouts: the decoder's layout for 1 to 8 channels, by
+/// FFmpeg's names (mono, stereo, 3.0, quad, 5.0, 5.1, 6.1, 7.1); more
+/// channels have none.
+pub fn channelLayout(channels: u8) channel_layout.Layout {
+    if (channels == 0 or channels > 8) return .{ .unspecified = channels };
+    return .{ .native = layout_masks[channels - 1] };
+}
+
+const layout_masks = masks: {
+    const names = [8][]const u8{ "mono", "stereo", "3.0", "quad", "5.0", "5.1", "6.1", "7.1" };
+    var out: [8]u64 = undefined;
+    for (names, &out) |name, *m| {
+        m.* = for (channel_layout.named_layouts) |n| {
+            if (std.mem.eql(u8, n.name, name)) break n.mask;
+        } else @compileError("no named layout " ++ name);
+    }
+    break :masks out;
 };
 
 /// BARK: single-precision products, double-precision arctangents.

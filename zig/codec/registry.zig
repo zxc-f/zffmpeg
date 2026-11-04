@@ -155,8 +155,11 @@ fn pcmImplementations() [pcm_count]Implementation {
     return list;
 }
 
-/// The PCM decoders, then FLAC's (T26a).
-pub const decoders = pcmImplementations() ++ [_]Implementation{.{ .name = "flac", .codec = .flac, .stage = false }};
+/// The PCM decoders, then FLAC's (T26a) and Vorbis' (T27d).
+pub const decoders = pcmImplementations() ++ [_]Implementation{
+    .{ .name = "flac", .codec = .flac, .stage = false },
+    .{ .name = "vorbis", .codec = .vorbis, .stage = false },
+};
 /// The PCM encoders, then FLAC's (T26c).
 pub const encoders = pcmImplementations() ++ [_]Implementation{.{ .name = "flac", .codec = .flac, .stage = false }};
 
