@@ -20,6 +20,7 @@
 const std = @import("std");
 const flac = @import("../codec/flac.zig");
 const flacdec = @import("../codec/flacdec.zig");
+const vorbisdec = @import("../codec/vorbis.zig");
 const metadata = @import("../core/metadata.zig");
 const rational = @import("../core/rational.zig");
 const vorbiscomment = @import("vorbiscomment.zig");
@@ -87,6 +88,9 @@ pub const StreamInfo = struct {
     initial_padding: u32 = 0,
     seek_preroll: u32 = 0,
     bit_rate: i64 = 0,
+    /// FFmpeg's Vorbis decoder refuses the stream's headers (T27d), so
+    /// avformat_find_stream_info cannot open it.
+    decoder_refuses: bool = false,
 
     fn deinit(s: *StreamInfo, gpa: std.mem.Allocator) void {
         s.extradata.deinit(gpa);
@@ -437,6 +441,17 @@ pub const Demuxer = struct {
                 os.info.start_time = pts;
             }
         }
+        // What avformat_find_stream_info's decoder makes of the headers.
+        for (d.streams.items) |*os| {
+            if (os.info.codec != .vorbis) continue;
+            if (vorbisdec.Decoder.init(gpa, os.info.extradata.items)) |dec| {
+                var v = dec;
+                v.deinit();
+            } else |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidData => os.info.decoder_refuses = true,
+            }
+        }
         if (seeker != null) try d.getLength();
         return d;
     }
@@ -609,8 +624,12 @@ pub const Demuxer = struct {
             .sample_rate = info.sample_rate,
             .channels = info.channels,
             .parse_flac = info.codec == .flac,
-            // The reference build decodes FLAC, not Opus or Vorbis.
-            .has_decoder = info.codec == .flac,
+            // The reference build decodes FLAC and Vorbis, not Opus.
+            .decoder = if (info.codec) |codec| switch (codec) {
+                .flac => .flac,
+                .vorbis => if (info.decoder_refuses) .refuses else .format_at_open,
+                .opus => .none,
+            } else .none,
             .bit_rate = info.bit_rate,
             .initial_padding = info.initial_padding,
             .seek_preroll = info.seek_preroll,
@@ -1678,7 +1697,7 @@ test "every Ogg fixture seeks as FFmpeg seeks it (vectors/seek_ogg.txt)" {
         }
     }
     // Every seek of the fixtures FFmpeg opens.
-    try testing.expectEqual(918, compared);
+    try testing.expectEqual(1134, compared);
 }
 
 test "a demuxer that cannot seek fails a seek instead of repositioning" {
@@ -1691,4 +1710,31 @@ test "a demuxer that cannot seek fails a seek instead of repositioning" {
     try layer.findStreamInfo();
     try testing.expectError(error.IoFailure, layer.seekFrame(0, 0, .{}));
     try testing.expectError(error.IoFailure, layer.seekFrame(0, 0, .{ .byte = true }));
+}
+
+test "FFmpeg's Vorbis decoder opens the encoded fixtures and refuses the synthetic setup headers" {
+    const gpa = testing.allocator;
+    var opened: usize = 0;
+    inline for (fixtures.ogg.all) |fixture| {
+        if (fixture.expected == .accept) {
+            var reader: std.Io.Reader = .fixed(fixtures.ogg.bytes(fixture.name));
+            const d = try Demuxer.init(gpa, &reader);
+            defer d.deinit();
+            for (0..d.streamCount()) |i| {
+                const info = d.stream(i);
+                if (info.codec != .vorbis) continue;
+                const real = comptime std.mem.startsWith(u8, fixture.name, "ogg_vorbis_ffmpeg");
+                if (vorbisdec.Decoder.init(gpa, info.extradata.items)) |dec| {
+                    var v = dec;
+                    v.deinit();
+                    try testing.expect(real);
+                    opened += 1;
+                } else |err| {
+                    try testing.expectEqual(error.InvalidData, err);
+                    try testing.expect(!real);
+                }
+            }
+        }
+    }
+    try testing.expectEqual(4, opened);
 }

@@ -3074,6 +3074,29 @@ class OggFixture:
     data: bytes
     # FFmpeg opens it ("accept") or fails with this error.
     reject: str = None
+    # "ffmpeg" for a committed file FFmpeg's encoder made, checked by hash.
+    made_by: str = "generate.py"
+
+
+# Vorbis fixtures made by FFmpeg's native Vorbis encoder (T27d), which writes
+# stereo only: name -> (channels, rate, samples, seed, encoder options,
+# sha256). zig/testing/reference/vorbis_fixtures.sh makes them from
+# --vorbis-input NAME; they are committed, as the FFmpeg-made FLAC fixtures.
+OGG_FFMPEG = {
+    "ogg_vorbis_ffmpeg_44k": (2, 44100, 30000, 7, "",
+                                "5766dab378033cdec1196bf8b3e59549bede9b88335f27d8c61312a4f4e5bdea"),
+    "ogg_vorbis_ffmpeg_8k": (2, 8000, 6000, 9, "",
+                                "50a22821911613c98f043df31c15607b37fb094d1187ec699e480d70f45ee745"),
+    "ogg_vorbis_ffmpeg_48k_q8": (2, 48000, 20000, 11, "-q:a 8",
+                                "40ee2ad8d98fc7407a49e8a83fd91ce48b22640e451da800bf0f816ef5cf1d96"),
+    "ogg_vorbis_ffmpeg_22k_short": (2, 22050, 1000, 13, "",
+                                "84770150a5782b3bd98725519e5506a5ecb552662a515ad3c7c7f98db909c6c0"),
+}
+
+
+def vorbis_ffmpeg_input(name):
+    channels, _, count, seed, _, _ = OGG_FFMPEG[name]
+    return interleave(flac_signal(count, channels, seed=seed))
 
 
 def vorbis_packets(count):
@@ -3158,6 +3181,11 @@ def build_ogg_fixtures():
     bad("ogg_opus_short_head", "An OpusHead shorter than 19 bytes.",
         b"".join(ogg_opus_stream(0x9001, opus_ps, head=opus_head()[:15])), "INVALIDDATA")
     bad("ogg_no_pages", "OggS and nothing else: the input ends before a page.", b"OggS\x00\x02", "EOF")
+    for name, (channels, rate, count, seed, options, digest) in OGG_FFMPEG.items():
+        path = OGG_DIR / f"{name}.ogg"
+        fx.append(OggFixture(name, "vorbis", f"FFmpeg's Vorbis encoder, {count} samples at {rate} Hz"
+                             + (f", `{options}`" if options else "") + "; decoded by the T27d oracle.",
+                             path.read_bytes() if path.exists() else b"", made_by="ffmpeg"))
     bad("ogg_vorbis_bad_setup", "A Vorbis setup header without a mode table the parser can find.",
         b"".join(ogg_stream_pages(0x9002, [vorbis_id_header(),
                                            vorbis_comment_packet(b"\x03vorbis", b"x", [], framing=True),
@@ -3213,7 +3241,7 @@ def outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures, fl
     files.update({FLAC_DIR / f"{f.name}.flac": f.data for f in flac_fixtures if f.made_by != "ffmpeg"})
     files[FLAC_MANIFEST] = render_flac_manifest(flac_fixtures).encode()
     files[FLAC_README] = render_readme(FLAC_README, render_flac_table(flac_fixtures))
-    files.update({OGG_DIR / f"{f.name}.ogg": f.data for f in ogg_fixtures})
+    files.update({OGG_DIR / f"{f.name}.ogg": f.data for f in ogg_fixtures if f.made_by != "ffmpeg"})
     files[OGG_MANIFEST] = render_ogg_manifest(ogg_fixtures).encode()
     files[OGG_README] = render_readme(OGG_README, render_ogg_table(ogg_fixtures))
     return files
@@ -3221,8 +3249,15 @@ def outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures, fl
 
 def check_ffmpeg_made(flac_fixtures):
     """FFmpeg-made fixtures are committed, not generated: each must exist
-    with its recorded hash (zig/testing/reference/flac_fixtures.sh)."""
+    with its recorded hash (zig/testing/reference/flac_fixtures.sh and
+    vorbis_fixtures.sh)."""
     problems = []
+    for name, (*_, digest) in OGG_FFMPEG.items():
+        path = OGG_DIR / f"{name}.ogg"
+        if not path.exists():
+            problems.append(f"missing FFmpeg-made fixture: {path.relative_to(HERE)}")
+        elif digest is None or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            problems.append(f"FFmpeg-made fixture differs from its recorded hash: {path.relative_to(HERE)}")
     for f in flac_fixtures:
         if f.made_by != "ffmpeg":
             continue
@@ -3239,9 +3274,14 @@ def main():
     parser.add_argument("--check", action="store_true", help="fail if any generated output is missing or stale")
     parser.add_argument("--flac-input", metavar="NAME",
                         help="write the s16le input of FFmpeg-made FLAC fixture NAME to stdout and stop")
+    parser.add_argument("--vorbis-input", metavar="NAME",
+                        help="write the s16le input of FFmpeg-made Vorbis fixture NAME to stdout and stop")
     args = parser.parse_args()
     if args.flac_input:
         sys.stdout.buffer.write(b"".join(struct.pack("<h", v) for v in flac_ffmpeg_input(args.flac_input)))
+        return 0
+    if args.vorbis_input:
+        sys.stdout.buffer.write(b"".join(struct.pack("<h", v) for v in vorbis_ffmpeg_input(args.vorbis_input)))
         return 0
 
     fixtures = build_fixtures()
@@ -3253,7 +3293,8 @@ def main():
     ogg_fixtures = build_ogg_fixtures()
     expected = outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures, flac_fixtures, ogg_fixtures)
     stale = [path for path, content in expected.items() if not path.exists() or path.read_bytes() != content]
-    ffmpeg_made = {FLAC_DIR / f"{f.name}.flac" for f in flac_fixtures if f.made_by == "ffmpeg"}
+    ffmpeg_made = ({FLAC_DIR / f"{f.name}.flac" for f in flac_fixtures if f.made_by == "ffmpeg"}
+                   | {OGG_DIR / f"{name}.ogg" for name in OGG_FFMPEG})
     extra = sorted((set(WAV_DIR.glob("*.wav")) | set(AU_DIR.glob("*.au")) | set(AIFF_DIR.glob("*.aiff"))
              | set(RAW_DIR.glob("*.raw")) | set(CAF_DIR.glob("*.caf")) | set(FLAC_DIR.glob("*.flac"))
              | set(OGG_DIR.glob("*.ogg")))

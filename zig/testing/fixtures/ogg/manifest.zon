@@ -98,6 +98,26 @@
         .expected = .reject,
     },
     .{
+        .name = "ogg_vorbis_ffmpeg_44k",
+        .sha256 = "5766dab378033cdec1196bf8b3e59549bede9b88335f27d8c61312a4f4e5bdea",
+        .expected = .accept,
+    },
+    .{
+        .name = "ogg_vorbis_ffmpeg_8k",
+        .sha256 = "50a22821911613c98f043df31c15607b37fb094d1187ec699e480d70f45ee745",
+        .expected = .accept,
+    },
+    .{
+        .name = "ogg_vorbis_ffmpeg_48k_q8",
+        .sha256 = "40ee2ad8d98fc7407a49e8a83fd91ce48b22640e451da800bf0f816ef5cf1d96",
+        .expected = .accept,
+    },
+    .{
+        .name = "ogg_vorbis_ffmpeg_22k_short",
+        .sha256 = "84770150a5782b3bd98725519e5506a5ecb552662a515ad3c7c7f98db909c6c0",
+        .expected = .accept,
+    },
+    .{
         .name = "ogg_vorbis_bad_setup",
         .sha256 = "6ea888c939293d5046d463107a77fe87ea625706ce68af14d94370329f1a77d2",
         .expected = .reject,

@@ -67,15 +67,28 @@ pub const Setup = struct {
     /// FLAC in a container: FFmpeg's FLAC parser reads each packet's
     /// frame header (AVSTREAM_PARSE_HEADERS).
     parse_flac: bool = false,
-    /// The reference build has a decoder for the codec, which
-    /// avformat_find_stream_info runs; without one, a known rate and
-    /// channel count are the codec parameters it needs.
-    has_decoder: bool = false,
+    /// What the reference build's decoder does when
+    /// avformat_find_stream_info opens it.
+    decoder: Decoder = .none,
     /// `codecpar->bit_rate`, 0 when unknown.
     bit_rate: i64 = 0,
     /// `codecpar->initial_padding` and `seek_preroll`, in samples.
     initial_padding: u32 = 0,
     seek_preroll: u32 = 0,
+};
+
+/// The reference build's decoder for a stream, as try_decode_frame meets it.
+pub const Decoder = enum {
+    /// None: a known rate and channel count are the parameters needed.
+    none,
+    /// FLAC's: the sample format is known once a frame decodes.
+    flac,
+    /// Sets the sample format when it opens (Vorbis).
+    format_at_open,
+    /// Refuses the stream's headers: avcodec_open2 fails and leaves the
+    /// context without a channel count, so the parameters never complete
+    /// and the read-ahead runs to its end.
+    refuses,
 };
 
 /// A packet as the demuxer gives it.
@@ -146,10 +159,13 @@ const StreamState = struct {
     fps_first_dts_idx: u32 = 0,
     fps_last_dts: i64 = nopts,
     fps_last_dts_idx: u32 = 0,
-    /// try_decode_frame: 0 untried, 1 a decoder ran and set the format,
-    /// -1 no decoder.
+    /// try_decode_frame: 0 untried, 1 a decoder opened, -1 none (or one
+    /// that refused the stream).
     found_decoder: i8 = 0,
+    /// The decoder set the sample format.
     decoded: bool = false,
+    /// A refused open cleared the channel count.
+    no_channels: bool = false,
     /// The index AVFMT_GENERIC_INDEX builds from the returned keyframes.
     index: seek.Index = .{},
     /// The samples the next packet's skip-samples side data discards,
@@ -262,10 +278,24 @@ pub fn Layer(comptime Source: type) type {
                     if (t >= max_analyze_duration) break;
                     if (pkt.duration > 0 and pkt.duration < std.math.maxInt(i64) - s.codec_info_duration) s.codec_info_duration += pkt.duration;
                 }
-                // try_decode_frame: a decoder sets the sample format from
-                // a frame it decodes; without one, the stream needs none.
-                if (s.found_decoder == 0) s.found_decoder = if (setup.has_decoder) 1 else -1;
-                if (setup.has_decoder and !s.decoded and setup.parse_flac and validFlacFrame(pkt.data)) s.decoded = true;
+                // try_decode_frame: the decoder opens once, setting the
+                // sample format at once (Vorbis) or from a frame it
+                // decodes (FLAC); without one the stream needs none.
+                if (s.found_decoder == 0) {
+                    switch (setup.decoder) {
+                        .none => s.found_decoder = -1,
+                        .flac => s.found_decoder = 1,
+                        .format_at_open => {
+                            s.found_decoder = 1;
+                            s.decoded = true;
+                        },
+                        .refuses => {
+                            s.found_decoder = -1;
+                            s.no_channels = true;
+                        },
+                    }
+                }
+                if (setup.decoder == .flac and !s.decoded and setup.parse_flac and validFlacFrame(pkt.data)) s.decoded = true;
                 s.codec_info_nb_frames += 1;
             }
             l.estimateTimings();
@@ -365,7 +395,7 @@ pub fn Layer(comptime Source: type) type {
         fn hasCodecParameters(setup: Setup, s: StreamState) bool {
             if (!setup.known) return false;
             if (setup.sample_rate == 0 and s.parser_rate == 0) return false;
-            if (setup.channels == 0) return false;
+            if (setup.channels == 0 or s.no_channels) return false;
             // A decoder that has not decoded yet leaves the sample format
             // unknown.
             if (s.found_decoder >= 0 and !s.decoded) return false;

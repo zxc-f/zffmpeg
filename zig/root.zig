@@ -163,6 +163,8 @@ test {
     _ = @import("format/oggmux.zig");
     _ = @import("codec/tx.zig");
     _ = @import("codec/vlc.zig");
+    _ = @import("codec/xiph.zig");
+    _ = @import("codec/vorbis.zig");
     _ = @import("format/framehash.zig");
     _ = @import("format/seek.zig");
     _ = @import("format/mov_chan.zig");

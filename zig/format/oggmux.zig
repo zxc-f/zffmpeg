@@ -29,6 +29,7 @@ const metadata = @import("../core/metadata.zig");
 const rational = @import("../core/rational.zig");
 const ogg = @import("ogg.zig");
 const vorbiscomment = @import("vorbiscomment.zig");
+const xiph = @import("../codec/xiph.zig");
 
 /// MAX_PAGE_SIZE: 255 segments of 255 bytes.
 pub const max_page_size = 255 * 255;
@@ -372,7 +373,7 @@ fn buildHeaders(gpa: std.mem.Allocator, s: *StreamState, params: Stream, tags: *
             @memcpy(second[0..8], "OpusTags");
         },
         .vorbis => {
-            const parts = splitXiphHeaders(extradata, 30) orelse return error.InvalidExtradata;
+            const parts = xiph.splitHeaders(extradata, 30) orelse return error.InvalidExtradata;
             s.header[0] = try gpa.dupe(u8, parts[0]);
             s.header[2] = try gpa.dupe(u8, parts[2]);
             const second = try comment(gpa, 7, tags, true);
@@ -380,55 +381,6 @@ fn buildHeaders(gpa: std.mem.Allocator, s: *StreamState, params: Stream, tags: *
             @memcpy(second[0..7], "\x03vorbis");
         },
     }
-}
-
-/// avpriv_split_xiph_headers: three headers each after a 16-bit size
-/// (the first size `first_header_size`), or in Xiph lacing (2, then the
-/// first two sizes in 255-byte steps, the third the rest); null where
-/// FFmpeg's fails.
-fn splitXiphHeaders(extradata: []const u8, first_header_size: u16) ?[3][]const u8 {
-    var out: [3][]const u8 = undefined;
-    if (extradata.len >= 6 and std.mem.readInt(u16, extradata[0..2], .big) == first_header_size) {
-        // The three size fields count from the start.
-        var overall: usize = 6;
-        var p: usize = 0;
-        for (&out) |*h| {
-            // In bounds: the previous header's check left room for this
-            // size field.
-            const len = std.mem.readInt(u16, extradata[p..][0..2], .big);
-            p += 2;
-            if (len > extradata.len or overall > extradata.len - len) return null;
-            h.* = extradata[p..][0..len];
-            p += len;
-            overall += len;
-        }
-        return out;
-    }
-    if (extradata.len >= 3 and extradata.len < std.math.maxInt(i32) - 0x1ff and extradata[0] == 2) {
-        // The type byte and the two last lacing bytes, then each 255-step
-        // lacing byte with what it adds; `p` stays below `overall`.
-        var overall: usize = 3;
-        var p: usize = 1;
-        var lens: [3]usize = undefined;
-        for (lens[0..2]) |*len| {
-            len.* = 0;
-            while (overall < extradata.len and extradata[p] == 0xff) : (p += 1) {
-                len.* += 0xff;
-                overall += 0xff + 1;
-            }
-            len.* += extradata[p];
-            overall += extradata[p];
-            p += 1;
-            if (overall > extradata.len) return null;
-        }
-        lens[2] = extradata.len - overall;
-        for (&out, lens) |*h, len| {
-            h.* = extradata[p..][0..len];
-            p += len;
-        }
-        return out;
-    }
-    return null;
 }
 
 /// ogg_bitexact_serial: FFmpeg's `av_crc` over the headers, seeded with
@@ -613,20 +565,4 @@ test "every case muxes as FFmpeg's Ogg muxer does (vectors/oggmux.txt)" {
         cases += 1;
     }
     try testing.expectEqual(28, cases);
-}
-
-test "Xiph lacing and 16-bit sizes split as FFmpeg's" {
-    const laced = [_]u8{ 2, 2, 1, 'a', 'b', 'c', 'd', 'e' };
-    const parts = splitXiphHeaders(&laced, 30).?;
-    try testing.expectEqualStrings("ab", parts[0]);
-    try testing.expectEqualStrings("c", parts[1]);
-    try testing.expectEqualStrings("de", parts[2]);
-    const sized = [_]u8{ 0, 2, 'a', 'b', 0, 1, 'c', 0, 1, 'd' };
-    const p2 = splitXiphHeaders(&sized, 2).?;
-    try testing.expectEqualStrings("ab", p2[0]);
-    try testing.expectEqualStrings("c", p2[1]);
-    try testing.expectEqualStrings("d", p2[2]);
-    try testing.expectEqual(null, splitXiphHeaders(&[_]u8{ 2, 0xff, 0xff }, 30));
-    try testing.expectEqual(null, splitXiphHeaders(&[_]u8{ 2, 9, 1, 'a' }, 30));
-    try testing.expectEqual(null, splitXiphHeaders(&[_]u8{ 3, 0, 0 }, 30));
 }

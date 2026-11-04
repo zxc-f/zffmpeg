@@ -2792,6 +2792,22 @@ names, not as an empty framework.
       the sample format at open, or refused) and the seek vectors be
       regenerated; compare.py's registry check needs the Vorbis encoder
       (fixtures only) as a known difference.
+      Part 0b and 1a: four FFmpeg-made Vorbis fixtures (stereo, the native
+      encoder's only layout, at 8, 22.05, 44.1 and 48 kHz, one at -q:a 8)
+      from vorbis_fixtures.sh, committed and checked by the hashes
+      generate.py records (24 Ogg fixtures); fate_samples.txt lists FATE's
+      20 vorbis/*.ogg decode tests and their .pcm references (mono, 6
+      channels, floor 0, residues 0 and 1, chains). codec/vorbis.zig parses
+      the identification and setup headers as vorbisdec.c does (codebooks
+      with len2vlc and av.vlc, lookup vectors, floors 0 and 1 with the Bark
+      map, residues, mappings, modes); codec/xiph.zig holds the shared
+      header split. The Ogg demuxer records whether that parser refuses a
+      stream's headers, and demux.Setup.decoder models FFmpeg's open (none,
+      FLAC, the format at open, refused: no channel count); ogg.txt (24
+      fixtures) and seek_ogg.txt (1134 seeks) regenerated, all equal, in
+      Debug, ReleaseSafe and ReleaseFast. Remaining: part 2 (audio packets
+      and their oracle), part 3 (convert, zffprobe's fltp and refusal as
+      ffprobe's, compare.py with the encoder as a registry difference).
     ```
 
 - [ ] **T28 — Opus decoder.** Checked when T28a–T28c are. Reference:
