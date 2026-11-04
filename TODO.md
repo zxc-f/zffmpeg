@@ -25,10 +25,12 @@ with T17b's metadata dictionary), T22a, every AU PCM encoding and
 unknown-length AU, T16, the codec and format registries with FFmpeg's scored
 content probing, and T22, the remaining audio containers (T22a AU encodings,
 T22b AIFF and AIFF-C, T22c raw PCM with FFmpeg's extension fallback, T22d
-CAF demux), are verified, and so are T23a, sample format conversion with
-libswresample's dither, and T23b, FFmpeg's channel layouts in every
-container (1 to 64 channels, Apple's `chan` in AIFF and CAF). **Next: T23c
-(rematrixing). See [Near-term order](#near-term-order).**
+CAF demux), are verified, and so is T23: T23a, sample format conversion
+with libswresample's dither, T23b, FFmpeg's channel layouts in every
+container (1 to 64 channels, Apple's `chan` in AIFF and CAF), and T23c,
+rematrixing as libswresample mixes, through zffmpeg's output `-ac` and
+`-ch_layout`. **Next: T24 (resampling), with T17a (typed options), which
+starts from its options. See [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
 [How tasks are completed](#how-tasks-are-completed) describes. Tasks and
@@ -1128,7 +1130,7 @@ names, not as an empty framework.
 
 ## Milestone 5: audio formats and processing
 
-- [ ] **T20 — Sample storage and PCM encodings.** Checked when T20a and T20b
+- [x] **T20 — Sample storage and PCM encodings.** Checked when T20a and T20b
   are. Reference: `libavutil/samplefmt.c`, `libavcodec/pcm.c`,
   `pcm_tablegen.h`; `tests/fate/pcm.mak`.
   - [x] **T20a — Decoded sample storage.** Needs T14a. Sample formats as
@@ -1716,8 +1718,9 @@ names, not as an empty framework.
     rejects, and FFmpeg's bit-rate duration estimate, now recorded.
 
 
-- [ ] **T23 — Sample format conversion, channel layouts and rematrixing.**
-  Checked when T23a–T23c are. Reference: `libswresample/audioconvert.c`,
+- [x] **T23 — Sample format conversion, channel layouts and rematrixing.**
+  Checked when T23a–T23c are (verified: T23a at `877dc97`, T23b at `a30a804`,
+  T23c at `6c795bc`). Reference: `libswresample/audioconvert.c`,
   `rematrix.c`, `swresample.c`, `dither.c`, `libavutil/channel_layout.c`.
   - [x] **T23a — Sample format conversion.** Needs T20a. Conversions between
     all T20a formats, packed and planar, with FFmpeg's rounding and clipping,
@@ -1858,14 +1861,14 @@ names, not as an empty framework.
     every writer output FFmpeg's muxers copy unchanged (AU 12, AIFF 16), AU
     and AIFF outputs equal to FFmpeg's own conversion 170/170, dithered
     conversions 416/416, detection and pipes 310/310.
-  - [ ] **T23c — Rematrixing.** Needs T23a and T23b. The default upmix and
+  - [x] **T23c — Rematrixing.** Needs T23a and T23b. The default upmix and
     downmix matrices with center and surround mix levels and normalization.
     Done when generated matrices equal `swr_build_matrix` output for every
     supported layout pair and rematrixed output matches the reference.
 
     ```text
     ID / parent: T23c / T23
-    State: implementing
+    State: verified
     Supported behavior and explicit exclusions: part 1, the matrix
       (`swr_build_matrix2`): native and custom layouts of up to 64 channels,
       libswresample's mix rules, the center, surround and LFE mix levels,
@@ -1890,13 +1893,30 @@ names, not as an empty framework.
       (Request.layout), cli/ffmpeg.zig, cli/status.zig (layoutOption);
       rematrix_vectors.c, remix_vectors.c, compare.py compare_remix, build.zig
       cases.
-    Evidence commit / Linux CI run / reference report: part 1 local Linux
-      runs; CI pending.
-    Required cases: parts 1 and 2 pass.
+    Evidence commit / Linux CI run / reference report: e2daea0, 8da3848,
+      6c795bc / local Linux runs / below.
+    Required cases: passed all / failed 0 / missing 0
     Optional cases: none
-    Fuzz seeds, budget and result: none yet.
-    Remaining work or blocker / next action: T23c's G5 record.
+    Fuzz seeds, budget and result: the conversion fuzz test, unchanged.
+    Remaining work or blocker / next action: T24, with T17a.
     ```
+
+    Evidence (G5, local Linux x86-64 runs with Zig 0.17.0): commits
+    `e2daea0` (the matrix), `8da3848` (the kernels) and `6c795bc` (the
+    pipeline and zffmpeg's output `-ac`/`-ch_layout`). At `6c795bc`: fmt,
+    `generate.py --check`, the example check, Debug and ReleaseSafe builds,
+    `zig build test` with 170/170 steps and 219/219 tests in Debug,
+    ReleaseSafe and ReleaseFast, and the three cross builds passed; the
+    seven vector generators reproduce their files from FFmpeg `5d5a38a`,
+    the 4833 matrices of `rematrix_vectors.c` and the 1792 `swr_convert`
+    outputs of `remix_vectors.c` among them, both of which a deliberately
+    wrong rule fails. `compare.py` against that reference, built with clang
+    23.1.4: 819 of the 924 fixtures rematrixed into six layouts equal
+    FFmpeg's samples, 30 refused by both, three input differences recorded;
+    the other 75, and the 90 transcodes of the other sections, differ only
+    at the inf and NaN samples of the 15 float fixtures, which that
+    compiler's FFmpeg converts to 0 where the CI's clang 18 build and the
+    port give -32768; every other section passed.
 
 - [ ] **T24 — Resampling.** Needs T17a and T23a.
   Reference: `libswresample/resample.c`, `resample_dsp.c` (soxr is external

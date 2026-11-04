@@ -17,8 +17,8 @@ tags (T21c), AU with every PCM encoding of FFmpeg's table and unknown
 length (T22a), AIFF and AIFF-C with every PCM encoding of FFmpeg's table
 (T22b), raw PCM in FFmpeg's raw formats (T22c), and CAF read only (T22d),
 with conversion between every sample format and libswresample's dither
-(T23a), and FFmpeg's channel layouts, 1 to 64 channels, in every container
-(T23b). The `av`
+(T23a), FFmpeg's channel layouts, 1 to 64 channels, in every container
+(T23b), and rematrixing between them (T23c). The `av`
 module (rooted at `zig/root.zig`) exports `pcm` (the PCM encodings,
 kernels and decoder/encoder stages), `audio`, `channel_layout` (FFmpeg's
 channel layouts), `time`, `samples` (decoded sample storage
@@ -41,8 +41,8 @@ sample storage), T20b (the PCM encodings) and T21 (complete WAV: T21a
 extensible headers and encodings, T21b RF64, Wave64 and unknown length, T21c
 tags), T16 (codec and format registries and probing) and T22 (T22a AU
 encodings, T22b AIFF, T22c raw PCM, T22d CAF) and T23a (sample format
-conversion and dither) and T23b (channel layouts) are verified; T23c
-(rematrixing) is next, and
+conversion and dither), T23b (channel layouts) and T23c (rematrixing) are
+verified, completing T23; T24 (resampling, with T17a) is next, and
 TODO.md lays out the roadmap through T64.
  When the state changes, update the current-state statements in
 README.md, port.md ("Status and scope"), the TODO.md introduction and this file

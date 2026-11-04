@@ -25,7 +25,8 @@ does, with `-c:a` to pick the encoder and every one of its dither methods,
 noise shaping included, bit-exact with FFmpeg's (T23a). Every container
 carries 1 to 64 channels with FFmpeg's channel layouts, Apple's layout chunk
 in AIFF and CAF included, and `zffmpeg` names an unspecified layout as
-FFmpeg's command line does (T23b). [TODO.md](TODO.md) holds the completion
+FFmpeg's command line does (T23b); its output `-ac` and `-ch_layout`
+rematrix as libswresample does, bit-exact (T23c). [TODO.md](TODO.md) holds the completion
 evidence and the roadmap. Development is verified on Linux only. The compiler
 is **Zig 0.17.0**, enforced by the build.
 
