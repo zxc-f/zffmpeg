@@ -29,10 +29,11 @@ input: a 4-byte type, a signed 64-bit size and the body, with no padding.
 
 | Chunk | Rule |
 | --- | --- |
-| `desc` | Must come first with size 32 (`InvalidCaf`): the sample rate as a double, the format ID, format flags, bytes per packet, frames per packet, channels and bits per channel, each a `u32`. |
+| `desc` | Must come first with size 32 (`InvalidCaf`): the sample rate as a double, the format ID, format flags, bytes per packet, frames per packet, channels and bits per channel, each a `u32`. Channels 0 is `InvalidFormat`, above 64 (the configurable `Limits.max_channels`, as for WAV, AU and AIFF) `LimitExceeded`; since T23b any count up to it is read. |
 | `data` | A `u32` edit count (skipped), then the samples. A size below 4 is `InvalidCaf`; the samples must be whole frames (`InvalidFormat`). A size of -1 means the data runs to the end of the input: `UnsupportedStreamingSize`, unless the parser's `unknown_length` option reads it, in whole frames (`Truncated` otherwise). A second `data` is `InvalidCaf`. |
 | `pakt` | `UnsupportedFormat`: a packet table can make FFmpeg trim priming and remainder frames. |
-| Others | Skipped (`free`, `chan`, `info`, `kuki`, ...), before or after `data`; a negative size is `InvalidCaf`. At most 4096 chunk headers after `desc` (`LimitExceeded`, configurable). |
+| `chan` | Since T23b, before `data`, Apple's channel layout, read as FFmpeg's `ff_mov_read_chan` reads it ([mov_chan.zig](../../../format/mov_chan.zig), as for AIFF's `CHAN`): a layout tag (`caf_chan_5point1`), a bitmap (`caf_chan_bitmap`) or channel descriptions (`caf_chan_descriptions`, a custom order) give the layout when their channel count is `desc`'s, else it is ignored (`caf_chan_count_mismatch`). Fewer than 12 bytes (`caf_chan_short`) and more descriptions than the chunk holds (`caf_chan_descriptions_overflow`) are `InvalidFormat`, a negative size `InvalidCaf` (`caf_chan_size_negative`). After `data` it is skipped (`caf_chan_after_data`). Without `chan` the layout is unspecified, which zffprobe prints as `unknown`. |
+| Others | Skipped (`free`, `info`, `kuki`, ...), before or after `data`; a negative size is `InvalidCaf`. At most 4096 chunk headers after `desc` (`LimitExceeded`, configurable). |
 
 Input that ends exactly between chunks before any `data` is `InvalidCaf`; one
 that ends inside a chunk header or body is `Truncated`.
@@ -63,7 +64,8 @@ that ends inside a chunk header or body is `Truncated`.
    so shorter input is `Truncated`; then magic, version, `desc` and its size.
 2. The description: the sample rate, then the codec, the channels and the
    packet layout.
-3. The chunks in file order, then the samples, then the chunks after them.
+3. The chunks in file order (a `chan`: its size, then its fields and
+   descriptions), then the samples, then the chunks after them.
 
 ## Content detection
 
@@ -87,9 +89,12 @@ pinned revision.
 | `data` size -1 | `UnsupportedStreamingSize` by default; the rest of the input with `unknown_length` (`caf_data_size_unknown`). Opt-in as for WAV and AU. | Reads to the end of the input. |
 | Data not whole frames | `InvalidFormat` (`caf_data_not_whole_frames`). | Decodes the whole frames. |
 | Chunks after `data` | Read and validated sequentially; a second `data` is `InvalidCaf`. | Read only from a seekable file. |
-| `chan`, `info`, `kuki` | Skipped; no tags or layout are read: mono or stereo follows the channel count. | Reads the channel layout and the `info` strings as tags; a `chan` that declares no channel descriptions is an error. |
+| `chan` before `data` | Read (`caf_chunks_around_data`, mono). | The same. |
+| `chan` after `data` | Skipped (`caf_chan_after_data`): a sequential reader has reported the stream by then. | Reads it from a seekable file, which `compare.py` records as a known difference (`quad` here). |
+| `chan` too short for its descriptions | `InvalidFormat` (`caf_chan_descriptions_overflow`). | Keeps the layout and, on a seekable file, goes on after the chunk. |
+| `info`, `kuki` | Skipped; no tags are read. | Reads the `info` strings as tags. |
 | Duration | The frame count, exact: from the `data` size. | Estimated from the bit rate over the bytes after the data start, so chunks after `data` count as frames (`caf_chunks_around_data`: 10 for 4); none for empty `data`. |
-| Sample rate above 192 kHz, more than 2 channels | `LimitExceeded`, `UnsupportedFormat`. | Accepted. |
+| Sample rate above 192 kHz, more than 64 channels | `LimitExceeded` (`caf_rate_over_limit`, `caf_channels65`). | Accepted. |
 | Muxing | Not supported (T22d is demux only). | Has a CAF muxer. |
 
 ## Provenance
@@ -120,7 +125,7 @@ were used.
 | `caf_alaw_mono_8k` | accepted | 76 | accept: 1 channel, 8000 Hz, 8 frames, `pcm_alaw` | Format ID `alaw`; decodes to s16. | `f4cf704ca46dd6b13b7199adeabddbf721278ae2df4c329fd724b99898953f8e` |
 | `caf_ulaw_mono_8k` | accepted | 76 | accept: 1 channel, 8000 Hz, 8 frames, `pcm_mulaw` | Format ID `ulaw`; decodes to s16. | `10e9310a847fa4521267fae8c351ff7ff837540cad112e7379dc57e5c08c1aea` |
 | `caf_empty_data` | accepted | 68 | accept: 1 channel, 8000 Hz, 0 frames | A `data` chunk of 4 bytes, its edit count only: 0 frames. | `e9ae4517e0b5818fd44002e96dff92a3476ce9ffdcd30b91179a5021410ed810` |
-| `caf_chunks_around_data` | accepted | 167 | accept: 1 channel, 8000 Hz, 4 frames | `free`, `chan` (the mono layout tag), `info` and `kuki` before `data` and `free` after it are skipped. | `e14afe6c5a78f6e765603e684c1df35edb1231b551f1e9f38969220b4444f090` |
+| `caf_chunks_around_data` | accepted | 167 | accept: mono (1 channel), 8000 Hz, 4 frames | `free`, `info` and `kuki` before `data` and `free` after it are skipped; `chan` before it, the mono layout tag, gives the layout (skipped before T23b). | `e14afe6c5a78f6e765603e684c1df35edb1231b551f1e9f38969220b4444f090` |
 | `caf_rate_fraction` | accepted | 76 | accept: 1 channel, 8000 Hz, 4 frames | A rate of 8000.75 Hz is truncated to 8000, as FFmpeg's int conversion does. | `e2e5fb2eaf15f3843eb7b67d80f5389499888574123dc679b1bca12151ea3316` |
 | `caf_edit_count` | accepted | 76 | accept: 1 channel, 8000 Hz, 4 frames | A nonzero edit count is skipped. | `e49571e5722dc411f0eda5ad59714f044df0570272440e8730f0f931719260bc` |
 | `caf_data_size_unknown` | size | 76 | reject: `UnsupportedStreamingSize`; with `unknown_length`, accept: 1 channel, 8000 Hz, 4 frames | `data` size -1, as a writer that could not seek back leaves it: with `unknown_length` the data is the rest of the input. | `da3a4066c511124b113e0c92b044f74e12177113afd8a60c1d6d1edc7303cd39` |
@@ -138,7 +143,18 @@ were used.
 | `caf_lpcm_bits12` | desc | 76 | reject: `UnsupportedFormat` | 12-bit `lpcm`: whole bytes only. FFmpeg rounds up to 16. | `631accfb6cd3e99c631add0fe8e606d9a56aec5d31b6413a9d210b998aad5532` |
 | `caf_float_bits16` | desc | 76 | reject: `UnsupportedFormat` | A 16-bit float: no codec. | `6cf9714e077016654a77846638491d213fe79e4b6e4b6ab517fdbd7d397bff96` |
 | `caf_channels0` | desc | 68 | reject: `InvalidFormat` | Zero channels. | `118207f3e9ad6439b26083f6a8e784e363248beff68d225fbba116022261a3bd` |
-| `caf_channels3` | desc | 80 | reject: `UnsupportedFormat` | Three channels. | `9e4d34d63f98f5839b42660f9fb327bd4d49f34aac6ce62bbe1e18c3ce6cc7b0` |
+| `caf_channels3` | channels | 80 | accept: 3 channels, 8000 Hz, 2 frames | Three channels without `chan`: unspecified (rejected before T23b). | `0eaff576bb2c31e0365ff8c85b66ee028a3ec683067fdbf74dd264534aa0c879` |
+| `caf_channels6` | channels | 92 | accept: 6 channels, 8000 Hz, 2 frames | Six channels without `chan`; FFmpeg's command line guesses 5.1 for them. | `05613e99004b968b09d817981756af81b995f7b4e236f596c9ad8de82ec0fc59` |
+| `caf_channels64` | channels | 196 | accept: 64 channels, 8000 Hz, 1 frame | 64 channels, the default limit: one frame. | `5a30cb376a37ef5cc22fc56203c42c74ce7fe10760037e9645e84fd327e89fd0` |
+| `caf_channels65` | channels | 198 | reject: `LimitExceeded` | 65 channels, above the default limit (FFmpeg reads them). | `101ff8debc8bb3b53460421f898b4e63992296d59f86a00823c58a57acb6f52f` |
+| `caf_chan_5point1` | channels | 116 | accept: 5.1(side) (6 channels), 8000 Hz, 2 frames | `chan` with the tag MPEG_5_1_A (L, R, C, LFE, Ls, Rs): 5.1(side). | `bac1368e2a9b58b679631415ceb4fe23d0a2d9e74875d169ef6fc0878b4601cb` |
+| `caf_chan_bitmap` | channels | 116 | accept: 5.1 (6 channels), 8000 Hz, 2 frames | `chan` with the 5.1 bitmap. | `0fae5b3f5b64acd36907a2c3483a6ea3c684bfe6b8b761ee39abd797b20af25f` |
+| `caf_chan_descriptions` | channels | 148 | accept: 2 channels (FR+FL) (2 channels), 8000 Hz, 4 frames | `chan` with channel descriptions R, L: a custom order, as FFmpeg reads it. | `bcfa208943af797e857c672147c549c5ef7623dfcdc97130a4b53343768be229` |
+| `caf_chan_count_mismatch` | channels | 108 | accept: 2 channels, 8000 Hz, 4 frames | `chan` with a four-channel tag on a stereo stream is ignored, as FFmpeg ignores it. | `89c7707b4e701a7a9023ff93fe42e2386f0ba0c1c3438860bbf9b355832ac21e` |
+| `caf_chan_after_data` | channels | 108 | accept: 4 channels, 8000 Hz, 2 frames | `chan` after `data` is skipped: a sequential reader has reported the stream by then. FFmpeg reads it from a seekable file. | `2a71aaf89c74a38b8727c8e4fd200e703e0ca9ca2de7641b9ccf2496e39126d6` |
+| `caf_chan_short` | channels | 96 | reject: `InvalidFormat` | A `chan` of 8 bytes, short of the 12 fixed ones: FFmpeg rejects it too. | `55ddb02017966df54a67f79ef31ca892506bcb94b55b41f07f6b24cffcccfaf4` |
+| `caf_chan_size_negative` | channels | 88 | reject: `InvalidCaf` | A `chan` of size -1: FFmpeg rejects it too. | `439476f598c5fa45671c8bb131144f4c2339a3399677e4308bfd9839b9ac2d3c` |
+| `caf_chan_descriptions_overflow` | channels | 128 | reject: `InvalidFormat` | A `chan` declaring two descriptions in room for one. FFmpeg keeps the layout and, on a seekable file, goes on after the chunk. | `1709e1f32496a8e112eb37eb12ce717f8dea31cb27d2808299fa6430cae1d990` |
 | `caf_bytes_per_packet` | desc | 76 | reject: `InvalidFormat` | 4 bytes per packet for 16-bit mono. | `e5ad27068b706f49996bee6299e0f866ddb635e07d07674e2faefb233ea6804d` |
 | `caf_frames_per_packet` | desc | 76 | reject: `InvalidFormat` | 2 frames per packet: PCM has one. | `2258c471efe5d6c3d8db2420af0abb989c2ba7b685f20c6ebee33c9dada9760e` |
 | `caf_missing_data` | chunks | 52 | reject: `InvalidCaf` | `desc`, then the end of the input. | `2e9c02b3f9e0f6ac06cc7e0820aa4e4cad7f840bd939f2dbc87f25c313f79f72` |

@@ -1709,6 +1709,12 @@ def caf(*chunks, magic=b"caff", version=1):
     return magic + struct.pack(">HH", version, 0) + b"".join(chunks)
 
 
+def caf_chan(tag=0, bitmap=0, labels=(), count=None):
+    """A `chan` chunk: the body of AIFF's CHAN (`chan_chunk`), unpadded."""
+    body = be32(tag) + be32(bitmap) + be32(len(labels) if count is None else count)
+    return caf_chunk(b"chan", body + b"".join(be32(label) + bytes(16) for label in labels))
+
+
 def caf_for(codec, channels, rate, payload, before=(), after=()):
     format_id, flags, bits = CAF_CODECS[codec]
     width = 1 if bits == 8 else bits // 8
@@ -1722,9 +1728,11 @@ def build_caf_fixtures():
     def stream(codec, channels, rate, payload):
         return Stream(codec, channels, rate, CAF_STORAGE[codec], decode_stored(codec, payload))
 
-    def ok(name, rule, codec, channels, rate, payload, data=None):
-        fx.append(Fixture(name, "accepted", rule, data or caf_for(codec, channels, rate, payload),
-                          accept=stream(codec, channels, rate, payload)))
+    def ok(name, rule, codec, channels, rate, payload, data=None, group="accepted", layout=None):
+        accepted_stream = stream(codec, channels, rate, payload)
+        accepted_stream.layout = layout
+        fx.append(Fixture(name, group, rule, data or caf_for(codec, channels, rate, payload),
+                          accept=accepted_stream))
 
     def bad(name, group, rule, data, error):
         assert error in CAF_ERRORS, error
@@ -1768,9 +1776,9 @@ def build_caf_fixtures():
     desc = caf_desc()
     # Other accepted layouts.
     ok("caf_empty_data", "A `data` chunk of 4 bytes, its edit count only: 0 frames.", "pcm_s16be", 1, 8000, b"")
-    ok("caf_chunks_around_data", "`free`, `chan` (the mono layout tag), `info` and `kuki` before `data` and `free` "
-       "after it are skipped.",
-       "pcm_s16be", 1, 8000, four,
+    ok("caf_chunks_around_data", "`free`, `info` and `kuki` before `data` and `free` after it are skipped; "
+       "`chan` before it, the mono layout tag, gives the layout (skipped before T23b).",
+       "pcm_s16be", 1, 8000, four, layout="mono",
        data=caf(desc, caf_chunk(b"free", bytes(6)), caf_chunk(b"chan", struct.pack(">III", 0x640001, 0, 0)),
                 caf_chunk(b"info", b"\0\0\0\x01title\0T\0"), caf_chunk(b"kuki", b"\x01"),
                 caf_data(four), caf_chunk(b"free", b"")))
@@ -1815,8 +1823,43 @@ def build_caf_fixtures():
         "UnsupportedFormat")
     bad("caf_channels0", "desc", "Zero channels.", caf(caf_desc(bytes_per_packet=0, channels=0), caf_data(b"")),
         "InvalidFormat")
-    bad("caf_channels3", "desc", "Three channels.", caf(caf_desc(bytes_per_packet=6, channels=3), caf_data(bytes(12))),
-        "UnsupportedFormat")
+    # Channels and layouts (T23b): any count up to the limit, unspecified
+    # unless a `chan` chunk before `data` gives a layout, as FFmpeg reads it.
+    s16_six = values(">h", MONO + MONO[:4])
+    ok("caf_channels3", "Three channels without `chan`: unspecified (rejected before T23b).", "pcm_s16be", 3, 8000,
+       values(">h", MONO[:6]), group="channels")
+    ok("caf_channels6", "Six channels without `chan`; FFmpeg's command line guesses 5.1 for them.", "pcm_s16be", 6,
+       8000, s16_six, group="channels")
+    wide = values(">h", [i - 32 for i in range(MAX_CHANNELS)])
+    ok("caf_channels64", f"{MAX_CHANNELS} channels, the default limit: one frame.", "pcm_s16be", MAX_CHANNELS, 8000,
+       wide, group="channels")
+    bad("caf_channels65", "channels", f"{MAX_CHANNELS + 1} channels, above the default limit (FFmpeg reads them).",
+        caf_for("pcm_s16be", MAX_CHANNELS + 1, 8000, bytes(2 * (MAX_CHANNELS + 1))), "LimitExceeded")
+    ok("caf_chan_5point1", "`chan` with the tag MPEG_5_1_A (L, R, C, LFE, Ls, Rs): 5.1(side).", "pcm_s16be", 6, 8000,
+       s16_six, group="channels", layout=describe_mask(channel_bits("FL", "FR", "FC", "LFE", "SL", "SR")),
+       data=caf_for("pcm_s16be", 6, 8000, s16_six, before=(caf_chan(CHAN_MPEG_5_1_A),)))
+    five_one = channel_bits("FL", "FR", "FC", "LFE", "BL", "BR")
+    ok("caf_chan_bitmap", "`chan` with the 5.1 bitmap.", "pcm_s16le", 6, 8000, pcm(MONO + MONO[:4]),
+       group="channels", layout=describe_mask(five_one),
+       data=caf_for("pcm_s16le", 6, 8000, pcm(MONO + MONO[:4]), before=(caf_chan(CHAN_USE_BITMAP, bitmap=five_one),)))
+    ok("caf_chan_descriptions", "`chan` with channel descriptions R, L: a custom order, as FFmpeg reads it.",
+       "pcm_s16be", 2, 8000, values(">h", STEREO), group="channels", layout="2 channels (FR+FL)",
+       data=caf_for("pcm_s16be", 2, 8000, values(">h", STEREO), before=(caf_chan(labels=(2, 1)),)))
+    ok("caf_chan_count_mismatch", "`chan` with a four-channel tag on a stereo stream is ignored, as FFmpeg "
+       "ignores it.", "pcm_s16be", 2, 8000, values(">h", STEREO), group="channels",
+       data=caf_for("pcm_s16be", 2, 8000, values(">h", STEREO), before=(caf_chan(CHAN_QUADRAPHONIC),)))
+    ok("caf_chan_after_data", "`chan` after `data` is skipped: a sequential reader has reported the stream by "
+       "then. FFmpeg reads it from a seekable file.", "pcm_s16be", 4, 8000, values(">h", MONO), group="channels",
+       data=caf_for("pcm_s16be", 4, 8000, values(">h", MONO), after=(caf_chan(CHAN_QUADRAPHONIC),)))
+    bad("caf_chan_short", "channels", "A `chan` of 8 bytes, short of the 12 fixed ones: FFmpeg rejects it too.",
+        caf(desc, caf_chunk(b"chan", bytes(8)), caf_data(four)), "InvalidFormat")
+    bad("caf_chan_size_negative", "channels", "A `chan` of size -1: FFmpeg rejects it too.",
+        caf(desc, caf_chunk(b"chan", b"", size=-1), caf_data(four)), "InvalidCaf")
+    bad("caf_chan_descriptions_overflow", "channels",
+        "A `chan` declaring two descriptions in room for one. FFmpeg keeps the layout and, on a seekable file, "
+        "goes on after the chunk.",
+        caf(caf_desc(bytes_per_packet=4, channels=2), caf_chan(labels=(1,), count=2), caf_data(values(">h", STEREO))),
+        "InvalidFormat")
     bad("caf_bytes_per_packet", "desc", "4 bytes per packet for 16-bit mono.",
         caf(caf_desc(bytes_per_packet=4), caf_data(four)), "InvalidFormat")
     bad("caf_frames_per_packet", "desc", "2 frames per packet: PCM has one.",

@@ -306,6 +306,18 @@ build include the WAV muxer. Its first run, locally on Windows at commit
   s16) rejected before any output: **54/54**.
 - Fixtures whose pipe result equals the file result: **105/105**.
 
+T23b part 5 widened CAF to 64 channels with its `chan` chunk, read by the
+same code as AIFF's, with no reference configuration change. The run,
+locally on Linux x86-64 as for part 3, failed only the same 90 inf and NaN
+transcodes:
+
+- CAF **27/27** and **31/31**, the layouts from `chan` equal to ffprobe's
+  (`caf_chunks_around_data`'s mono included, a known difference before);
+  `caf_chan_after_data`'s `chan` after `data`, which FFmpeg reads (`quad`),
+  and its duration estimate (5 frames for 2) are recorded differences.
+- Detection and pipes: **305/305**; zffmpeg outputs **1392/1482**, the 90
+  above the only failures.
+
 T23b part 4 widened AIFF to 64 channels with FFmpeg's `CHAN` chunk, both
 ways, and added the `chan` vectors (2516, from `chan_vectors.c`), with no
 reference configuration change. The run, locally on Linux x86-64 as for part
@@ -524,7 +536,7 @@ FFmpeg decodes the same samples as the contract for every accepted fixture, and
 
 | Field | FFmpeg | Contract | Reason |
 | --- | --- | --- | --- |
-| `channel_layout`, `caf_chunks_around_data` only | `mono` | `unknown` | FFmpeg reads the `chan` layout tag, which the port reads in CAF's T23b part. Until T23b part 2 every plain WAV, AU, AIFF and CAF fixture differed here (FFmpeg `unknown`, the contract `mono` or `stereo`); now both report FFmpeg's layout. |
+| `channel_layout`, `aiff_chan_after_ssnd` and `caf_chan_after_data` only | `quad` | `unknown` | FFmpeg reads a seekable file's layout chunk after the samples; a sequential reader has reported the stream by then. Until T23b part 2 every plain WAV, AU, AIFF and CAF fixture differed here (FFmpeg `unknown`, the contract `mono` or `stereo`), and until part 5 `caf_chunks_around_data` (its `chan` was not read); now both report FFmpeg's layout. |
 | `duration_ts`, `empty_data` and zffmpeg's WAV output of an empty stream | `N/A` | `0` | FFmpeg reads a `data` size of 0 as unknown length and sets no duration; it still decodes zero samples. The contract treats 0 as an empty stream. |
 | Decoded samples, `au_trailing_bytes_after_data` only | 6 samples | 4 samples | FFmpeg's AU demuxer reads to the end of input and decodes the bytes after the declared data; the contract never reads them. |
 | Content detection, `au_empty_data` only | not detected | detected | FFmpeg's `au_probe` needs every header field nonzero, including the data size; with `-f au` it reads the file as expected. Our detection checks only the `.snd` magic. |

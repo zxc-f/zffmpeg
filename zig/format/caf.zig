@@ -2,10 +2,13 @@
 // Original file for this project; not translated from FFmpeg source.
 // libavformat/cafdec.c, caf.c and isom.h (ff_mov_get_lpcm_codec_id) at the
 // pinned reference revision describe FFmpeg's behavior; see
-// zig/testing/fixtures/caf/README.md.
+// zig/testing/fixtures/caf/README.md. The `chan` chunk is read by
+// mov_chan.zig, as cafdec.c uses mov_chan.c.
 //! Bounded Apple CAF (Core Audio Format) reading (TODO.md T22d): linear PCM
 //! (`lpcm`: s8, s16, s24, s32 and s64 integers and f32 and f64 floats, in
-//! either byte order), A-law (`alaw`) and µ-law (`ulaw`).
+//! either byte order), A-law (`alaw`) and µ-law (`ulaw`), with 1 to
+//! `max_channels` channels (T23b) in the layout FFmpeg reads: unspecified, or
+//! what a `chan` chunk before `data` gives (mov_chan.zig).
 //!
 //! A file is `caff`, version 1, then a 32-byte `desc` chunk describing the
 //! stream, then chunks with 64-bit big-endian sizes to the end of the input,
@@ -21,6 +24,7 @@ const std = @import("std");
 const audio = @import("../core/audio.zig");
 const samples_storage = @import("../core/samples.zig");
 const pcm = @import("../codec/pcm.zig");
+const mov_chan = @import("mov_chan.zig");
 
 /// Contract errors (see the CAF fixture README), plus `IoFailure` for a
 /// failing reader.
@@ -37,6 +41,8 @@ pub const Error = error{
 /// Configurable policy limits; exceeding one is `error.LimitExceeded`.
 pub const Limits = struct {
     max_sample_rate: u32 = 192_000,
+    /// libswresample's `SWR_CH_MAX`: more channels than FFmpeg converts.
+    max_channels: u16 = max_channels,
     /// Counts every chunk header after `desc`.
     max_chunks: u32 = 4096,
     /// Read a `data` size of -1 to the end of the input, in whole frames,
@@ -51,6 +57,9 @@ pub const Info = struct {
     /// Sample frames in `data`; null when its length is unknown.
     frame_count: ?u64,
 };
+
+/// The default channel limit.
+pub const max_channels = 64;
 
 /// The 8-byte file header and the `desc` chunk's 12-byte header.
 const file_header_len = 8;
@@ -169,30 +178,47 @@ pub const Parser = struct {
         const channels = std.mem.readInt(u32, desc[24..28], .big);
         const bits = std.mem.readInt(u32, desc[28..32], .big);
         const codec = codecFor(desc[8..12], flags, bits) orelse return error.UnsupportedFormat;
-        // A count that does not fit in u16 is far above the two supported channels.
-        const channel_count = std.math.cast(u16, channels) orelse return error.UnsupportedFormat;
-        if (channel_count == 0) return error.InvalidFormat;
-        if (channel_count > 2) return error.UnsupportedFormat;
+        if (channels == 0) return error.InvalidFormat;
+        if (channels > p.limits.max_channels) return error.LimitExceeded;
+        // max_channels is a u16.
+        const channel_count: u16 = @intCast(channels);
         // Without `chan` FFmpeg leaves the layout unspecified.
-        const layout: audio.ChannelLayout = .{ .unspecified = channel_count };
-        // At most 8 bytes times 2 channels.
+        var layout: audio.ChannelLayout = .{ .unspecified = channel_count };
+        // At most 8 bytes times 65535 channels: no overflow.
         const sample_bytes: u32 = codec.bytesPerSample();
         const frame_bytes = sample_bytes * channel_count;
         // PCM is one frame per packet of exactly the frame's bytes.
         if (frames_per_packet != 1 or bytes_per_packet != frame_bytes) return error.InvalidFormat;
         p.codec = codec;
         p.frame_bytes = frame_bytes;
-        const format: audio.Format = .{ .sample_rate = rate, .layout = layout, .sample_format = codec.storage() };
 
         while (true) {
             const chunk = try p.nextChunk() orelse return error.InvalidCaf; // no `data`
             if (std.mem.eql(u8, &chunk.id, "data")) {
                 const frame_count = try p.beginData(chunk.size);
                 p.state = .data;
+                const format: audio.Format = .{ .sample_rate = rate, .layout = layout, .sample_format = codec.storage() };
                 return .{ .codec = codec, .format = format, .frame_count = frame_count };
             }
-            try p.skipChunk(chunk);
+            if (std.mem.eql(u8, &chunk.id, "chan")) {
+                // A `chan` keeps the count `desc` gave: only its layout changes.
+                layout = try p.readChan(chunk.size, layout);
+            } else {
+                try p.skipChunk(chunk);
+            }
         }
+    }
+
+    /// `chan` before `data`: FFmpeg's `ff_mov_read_chan`. After `data` it is
+    /// skipped like any other chunk, as the stream is reported by then.
+    fn readChan(p: *Parser, size: i64, layout: audio.ChannelLayout) Error!audio.ChannelLayout {
+        if (size < 0) return error.InvalidCaf;
+        return mov_chan.read(p.reader, @intCast(size), layout) catch |err| switch (err) {
+            error.InvalidFormat => error.InvalidFormat,
+            error.Truncated => error.Truncated,
+            error.LimitExceeded => error.LimitExceeded,
+            error.IoFailure => error.IoFailure,
+        };
     }
 
     /// `data`: a 4-byte edit count, then the samples.
@@ -331,10 +357,14 @@ pub const DecodeError = Error || std.Io.Writer.Error;
 
 /// Decodes a CAF stream and writes its samples to `out` as raw little-endian
 /// samples of its storage format, using fixed working storage. The caller
-/// flushes `out`.
+/// flushes `out`. A frame wider than that storage (4 KiB, possible only with a
+/// channel limit above the default) is `LimitExceeded`.
 pub fn decodeToRaw(reader: *std.Io.Reader, out: *std.Io.Writer, limits: Limits) DecodeError!Info {
     var parser: Parser = .init(reader, limits);
     const info = try parser.readHeader();
+    // readData delivers nothing when a frame does not fit, which would end
+    // the loop below early; only a channel limit above the default allows it.
+    if (parser.frame_bytes > scratch_len) return error.LimitExceeded;
     var encoded: [scratch_len]u8 = undefined;
     // Storage is at most twice the encoded size (A-law and µ-law to s16).
     var stored: [2 * scratch_len]u8 = undefined;

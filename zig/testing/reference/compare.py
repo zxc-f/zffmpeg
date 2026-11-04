@@ -99,8 +99,10 @@ KNOWN_FIXTURE_DIFFERENCES = {
     # FFmpeg estimates a CAF duration from the bit rate over the bytes after the
     # data start, so the 12-byte trailing ree chunk counts as 6 frames.
     ("caf_chunks_around_data", "duration_ts", "10"): "FFmpeg estimates the duration from the bytes after the data start",
-    # FFmpeg reads the `chan` layout tag; the port reads `chan` in CAF's T23b part.
-    ("caf_chunks_around_data", "channel_layout", "mono"): "`chan` is read in CAF's T23b part",
+    # FFmpeg reads a seekable CAF file's chunks after a data chunk of known size.
+    ("caf_chan_after_data", "channel_layout", "quad"): "`chan` after `data` is not read",
+    # The same estimate counts the 24-byte `chan` after the data as 3 frames.
+    ("caf_chan_after_data", "duration_ts", "5"): "FFmpeg estimates the duration from the bytes after the data start",
     # FFmpeg reads a seekable AIFF file's chunks after SSND; a sequential
     # reader has reported the stream by then.
     ("aiff_chan_after_ssnd", "channel_layout", "quad"): "CHAN after SSND is not read",

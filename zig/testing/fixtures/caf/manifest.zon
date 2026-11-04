@@ -100,7 +100,7 @@
     .{
         .name = "caf_chunks_around_data",
         .sha256 = "e14afe6c5a78f6e765603e684c1df35edb1231b551f1e9f38969220b4444f090",
-        .expected = .{ .accept = .{ .codec = .pcm_s16be, .channels = 1, .layout = "unknown", .sample_rate = 8000, .samples = .{ .s16 = .{ 0, 1, -1, 32767 } } } },
+        .expected = .{ .accept = .{ .codec = .pcm_s16be, .channels = 1, .layout = "mono", .sample_rate = 8000, .samples = .{ .s16 = .{ 0, 1, -1, 32767 } } } },
         .detected = .caf,
     },
     .{
@@ -209,8 +209,74 @@
     },
     .{
         .name = "caf_channels3",
-        .sha256 = "9e4d34d63f98f5839b42660f9fb327bd4d49f34aac6ce62bbe1e18c3ce6cc7b0",
-        .expected = .{ .reject = .UnsupportedFormat },
+        .sha256 = "0eaff576bb2c31e0365ff8c85b66ee028a3ec683067fdbf74dd264534aa0c879",
+        .expected = .{ .accept = .{ .codec = .pcm_s16be, .channels = 3, .layout = "unknown", .sample_rate = 8000, .samples = .{ .s16 = .{ 0, 1, -1, 32767, -32768, 12345 } } } },
+        .detected = .caf,
+    },
+    .{
+        .name = "caf_channels6",
+        .sha256 = "05613e99004b968b09d817981756af81b995f7b4e236f596c9ad8de82ec0fc59",
+        .expected = .{ .accept = .{ .codec = .pcm_s16be, .channels = 6, .layout = "unknown", .sample_rate = 8000, .samples = .{ .s16 = .{ 0, 1, -1, 32767, -32768, 12345, -12345, 256, 0, 1, -1, 32767 } } } },
+        .detected = .caf,
+    },
+    .{
+        .name = "caf_channels64",
+        .sha256 = "5a30cb376a37ef5cc22fc56203c42c74ce7fe10760037e9645e84fd327e89fd0",
+        .expected = .{ .accept = .{ .codec = .pcm_s16be, .channels = 64, .layout = "unknown", .sample_rate = 8000, .samples = .{ .s16 = .{ -32, -31, -30, -29, -28, -27, -26, -25, -24, -23, -22, -21, -20, -19, -18, -17, -16, -15, -14, -13, -12, -11, -10, -9, -8, -7, -6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31 } } } },
+        .detected = .caf,
+    },
+    .{
+        .name = "caf_channels65",
+        .sha256 = "101ff8debc8bb3b53460421f898b4e63992296d59f86a00823c58a57acb6f52f",
+        .expected = .{ .reject = .LimitExceeded },
+        .detected = .caf,
+    },
+    .{
+        .name = "caf_chan_5point1",
+        .sha256 = "bac1368e2a9b58b679631415ceb4fe23d0a2d9e74875d169ef6fc0878b4601cb",
+        .expected = .{ .accept = .{ .codec = .pcm_s16be, .channels = 6, .layout = "5.1(side)", .sample_rate = 8000, .samples = .{ .s16 = .{ 0, 1, -1, 32767, -32768, 12345, -12345, 256, 0, 1, -1, 32767 } } } },
+        .detected = .caf,
+    },
+    .{
+        .name = "caf_chan_bitmap",
+        .sha256 = "0fae5b3f5b64acd36907a2c3483a6ea3c684bfe6b8b761ee39abd797b20af25f",
+        .expected = .{ .accept = .{ .codec = .pcm_s16le, .channels = 6, .layout = "5.1", .sample_rate = 8000, .samples = .{ .s16 = .{ 0, 1, -1, 32767, -32768, 12345, -12345, 256, 0, 1, -1, 32767 } } } },
+        .detected = .caf,
+    },
+    .{
+        .name = "caf_chan_descriptions",
+        .sha256 = "bcfa208943af797e857c672147c549c5ef7623dfcdc97130a4b53343768be229",
+        .expected = .{ .accept = .{ .codec = .pcm_s16be, .channels = 2, .layout = "2 channels (FR+FL)", .sample_rate = 8000, .samples = .{ .s16 = .{ 0, 0, 32767, -32768, -1, 1, 1000, -1000 } } } },
+        .detected = .caf,
+    },
+    .{
+        .name = "caf_chan_count_mismatch",
+        .sha256 = "89c7707b4e701a7a9023ff93fe42e2386f0ba0c1c3438860bbf9b355832ac21e",
+        .expected = .{ .accept = .{ .codec = .pcm_s16be, .channels = 2, .layout = "unknown", .sample_rate = 8000, .samples = .{ .s16 = .{ 0, 0, 32767, -32768, -1, 1, 1000, -1000 } } } },
+        .detected = .caf,
+    },
+    .{
+        .name = "caf_chan_after_data",
+        .sha256 = "2a71aaf89c74a38b8727c8e4fd200e703e0ca9ca2de7641b9ccf2496e39126d6",
+        .expected = .{ .accept = .{ .codec = .pcm_s16be, .channels = 4, .layout = "unknown", .sample_rate = 8000, .samples = .{ .s16 = .{ 0, 1, -1, 32767, -32768, 12345, -12345, 256 } } } },
+        .detected = .caf,
+    },
+    .{
+        .name = "caf_chan_short",
+        .sha256 = "55ddb02017966df54a67f79ef31ca892506bcb94b55b41f07f6b24cffcccfaf4",
+        .expected = .{ .reject = .InvalidFormat },
+        .detected = .caf,
+    },
+    .{
+        .name = "caf_chan_size_negative",
+        .sha256 = "439476f598c5fa45671c8bb131144f4c2339a3399677e4308bfd9839b9ac2d3c",
+        .expected = .{ .reject = .InvalidCaf },
+        .detected = .caf,
+    },
+    .{
+        .name = "caf_chan_descriptions_overflow",
+        .sha256 = "1709e1f32496a8e112eb37eb12ce717f8dea31cb27d2808299fa6430cae1d990",
+        .expected = .{ .reject = .InvalidFormat },
         .detected = .caf,
     },
     .{

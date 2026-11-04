@@ -1794,7 +1794,8 @@ names, not as an empty framework.
       layout guess; multichannel dither. Part 3: AU with 1 to 64 channels
       both ways, unspecified as FFmpeg reads them. Part 4: Apple's `chan`
       reader and writer (format/mov_chan.zig) and AIFF with 1 to 64
-      channels and `CHAN` both ways. Excluded: ambisonics;
+      channels and `CHAN` both ways. Part 5: CAF with 1 to 64 channels and
+      `chan` before `data`. Excluded: ambisonics;
       custom layouts past 64 channels; more than 64 channels.
     Needs (verified) / lands with / verified after: T20a.
     Contract and source provenance: port.md "Channel layouts"; notes.md
@@ -1805,29 +1806,30 @@ names, not as an empty framework.
       fixtures (part 3: au_channels3 now accepted, au_channels6,
       au_channels64 and au_channels65 new); 2516 `chan` vectors of the
       pinned libavformat (chan_vectors.c); 57 AIFF fixtures (part 4:
-      aiff_channels3 now accepted, 13 new, 10 of them with `CHAN`); no
-      optional corpus.
+      aiff_channels3 now accepted, 13 new, 10 of them with `CHAN`); 58 CAF
+      fixtures (part 5: caf_channels3 now accepted, 11 new, 8 of them with
+      `chan`; caf_chunks_around_data's `chan` now read); no optional corpus.
     Ownership, state transitions and limits: layouts are values; no
       allocation.
     Comparison rule and intentional differences: exact; ambisonic text is
       UnsupportedLayout, custom maps past 64 channels LimitExceeded, more
       than 64 WAV, AU or AIFF channels LimitExceeded; a `chan` body too
       short for its descriptions InvalidFormat and an AIFF `CHAN` after
-      `SSND` skipped (FFmpeg reads on); CAF `chan` unread until its part.
+      `SSND` or a CAF `chan` after `data` skipped (FFmpeg reads on).
     Implementation files and test entry points: core/channel_layout.zig,
       core/audio.zig, format/wav.zig, format/au.zig, format/aiff.zig,
-      format/mov_chan.zig, format/convert.zig, cli/probe.zig, generate.py,
+      format/caf.zig, format/mov_chan.zig, format/convert.zig, cli/probe.zig, generate.py,
       chan_vectors.c, compare.py.
     Evidence commit / Linux CI run / reference report: part 1 `1f4f41c`;
-      part 2 `45f1a7d` local Windows runs; parts 2 to 4 local Linux runs
+      part 2 `45f1a7d` local Windows runs; parts 2 to 5 local Linux runs
       of every CI step (Debug, ReleaseSafe, ReleaseFast; the vector
       generators; compare.py, whose only failures are the 90 inf and NaN
       conversions a clang 23 reference build gives 0 for); CI pending.
-    Required cases: parts 1 to 4 pass; CAF and raw are missing.
+    Required cases: parts 1 to 5 pass; raw is missing.
     Optional cases: none
     Fuzz seeds, budget and result: none yet.
-    Remaining work or blocker / next action: CAF `chan` (through
-      mov_chan.zig) with N channels, and raw `-ch_layout` with any layout.
+    Remaining work or blocker / next action: raw `-ch_layout` with any
+      layout (part 6), then T23b's G5.
     ```
   - [ ] **T23c — Rematrixing.** Needs T23a and T23b. The default upmix and
     downmix matrices with center and surround mix levels and normalization.
