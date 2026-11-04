@@ -281,6 +281,14 @@ port.md's contract table updated, and (after T06) the parser.
 | Hash muxers | framecrc, framemd5 and streamhash (T19b) are `av.framehash`, used by the hash driver, and not registered formats or zffmpeg outputs yet: zffmpeg's output path writes PCM containers only, and the comparison needs the text, not a CLI. | `compare.py`'s `KNOWN_REGISTRY_DIFFERENCES`; register them with a zffmpeg output (T53). |
 | Probe retry | FFmpeg reprobes with more data while the best score is at most 25. Every registered probe reads a fixed few bytes, so the retry cannot change a winner and is not ported; raw FLAC's 13 and a probing demuxer's extension match (1) win at once where FFmpeg accepts them after the retries. | `detect.zig`, `registry.zig`'s check; port the loop with the first probe that looks further. |
 
+## Seeking
+
+| Decision | Current choice and reason | To change it |
+| --- | --- | --- |
+| Seekable source (T52a) | The caller passes a `seek.Seeker` over the stream the parser reads, with its position and size, rather than the parser owning the I/O: parsers stay over `*std.Io.Reader`, and seekability stays optional. | `format/seek.zig`; a seekable replay when detection must seek (T53). |
+| Past the end | A target past the data positions at its end in every case. FFmpeg's result there depends on its I/O buffer and the packets it has read (read-ahead to the end, then its generic index), which the port does not model: the comparison classifies those cases instead. | The seeking contract; `KNOWN` handling in `wav.zig`'s seek test. |
+| Timestamp after a byte seek | `null`: the position gives none. FFmpeg reports 0, its relative count restarting, which is not the stream's time. | `seek.Position.timestamp`. |
+
 ## Raw PCM contract
 
 | Decision | Current choice and reason | To change it |

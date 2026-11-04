@@ -105,6 +105,19 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/resample_ve
 ./resample-vectors | diff -u zig/testing/vectors/resample.txt -
 ```
 
+The T52a seek vectors come from the reference's `libavformat` and
+`libavcodec`: `seek_vectors.c` opens each WAV fixture as the ffmpeg program
+does, reads a packet, seeks (`av_seek_frame` on stream 0 and on the
+default stream, with and without `AVSEEK_FLAG_BACKWARD` and
+`AVSEEK_FLAG_ANY`, by byte position, and `avformat_seek_file` as the
+ffmpeg program's `-ss` calls it), and prints the next packet and its
+first decoded samples; every seek starts from a freshly opened file:
+
+```bash
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/seek_vectors.c .references/ffmpeg-install/lib/libavformat.a .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o seek-vectors
+LC_ALL=C ./seek-vectors zig/testing/fixtures/wav/*.wav | diff -u zig/testing/vectors/seek.txt -
+```
+
 The T15 rational vectors come from the reference's `libavutil`: its
 rational arithmetic (`av_reduce`, `av_mul_q` and the others, `av_cmp_q`,
 `av_nearer_q`, `av_d2q`) and timestamp helpers (`av_gcd`, `av_rescale_rnd`

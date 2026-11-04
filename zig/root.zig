@@ -45,6 +45,9 @@
 //!   `codec/flac_parser.zig`, `codec/flacdec.zig`).
 //! - `framehash`: FFmpeg's framecrc, framemd5 and streamhash muxers' text
 //!   for one audio stream (`format/framehash.zig`).
+//! - `seek`: the seek API, FFmpeg's `av_seek_frame` and
+//!   `avformat_seek_file` with a seekable source; WAV and Wave64 implement
+//!   it (`format/seek.zig`, `wav.Parser.seekFrame`).
 //! - `audioconvert`: sample format conversion between every format, packed
 //!   or planar, as libswresample converts (`resample/audioconvert.zig`).
 //! - `dither`: libswresample's dithered conversion, every method, noise
@@ -91,6 +94,7 @@ pub const raw = @import("format/raw.zig");
 pub const caf = @import("format/caf.zig");
 pub const flac = @import("format/flac.zig");
 pub const framehash = @import("format/framehash.zig");
+pub const seek = @import("format/seek.zig");
 pub const audioconvert = @import("resample/audioconvert.zig");
 pub const dither = @import("resample/dither.zig");
 pub const codecs = @import("codec/registry.zig");
@@ -128,6 +132,7 @@ test {
     _ = @import("format/caf.zig");
     _ = @import("format/flac.zig");
     _ = @import("format/framehash.zig");
+    _ = @import("format/seek.zig");
     _ = @import("format/mov_chan.zig");
     _ = @import("resample/audioconvert.zig");
     _ = @import("resample/dither.zig");

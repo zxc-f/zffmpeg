@@ -20,7 +20,8 @@ with conversion between every sample format and libswresample's dither
 (T23a), FFmpeg's channel layouts, 1 to 64 channels, in every container
 (T23b), rematrixing between them (T23c) and resampling (T24), with
 FFmpeg's option syntax (T17a), an audio filter graph (T25), and FLAC with
-16-bit samples read and decoded as FFmpeg does (T26a). The `av`
+16-bit samples read and decoded as FFmpeg does (T26a), and WAV seeking
+(T52a) on FFmpeg's rational arithmetic (T15). The `av`
 module (rooted at `zig/root.zig`) exports `pcm` (the PCM encodings,
 kernels and decoder/encoder stages), `audio`, `channel_layout` (FFmpeg's
 channel layouts), `time`, `samples` (decoded sample storage
@@ -35,7 +36,8 @@ channelmap, pan, amix, from filtergraph text, several inputs and outputs),
 `aiff` and `raw` (bounded parsers and writers), `caf` (a bounded parser),
 `flac` (FFmpeg's FLAC demuxer, parser and decoder for 16-bit streams),
 `bits` (an MSB-first bit reader and FLAC's CRCs), `framehash` (FFmpeg's
-framecrc, framemd5 and streamhash text),
+framecrc, framemd5 and streamhash text), `rational` (FFmpeg's rational
+arithmetic and timestamp helpers), `seek` (the seek API),
 `codecs` and `formats`
 (the codec and format registries), `detect` (detection with FFmpeg's scored
 probes and extension fallback), `audioconvert` and `dither` (sample format
@@ -58,8 +60,9 @@ options, a diagnostic sink), T24 (resampling) and T25a (the audio filter
 graph's core), T25b (expressions, filtergraph text, atrim and asetpts)
 and T25c (several inputs and outputs on libavfilter's scheduler), completing
 T25, and T26a (FLAC demux and 16-bit decoding) with T18a (the bit reader
-and CRCs) and T19b (frame and stream hashes); T52a (the seek API and WAV
-seeking, with T15) is next, and TODO.md lays out the roadmap through T64.
+and CRCs) and T19b (frame and stream hashes), T15 (rational arithmetic and
+timestamps) and T52a (the seek API and WAV seeking); T26b (complete FLAC
+decoding and seeking) is next, and TODO.md lays out the roadmap through T64.
  When the state changes, update the current-state statements in
 README.md, port.md ("Status and scope"), the TODO.md introduction and this file
 together.

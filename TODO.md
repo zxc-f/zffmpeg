@@ -39,8 +39,9 @@ and outputs on libavfilter's scheduler, with asplit, channelsplit,
 channelmap, pan and amix, which completes T25; and T26a, FLAC demux and
 16-bit decoding as FFmpeg's demuxer, parser and decoder do it, in zffprobe
 and as a zffmpeg input, with T18a, the bit reader and FLAC's CRCs, and
-T19b, FFmpeg's frame and stream hashes. **Next: T52a (the seek API and WAV
-seeking, with T15), which T26b needs. See
+T19b, FFmpeg's frame and stream hashes; T15, FFmpeg's rational arithmetic
+and timestamp helpers; and T52a, the seek API with WAV and Wave64
+seeking. **Next: T26b (complete FLAC decoding and seeking). See
 [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
@@ -2881,12 +2882,64 @@ fixtures, committed when small and redistributable or fetched by pinned hash.
 - [ ] **T52 — Seeking, stream copy and timestamps.** Checked when T52a–T52c
   are. Reference: `libavformat/seek.c`, `demux.c`, `mux.c`, `mux_utils.c`;
   `tests/fate/seek.mak`.
-  - [ ] **T52a — Seek API and WAV seeking.** Needs T14a, T15 and T21a. The
+  - [x] **T52a — Seek API and WAV seeking.** Needs T14a, T15 and T21a. The
     seek API (keyframe and byte-position seeking) with WAV as its first
     container; other containers add seeking in their own subtasks (T26b, T27a,
     T33b, T35b).
     Done when seek positions and the first decoded samples after each WAV seek
     match the reference.
+
+    ```text
+    ID / parent: T52a / T52
+    State: verified
+    Supported behavior and explicit exclusions: av_seek_frame and
+      avformat_seek_file on WAV and Wave64 (RIFF, RF64/BW64, Wave64, known
+      or unknown length): timestamps on stream 0 or the default stream
+      (AV_TIME_BASE), backward and any, byte positions, ranges; a seekable
+      source (seek.Seeker over a file reader or a fixed buffer). Excluded:
+      other containers (their own subtasks), seeking through detection's
+      replay reader, zffmpeg's -ss (T53), accurate seeking (T52b).
+    Needs (verified) / lands with / verified after: T14a, T15, T21a.
+    Contract and source provenance: port.md "Seeking"; libavformat/seek.c
+      (av_seek_frame, avformat_seek_file, seek_file, seek_frame_byte),
+      wavdec.c (wav_read_seek), pcm.c (ff_pcm_read_seek), aviobuf.c
+      (avio_seek, for the understood difference).
+    Required fixtures / optional corpus: every accepted WAV fixture (with
+      unknown_length where its manifest accepts it), 53 seeks each from
+      seek_vectors.c (vectors/seek.txt); no optional corpus.
+    Ownership, state transitions and limits: the caller owns the source
+      and its Seeker; a seek is valid in the data state and leaves the
+      parser there, data_left recomputed from the data's absolute end;
+      finish still checks the chunks after the data.
+    Comparison rule and intentional differences: the result or error, the
+      next packet's byte position and timestamp (timestamp seeks), and its
+      first decoded sample frames byte for byte. Intentional: past the
+      data's end the seek lands at the end, where FFmpeg's read-ahead
+      window and packet index answer for small files (722 of 3548 cases,
+      each checked to be past the end); after a byte seek the timestamp
+      is null where FFmpeg restarts at 0.
+    Implementation files and test entry points: format/seek.zig, wav.zig
+      (enableSeeking, seekFrame, seekFile; "every accepted WAV fixture
+      seeks as FFmpeg seeks it", the file, misalignment and range tests).
+    Evidence commit / Linux CI run / reference report: see below / local
+      Linux runs / below.
+    Required cases: passed 3548 / failed 0 / missing 0 (722 understood).
+    Optional cases: none
+    Fuzz seeds, budget and result: none added; the local fuzzer fails as
+      T25a records.
+    Remaining work or blocker / next action: T52b; T26b's FLAC seeking.
+    ```
+
+    Evidence (G5, local Linux x86-64 runs with Zig 0.17.0, in the commit
+    that records this): fmt, `generate.py --check`, the example check,
+    Debug and ReleaseSafe builds, `zig build test` with 185/185 steps and
+    296/296 tests in Debug, ReleaseSafe and ReleaseFast, and the three cross
+    builds passed; `seek_vectors.c` and every other generator reproduce
+    their files from FFmpeg `5d5a38a`; the seek comparison passes 3548
+    seeks (722 understood, past the data's end); `compare.py`'s only
+    failures are the 176 known inf and NaN samples of this machine's clang
+    23 reference build.
+
   - [ ] **T52b — Accurate seeking.** Needs T52a. Decode and discard to the
     exact position.
     Done when the first decoded sample or frame after a seek matches the

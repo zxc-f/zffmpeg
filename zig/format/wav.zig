@@ -32,6 +32,8 @@ const audio = @import("../core/audio.zig");
 const samples_storage = @import("../core/samples.zig");
 const metadata = @import("../core/metadata.zig");
 const pcm = @import("../codec/pcm.zig");
+const seek = @import("seek.zig");
+const rational = @import("../core/rational.zig");
 
 /// Contract errors (see the fixture README), plus `IoFailure` for a failing
 /// reader and `OutOfMemory`, which only collecting tags can return. File
@@ -286,6 +288,16 @@ pub const Parser = struct {
     /// Bytes of tag chunks read into memory so far (`Limits.max_retained_bytes`).
     retained: u64 = 0,
     state: State = .header,
+    /// Set by `enableSeeking`: the source to reposition, and the absolute
+    /// offsets of the data's start and end (null when it runs to the end of
+    /// the stream), recorded at the start of `data`.
+    seeker: ?seek.Seeker = null,
+    data_offset: u64 = 0,
+    data_end: ?u64 = null,
+    /// A byte seek landed inside a frame: reads keep whole frames from
+    /// there, and a final partial frame is dropped, as FFmpeg's decoder
+    /// drops it.
+    misaligned: bool = false,
 
     const State = enum { header, data, done };
 
@@ -309,6 +321,14 @@ pub const Parser = struct {
     pub fn collectTags(p: *Parser, tags: Tags) void {
         std.debug.assert(p.state == .header);
         p.tags = tags;
+    }
+
+    /// Makes `seekFrame` and `seekFile` available once the header is read:
+    /// `seeker` repositions the stream this parser reads, from its start
+    /// (T52a). Call it before `readHeader`.
+    pub fn enableSeeking(p: *Parser, seeker: seek.Seeker) void {
+        std.debug.assert(p.state == .header);
+        p.seeker = seeker;
     }
 
     /// Reads the RIFF (or RF64/BW64, or Wave64) header and every chunk up to
@@ -416,10 +436,15 @@ pub const Parser = struct {
         const data_left = p.data_left orelse {
             // The data runs to the end of the stream: a short read ends it.
             const len = p.reader.readSliceShort(whole) catch |err| return mapShort(err);
-            if (len % p.frame_bytes != 0) return error.Truncated;
+            if (len % p.frame_bytes != 0) {
+                if (!p.misaligned) return error.Truncated;
+                return whole[0 .. len - len % p.frame_bytes];
+            }
             return whole[0..len];
         };
-        const want = @min(std.math.cast(usize, data_left) orelse std.math.maxInt(usize), whole.len);
+        // Only a misaligned seek leaves a partial frame, which is not read.
+        const frames_left = data_left - data_left % p.frame_bytes;
+        const want = @min(std.math.cast(usize, frames_left) orelse std.math.maxInt(usize), whole.len);
         p.reader.readSliceAll(whole[0..want]) catch |err| return mapRead(err);
         p.data_left = data_left - want;
         return whole[0..want];
@@ -552,6 +577,7 @@ pub const Parser = struct {
             // The data is the rest of the stream; `finish` reads nothing after it.
             p.data_left = null;
             p.state = .data;
+            if (p.seeker) |seeker| p.data_offset = seeker.position();
             return .{ .codec = p.codec, .format = format, .frame_count = null, .variant = p.variant };
         };
         if (size % p.frame_bytes != 0) return error.InvalidFormat;
@@ -563,6 +589,10 @@ pub const Parser = struct {
         p.data_left = size;
         p.data_pad = p.variant.padAfter(size);
         p.state = .data;
+        if (p.seeker) |seeker| {
+            p.data_offset = seeker.position();
+            p.data_end = std.math.add(u64, p.data_offset, size) catch return error.InvalidRiff;
+        }
         return .{ .codec = p.codec, .format = format, .frame_count = size / p.frame_bytes, .variant = p.variant };
     }
 
@@ -651,7 +681,73 @@ pub const Parser = struct {
             partial = (partial + skipped) % p.frame_bytes;
             if (skipped < step) break;
         }
-        if (partial != 0) return error.Truncated;
+        if (partial != 0 and !p.misaligned) return error.Truncated;
+    }
+
+    /// `av_seek_frame` on a WAV or Wave64 stream (`wav_read_seek`,
+    /// `ff_pcm_read_seek`, `seek_frame_byte`): to a timestamp in the
+    /// stream's 1/rate time base (stream 0) or in `seek.time_base_units`
+    /// (stream -1), rounded to a frame up or, `backward`, down; or with
+    /// `byte`, to a byte position clamped to the data's start and the
+    /// source's last byte. A target past the data positions at its end.
+    /// Needs `enableSeeking`; afterwards `readData` reads from there and
+    /// `finish` still checks the chunks after the data.
+    pub fn seekFrame(p: *Parser, stream: i32, timestamp: i64, flags: seek.Flags) seek.Error!seek.Position {
+        std.debug.assert(p.state == .data);
+        const seeker = p.seeker.?; // `enableSeeking` is the precondition
+        if (flags.byte) {
+            var pos: i64 = timestamp;
+            const pos_min: i64 = @intCast(p.data_offset);
+            if (pos < pos_min) {
+                pos = pos_min;
+            } else if (seeker.size()) |size| {
+                const pos_max = std.math.cast(i64, size) orelse std.math.maxInt(i64);
+                if (pos > pos_max - 1) pos = @max(pos_max - 1, pos_min);
+            }
+            return p.reposition(seeker, @intCast(pos), null);
+        }
+        if (stream != 0 and stream != -1) return error.InvalidStream;
+        const format = p.format.?; // set before `data`
+        const rate: i64 = format.sample_rate;
+        const block_align: i64 = p.frame_bytes;
+        // FFmpeg replaces a PCM header's byte rate with this one.
+        const byte_rate = block_align * rate;
+        var ts = timestamp;
+        if (stream == -1) ts = seek.defaultStreamTimestamp(ts, .{ .num = 1, .den = @intCast(rate) });
+        const offset: i64 = @intCast(p.data_offset);
+        // Where ff_pcm_read_seek's arithmetic would overflow, FFmpeg falls
+        // back to its packet index; the target is past any data here.
+        if (@max(ts, 1) > @divTrunc(std.math.maxInt(i64), byte_rate)) return p.reposition(seeker, std.math.maxInt(u64), null);
+        if (ts < 0) ts = 0;
+        var pos = rational.rescaleRnd(ts * byte_rate, 1, rate * block_align, if (flags.backward) .down else .up);
+        if (pos > @divTrunc(std.math.maxInt(i64) - offset, block_align)) return p.reposition(seeker, std.math.maxInt(u64), null);
+        pos *= block_align;
+        const cur_dts = rational.rescale(pos, rate, byte_rate);
+        return p.reposition(seeker, @intCast(offset + pos), cur_dts);
+    }
+
+    /// `avformat_seek_file` on a WAV or Wave64 stream: `seekFrame` within
+    /// `min_ts` and `max_ts`, as libavformat's fallback runs it.
+    pub fn seekFile(p: *Parser, stream: i32, min_ts: i64, ts: i64, max_ts: i64, flags: seek.Flags) seek.Error!seek.Position {
+        return seek.seekFile(p, seekFrame, stream, min_ts, ts, max_ts, flags);
+    }
+
+    /// Moves the source to `target`, at most to the data's end.
+    fn reposition(p: *Parser, seeker: seek.Seeker, target: u64, timestamp: ?i64) seek.Error!seek.Position {
+        var at = target;
+        var at_end = false;
+        if (p.data_end) |end| {
+            if (target >= end) {
+                at = end;
+                at_end = true;
+            }
+            p.data_left = end - at;
+        } else if (seeker.size()) |size| {
+            at_end = target >= size;
+        }
+        try seeker.seekTo(at);
+        p.misaligned = (at - p.data_offset) % p.frame_bytes != 0;
+        return .{ .offset = target, .timestamp = timestamp, .at_end = at_end };
     }
 
     /// RF64/BW64: the `ds64` chunk that must come first, holding the 64-bit
@@ -2061,4 +2157,232 @@ test "RF64 and plain RIFF agree below 4 GiB, and never refuses what needs 64 bit
     try std.testing.expectEqualSlices(u8, riff[12 .. riff.len - 4], rf64[12 + ds64_len .. rf64.len - 4]);
     const mono = try audio.Format.init(8000, 1, .s16);
     try std.testing.expectError(error.SizeOverflow, Writer.check(.s16le, mono, 3 << 30, .{ .rf64 = .never }));
+}
+
+const seek_vectors = @embedFile("../testing/vectors/seek.txt");
+
+/// The oracle's lines for fixture `name`, without its `F` line.
+fn seekBlock(name: []const u8) ?[]const u8 {
+    var start: ?usize = null;
+    var lines = std.mem.splitScalar(u8, seek_vectors, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "F ")) continue;
+        const at = @intFromPtr(line.ptr) - @intFromPtr(seek_vectors.ptr);
+        if (start) |s| return seek_vectors[s..at];
+        if (std.mem.eql(u8, line[2..], name)) start = at + line.len + 1;
+    }
+    return if (start) |s| seek_vectors[s..] else null;
+}
+
+const SeekTally = struct {
+    compared: usize = 0,
+    /// FFmpeg's avio read-ahead hit the end and its packet index answered
+    /// (port.md "Seeking").
+    understood: usize = 0,
+};
+
+/// Up to 16 frames from the parser's position, decoded and stored
+/// little-endian, as hexadecimal.
+fn firstFramesHex(p: *Parser, out: []u8) ![]const u8 {
+    var encoded: [16 * 8 * 64]u8 = undefined;
+    const want = @min(encoded.len, 16 * @as(usize, p.frame_bytes));
+    var got: usize = 0;
+    while (got < want) {
+        const bytes = try p.readData(encoded[got..want]);
+        if (bytes.len == 0) break;
+        got += bytes.len;
+    }
+    if (got == 0) return out[0..0];
+    const format = p.format.?;
+    const frames: u32 = @intCast(got / p.frame_bytes);
+    var stored: [2 * encoded.len]u8 = undefined;
+    const layout = try samples_storage.Layout.init(format.sample_format, format.channelCount(), frames, .{ .line = 1 });
+    const buffer = try samples_storage.Buffer.init(layout, &stored);
+    _ = try pcm.decode(p.codec, encoded[0..got], buffer, 0);
+    pcm.storedToLittle(format.sample_format, buffer.bytes);
+    return std.fmt.bufPrint(out, "{x}", .{buffer.bytes}) catch unreachable;
+}
+
+fn parseFlags(text: []const u8) !seek.Flags {
+    const bits = try std.fmt.parseInt(u8, text, 16);
+    return .{ .backward = bits & 1 != 0, .byte = bits & 2 != 0, .any = bits & 4 != 0 };
+}
+
+/// Replays one fixture's seeks against the oracle.
+fn expectSeeks(bytes: []const u8, limits: Limits, block: []const u8, tally: *SeekTally) !void {
+    var lines = std.mem.splitScalar(u8, block, '\n');
+    const opened = lines.next() orelse return error.BadVector;
+    if (!std.mem.eql(u8, opened, "O ok")) return; // FFmpeg cannot open it
+    var info_fields = std.mem.tokenizeScalar(u8, lines.next() orelse return error.BadVector, ' ');
+    _ = info_fields.next();
+    const data_offset = try std.fmt.parseInt(i64, info_fields.next().?, 10);
+    var pending: ?[]const u8 = lines.next();
+    while (pending) |k_line| {
+        pending = lines.next();
+        if (k_line.len == 0) continue;
+        if (k_line[0] != 'K') return error.BadVector;
+        var f = std.mem.tokenizeScalar(u8, k_line, ' ');
+        _ = f.next();
+        const api = f.next().?[0];
+        const stream = try std.fmt.parseInt(i32, f.next().?, 10);
+        const ts = try std.fmt.parseInt(i64, f.next().?, 10);
+        var min_ts: i64 = 0;
+        var max_ts: i64 = 0;
+        if (api == 's') {
+            min_ts = try std.fmt.parseInt(i64, f.next().?, 10);
+            max_ts = try std.fmt.parseInt(i64, f.next().?, 10);
+        }
+        const flags = try parseFlags(f.next().?);
+        const ret = f.next().?;
+        var packet: ?[]const u8 = null;
+        var decoded: ?[]const u8 = null;
+        if (std.mem.eql(u8, ret, "0")) {
+            packet = pending;
+            pending = lines.next();
+            if (packet != null and !std.mem.eql(u8, packet.?, "P EOF")) {
+                decoded = pending;
+                pending = lines.next();
+            }
+        }
+        errdefer std.debug.print("seek: {s}\n", .{k_line});
+
+        var reader: std.Io.Reader = .fixed(bytes);
+        var parser: Parser = .init(&reader, limits);
+        parser.enableSeeking(.fixed(&reader));
+        _ = try parser.readHeader();
+        // FFmpeg's offset is its first packet's; empty data has none.
+        if (data_offset >= 0) try std.testing.expectEqual(data_offset, @as(i64, @intCast(parser.data_offset)));
+        const result = if (api == 'f')
+            parser.seekFrame(stream, ts, flags)
+        else
+            parser.seekFile(stream, min_ts, ts, max_ts, flags);
+        tally.compared += 1;
+        if (std.mem.eql(u8, ret, "EINVAL")) {
+            try std.testing.expectError(error.InvalidStream, result);
+            continue;
+        }
+        const position = try result;
+        if (std.mem.eql(u8, ret, "-1")) {
+            // A target in FFmpeg's read-ahead window past the end, which it
+            // then fails to find in its packet index: the end here.
+            try std.testing.expect(position.at_end);
+            tally.understood += 1;
+            continue;
+        }
+        try std.testing.expectEqualStrings("0", ret);
+        const p_line = packet orelse return error.BadVector;
+        var hex: [16 * 8 * 64 * 2 * 2]u8 = undefined;
+        const ours = try firstFramesHex(&parser, &hex);
+        if (std.mem.eql(u8, p_line, "P EOF")) {
+            try std.testing.expectEqual(0, ours.len);
+            continue;
+        }
+        var pf = std.mem.tokenizeScalar(u8, p_line, ' ');
+        _ = pf.next();
+        const pts_text = pf.next().?;
+        const pos = try std.fmt.parseInt(u64, pf.next().?, 10);
+        if (position.at_end and pos < position.offset) {
+            // FFmpeg's index answered a target past the end (as above),
+            // landing at a packet it had read.
+            tally.understood += 1;
+            continue;
+        }
+        try std.testing.expectEqual(pos, position.offset);
+        if (!flags.byte) try std.testing.expectEqual(try std.fmt.parseInt(i64, pts_text, 10), position.timestamp.?);
+        const d_line = decoded orelse return error.BadVector;
+        if (std.mem.eql(u8, d_line, "D none")) {
+            try std.testing.expectEqual(0, ours.len);
+            continue;
+        }
+        var df = std.mem.tokenizeScalar(u8, d_line, ' ');
+        _ = df.next();
+        _ = df.next();
+        const theirs = df.next() orelse "";
+        const common = @min(theirs.len, ours.len);
+        try std.testing.expect(common > 0);
+        try std.testing.expectEqualStrings(theirs[0..common], ours[0..common]);
+    }
+}
+
+test "every accepted WAV fixture seeks as FFmpeg seeks it (vectors/seek.txt)" {
+    var tally: SeekTally = .{};
+    inline for (fixtures.all) |fixture| {
+        const limits: ?Limits = switch (fixture.expected) {
+            .accept => .{},
+            .reject => if (fixture.unknown_length) |u| (if (u == .accept) Limits{ .unknown_length = true } else null) else null,
+        };
+        if (limits) |l| {
+            if (seekBlock(fixture.name)) |block| {
+                expectSeeks(fixtures.bytes(fixture.name), l, block, &tally) catch |err| {
+                    std.debug.print("fixture {s}\n", .{fixture.name});
+                    return err;
+                };
+            }
+        }
+    }
+    // Every seek on the fixtures this parser accepts, 722 of them past the
+    // data's end where FFmpeg's read-ahead and packet index answer.
+    try std.testing.expectEqual(3548, tally.compared);
+    try std.testing.expectEqual(722, tally.understood);
+}
+
+test "seeking a file: back and forth, then finish checks the chunks after the data" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "in.wav", .data = fixtures.bytes("info_after_data") });
+    const file = try tmp.dir.openFile(io, "in.wav", .{});
+    defer file.close(io);
+    var buffer: [3]u8 = undefined;
+    var reader = file.reader(io, &buffer);
+    var parser: Parser = .init(&reader.interface, .{});
+    parser.enableSeeking(.file(&reader));
+    _ = try parser.readHeader();
+    var out: [64]u8 = undefined;
+    // Frame 2 of 4, then frame 0, then past the end.
+    const two = try parser.seekFrame(0, 2, .{});
+    try std.testing.expectEqual(2, two.timestamp);
+    try std.testing.expectEqual(parser.data_offset + 4, two.offset);
+    try std.testing.expectEqual(4, (try parser.readData(&out)).len);
+    _ = try parser.seekFrame(0, 0, .{ .backward = true });
+    try std.testing.expectEqual(8, (try parser.readData(&out)).len);
+    const end = try parser.seekFrame(-1, 10 * seek.time_base_units, .{});
+    try std.testing.expect(end.at_end);
+    try std.testing.expectEqual(0, (try parser.readData(&out)).len);
+    // The trailing LIST chunk is still read and checked.
+    try parser.finish();
+}
+
+test "a misaligned byte seek drops the final partial frame, known length or not" {
+    for ([_]bool{ false, true }) |unknown| {
+        const bytes = if (unknown) fixtures.bytes("riff_size_unknown") else fixtures.bytes("mono_8k");
+        var reader: std.Io.Reader = .fixed(bytes);
+        var parser: Parser = .init(&reader, .{ .unknown_length = unknown });
+        parser.enableSeeking(.fixed(&reader));
+        _ = try parser.readHeader();
+        const position = try parser.seekFrame(0, @intCast(parser.data_offset + 1), .{ .byte = true });
+        try std.testing.expectEqual(null, position.timestamp);
+        var out: [64]u8 = undefined;
+        var total: usize = 0;
+        while (true) {
+            const data = try parser.readData(&out);
+            if (data.len == 0) break;
+            total += data.len;
+        }
+        // Every whole frame after the first byte; the odd byte at the end
+        // is dropped.
+        try std.testing.expectEqual(bytes.len - parser.data_offset - 2 - (bytes.len - parser.data_offset) % 2, total);
+        try parser.finish();
+    }
+}
+
+test "seekFile refuses an empty range and seeks within one" {
+    var reader: std.Io.Reader = .fixed(fixtures.bytes("stereo_44k1"));
+    var parser: Parser = .init(&reader, .{});
+    parser.enableSeeking(.fixed(&reader));
+    _ = try parser.readHeader();
+    try std.testing.expectError(error.InvalidRange, parser.seekFile(0, 2, 1, 3, .{}));
+    try std.testing.expectError(error.InvalidStream, parser.seekFrame(1, 0, .{}));
+    const position = try parser.seekFile(0, 1, 2, 3, .{});
+    try std.testing.expectEqual(2, position.timestamp);
 }
