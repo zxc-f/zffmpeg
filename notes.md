@@ -299,6 +299,12 @@ port.md's contract table updated, and (after T06) the parser.
 | Decode error rate (T27d) | A decoding where more than two thirds of the decodes fail is refused (`DecodeErrorRate`), as the ffmpeg program's `-max_error_rate` default fails it; from a file the counting pass finds it before any output, where FFmpeg leaves an empty output. Native FLAC input keeps T26b's behavior. | `oggdecode.DecodedReader.checkErrorRate`; a `-max_error_rate` option. |
 | Ogg output scope (T27b) | FLAC encoded into Ogg only. Stream copy into Ogg needs a packet-copy pipeline (the conversion copies PCM bytes) and the ffmpeg program's muxing timestamp fix-ups, which T53 ports; several streams per output, chaining on new metadata and the `-page_duration` and `-serial_offset` options wait for a consumer. The muxer itself takes Opus and Vorbis streams, verified by oggmux.txt. | `Conversion.init`'s operation matrix; T53. |
 
+## Floating-point library
+
+| Decision | Current choice and reason | To change it |
+| --- | --- | --- |
+| glibc's float functions (T28a) | Where FFmpeg's C code calls the C library's math, the port calls a port of the reference platform's: glibc's `exp2f`, `sinf` and `cosf` (from Arm's optimized-routines), in `core/libm.zig`, with the FMA variant's fused multiply-adds (`@mulAdd`), which glibc picks on every x86-64 machine with FMA (the local and CI runners). Zig's own functions follow older musl code and differ from glibc in the last bit (`@exp2` for 187,000 floats in [-160, 40], `@sin` for 1579 of CELT's 119,400 rotation angles), and one ulp in an energy or a rotation changes every later CELT sample. Checked against the installed glibc for every non-NaN float (`exp2f`) and every float in [0, pi/4) (`sinf`, `cosf`); vectors/libm.txt keeps the check in CI. On a CPU without FMA glibc runs its SSE2 variant, which may round differently, so the reference itself changes there. | `core/libm.zig`, `libm_vectors.c`. Re-evaluated with T58 (SIMD kernels), together with every other use of the C library's math: whether to keep the glibc ports, vectorize them, or return to Zig's functions with a declared tolerance, measured for speed and difference. Platforms whose C library differs (T62-T63) decide the same question. |
+
 ## Seeking
 
 | Decision | Current choice and reason | To change it |

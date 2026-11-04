@@ -2866,7 +2866,7 @@ names, not as an empty framework.
 
     ```text
     ID / parent: T28a / T28
-    State: G3 (parts 0 and 1 done)
+    State: G3 (parts 0 to 3 done)
     Plan: part 0, the corpus: FATE's Opus samples are Matroska rewraps
       (.mka), which the port cannot demux yet, so the RFC 6716/8251 test
       vectors themselves (opus_testvectors-rfc8251, their .bit packet
@@ -2910,7 +2910,23 @@ names, not as an empty framework.
       self-delimited, FFmpeg's checks and its negative sizes for a padding
       past the end); opus_rc_vectors.c (108 frames of mixed operations)
       and opus_parse_vectors.c (2000 packets, 985 parsed) call the
-      reference's internal functions: every result equal.
+      reference's internal functions: every result equal. Part 3:
+      codec/celt.zig, FFmpeg's CELT decoder (dec_celt.c, celt.c's
+      allocation and band loop, pvq.c's decoding path, dsp.c's post-filter
+      and de-emphasis) over celt_tab.zig (tab.c); tx.zig's inverse MDCT
+      takes FFmpeg's input stride (short blocks); codec/float_dsp.zig
+      shares vector_fmul_window (now also Vorbis'), fmac and fmul by a
+      scalar; core/libm.zig ports glibc's exp2f, sinf and cosf (Zig's
+      round differently: notes.md "Floating-point library"), checked
+      against the installed glibc on every non-NaN float and every float
+      in [0, pi/4), and by libm_vectors.c. celt_vectors.c runs
+      ff_celt_decode_frame over 48 decoders of 20 generated frames (every
+      frame size, mono and stereo, up- and downmix, the hybrid start
+      band, flushes, phase inversion on and off): all 960 frames equal,
+      final range, decoder state and the MD5 of every sample, in Debug,
+      ReleaseSafe and ReleaseFast. The port refuses start_band ==
+      end_band, which FFmpeg's band skipping divides by zero on and its
+      callers never pass.
     ```
   - [ ] **T28b — SILK.** Needs T28a.
     Done when the SILK-only test vectors meet `opus_compare`.
@@ -3497,6 +3513,10 @@ optimization, concurrency, fuzz duration and corpus breadth.
   conversion, CRC), each with a checkasm-style test against the scalar version
   over random inputs, tails and alignments, and a scalar fallback. No inline
   assembly or target intrinsics during the Linux-only phase.
+  Re-evaluate here the C library math ports (`core/libm.zig`, notes.md
+  "Floating-point library"): keep glibc's algorithms as scalar oracles and
+  vectorize them, or use Zig's native functions under a declared
+  tolerance, by measured speed and difference.
   Done when each kernel is bit-identical to scalar (or within a declared float
   tolerance) and its benchmark shows a measured gain.
 

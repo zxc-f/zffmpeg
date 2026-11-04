@@ -208,6 +208,22 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/opus_parse_
 ./opus-parse-vectors | diff -u zig/testing/vectors/opus_parse.txt -
 ```
 
+`celt_vectors.c` runs the reference's CELT decoder (`ff_celt_init`,
+`ff_celt_decode_frame`, `ff_celt_flush`) over generated frame sequences,
+48 decoders of 20 frames with every frame size, mono and stereo, up- and
+downmixing, the hybrid start band and phase inversion on and off, and
+prints each frame's final range and the MD5 of its samples.
+`libm_vectors.c` needs only the C library: it prints digests of what
+glibc's `exp2f`, `sinf` and `cosf` return on sampled floats and on every
+angle CELT's spreading rotation can take, which `core/libm.zig` ports:
+
+```bash
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/celt_vectors.c .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o celt-vectors
+./celt-vectors | diff -u zig/testing/vectors/celt.txt -
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/libm_vectors.c .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o libm-vectors
+./libm-vectors | diff -u zig/testing/vectors/libm.txt -
+```
+
 The T18c VLC vectors come from the reference's `libavcodec`:
 `vlc_vectors.c` builds decoding tables with `ff_vlc_init_sparse` (its
 prototype and the `VLC` struct restated, as `vlc.h` is not installed) for

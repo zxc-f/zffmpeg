@@ -173,6 +173,9 @@ test {
     _ = @import("codec/vorbis.zig");
     _ = @import("codec/opus_rc.zig");
     _ = @import("codec/opus.zig");
+    _ = @import("core/libm.zig");
+    _ = @import("codec/float_dsp.zig");
+    _ = @import("codec/celt.zig");
     _ = @import("format/framehash.zig");
     _ = @import("format/seek.zig");
     _ = @import("format/mov_chan.zig");

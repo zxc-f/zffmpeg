@@ -239,6 +239,19 @@ jobs:
             -lm -pthread -o opus-parse-vectors
           ./opus-parse-vectors | diff -u zig/testing/vectors/opus_parse.txt -
 
+      # The committed T28a CELT oracle must be what this build's CELT
+      # decoder makes of the generated frames, and the libm oracle what the
+      # runner's glibc returns (its x86-64 variant with FMA).
+      - name: Check the CELT and libm vectors (T28a)
+        run: |
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/celt_vectors.c \
+            .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a \
+            .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o celt-vectors
+          ./celt-vectors | diff -u zig/testing/vectors/celt.txt -
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/libm_vectors.c \
+            .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o libm-vectors
+          ./libm-vectors | diff -u zig/testing/vectors/libm.txt -
+
       # The committed T27d oracle must be what this build's Vorbis decoder
       # makes of the Ogg Vorbis fixtures.
       - name: Check the Vorbis vectors (T27d)

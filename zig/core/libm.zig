@@ -1,0 +1,166 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
+// Derived from the GNU C Library 2.44's sysdeps/ieee754/flt-32/e_exp2f.c,
+// e_exp2f_data.c, math_config.h, s_sinf.c, s_cosf.c, sincosf.h and
+// s_sincosf_data.c, which came from Arm's optimized-routines: copyright
+// (c) 2017-2018 Arm Ltd. The GNU C Library is free software; you can
+// redistribute it and/or modify it under the terms of the GNU Lesser
+// General Public License as published by the Free Software Foundation;
+// either version 2.1 of the License, or (at your option) any later version.
+// The constants are those of the reference platform's libm.so.6, read from
+// its __exp2f_data and __sincosf_table.
+//! The reference platform's single-precision `exp2f`, `sinf` and `cosf`,
+//! where FFmpeg's C code calls them and Zig's own functions round
+//! differently (notes.md, "glibc's float functions"): Zig's `@exp2` and
+//! `@sin` follow musl's older code and differ from glibc in the last bit
+//! for about one float in 12,000 and for 1579 of CELT's rotation angles.
+//!
+//! glibc picks a variant by CPU at load time; on x86-64 with FMA (every
+//! machine the project verifies on) it runs these with fused multiply-adds,
+//! which `@mulAdd` reproduces on any target. Checked against the installed
+//! glibc for every float (exp2f) and every CELT angle (sinf, cosf), and by
+//! vectors/libm.txt.
+
+const std = @import("std");
+
+/// __exp2f_data.tab: 2^(i/32) with i/32 taken out of the exponent.
+const exp2f_tab = [32]u64{
+    0x3ff0000000000000, 0x3fefd9b0d3158574, 0x3fefb5586cf9890f, 0x3fef9301d0125b51,
+    0x3fef72b83c7d517b, 0x3fef54873168b9aa, 0x3fef387a6e756238, 0x3fef1e9df51fdee1,
+    0x3fef06fe0a31b715, 0x3feef1a7373aa9cb, 0x3feedea64c123422, 0x3feece086061892d,
+    0x3feebfdad5362a27, 0x3feeb42b569d4f82, 0x3feeab07dd485429, 0x3feea47eb03a5585,
+    0x3feea09e667f3bcd, 0x3fee9f75e8ec5f74, 0x3feea11473eb0187, 0x3feea589994cce13,
+    0x3feeace5422aa0db, 0x3feeb737b0cdc5e5, 0x3feec49182a3f090, 0x3feed503b23e255d,
+    0x3feee89f995ad3ad, 0x3feeff76f2fb5e47, 0x3fef199bdd85529c, 0x3fef3720dcef9069,
+    0x3fef5818dcfba487, 0x3fef7c97337b9b5f, 0x3fefa4afa2a490da, 0x3fefd0765b6e4540,
+};
+
+fn f64Bits(b: u64) f64 {
+    return @bitCast(b);
+}
+
+/// glibc's exp2f.
+pub fn exp2f(x: f32) f32 {
+    const ux: u32 = @bitCast(x);
+    const abstop = (ux >> 20) & 0x7ff;
+    if (abstop >= 0x430) {
+        // |x| >= 128 or NaN.
+        if (ux == 0xff800000) return 0;
+        if (abstop >= 0x7f8) return x + x;
+        if (x > 0) return std.math.inf(f32);
+        if (x <= -150) return 0;
+    }
+    const shift = f64Bits(0x42e8000000000000); // 0x1.8p52 / 32
+    const xd: f64 = x;
+    var kd = xd + shift;
+    const ki: u64 = @bitCast(kd);
+    kd -= shift;
+    const r = xd - kd;
+    // 2^x = 2^(k/32) * 2^r, 2^r ~= C0 r^3 + C1 r^2 + C2 r + 1.
+    const t = exp2f_tab[ki % 32] +% (ki << 47);
+    const s: f64 = @bitCast(t);
+    const z = @mulAdd(f64, f64Bits(0x3fac6af84b912394), r, f64Bits(0x3fcebfce50fac4f3));
+    const r2 = r * r;
+    var y = @mulAdd(f64, r, f64Bits(0x3fe62e42ff0c52d6), 1.0);
+    y = @mulAdd(f64, z, r2, y);
+    return @floatCast(y * s);
+}
+
+/// __sincosf_table[0]'s polynomials.
+const sin1 = f64Bits(0xbfc555545995a603);
+const sin2 = f64Bits(0x3f81107605230bc4);
+const sin3 = f64Bits(0xbf2994eb3774cf24);
+const cos1 = f64Bits(0xbfdffffffd0c621c);
+const cos2 = f64Bits(0x3fa55553e1068f19);
+const cos3 = f64Bits(0xbf56c087e89a359d);
+const cos4 = f64Bits(0x3ef99343027bf8c3);
+
+/// The upper bound of `sinf` and `cosf`'s domain here.
+pub const quarter_pi: f32 = std.math.pi / 4.0;
+
+/// glibc's sinf for 0 <= x < pi/4, where it needs no argument reduction
+/// (from 0.75 its reduction gives n = 0 and the same polynomial).
+pub fn sinf(x: f32) f32 {
+    std.debug.assert(x >= 0 and x < quarter_pi);
+    const ux: u32 = @bitCast(x);
+    if ((ux >> 20) & 0x7ff <= 0x397) return x; // below 2^-12
+    const xd: f64 = x;
+    const x2 = xd * xd;
+    const s = @mulAdd(f64, x2, sin3, sin2);
+    const x3 = xd * x2;
+    const x5 = x3 * x2;
+    return @floatCast(@mulAdd(f64, s, x5, @mulAdd(f64, x3, sin1, xd)));
+}
+
+/// glibc's cosf for 0 <= x < pi/4.
+pub fn cosf(x: f32) f32 {
+    std.debug.assert(x >= 0 and x < quarter_pi);
+    const ux: u32 = @bitCast(x);
+    if ((ux >> 20) & 0x7ff <= 0x397) return 1.0;
+    const xd: f64 = x;
+    const x2 = xd * xd;
+    const c = @mulAdd(f64, x2, cos4, cos3);
+    const x4 = x2 * x2;
+    const x6 = x2 * x4;
+    const low = @mulAdd(f64, x4, cos2, @mulAdd(f64, x2, cos1, 1.0));
+    return @floatCast(@mulAdd(f64, c, x6, low));
+}
+
+const testing = std.testing;
+const Md5 = std.crypto.hash.Md5;
+
+fn put(md5: *Md5, v: f32) void {
+    var b: [4]u8 = undefined;
+    std.mem.writeInt(u32, &b, @bitCast(v), .little);
+    md5.update(&b);
+}
+
+fn expectLine(line: []const u8, head: []const u8, md5: *Md5) !void {
+    var digest: [Md5.digest_length]u8 = undefined;
+    md5.final(&digest);
+    var text: [128]u8 = undefined;
+    const got = try std.fmt.bufPrint(&text, "{s} {x}", .{ head, digest });
+    try testing.expectEqualStrings(line, got);
+}
+
+test "exp2f, sinf and cosf return glibc's results (vectors/libm.txt)" {
+    var lines = std.mem.splitScalar(u8, @embedFile("../testing/vectors/libm.txt"), '\n');
+    var head: [64]u8 = undefined;
+
+    var md5: Md5 = .init(.{});
+    for (0..65536) |i| put(&md5, exp2f(@bitCast(@as(u32, @intCast(i)) *% 65537)));
+    try expectLine(lines.next().?, "E 65537 65536", &md5);
+
+    md5 = .init(.{});
+    var count: u32 = 0;
+    for (1..401) |len_usize| {
+        const len: u32 = @intCast(len_usize);
+        var k: u32 = 1;
+        while (2 * k < len) : (k += 1) {
+            for (1..4) |spread| {
+                const theta = rotationAngle(len, k, @intCast(spread));
+                put(&md5, sinf(theta));
+                put(&md5, cosf(theta));
+                count += 1;
+            }
+        }
+    }
+    try expectLine(lines.next().?, try std.fmt.bufPrint(&head, "T {d}", .{count}), &md5);
+
+    md5 = .init(.{});
+    count = 0;
+    var i: u32 = 0;
+    while (true) : (i += 1) {
+        const x: f32 = @bitCast(i *% 4099);
+        if (!(x < quarter_pi)) break;
+        put(&md5, sinf(x));
+        put(&md5, cosf(x));
+        count += 1;
+    }
+    try expectLine(lines.next().?, try std.fmt.bufPrint(&head, "Q 4099 {d}", .{count}), &md5);
+}
+
+/// pvq.c's celt_exp_rotation angle, as the vectors compute it.
+fn rotationAngle(len: u32, k: u32, spread: u32) f32 {
+    const gain = @as(f32, @floatFromInt(len)) / @as(f32, @floatFromInt(len + (20 - 5 * spread) * k));
+    return @floatCast(std.math.pi * @as(f64, gain) * gain / 4);
+}

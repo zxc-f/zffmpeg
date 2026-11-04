@@ -488,25 +488,32 @@ pub const Mdct = struct {
     /// The inverse: `len` coefficients in `src` to `len` samples in `dst`;
     /// the forward: 2 * len samples to `len` coefficients.
     pub fn run(m: *const Mdct, dst: []f32, src: []const f32) void {
-        if (m.pfa) |*p| return m.inversePfa(p, dst, src);
-        if (m.inv) m.inverse(dst, src) else m.forward(dst, src);
+        if (m.pfa) |*p| return m.inversePfa(p, dst, src, 1);
+        if (m.inv) m.inverse(dst, src, 1) else m.forward(dst, src);
+    }
+
+    /// The inverse with FFmpeg's input stride: coefficient `k` at
+    /// `src[k * stride]` (Opus CELT's interleaved short blocks).
+    pub fn runInverseStrided(m: *const Mdct, dst: []f32, src: []const f32, stride: usize) void {
+        std.debug.assert(m.inv and stride >= 1);
+        if (m.pfa) |*p| m.inversePfa(p, dst, src, stride) else m.inverse(dst, src, stride);
     }
 
     /// ff_tx_mdct_pfa_15xM_inv: each group of 15 pre-rotated inputs
     /// through the 15-point transform into the sub-FFTs' buffer, the 15
     /// sub-FFTs, then the post-rotation in the CRT order.
-    fn inversePfa(m: *const Mdct, p: *const Pfa, dst: []f32, src: []const f32) void {
+    fn inversePfa(m: *const Mdct, p: *const Pfa, dst: []f32, src: []const f32, stride: usize) void {
         const n = 15;
         const len2 = m.len / 2;
         const len4 = m.len / 4;
-        std.debug.assert(dst.len == m.len and src.len == m.len);
+        std.debug.assert(dst.len == m.len and src.len == (m.len - 1) * stride + 1);
         var fin: [n]Complex = undefined;
         var group: usize = 0;
         while (group * n < len2) : (group += 1) {
             const in_map = m.map[group * n ..][0..n];
             const exp = m.exp[group * n ..][0..n];
             for (&fin, in_map, exp) |*c, k, e| {
-                const tmp: Complex = .{ .re = src[m.len - 1 - k], .im = src[k] };
+                const tmp: Complex = .{ .re = src[(m.len - 1 - k) * stride], .im = src[k * stride] };
                 c.* = .{ .re = tmp.re * e.re - tmp.im * e.im, .im = tmp.re * e.im + tmp.im * e.re };
             }
             fft15(p.tmp, p.sub_map[group], &fin, p.m, &p.tab53);
@@ -533,13 +540,13 @@ pub const Mdct = struct {
     }
 
     /// ff_tx_mdct_inv.
-    fn inverse(m: *const Mdct, dst: []f32, src: []const f32) void {
+    fn inverse(m: *const Mdct, dst: []f32, src: []const f32, stride: usize) void {
         const len2 = m.len / 2;
         const len4 = m.len / 4;
-        std.debug.assert(dst.len == m.len and src.len == m.len);
+        std.debug.assert(dst.len == m.len and src.len == (m.len - 1) * stride + 1);
         const z = m.z;
         for (z, m.map, m.exp[0..len2]) |*c, k, e| {
-            const tmp: Complex = .{ .re = src[m.len - 1 - k], .im = src[k] };
+            const tmp: Complex = .{ .re = src[(m.len - 1 - k) * stride], .im = src[k * stride] };
             c.* = .{ .re = tmp.re * e.re - tmp.im * e.im, .im = tmp.re * e.im + tmp.im * e.re };
         }
         fftSr(&m.tables, z);
@@ -759,5 +766,27 @@ test "the transforms equal their float64 definitions within the declared error" 
                 try testing.expect(relativeError(out, exact) <= declared_error);
             }
         }
+    }
+}
+
+test "a strided inverse equals the inverse of the gathered coefficients" {
+    const gpa = testing.allocator;
+    for ([_]usize{ 120, 240, 64 }) |len| {
+        var m: Mdct = try .init(gpa, len, true, -1.0 / 32768.0);
+        defer m.deinit();
+        const stride = 3;
+        const src = try gpa.alloc(f32, (len - 1) * stride + 1);
+        defer gpa.free(src);
+        for (src, 0..) |*v, i| v.* = @floatFromInt(@as(i32, @intCast(i % 97)) - 48);
+        const gathered = try gpa.alloc(f32, len);
+        defer gpa.free(gathered);
+        for (gathered, 0..) |*v, k| v.* = src[k * stride];
+        const want = try gpa.alloc(f32, len);
+        defer gpa.free(want);
+        const got = try gpa.alloc(f32, len);
+        defer gpa.free(got);
+        m.run(want, gathered);
+        m.runInverseStrided(got, src, stride);
+        try testing.expectEqualSlices(f32, want, got);
     }
 }

@@ -2,7 +2,7 @@
 // Derived from FFmpeg's libavcodec/vorbisdec.c, vorbis.c (ff_vorbis_len2vlc,
 // ff_vorbis_nth_root, ff_vorbis_ready_floor1_list, render_line,
 // ff_vorbis_floor1_render_list), vorbisdsp.c (vorbis_inverse_coupling_c),
-// libavutil/float_dsp.c (vector_fmul_c, vector_fmul_window_c) and
+// libavutil/float_dsp.c (vector_fmul_c; vector_fmul_window_c is float_dsp.zig) and
 // mathtables.c (ff_inverse) at the pinned reference revision.
 // Vorbis I decoder: copyright (c) 2005 Denes Balatoni ( dbalatoni
 // programozo hu ); vorbis.c: copyright (c) 2006 Loren Merritt, Michael
@@ -27,6 +27,7 @@ const std = @import("std");
 const bits = @import("bits.zig");
 const vlc = @import("vlc.zig");
 const tx = @import("tx.zig");
+const float_dsp = @import("float_dsp.zig");
 const xiph = @import("xiph.zig");
 const data = @import("vorbis_data.zig");
 const channel_layout = @import("../core/channel_layout.zig");
@@ -803,13 +804,13 @@ pub const Decoder = struct {
             const ret = floor_ptr[c];
             const win = d.win[blockflag & prev];
             if (blockflag == prev) {
-                fmulWindow(ret, saved, buf, win, blocksize / 4);
+                float_dsp.fmulWindow(ret, saved, buf, win, blocksize / 4);
             } else if (blockflag > prev) {
-                fmulWindow(ret, saved, buf, win, bs0 / 4);
+                float_dsp.fmulWindow(ret, saved, buf, win, bs0 / 4);
                 @memcpy(ret[bs0 / 2 ..][0 .. (bs1 - bs0) / 4], buf[bs0 / 4 ..][0 .. (bs1 - bs0) / 4]);
             } else {
                 @memcpy(ret[0 .. (bs1 - bs0) / 4], saved[0 .. (bs1 - bs0) / 4]);
-                fmulWindow(ret[(bs1 - bs0) / 4 ..], saved[(bs1 - bs0) / 4 ..], buf, win, bs0 / 4);
+                float_dsp.fmulWindow(ret[(bs1 - bs0) / 4 ..], saved[(bs1 - bs0) / 4 ..], buf, win, bs0 / 4);
             }
             @memcpy(saved[0 .. blocksize / 4], buf[blocksize / 4 ..][0 .. blocksize / 4]);
         }
@@ -1166,20 +1167,6 @@ fn inverseCoupling(mag: []f32, ang: []f32) void {
                 m.* = magi - angi;
             }
         }
-    }
-}
-
-/// vector_fmul_window_c: `dst[0 .. 2 * len]` from the end of the saved
-/// block and the start of the new one under the window `win[0 .. 2 * len]`.
-fn fmulWindow(dst: []f32, src0: []const f32, src1: []const f32, win: []const f32, len: usize) void {
-    for (0..len) |n| {
-        const m = 2 * len - 1 - n;
-        const s0 = src0[n];
-        const s1 = src1[len - 1 - n];
-        const wi = win[n];
-        const wj = win[m];
-        dst[n] = s0 * wj - s1 * wi;
-        dst[m] = s0 * wi + s1 * wj;
     }
 }
 
