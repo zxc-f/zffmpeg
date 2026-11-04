@@ -1354,15 +1354,35 @@ def form(*chunks, form_type=b"AIFF", size=None, size_delta=0):
     return b"FORM" + be32(declared) + rest
 
 
-def canonical_aiff(codec, channels, rate, data):
+# Apple's channel layout tags (T23b): the tag number shifted by 16 and the
+# channel count, from Core Audio's CoreAudioBaseTypes.h, which FFmpeg's
+# mov_chan.h restates.
+CHAN_USE_DESCRIPTIONS = 0
+CHAN_USE_BITMAP = 1 << 16
+CHAN_QUADRAPHONIC = 108 << 16 | 4
+CHAN_MPEG_5_1_A = 121 << 16 | 6  # L R C LFE Ls Rs
+
+
+def chan_chunk(tag=CHAN_USE_DESCRIPTIONS, bitmap=0, labels=(), count=None, size=None):
+    """A `CHAN` chunk: the layout tag, the bitmap, the description count, then
+    a 20-byte description per Core Audio label (flags and coordinates 0)."""
+    body = be32(tag) + be32(bitmap) + be32(len(labels) if count is None else count)
+    body += b"".join(be32(label) + bytes(16) for label in labels)
+    return iff_chunk(b"CHAN", body, size=size)
+
+
+def canonical_aiff(codec, channels, rate, data, chan=None):
     """The writer's output: plain AIFF for the NONE encodings, else AIFF-C with
-    FVER, a 24-byte COMM holding the compression type, then SSND."""
+    FVER, a 24-byte COMM holding the compression type, then SSND. FFmpeg's
+    muxer puts `chan`, a CHAN chunk for a native layout of more than two
+    channels, after COMM."""
     compression, bits, _ = AIFF_CODECS[codec]
     frames = len(data) // (channels * bits // 8)
+    after_comm = [chan] if chan is not None else []
     if compression == b"NONE":
-        return form(comm_chunk(channels, frames, bits, rate), ssnd_chunk(data))
+        return form(comm_chunk(channels, frames, bits, rate), *after_comm, ssnd_chunk(data))
     return form(iff_chunk(b"FVER", be32(AIFC_VERSION1)), comm_chunk(channels, frames, bits, rate, compression),
-                ssnd_chunk(data), form_type=b"AIFC")
+                *after_comm, ssnd_chunk(data), form_type=b"AIFC")
 
 
 def aiff_stream(codec, channels, rate, payload):
@@ -1372,9 +1392,10 @@ def aiff_stream(codec, channels, rate, payload):
 def build_aiff_fixtures():
     fx = []
 
-    def ok(name, group, rule, data, codec, channels, rate, payload, writer_output=False):
-        fx.append(Fixture(name, group, rule, data, accept=aiff_stream(codec, channels, rate, payload),
-                          writer_output=writer_output))
+    def ok(name, group, rule, data, codec, channels, rate, payload, writer_output=False, layout=None):
+        stream = aiff_stream(codec, channels, rate, payload)
+        stream.layout = layout
+        fx.append(Fixture(name, group, rule, data, accept=stream, writer_output=writer_output))
 
     def bad(name, group, rule, data, error):
         assert error in AIFF_ERRORS, error
@@ -1461,8 +1482,61 @@ def build_aiff_fixtures():
         form(iff_chunk(b"COMM", comm[8:24]), ssnd_chunk(four)), "InvalidFormat")
     bad("aiff_truncated_comm", "comm", "Input ends inside COMM.", form(comm, ssnd_chunk(four))[:24], "Truncated")
     bad("aiff_channels0", "comm", "Zero channels.", form(comm_chunk(channels=0), ssnd_chunk(b"")), "InvalidFormat")
-    bad("aiff_channels3", "comm", "Three channels.", form(comm_chunk(channels=3, frames=2), ssnd_chunk(s16[:12])),
-        "UnsupportedFormat")
+    # Channels and layouts (T23b): any count up to the limit, unspecified
+    # unless a CHAN chunk before SSND gives a layout, as FFmpeg reads it.
+    ok("aiff_channels3", "channels", "Three channels without CHAN: unspecified (rejected before T23b).",
+       form(comm_chunk(channels=3, frames=2), ssnd_chunk(s16[:12])), "pcm_s16be", 3, 8000, s16[:12])
+    six = s16 + s16[:8]
+    ok("aiff_channels6", "channels",
+       "Six channels without CHAN, written back the same way; FFmpeg's command line guesses 5.1 for them.",
+       canonical_aiff("pcm_s16be", 6, 8000, six), "pcm_s16be", 6, 8000, six, writer_output=True)
+    wide = be_values(">h", [i - 32 for i in range(MAX_CHANNELS)])
+    ok("aiff_channels64", "channels", f"{MAX_CHANNELS} channels, the default limit: one frame.",
+       form(comm_chunk(channels=MAX_CHANNELS, frames=1), ssnd_chunk(wide)), "pcm_s16be", MAX_CHANNELS, 8000, wide)
+    bad("aiff_channels65", "channels", f"{MAX_CHANNELS + 1} channels, above the default limit (FFmpeg reads them).",
+        form(comm_chunk(channels=MAX_CHANNELS + 1, frames=1), ssnd_chunk(bytes(2 * (MAX_CHANNELS + 1)))),
+        "LimitExceeded")
+    ok("aiff_chan_5point1", "channels",
+       "CHAN with the tag MPEG_5_1_A (L, R, C, LFE, Ls, Rs) after COMM: 5.1(side), as FFmpeg's muxer writes it.",
+       canonical_aiff("pcm_s16be", 6, 8000, six, chan=chan_chunk(CHAN_MPEG_5_1_A)), "pcm_s16be", 6, 8000, six,
+       writer_output=True, layout=describe_mask(channel_bits("FL", "FR", "FC", "LFE", "SL", "SR")))
+    six_one = channel_bits("FL", "FR", "FC", "LFE", "BC", "SL", "SR")
+    ok("aiff_chan_bitmap", "channels",
+       "CHAN with a channel bitmap, 6.1, which no tag names, as FFmpeg's muxer writes it in AIFF-C `sowt`.",
+       canonical_aiff("pcm_s16le", 7, 8000, pcm(MONO + MONO[:6]),
+                      chan=chan_chunk(CHAN_USE_BITMAP, bitmap=six_one)), "pcm_s16le", 7, 8000,
+       pcm(MONO + MONO[:6]), writer_output=True, layout=describe_mask(six_one))
+    ok("aiff_chan_descriptions", "channels",
+       "CHAN with channel descriptions C, L, R: a custom order, as FFmpeg reads it.",
+       form(comm_chunk(channels=3, frames=2), chan_chunk(labels=(3, 1, 2)), ssnd_chunk(s16[:12])),
+       "pcm_s16be", 3, 8000, s16[:12], layout="3 channels (FC+FL+FR)")
+    ok("aiff_chan_before_comm", "channels",
+       "CHAN (the quadraphonic tag) before COMM: the tag's count must be COMM's, as FFmpeg checks.",
+       form(chan_chunk(CHAN_QUADRAPHONIC), comm_chunk(channels=4, frames=2), ssnd_chunk(s16[:16])),
+       "pcm_s16be", 4, 8000, s16[:16], layout=describe_mask(channel_bits("FL", "FR", "BL", "BR")))
+    ok("aiff_chan_count_mismatch", "channels",
+       "CHAN with a six-channel tag on a four-channel stream is ignored, as FFmpeg ignores it.",
+       form(comm_chunk(channels=4, frames=2), chan_chunk(CHAN_MPEG_5_1_A), ssnd_chunk(s16[:16])),
+       "pcm_s16be", 4, 8000, s16[:16])
+    ok("aiff_chan_after_ssnd", "channels",
+       "CHAN after SSND is not read: a sequential reader has reported the stream by then. FFmpeg reads it "
+       "from a seekable file.",
+       form(comm_chunk(channels=4, frames=2), ssnd_chunk(s16[:16]), chan_chunk(CHAN_QUADRAPHONIC)),
+       "pcm_s16be", 4, 8000, s16[:16])
+    bad("aiff_chan_before_comm_mismatch", "channels",
+        "CHAN (a four-channel tag) before a two-channel COMM: FFmpeg rejects it too.",
+        form(chan_chunk(CHAN_QUADRAPHONIC), comm_chunk(channels=2, frames=2), ssnd_chunk(s16[:8])),
+        "InvalidFormat")
+    bad("aiff_chan_short", "channels", "A CHAN chunk of 8 bytes, short of the 12 fixed ones: FFmpeg rejects it too.",
+        form(comm, iff_chunk(b"CHAN", bytes(8)), ssnd_chunk(four)), "InvalidFormat")
+    bad("aiff_chan_too_few_descriptions", "channels",
+        "One channel description for two channels: FFmpeg rejects it too.",
+        form(comm_chunk(channels=2, frames=2), chan_chunk(labels=(1,)), ssnd_chunk(s16[:8])), "InvalidFormat")
+    bad("aiff_chan_descriptions_overflow", "channels",
+        "CHAN declaring two descriptions in room for one. FFmpeg keeps the layout and reads on from the "
+        "middle of the chunk.",
+        form(comm_chunk(channels=2, frames=2), chan_chunk(labels=(1,), count=2), ssnd_chunk(s16[:8])),
+        "InvalidFormat")
     bad("aiff_rate_zero", "comm", "An 80-bit rate of 0.", form(comm_chunk(rate_bytes=bytes(10)), ssnd_chunk(four)),
         "InvalidFormat")
     bad("aiff_rate_exponent", "comm", "An 80-bit rate whose exponent needs a shift beyond 63.",

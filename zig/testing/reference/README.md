@@ -63,6 +63,16 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/layout_vect
 ./layout-vectors | diff -u zig/testing/vectors/layout.txt -
 ```
 
+The T23b `chan` vectors come from the reference's `libavformat`: the
+generator calls `ff_mov_read_chan` and `ff_mov_write_chan`, the internal
+functions AIFF's and CAF's demuxers and AIFF's muxer share, which the static
+library exports:
+
+```bash
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/chan_vectors.c .references/ffmpeg-install/lib/libavformat.a .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o chan-vectors
+./chan-vectors | diff -u zig/testing/vectors/chan.txt -
+```
+
 On Windows (MSYS2 UCRT64 clang) link with `-lm -lbcrypt` instead of
 `-pthread` and strip the carriage returns MinGW's text output adds
 (`tr -d '\015'`) before comparing.
@@ -222,9 +232,10 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   `ffmpeg -bitexact` conversion byte for byte. Since T23b each output's
   `channel_layout` must be the input's after FFmpeg's command-line guess (an
   unspecified layout takes the default for its channel count), as far as the
-  output container records it (a WAV mask, else `unknown`); AIFF refuses
-  more than two channels until its part (AU takes up to 64 since T23b
-  part 3).
+  output container records it (a WAV mask; since T23b part 4 an AIFF
+  `CHAN` for a native layout of more than two channels, which FFmpeg reads
+  back as its tag's channel list, so 5.1 comes back as 5.1(side); else
+  `unknown`).
 - **Dither (T23a).** Eight generated inputs of 200000 frames (f32 WAV, s24
   AIFF, s32 AU, f64 Wave64, raw f32be, s32 CAF written by hand, s16 WAV, and
   since T23b a six-channel f32 WAV, which FFmpeg writes as 5.1), so
@@ -294,6 +305,21 @@ build include the WAV muxer. Its first run, locally on Windows at commit
   unsupported cells (copy across containers, transcoding samples not stored as
   s16) rejected before any output: **54/54**.
 - Fixtures whose pipe result equals the file result: **105/105**.
+
+T23b part 4 widened AIFF to 64 channels with FFmpeg's `CHAN` chunk, both
+ways, and added the `chan` vectors (2516, from `chan_vectors.c`), with no
+reference configuration change. The run, locally on Linux x86-64 as for part
+3, failed only the same 90 inf and NaN transcodes:
+
+- AIFF **30/30** and **27/27**, the layouts from `CHAN` (tag, bitmap,
+  descriptions, before `COMM`) equal to ffprobe's; one recorded difference,
+  `aiff_chan_after_ssnd`, whose `CHAN` after `SSND` FFmpeg reads (`quad`);
+  AIFF writer outputs FFmpeg copies to identical bytes **16/16**, with
+  `-guess_layout_max 0` so that its command line keeps an unspecified
+  layout unspecified.
+- Detection and pipes: **294/294**.
+- AU and AIFF outputs equal to FFmpeg's own conversion: **158/158** (six AU
+  or AIFF channels become a 5.1 `CHAN` in AIFF, byte for byte).
 
 T23b part 3 widened AU to 64 channels, with no reference configuration
 change. The run, locally on Linux x86-64 (Arch Linux, clang 23.1.4 for the

@@ -90,6 +90,7 @@ test {
     _ = @import("format/aiff.zig");
     _ = @import("format/raw.zig");
     _ = @import("format/caf.zig");
+    _ = @import("format/mov_chan.zig");
     _ = @import("resample/audioconvert.zig");
     _ = @import("resample/dither.zig");
     _ = @import("format/registry.zig");

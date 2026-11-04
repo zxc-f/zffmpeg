@@ -536,9 +536,9 @@ fn wavOptions(limits: Limits, output: Container, tags: ?*const metadata.Dictiona
     };
 }
 
-/// The AIFF writer's options: the rate limit of the AIFF limits.
+/// The AIFF writer's options: the rate and channel limits of the AIFF limits.
 fn aiffOptions(limits: Limits) aiff.WriteOptions {
-    return .{ .max_sample_rate = limits.aiff.max_sample_rate };
+    return .{ .max_sample_rate = limits.aiff.max_sample_rate, .max_channels = limits.aiff.max_channels };
 }
 
 /// The raw PCM writer's options: the rate limit of the raw limits.
@@ -659,7 +659,7 @@ fn headerLenOf(container: Container, codec: pcm.Codec, format: audio.Format) usi
         .wav => wav.headerLen(codec, format, .riff), // small test outputs: plain RIFF
         .w64 => wav.headerLen(codec, format, .w64),
         .au => au.canonical_header_len,
-        .aiff => aiff.headerLen(codec),
+        .aiff => aiff.headerLen(codec, format),
         else => 0, // raw PCM
     };
 }
@@ -736,12 +736,6 @@ fn expectEveryCell(input: Container, detected: bool, source: detect.Source, byte
         };
         if (!supported) {
             try std.testing.expectError(error.UnsupportedOperation, result);
-            try std.testing.expectEqual(0, out.buffered().len);
-            continue;
-        }
-        // The AIFF writer takes mono and stereo only, until its T23b part.
-        if (stream.channels > 2 and request.output.family() == .aiff) {
-            try std.testing.expectError(error.UnsupportedFormat, result);
             try std.testing.expectEqual(0, out.buffered().len);
             continue;
         }

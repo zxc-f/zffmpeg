@@ -101,6 +101,9 @@ KNOWN_FIXTURE_DIFFERENCES = {
     ("caf_chunks_around_data", "duration_ts", "10"): "FFmpeg estimates the duration from the bytes after the data start",
     # FFmpeg reads the `chan` layout tag; the port reads `chan` in CAF's T23b part.
     ("caf_chunks_around_data", "channel_layout", "mono"): "`chan` is read in CAF's T23b part",
+    # FFmpeg reads a seekable AIFF file's chunks after SSND; a sequential
+    # reader has reported the stream by then.
+    ("aiff_chan_after_ssnd", "channel_layout", "quad"): "CHAN after SSND is not read",
 }
 
 # Fixtures the `unknown_length` option accepts but FFmpeg cannot open: its
@@ -193,7 +196,7 @@ def layout_text(stream):
 
 def layout_mask(layout):
     """The mask of a native layout's description (`generate.describe_mask`),
-    or None for `unknown`."""
+    or None for `unknown` and a custom order (channels that do not rise)."""
     for name, mask in generate.NAMED_LAYOUTS:
         if name == layout:
             return mask
@@ -201,7 +204,66 @@ def layout_mask(layout):
     if not match:
         return None
     by_name = {name: bit for bit, name in generate.CHANNEL_NAMES.items()}
-    return sum(1 << (by_name[name] if name in by_name else int(name[3:])) for name in match.group(1).split("+"))
+    bits = [by_name[name] if name in by_name else int(name[3:]) for name in match.group(1).split("+")]
+    if any(a >= b for a, b in zip(bits, bits[1:])):
+        return None
+    return sum(1 << bit for bit in bits)
+
+
+def describe_channels(names):
+    """FFmpeg's description of a channel list: native when the channels rise
+    (`generate.describe_mask`), else a custom order."""
+    by_name = {name: bit for bit, name in generate.CHANNEL_NAMES.items()}
+    bits = [by_name[name] for name in names]
+    if all(a < b for a, b in zip(bits, bits[1:])):
+        return generate.describe_mask(sum(1 << bit for bit in bits))
+    return f"{len(names)} channels ({'+'.join(names)})"
+
+
+# FFmpeg's AIFF muxer writes a native layout of more than two channels as a
+# CHAN chunk (ff_mov_write_chan in isom.c): the first Core Audio layout tag
+# its table pairs with the mask, else the mask as a bitmap. Its demuxer
+# reads a tag back as the tag's channel list in Core Audio's order
+# (mov_chan.c), so a round trip can change the layout: 5.1 comes back as
+# 5.1(side). Each entry: the mask written, then the channels read, both
+# restated from the Core Audio tags (kAudioChannelLayoutTag_*).
+AIFF_CHAN_ROUND_TRIP = [
+    (("FC",), ("FC",)),  # Mono
+    (("FL", "FR"), ("FL", "FR")),  # Stereo
+    (("FL", "FR", "BC"), ("FL", "FR", "BC")),  # ITU_2_1
+    (("FL", "FR", "BL", "BR"), ("FL", "FR", "SL", "SR")),  # ITU_2_2 for quad
+    (("FL", "FR", "SL", "SR"), ("FL", "FR", "SL", "SR")),  # ITU_2_2
+    (("FL", "FR", "FC"), ("FL", "FR", "FC")),  # MPEG_3_0_A
+    (("FL", "FR", "FC", "BC"), ("FL", "FR", "FC", "BC")),  # MPEG_4_0_A
+    (("FL", "FR", "FC", "BL", "BR"), ("FL", "FR", "FC", "SL", "SR")),  # MPEG_5_0_A for 5.0
+    (("FL", "FR", "FC", "SL", "SR"), ("FL", "FR", "FC", "SL", "SR")),  # MPEG_5_0_A
+    (("FL", "FR", "FC", "LFE", "BL", "BR"), ("FL", "FR", "FC", "LFE", "SL", "SR")),  # MPEG_5_1_A for 5.1
+    (("FL", "FR", "FC", "LFE", "SL", "SR"), ("FL", "FR", "FC", "LFE", "SL", "SR")),  # MPEG_5_1_A
+    (("FL", "FR", "FC", "LFE", "BL", "BR", "SL", "SR"),
+     ("FL", "FR", "FC", "LFE", "SL", "SR", "BL", "BR")),  # MPEG_7_1_C
+    (("FL", "FR", "FC", "LFE", "SL", "SR", "FLC", "FRC"),
+     ("FL", "FR", "FC", "LFE", "SL", "SR", "FLC", "FRC")),  # MPEG_7_1_A
+    (("FL", "FR", "FC", "LFE", "BL", "BR", "DL", "DR"),
+     ("FL", "FR", "FC", "LFE", "SL", "SR", "DL", "DR")),  # SMPTE_DTV
+    (("FL", "FR", "LFE"), ("FL", "FR", "LFE")),  # DVD_4
+    (("FL", "FR", "LFE", "BC"), ("FL", "FR", "LFE", "BC")),  # DVD_5
+    (("FL", "FR", "LFE", "BL", "BR"), ("FL", "FR", "LFE", "SL", "SR")),  # DVD_6 for quad and LFE
+    (("FL", "FR", "LFE", "SL", "SR"), ("FL", "FR", "LFE", "SL", "SR")),  # DVD_6
+    (("FL", "FR", "FC", "LFE"), ("FL", "FR", "FC", "LFE")),  # DVD_10
+    (("FL", "FR", "FC", "LFE", "BC"), ("FL", "FR", "FC", "LFE", "BC")),  # DVD_11
+]
+
+
+def aiff_round_trip(mask):
+    """The layout ffprobe reads from an AIFF file FFmpeg's muxer (or ours)
+    wrote with the native layout `mask`."""
+    if bin(mask).count("1") <= 2:
+        return "unknown"  # no CHAN
+    for written, read in AIFF_CHAN_ROUND_TRIP:
+        if generate.channel_bits(*written) == mask:
+            return describe_channels(read)
+    # A bitmap: read back below bit 18, the 32 bits written, else ignored.
+    return generate.describe_mask(mask) if mask < 0x40000 else "unknown"
 
 
 def guessed_layout(layout, channels):
@@ -216,10 +278,14 @@ def guessed_layout(layout, channels):
 def written_layout(container, codec, rate, layout, channels):
     """What ffprobe reads back from a file a muxer wrote with `layout`: WAV
     and Wave64 keep a native layout's mask in an extensible header (riffenc.c,
-    `generate.canonical_wav`), AU and AIFF keep none, and
-    raw PCM is read with the layout of its channel count."""
+    `generate.canonical_wav`), AIFF keeps one of more than two channels in a
+    CHAN chunk (`aiff_round_trip`), AU keeps none, and raw PCM is read with
+    the layout of its channel count."""
     if container in generate.RAW_FORMATS:
         return LAYOUT.get(channels, "unknown")
+    if container == "aiff":
+        mask = layout_mask(layout)
+        return "unknown" if mask is None else aiff_round_trip(mask)
     if container not in ("wav", "w64"):
         return "unknown"
     tag, bits, _ = generate.WAV_CODECS[codec]
@@ -937,12 +1003,9 @@ def compare_zffmpeg(args, lines, failures):
                 output_codec = stream.codec if copy else S16_CODEC[output]
                 # Since T23a any storage transcodes to the output's default codec.
                 supported = stream.codec in carried[output] if copy else True
-                # The AIFF writer takes mono and stereo only, until its T23b
-                # part.
-                over_channels = supported and channels > 2 and output == "aiff"
-                if not supported or over_channels:
+                if not supported:
                     rejected_total += 1
-                    error = b"UnsupportedFormat" if over_channels else b"UnsupportedOperation"
+                    error = b"UnsupportedOperation"
                     if code == 3 and error in err and not out.exists():
                         rejected_ok += 1
                     else:
@@ -1283,14 +1346,17 @@ def compare_ffmpeg_w64(args, lines, failures):
 def compare_ffmpeg_muxer(args, lines, failures, container, title, build):
     """FFmpeg's AU or AIFF muxer against the Zig writer (T22a, T22b): FFmpeg
     copies each writer-output fixture into the same container, which must give
-    back the same bytes, so both write the same header for every encoding."""
+    back the same bytes, so both write the same header for every encoding.
+    `-guess_layout_max 0` keeps the command line from guessing a layout for an
+    unspecified one (T23b), so the muxer gets the stream's own: six AIFF
+    channels with no CHAN stay without one."""
     fixtures = [f for f in build() if f.writer_output]
     same = 0
     with tempfile.TemporaryDirectory() as tmp:
         for fixture in fixtures:
             out = pathlib.Path(tmp) / f"{fixture.name}.{container}"
             # Forced, because FFmpeg's probe does not detect an empty AU file.
-            process = run(args.ffmpeg, "-v", "error", "-nostdin", "-f", container,
+            process = run(args.ffmpeg, "-v", "error", "-nostdin", "-f", container, "-guess_layout_max", "0",
                           "-i", FIXTURES / container / f"{fixture.name}.{container}",
                           "-bitexact", "-c:a", "copy", "-f", container, out)
             if process.returncode == 0 and out.read_bytes() == fixture.data:

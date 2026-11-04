@@ -32,8 +32,9 @@ pipes.
 | --- | --- |
 | `FORM` header | `FORM`, else `InvalidAiff`. A size below 4 is `InvalidAiff`. Form type `AIFF` or `AIFC`, else `InvalidAiff`. The declared size bounds every chunk: a chunk that does not fit is `InvalidAiff`, and bytes after the extent are never read. |
 | `FVER` | Its first 4 bytes are the AIFF-C version (an `FVER` of fewer bytes is skipped like any other chunk). A `FORM AIFC` file starts as version 1 (`0xA2805140`), as FFmpeg's reader does, and `FVER` replaces it. |
-| `COMM` | Required before `SSND`, once (`InvalidAiff` otherwise). Fields: channels `u16`, frames `u32`, sample size `u16`, the sample rate as an 80-bit extended float, then in AIFF-C a compression type and a Pascal-string name. A size below 18 is `InvalidFormat`. Channels 0 is `InvalidFormat`, above 2 `UnsupportedFormat`. |
+| `COMM` | Required before `SSND`, once (`InvalidAiff` otherwise). Fields: channels `u16`, frames `u32`, sample size `u16`, the sample rate as an 80-bit extended float, then in AIFF-C a compression type and a Pascal-string name. A size below 18 is `InvalidFormat`. Channels 0 is `InvalidFormat`, above 64 (the configurable `Limits.max_channels`, libswresample's limit, as for WAV and AU) `LimitExceeded`; since T23b any count up to it is read. A count other than an earlier `CHAN` chunk's is `InvalidFormat`, as in FFmpeg (`aiff_chan_before_comm_mismatch`). |
 | `SSND` | A data offset `u32` and a block size `u32` (ignored), the `offset` bytes skipped, then the samples to the end of the chunk. A size below 8, or an offset past the chunk's end, is `InvalidAiff`. The samples must be whole frames (`InvalidFormat`), exactly as many as `COMM` declares (`InvalidFormat`). |
+| `CHAN` | Since T23b, before `SSND`, Apple's channel layout (FFmpeg's `ff_mov_read_chan`, [mov_chan.zig](../../../format/mov_chan.zig), checked on [chan.txt](../../vectors/chan.txt)): a layout tag, a bitmap and a count of 20-byte channel descriptions. A tag FFmpeg's table names gives its channels (`aiff_chan_5point1`, the tag MPEG_5_1_A, is 5.1(side)), the bitmap tag the bitmap's channels below bit 18 (`aiff_chan_bitmap`), the description tag one channel per description's label, in order (`aiff_chan_descriptions`, a custom layout); the list is put in FFmpeg's canonical order. A tag or bitmap whose channel count is not the stream's is ignored (`aiff_chan_count_mismatch`); before `COMM` it gives the count, which `COMM` must repeat (`aiff_chan_before_comm`). Fewer than 12 bytes (`aiff_chan_short`), fewer descriptions than channels (`aiff_chan_too_few_descriptions`) and more descriptions than the chunk holds (`aiff_chan_descriptions_overflow`) are `InvalidFormat`. After `SSND` it is skipped like any other chunk (`aiff_chan_after_ssnd`). Without `CHAN` the layout is unspecified, which zffprobe prints as `unknown`. |
 | Others | Skipped with their pad byte, before or after `SSND`; after `SSND` a second `COMM` or `SSND` is `InvalidAiff`. At most 4096 chunk headers (`LimitExceeded`, configurable). |
 
 ### Sample rate
@@ -88,10 +89,14 @@ placeholder sizes. For `pcm_s8`, `pcm_s16be`, `pcm_s24be` and `pcm_s32be`
 (type `NONE`) it is plain AIFF: `FORM`, `AIFF`, an 18-byte `COMM`, then
 `SSND` with offset and block size 0. For the other encodings it is AIFF-C:
 `FORM`, `AIFC`, `FVER` version 1, a 24-byte `COMM` ending in the compression
-type and an empty name, then `SSND`. The rate is the integer's exact 80-bit
+type and an empty name, then `SSND`. For a native layout of more than two
+channels a 12-byte `CHAN` follows `COMM`, as FFmpeg's `ff_mov_write_chan`
+writes it: the first layout tag its table pairs with the mask, else the
+bitmap tag and the mask's low 32 bits (`aiff_chan_5point1`,
+`aiff_chan_bitmap`); other layouts get none (`aiff_channels6`). The rate is the integer's exact 80-bit
 form. Odd data gets a pad byte, counted in the `FORM` size but not in the
 `SSND` size. The frame count and the `FORM` size must fit in 32 bits, and the
-rate limit applies, before anything is written.
+rate and channel limits apply, before anything is written.
 
 ## Error precedence
 
@@ -101,7 +106,10 @@ rate limit applies, before anything is written.
    (`InvalidAiff`), then counts toward the chunk limit; each body must fit in
    the extent (`InvalidAiff`). Input ending inside any of them is `Truncated`.
 3. `COMM`: duplicate (`InvalidAiff`), then a size below 18 (`InvalidFormat`),
-   then the extent, then channels, sample rate and codec, in that order.
+   then the extent, then channels (zero, the limit, then an earlier `CHAN`'s
+   count), sample rate and codec, in that order. `CHAN`: the extent, a size
+   below 12, the description count against the size and then the channels,
+   then the descriptions (`Truncated` if input ends there).
 4. `SSND`: no `COMM` yet, then a size below 8, then the extent (all
    `InvalidAiff`), then the offset, then whole frames, then the frame count.
 5. The samples, then every chunk after `SSND` up to the end of the extent.
@@ -131,7 +139,9 @@ the pinned revision.
 | Offset past the chunk, short `SSND`, chunk beyond the extent | `InvalidAiff` (`aiff_ssnd_offset_too_big`, `aiff_ssnd_short`, `aiff_chunk_exceeds_form`). | Rejects a short `SSND`; accepts the others and reads what it finds. |
 | Sample size not 8, 16, 24 or 32 | `UnsupportedFormat` (`aiff_bits12`). | Rounds up to the next of those. |
 | Sample rate above 192 kHz | `LimitExceeded` (`aiff_rate_over_limit`). | Accepts any rate that fits in an `int`; larger values are truncated to one. |
-| More than 2 channels | `UnsupportedFormat` (`aiff_channels3`). | Accepts them, with a `CHAN` layout. |
+| Channels | Since T23b 1 to 64 (`aiff_channels3`, `aiff_channels6`, `aiff_channels64`); more is `LimitExceeded` (`aiff_channels65`). | Accepts more. |
+| `CHAN` after `SSND` | Skipped (`aiff_chan_after_ssnd`): a sequential reader has reported the stream by then. | Reads it from a seekable file, which `compare.py` records as a known difference (`quad` here). |
+| `CHAN` too short for its descriptions | `InvalidFormat` (`aiff_chan_descriptions_overflow`). | Keeps the layout and reads on from the middle of the chunk, as if a chunk header started there. |
 | `NAME`, `AUTH`, `(c) `, `ANNO`, `ID3 ` | Skipped (`aiff_other_chunks`); AIFF tags are not read or written. | Reads them as title, author, copyright, comment and ID3 tags, and writes the first four. |
 | Unknown length | Not supported: a `FORM` size below 4 is `InvalidAiff`, and not detected. | Writes zero sizes when its output is a pipe, and its own demuxer rejects that file the same way (`FORM` size 0). |
 
@@ -183,7 +193,20 @@ record the behavior and differences above.
 | `aiff_comm_short` | comm | 60 | reject: `InvalidFormat` | A COMM chunk declaring 16 bytes. | `72398ebcb7d62b67e81ea82ad6b4e7364976c48b7a8d30cb8d2e39c0ee8f8b35` |
 | `aiff_truncated_comm` | comm | 24 | reject: `Truncated` | Input ends inside COMM. | `d89f8e19ba3e918510a7743bb1af094c6f6e28797550792575e8894f8ef73836` |
 | `aiff_channels0` | comm | 54 | reject: `InvalidFormat` | Zero channels. | `69941c534df543a1d5f71fe60aba3df0f5fb73a4fdebaede5d08e2ee7f376dc8` |
-| `aiff_channels3` | comm | 66 | reject: `UnsupportedFormat` | Three channels. | `b04b869fda7694057d418ab47db8a3fc81205c9835a8370f3f76e5fb73ce999f` |
+| `aiff_channels3` | channels | 66 | accept: 3 channels, 8000 Hz, 2 frames | Three channels without CHAN: unspecified (rejected before T23b). | `b04b869fda7694057d418ab47db8a3fc81205c9835a8370f3f76e5fb73ce999f` |
+| `aiff_channels6` | channels | 78 | accept: 6 channels, 8000 Hz, 2 frames; writer output | Six channels without CHAN, written back the same way; FFmpeg's command line guesses 5.1 for them. | `adb12066341ed11af8b203f24b208d39d4ef0f9cda8f439ad7229dc0be8b07bd` |
+| `aiff_channels64` | channels | 182 | accept: 64 channels, 8000 Hz, 1 frame | 64 channels, the default limit: one frame. | `9b383e44725338dc56d42685e876e7cc51023502443a76bd9312795018564d8e` |
+| `aiff_channels65` | channels | 184 | reject: `LimitExceeded` | 65 channels, above the default limit (FFmpeg reads them). | `a81dbb63f2ebd4e5ed96f2985616ca45ae867ba35faa685437d7aa4578224382` |
+| `aiff_chan_5point1` | channels | 98 | accept: 5.1(side) (6 channels), 8000 Hz, 2 frames; writer output | CHAN with the tag MPEG_5_1_A (L, R, C, LFE, Ls, Rs) after COMM: 5.1(side), as FFmpeg's muxer writes it. | `c1ad980af720b03baddb21202398a1f0ee060d9a78c5791f762f1c93b1b6ad6e` |
+| `aiff_chan_bitmap` | channels | 120 | accept: 6.1 (7 channels), 8000 Hz, 2 frames; writer output | CHAN with a channel bitmap, 6.1, which no tag names, as FFmpeg's muxer writes it in AIFF-C `sowt`. | `8ef4162ef70726315e0ea12ec8edf857870b613c7c7ffd6b1f55435a5ff0df29` |
+| `aiff_chan_descriptions` | channels | 146 | accept: 3 channels (FC+FL+FR) (3 channels), 8000 Hz, 2 frames | CHAN with channel descriptions C, L, R: a custom order, as FFmpeg reads it. | `53d75e2437ed662ce270a8ce85e3993e06503caaf347a293bbc1a494ecf5d892` |
+| `aiff_chan_before_comm` | channels | 90 | accept: quad (4 channels), 8000 Hz, 2 frames | CHAN (the quadraphonic tag) before COMM: the tag's count must be COMM's, as FFmpeg checks. | `537be3a3a92cc08152b3a279bba5040f8831858717a48417a5bfab167297cac9` |
+| `aiff_chan_count_mismatch` | channels | 90 | accept: 4 channels, 8000 Hz, 2 frames | CHAN with a six-channel tag on a four-channel stream is ignored, as FFmpeg ignores it. | `8b710d002310ed49a49d82c4c94014d111a54d30a6fea0767c1959b81ac135a6` |
+| `aiff_chan_after_ssnd` | channels | 90 | accept: 4 channels, 8000 Hz, 2 frames | CHAN after SSND is not read: a sequential reader has reported the stream by then. FFmpeg reads it from a seekable file. | `56312a73bafae34a9a5a90598e5580575e2dc334f298062343888e28a745e214` |
+| `aiff_chan_before_comm_mismatch` | channels | 82 | reject: `InvalidFormat` | CHAN (a four-channel tag) before a two-channel COMM: FFmpeg rejects it too. | `54399afb580a895bb89602375d6090c5be056a6c01ba05a0013c8d60ca44c6c6` |
+| `aiff_chan_short` | channels | 78 | reject: `InvalidFormat` | A CHAN chunk of 8 bytes, short of the 12 fixed ones: FFmpeg rejects it too. | `eb32353bd197f69731473d7ee9b7a9c52fa3131a802191405fcf31a6f49f08d9` |
+| `aiff_chan_too_few_descriptions` | channels | 102 | reject: `InvalidFormat` | One channel description for two channels: FFmpeg rejects it too. | `4201fda85da1127d18580d67dba1979b6a1a936610078fbf86b9ace1911ac18f` |
+| `aiff_chan_descriptions_overflow` | channels | 102 | reject: `InvalidFormat` | CHAN declaring two descriptions in room for one. FFmpeg keeps the layout and reads on from the middle of the chunk. | `70b70b95a36f40e9b06dd382d760af7af6326e8264ea79e1da5f8403337622c6` |
 | `aiff_rate_zero` | comm | 62 | reject: `InvalidFormat` | An 80-bit rate of 0. | `4fe9ac1db3fef971f44dbf81e3ae6f0a448e469b5da4999b3b5d4221a5cd66ff` |
 | `aiff_rate_exponent` | comm | 62 | reject: `InvalidFormat` | An 80-bit rate whose exponent needs a shift beyond 63. | `912f24089bff7f3d73e6753ba972f9c50619ab2cc46868adb9d0bb3cf4829d5a` |
 | `aiff_rate_over_limit` | comm | 62 | reject: `LimitExceeded` | Sample rate 192001 Hz, above the default limit. | `e36541dd0d80cef503f0c9fc650d9f2973cc93b07df79d892da8886dae5625a9` |

@@ -2,10 +2,14 @@
 // Original file for this project; not translated from FFmpeg source.
 // libavformat/aiffdec.c, aiffenc.c and aiff.c at the pinned reference
 // revision describe FFmpeg's behavior; see zig/testing/fixtures/aiff/README.md.
+// The `CHAN` chunk is read and written by mov_chan.zig, as aiffdec.c and
+// aiffenc.c use mov_chan.c and isom.c.
 //! Bounded AIFF and AIFF-C reading and known-length writing (TODO.md T22b):
 //! s8, s16, s24 and s32 big-endian PCM in plain AIFF, and in AIFF-C also u8
 //! (`raw `), s16 little-endian (`sowt`), 32- and 64-bit big-endian float
-//! (`fl32`, `fl64`), A-law (`alaw`) and µ-law (`ulaw`).
+//! (`fl32`, `fl64`), A-law (`alaw`) and µ-law (`ulaw`), with 1 to
+//! `max_channels` channels (T23b) in the layout FFmpeg reads: unspecified,
+//! or what a `CHAN` chunk before `SSND` gives (mov_chan.zig).
 //!
 //! The parser is sequential and never seeks, so it works on pipes: `COMM`
 //! must come before `SSND`, which FFmpeg also needs on non-seekable input.
@@ -18,13 +22,15 @@
 //! The writer emits the header FFmpeg's muxer writes on seekable output
 //! without metadata: plain AIFF for the big-endian integer encodings, AIFF-C
 //! with an `FVER` chunk and the compression type for the others, exact sizes
-//! known up front, and a pad byte after odd data. Neither the parser nor the
-//! writer allocates.
+//! known up front, a `CHAN` chunk after `COMM` for a native layout of more
+//! than two channels, and a pad byte after odd data. Neither the parser nor
+//! the writer allocates.
 
 const std = @import("std");
 const audio = @import("../core/audio.zig");
 const samples_storage = @import("../core/samples.zig");
 const pcm = @import("../codec/pcm.zig");
+const mov_chan = @import("mov_chan.zig");
 
 /// Contract errors (see the AIFF fixture README), plus `IoFailure` for a
 /// failing reader.
@@ -40,6 +46,8 @@ pub const Error = error{
 /// Configurable policy limits; exceeding one is `error.LimitExceeded`.
 pub const Limits = struct {
     max_sample_rate: u32 = 192_000,
+    /// libswresample's `SWR_CH_MAX`: more channels than FFmpeg converts.
+    max_channels: u16 = max_channels,
     /// Counts every chunk header inside the FORM extent.
     max_chunks: u32 = 4096,
 };
@@ -53,6 +61,9 @@ pub const Info = struct {
     /// The FORM type is `AIFC`.
     aifc: bool,
 };
+
+/// The default channel limit of the parser and the writer.
+pub const max_channels = 64;
 
 /// `AIFF_C_VERSION1`: the `FVER` timestamp that makes `COMM` carry a
 /// compression type.
@@ -199,6 +210,9 @@ pub const Parser = struct {
     version: u32 = 0,
     /// Set by `COMM`.
     format: ?audio.Format = null,
+    /// FFmpeg's layout so far: a count of 0 until `COMM` or a `CHAN` gives
+    /// one, then what `CHAN` chunks make of it.
+    layout: audio.ChannelLayout = .{ .unspecified = 0 },
     codec: pcm.Codec = .s16be,
     frame_bytes: u32 = 0,
     declared_frames: u32 = 0,
@@ -236,6 +250,16 @@ pub const Parser = struct {
                 try p.readCommon(header.size);
             } else if (std.mem.eql(u8, &header.id, "SSND")) {
                 return p.beginSound(header.size);
+            } else if (std.mem.eql(u8, &header.id, "CHAN")) {
+                try p.checkExtent(header.size);
+                p.layout = mov_chan.read(p.reader, header.size, p.layout) catch |err| return switch (err) {
+                    error.InvalidFormat => error.InvalidFormat,
+                    error.Truncated => error.Truncated,
+                    error.LimitExceeded => error.LimitExceeded,
+                    error.IoFailure => error.IoFailure,
+                };
+                p.extent_left -= header.size;
+                try p.skipPad(header.size);
             } else if (std.mem.eql(u8, &header.id, "FVER") and header.size >= 4) {
                 try p.checkExtent(header.size);
                 const version = try p.readArray(4);
@@ -320,9 +344,12 @@ pub const Parser = struct {
         const frames = std.mem.readInt(u32, fields[2..6], .big);
         const bits = std.mem.readInt(u16, fields[6..8], .big);
         if (channels == 0) return error.InvalidFormat;
-        if (channels > 2) return error.UnsupportedFormat;
+        if (channels > p.limits.max_channels) return error.LimitExceeded;
+        // A `CHAN` before `COMM` gave another count: FFmpeg rejects it.
+        const known = p.layout.channelCount();
+        if (known != 0 and known != channels) return error.InvalidFormat;
         // Without `CHAN` FFmpeg leaves the layout unspecified.
-        const layout: audio.ChannelLayout = .{ .unspecified = channels };
+        if (known == 0) p.layout = .{ .unspecified = channels };
         const rate = try sampleRate(fields[8..18], p.limits.max_sample_rate);
         var rest = size - 18;
         const codec = if (p.version == aifc_version1 and rest >= 4) codec: {
@@ -334,7 +361,7 @@ pub const Parser = struct {
         p.extent_left -= size;
         try p.skipPad(size);
         const sample_bytes: u32 = codec.bytesPerSample();
-        p.format = .{ .sample_rate = rate, .layout = layout, .sample_format = codec.storage() };
+        p.format = .{ .sample_rate = rate, .layout = p.layout, .sample_format = codec.storage() };
         p.codec = codec;
         p.frame_bytes = sample_bytes * channels;
         p.declared_frames = frames;
@@ -343,7 +370,9 @@ pub const Parser = struct {
     /// `SSND`: its 8-byte offset and block size, the data offset skipped, then
     /// whole frames, as many as `COMM` declares.
     fn beginSound(p: *Parser, size: u32) Error!Info {
-        const format = p.format orelse return error.InvalidAiff;
+        var format = p.format orelse return error.InvalidAiff;
+        // With the `CHAN` chunks between `COMM` and here, which keep the count.
+        format.layout = p.layout;
         if (size < 8) return error.InvalidAiff;
         try p.checkExtent(size);
         const fields = try p.readArray(8);
@@ -407,10 +436,14 @@ pub const DecodeError = Error || std.Io.Writer.Error;
 
 /// Decodes an AIFF stream and writes its samples to `out` as raw
 /// little-endian samples of its storage format, using fixed working storage.
-/// The caller flushes `out`.
+/// The caller flushes `out`. A frame wider than that storage (4 KiB, possible
+/// only with a channel limit above the default) is `LimitExceeded`.
 pub fn decodeToRaw(reader: *std.Io.Reader, out: *std.Io.Writer, limits: Limits) DecodeError!Info {
     var parser: Parser = .init(reader, limits);
     const info = try parser.readHeader();
+    // readData delivers nothing when a frame does not fit, which would end
+    // the loop below early; only a channel limit above the default allows it.
+    if (parser.frame_bytes > scratch_len) return error.LimitExceeded;
     var encoded: [scratch_len]u8 = undefined;
     // Storage is at most twice the encoded size (A-law and µ-law to s16).
     var stored: [2 * scratch_len]u8 = undefined;
@@ -435,7 +468,8 @@ pub const HeaderError = error{
     UnsupportedFormat,
     /// A zero sample rate.
     InvalidFormat,
-    /// The sample rate is above `WriteOptions.max_sample_rate`.
+    /// The sample rate is above `WriteOptions.max_sample_rate`, or the
+    /// channels above `WriteOptions.max_channels`.
     LimitExceeded,
     /// The FORM size or the frame count does not fit in 32 bits.
     SizeOverflow,
@@ -452,17 +486,32 @@ pub const WriteError = std.Io.Writer.Error || HeaderError || error{
 
 pub const WriteOptions = struct {
     max_sample_rate: u32 = 192_000,
+    max_channels: u16 = max_channels,
 };
 
-/// The bytes before the samples, as the writer emits them for `codec`: plain
-/// AIFF (FORM header, 18-byte `COMM`, `SSND` header) or AIFF-C (with `FVER`
-/// and a 24-byte `COMM`).
-pub fn headerLen(codec: pcm.Codec) usize {
-    const plain = std.mem.eql(u8, compressionFor(codec) orelse "NONE", "NONE");
-    return if (plain) 12 + 26 + 16 else 12 + 12 + 32 + 16;
+/// The `CHAN` chunk FFmpeg's muxer writes after `COMM`, for a native layout
+/// of more than two channels: its mask, by `mov_chan.encode`.
+fn chanMask(layout: audio.ChannelLayout) ?u64 {
+    return switch (layout) {
+        .native => |mask| if (@popCount(mask) > 2) mask else null,
+        .unspecified, .custom => null,
+    };
 }
 
-const max_header_len = 12 + 12 + 32 + 16;
+const chan_chunk_len = 8 + mov_chan.header_len;
+
+/// The bytes before the samples, as the writer emits them for `codec` and
+/// `format`: plain AIFF (FORM header, 18-byte `COMM`, `SSND` header) or
+/// AIFF-C (with `FVER` and a 24-byte `COMM`), and `CHAN` for a native
+/// layout of more than two channels.
+pub fn headerLen(codec: pcm.Codec, format: audio.Format) usize {
+    const plain = std.mem.eql(u8, compressionFor(codec) orelse "NONE", "NONE");
+    const chan: usize = if (chanMask(format.layout) != null) chan_chunk_len else 0;
+    const common: usize = if (plain) 12 + 26 + 16 else 12 + 12 + 32 + 16;
+    return chan + common;
+}
+
+const max_header_len = 12 + 12 + 32 + chan_chunk_len + 16;
 
 /// Writes one known-length AIFF or AIFF-C stream to a borrowed writer: the
 /// header with exact sizes, then the samples. No seeking and no placeholder
@@ -496,13 +545,12 @@ pub const Writer = struct {
         if (format.sample_format != codec.storage()) return error.UnsupportedFormat;
         if (format.sample_rate == 0) return error.InvalidFormat;
         if (format.sample_rate > options.max_sample_rate) return error.LimitExceeded;
-        // Mono and stereo only, until this container's T23b part.
-        if (format.channelCount() > 2) return error.UnsupportedFormat;
+        if (format.channelCount() > options.max_channels) return error.LimitExceeded;
         const frames = std.math.cast(u32, frame_count) orelse return error.SizeOverflow;
         const sample_bytes: u32 = codec.bytesPerSample();
         const frame_bytes = sample_bytes * format.channelCount();
         const data_bytes = std.math.mul(u64, frames, frame_bytes) catch return error.SizeOverflow;
-        const header_len = headerLen(codec);
+        const header_len = headerLen(codec, format);
         // The FORM size counts everything after its 8 bytes, the pad included.
         const form_size = std.math.add(u64, header_len - 8, data_bytes + data_bytes % 2) catch return error.SizeOverflow;
         if (form_size > std.math.maxInt(u32)) return error.SizeOverflow;
@@ -529,6 +577,11 @@ pub const Writer = struct {
             // An empty compression name: a zero length and its pad byte.
             writeBig(&w, u16, 0);
         }
+        if (chanMask(format.layout)) |mask| {
+            w.writeAll("CHAN") catch unreachable;
+            writeBig(&w, u32, mov_chan.header_len);
+            w.writeAll(&mov_chan.encode(mask)) catch unreachable;
+        }
         w.writeAll("SSND") catch unreachable;
         // The SSND size counts the offset and block size, not the pad.
         writeBig(&w, u32, @intCast(data_bytes + 8));
@@ -549,12 +602,15 @@ pub const Writer = struct {
         var bytes: [scratch_len]u8 = undefined;
         var rest = samples;
         while (rest.len > 0) {
-            // scratch_len / 2 samples are whole mono and stereo frames and
-            // encode into at most scratch_len bytes.
+            // The frames were checked above, so a chunk need not end on a
+            // frame, which may be wider than the scratch. scratch_len / 2
+            // samples encode into at most scratch_len bytes.
             const take = @min(rest.len, scratch_len / 2);
-            try w.writeData(pcm.encodeFromS16(w.codec, rest[0..take], &bytes) catch unreachable);
+            try w.out.writeAll(pcm.encodeFromS16(w.codec, rest[0..take], &bytes) catch unreachable);
             rest = rest[take..];
         }
+        // The count was checked against frames_expected, a u32.
+        w.frames_written += @intCast(samples.len / channels);
     }
 
     /// Writes whole frames already encoded as the writer's codec, unchanged.
@@ -800,7 +856,7 @@ test "the writer reproduces every AIFF writer-output fixture byte for byte" {
             var buffer: [1024]u8 = undefined;
             var out: std.Io.Writer = .fixed(&buffer);
             var writer = try Writer.begin(&out, codec, format, stream.frameCount(), .{});
-            try std.testing.expectEqual(headerLen(codec), out.buffered().len);
+            try std.testing.expectEqual(headerLen(codec, format), out.buffered().len);
             // One frame per call exercises repeated writes.
             const frame_bytes = codec.bytesPerSample() * stream.channels;
             var i: usize = 0;
@@ -841,7 +897,7 @@ test "the writer rejects frame-count mismatches and incomplete frames" {
     try std.testing.expectError(error.IncompleteFrame, writer.writeFrames(&.{ 1, 2, 3 }));
     try std.testing.expectError(error.TooManyFrames, writer.writeFrames(&.{ 1, 2, 3, 4, 5, 6 }));
     try std.testing.expectError(error.IncompleteFrame, writer.writeData(&.{ 1, 2, 3 }));
-    try std.testing.expectEqual(headerLen(.s16be), out.buffered().len);
+    try std.testing.expectEqual(headerLen(.s16be, stereo), out.buffered().len);
     try writer.writeFrames(&.{ 1, 2 });
     try std.testing.expectError(error.TooFewFrames, writer.finish());
     try writer.writeFrames(&.{ 3, 4 });
@@ -860,12 +916,14 @@ test "the writer checks every size and the codec before writing the header" {
     try std.testing.expectError(error.SizeOverflow, Writer.begin(&out, .s16be, mono, std.math.maxInt(u64), .{}));
     // The FORM size counts the header after its first 8 bytes, the data and
     // the pad; the largest mono s16 stream fills it to 0xFFFFFFFE.
-    const max_frames = (std.math.maxInt(u32) - (headerLen(.s16be) - 8)) / 2;
+    const max_frames = (std.math.maxInt(u32) - (headerLen(.s16be, mono) - 8)) / 2;
     try std.testing.expectError(error.SizeOverflow, Writer.begin(&out, .s16be, mono, max_frames + 1, .{}));
     const fast = try audio.Format.init(192_001, 1, .s16);
     try std.testing.expectError(error.LimitExceeded, Writer.begin(&out, .s16be, fast, 0, .{}));
     const zero_rate: audio.Format = .{ .sample_rate = 0, .layout = .mono, .sample_format = .s16 };
     try std.testing.expectError(error.InvalidFormat, Writer.begin(&out, .s16be, zero_rate, 0, .{}));
+    const too_wide = try audio.Format.init(8000, max_channels + 1, .s16);
+    try std.testing.expectError(error.LimitExceeded, Writer.begin(&out, .s16be, too_wide, 0, .{}));
     const planar = try audio.Format.init(8000, 1, .s16p);
     try std.testing.expectError(error.UnsupportedFormat, Writer.begin(&out, .s16be, planar, 0, .{}));
     // AIFF does not carry these encodings, and the storage must match.

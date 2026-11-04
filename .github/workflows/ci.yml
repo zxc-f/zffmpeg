@@ -138,6 +138,16 @@ jobs:
             .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o layout-vectors
           ./layout-vectors | diff -u zig/testing/vectors/layout.txt -
 
+      # The committed T23b `chan` oracle must be what this build's libavformat
+      # gives (internal functions of the static library).
+      - name: Check the channel layout chunk vectors (T23b)
+        run: |
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/chan_vectors.c \
+            .references/ffmpeg-install/lib/libavformat.a .references/ffmpeg-install/lib/libavcodec.a \
+            .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a \
+            -lm -pthread -o chan-vectors
+          ./chan-vectors | diff -u zig/testing/vectors/chan.txt -
+
       # The committed T23a oracle must be what this build's libswresample gives.
       - name: Check the sample conversion and dither vectors (T23a)
         run: |

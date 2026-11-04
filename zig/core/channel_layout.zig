@@ -385,6 +385,25 @@ pub const Layout = union(enum) {
         return .{ .custom = custom };
     }
 
+    /// An unnamed channel list in FFmpeg's canonical order
+    /// (`av_channel_layout_retype` with `AV_CHANNEL_LAYOUT_RETYPE_FLAG_CANONICAL`
+    /// on a custom layout): unspecified when every channel is `unknown`,
+    /// native when the channels rise below 63, else custom. What a demuxer
+    /// that builds a channel list reports, as `ff_mov_read_chan` does. A
+    /// list in ambisonic order, which FFmpeg makes an ambisonic layout, is
+    /// `UnsupportedLayout`.
+    pub fn canonical(channels: []const Channel) error{ LimitExceeded, UnsupportedLayout }!Layout {
+        var list: List = .{};
+        for (channels) |c| list.add(c, "");
+        list.ambisonic = ambisonicOrder(channels);
+        return list.finish() catch |err| switch (err) {
+            error.LimitExceeded => error.LimitExceeded,
+            error.UnsupportedLayout => error.UnsupportedLayout,
+            // finish never reports InvalidLayout.
+            error.InvalidLayout => unreachable,
+        };
+    }
+
     /// `av_channel_layout_default`: the first named layout with `count`
     /// channels, else `count` unspecified channels.
     pub fn default(count: u32) Layout {
@@ -568,6 +587,31 @@ const List = struct {
         return .{ .custom = list.custom };
     }
 };
+
+/// Whether an unnamed channel list is an ambisonic layout to FFmpeg's
+/// `canonical_order`: `av_channel_layout_ambisonic_order` finds a complete
+/// order (the components first, each at its own index, `(n + 1)²` of them),
+/// and the channels after them rise below 63.
+fn ambisonicOrder(channels: []const Channel) bool {
+    var highest: ?usize = null;
+    for (channels, 0..) |c, i| {
+        const ambisonic = c.isAmbisonic();
+        if (i > 0 and ambisonic and !channels[i - 1].isAmbisonic()) return false;
+        if (ambisonic and c.id() - Channel.ambisonic_base != i) return false;
+        if (ambisonic) highest = i;
+    }
+    const last = highest orelse return false;
+    const order: usize = std.math.sqrt(last);
+    const components = (order + 1) * (order + 1);
+    if (components != last + 1) return false;
+    var mask: u64 = 0;
+    for (channels[components..]) |c| {
+        const n = c.id();
+        if (n < 0 or n >= 63 or mask >= bit(c)) return false;
+        mask |= bit(c);
+    }
+    return true;
+}
 
 /// `parse_channel_list`: channels joined by `+`, each a key and `@` and a
 /// label, or a token alone (`av_opt_get_key_value` with an implicit key).
