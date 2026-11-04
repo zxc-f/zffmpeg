@@ -2692,6 +2692,31 @@ names, not as an empty framework.
     module for the sizes the audio codecs need.
     Done when outputs match a float64 DFT oracle within a declared error, for
     every supported size.
+
+    ```text
+    ID / parent: T27c / T27
+    State: G4 (implemented and checked; G5 lands with T27d)
+    Scope: FFmpeg's float transforms for power-of-two lengths as the
+      reference build's C code computes them (no x86 assembly): the
+      split-radix FFT (fft2 to fft131072 codelets, the split-radix
+      permutation, the out-of-place `fft` wrapper) and the forward and
+      inverse MDCT (`mdct_fwd`, `mdct_inv`, the half inverse, with
+      ff_tx_mdct_gen_exp's scale and phase). Vorbis takes inverse MDCTs
+      of 32 to 4096 coefficients with scale -1. Non-power-of-two lengths
+      (the PFA codelets for 3, 5, 7, 9 and 15) wait for their codecs
+      (AAC's 960 and 120, Opus CELT's 120 * 2^k: T30, T28).
+    Evidence: codec/tx.zig (av.tx); tx_vectors.c prints av_tx_init's
+      codelet tree and the MD5 of each output's float bits:
+      vectors/tx.txt, 138 cases (FFT 2 to 131072 points both ways, MDCT
+      4 to 16384 coefficients both ways at scales 1, -1, 1/32768, -2), all
+      equal bit for bit in Debug, ReleaseSafe and ReleaseFast. Against an
+      independent float64 evaluation of the definitions (the DFT with
+      e^(-2πi nk/N) forward; the MDCT; the half inverse as the negated
+      middle half of the full IMDCT), the declared error is a relative
+      RMS error of at most 4 float epsilons (measured 1.2e-7 for the FFT
+      to 1024 points, 1.5e-7 for the MDCT to 2048 coefficients). CI and
+      local CI check tx.txt.
+    ```
   - [ ] **T27d — Vorbis decoder.** Needs T27a. Lands with T27c and T18c.
     Codebooks, floors 0 and 1, residues 0–2 and coupling.
     Done when float output matches the reference within a declared tolerance on

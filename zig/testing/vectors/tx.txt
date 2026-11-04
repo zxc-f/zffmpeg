@@ -1,0 +1,552 @@
+T fft 2 0 0x1p+0
+C fft 2
+C fft2_ns 2
+O 4 031b3db0e694c22540e4536adc334dd3 0x1.2324p-1 -0x1.54c8p-2 0x1.cd8cp-1 0x1.cd8cp-1
+T fft 2 1 0x1p+0
+C fft 2
+C fft2_ns 2
+O 4 2dfaa40e7c48645d04ca2ba8ea71dd2e -0x1.210cp-1 0x1.1168p-1 -0x1.193ap+0 0x1.cd9p-1
+T fft 4 0 0x1p+0
+C fft 4
+C fft4_ns 4
+O 8 71ac7c596bd88d65d1ea99a68783643e 0x1.dd1p-2 -0x1.5648p+0 -0x1.9398p-2 0x1p-15
+T fft 4 1 0x1p+0
+C fft 4
+C fft4_ns 4
+O 8 ddb2fd8dc0c2b99873af80028358e9c5 0x1.98ap-3 0x1.961p-2 0x1p+1 -0x1.93ap-2
+T fft 8 0 0x1p+0
+C fft 8
+C fft8_ns 8
+O 16 4640acb7ffdd3534473854958d580343 -0x1.c104p+0 0x1.47c4p-1 0x1.18e2dp-4 -0x1.b6aebp-1
+T fft 8 1 0x1p+0
+C fft 8
+C fft8_ns 8
+O 16 f82941777e0322e3b70a5e6432619a8f 0x1.b696p+0 -0x1.e482p+0 0x1.1d5e46p-1 -0x1.587f24p+0
+T fft 16 0 0x1p+0
+C fft 16
+C fft16_ns 16
+O 32 e129c00ac6e0310898cbeee2c579e21c -0x1.00d8p-2 0x1.1328p-1 -0x1.f33f1p+0 0x1.fce72ap+1
+T fft 16 1 0x1p+0
+C fft 16
+C fft16_ns 16
+O 32 8c3ed768f23b8670db40af75614a62f1 0x1.5dfcp-1 -0x1.0e68p-1 0x1.1f8424p-1 -0x1.1af1ep-3
+T fft 32 0 0x1p+0
+C fft 32
+C fft32_ns 32
+O 64 d1f455723014e666418bc66eb5ae11b6 0x1.0d98p-1 0x1.a66p-4 0x1.edee88p+0 -0x1.3bdcdp-2
+T fft 32 1 0x1p+0
+C fft 32
+C fft32_ns 32
+O 64 4e5cd102834a4620baef0b77c037d326 -0x1.9ac8p+0 -0x1.cb8p-6 -0x1.756b92p+0 0x1.c7048ep+0
+T fft 64 0 0x1p+0
+C fft 64
+C fft64_ns 64
+O 128 49d666c802e4bf445828db8393241a5e -0x1.aaf4p-1 -0x1.ae44p+0 -0x1.06c4acp-2 -0x1.d54c4cp+1
+T fft 64 1 0x1p+0
+C fft 64
+C fft64_ns 64
+O 128 8cf401d501dfc99e25767b3701f9acfa 0x1.cecp-1 0x1.d28p-5 0x1.038fe4p+0 0x1.b50f94p-1
+T fft 128 0 0x1p+0
+C fft 128
+C fft128_ns 128
+O 256 d760fce2b1dfe346039ca8a6dc10cc33 -0x1.3734p+0 0x1.173ap+0 -0x1.260f44p+1 -0x1.0ee2p-6
+T fft 128 1 0x1p+0
+C fft 128
+C fft128_ns 128
+O 256 16cd30f3c337a4ad75494dea7647585a 0x1.09f8p-2 -0x1.b78bp+1 0x1.639cf4p+0 -0x1.22cc44p+1
+T fft 256 0 0x1p+0
+C fft 256
+C fft256_ns 256
+O 512 2f18e944b517428f081225f0178dd8a2 -0x1.3edp-1 -0x1.0146p+1 0x1.8b1482p+0 -0x1.1efe04p+0
+T fft 256 1 0x1p+0
+C fft 256
+C fft256_ns 256
+O 512 0daa8997da593a8a4e92039524dd9d7c 0x1.4ffp-2 0x1.e1a8p-1 -0x1.5451c4p+0 0x1.5b95ep-2
+T fft 512 0 0x1p+0
+C fft 512
+C fft512_ns 512
+O 1024 441b997f0dfbd2152019f0c83170bfeb -0x1.68p-7 0x1.36e8p+0 0x1.7b5d48p+0 -0x1.c454ap+0
+T fft 512 1 0x1p+0
+C fft 512
+C fft512_ns 512
+O 1024 09aa05039d8e77dfde0db80f2bcb9eb6 -0x1.c08p-4 0x1.1da8p+0 -0x1.8d424p-3 -0x1.19a1f4p+0
+T fft 1024 0 0x1p+0
+C fft 1024
+C fft1024_ns 1024
+O 2048 8af65a284e34c55ff699cac8e0dd8fee 0x1.d4cp-1 0x1.5ddp+0 -0x1.9c134cp-2 0x1.0e0098p+1
+T fft 1024 1 0x1p+0
+C fft 1024
+C fft1024_ns 1024
+O 2048 a7dbbfd3dfabc8ac80feb826651e3ba3 0x1.6fep-1 0x1.2b5p+0 0x1.4efc8p+0 0x1.38f7p+0
+T fft 2048 0 0x1p+0
+C fft 2048
+C fft2048_ns 2048
+O 4096 622b71af89ef1160b9313f5c6dfd1c88 0x1.94cp+0 0x1.ee8p-2 0x1.8995ep-1 -0x1.0fc7dp-3
+T fft 2048 1 0x1p+0
+C fft 2048
+C fft2048_ns 2048
+O 4096 368dbd4240f3857fadc40a397866828b 0x1.2fep+0 0x1.0b5p+1 0x1.872a7p-4 0x1.9fcdap-1
+T fft 4096 0 0x1p+0
+C fft 4096
+C fft4096_ns 4096
+O 8192 33c61df6ac1abc1a40bb890869007938 0x1.14cp+1 -0x1.18p-5 0x1.c96e78p-1 -0x1.0ac3cp-1
+T fft 4096 1 0x1p+0
+C fft 4096
+C fft4096_ns 4096
+O 8192 6c567b82810caf939ae116e51edebc7a 0x1.5fcp+0 0x1.96ap+1 -0x1.f859cp-5 0x1.f21ea4p-1
+T fft 8192 0 0x1p+0
+C fft 8192
+C fft8192_ns 8192
+O 16384 c88abdd3ad96a0bba478f9ca99fd26ba 0x1.4cp-2 -0x1.18p-4 -0x1.90fab8p-1 0x1.ea67ap+0
+T fft 8192 1 0x1p+0
+C fft 8192
+C fft8192_ns 8192
+O 16384 598cbc0aee6d400eafa9561dfc04b336 0x1.7fp-1 0x1.2d4p+1 0x1.acbc5cp-1 -0x1.4646fp-1
+T fft 16384 0 0x1p+0
+C fft 16384
+C fft16384_ns 16384
+O 32768 d777a679a70f4db884642e6d2b03f37b 0x1.298p+2 -0x1.18p-3 0x1.0bf222p+3 0x1.1c2478p+1
+T fft 16384 1 0x1p+0
+C fft 16384
+C fft16384_ns 16384
+O 32768 4697aeccd978df3908016514557a86bb -0x1.02p-1 0x1.5a8p+1 0x1.54581cp+2 0x1.ceb228p+1
+T fft 32768 0 0x1p+0
+C fft 32768
+C fft32768_ns 32768
+O 65536 508a8d4afc73591460e2ef24f29e7825 0x1.a6p+1 -0x1.18p-2 0x1.803c78p+2 0x1.3b72cp+0
+T fft 32768 1 0x1p+0
+C fft 32768
+C fft32768_ns 32768
+O 65536 917e68c93729bf07bdb58c51551778fe 0x1.7fp+1 0x1.6ap+0 0x1.b7f724p+1 0x1.6b9c84p+1
+T fft 65536 0 0x1p+0
+C fft 65536
+C fft65536_ns 65536
+O 131072 c3073b847659777c44b4399a831822f5 0x1.3p-1 0x1.74p+0 -0x1.e1bfep-2 0x1.98207cp+1
+T fft 65536 1 0x1p+0
+C fft 65536
+C fft65536_ns 65536
+O 131072 510956f76e543ada9f38bd97e42d4236 0x1.fcp+0 -0x1.96p+1 0x1.78f104p+1 -0x1.bf6d8p-1
+T fft 131072 0 0x1p+0
+C fft 131072
+C fft131072_ns 131072
+O 262144 af95a0a689ee4f6d57e1a286fd9d3b3f 0x1.3p+0 -0x1.8cp+1 0x1.38b22p+1 -0x1.15eadcp+1
+T fft 131072 1 0x1p+0
+C fft 131072
+C fft131072_ns 131072
+O 262144 0536fcaab9884850c351e47964f8d937 -0x1.04p+1 0x1.a8p+0 -0x1.140758p+1 0x1.e8d6c8p+1
+T mdct 4 0 0x1p+0
+C mdct_fwd 4
+C fft2_ns 2
+O 4 1555079603e208cd3ca7494cc27af271 0x1.c0e0d8p-1 -0x1.903c9cp+0 0x1.427094p-1 0x1.59772ap-1
+T mdct 4 0 -0x1p+0
+C mdct_fwd 4
+C fft2_ns 2
+O 4 3ccc822256eb7b35a9812d21608d9ee3 -0x1.c0e0d8p-1 0x1.903c9cp+0 -0x1.427094p-1 -0x1.59772ap-1
+T mdct 4 0 0x1p-15
+C mdct_fwd 4
+C fft2_ns 2
+O 4 33981ae2d7f237608784bc0775b9aa24 0x1.c0e0d8p-16 -0x1.903c9cp-15 0x1.42709ap-16 0x1.59772cp-16
+T mdct 4 0 -0x1p+1
+C mdct_fwd 4
+C fft2_ns 2
+O 4 8f6ec3c091a90676c0eb570241558b3a -0x1.c0e0d8p+0 0x1.903c9cp+1 -0x1.42709ap+0 -0x1.59772cp+0
+T mdct 4 1 0x1p+0
+C mdct_inv 4
+C fft2_ns 2
+O 4 5ddb411262afb1e60c164c7ad8998fef 0x1.780c7ap-2 -0x1.43380ep-2 0x1.d2ad1p-1 0x1.2c2a54p+0
+T mdct 4 1 -0x1p+0
+C mdct_inv 4
+C fft2_ns 2
+O 4 0fed997f942d5731db7cdaba74c7d78a -0x1.780c7ap-2 0x1.43380ep-2 -0x1.d2ad1p-1 -0x1.2c2a54p+0
+T mdct 4 1 0x1p-15
+C mdct_inv 4
+C fft2_ns 2
+O 4 8431b98a191112d2db8263443ab6f85b 0x1.780c78p-17 -0x1.43381p-17 0x1.d2ad1p-16 0x1.2c2a52p-15
+T mdct 4 1 -0x1p+1
+C mdct_inv 4
+C fft2_ns 2
+O 4 1fb183c759e84f4c2b455abd2fe706b3 -0x1.780c78p-1 0x1.43381p-1 -0x1.d2ad1p+0 -0x1.2c2a52p+1
+T mdct 8 0 0x1p+0
+C mdct_fwd 8
+C fft4_ns 4
+O 8 724123237747d56d4a3a914d42b391ee -0x1.879c78p-1 -0x1.cb108cp-2 -0x1.14a0ecp+1 -0x1.26e094p+1
+T mdct 8 0 -0x1p+0
+C mdct_fwd 8
+C fft4_ns 4
+O 8 283a48a60ae2b5bcb307a9de69a96a6a 0x1.879c78p-1 0x1.cb108cp-2 0x1.14a0ecp+1 0x1.26e094p+1
+T mdct 8 0 0x1p-15
+C mdct_fwd 8
+C fft4_ns 4
+O 8 404d6ac3eedcedbdbc1355c498e8ba1b -0x1.879c72p-16 -0x1.cb1094p-17 -0x1.14a0ecp-14 -0x1.26e092p-14
+T mdct 8 0 -0x1p+1
+C mdct_fwd 8
+C fft4_ns 4
+O 8 e15768e2990638385f0cfd79b9128352 0x1.879c72p+0 0x1.cb1094p-1 0x1.14a0ecp+2 0x1.26e092p+2
+T mdct 8 1 0x1p+0
+C mdct_inv 8
+C fft4_ns 4
+O 8 b5ed666dd48f645080aa06ecfeed60ee 0x1.3aceccp+0 0x1.f852c8p-3 -0x1.4809p-3 -0x1.72ff58p+0
+T mdct 8 1 -0x1p+0
+C mdct_inv 8
+C fft4_ns 4
+O 8 297653d9f05944d5e31c35db7ce2f80a -0x1.3aceccp+0 -0x1.f852c8p-3 0x1.4809p-3 0x1.72ff58p+0
+T mdct 8 1 0x1p-15
+C mdct_inv 8
+C fft4_ns 4
+O 8 a298f2f95de11bea921be6bdf0080c8a 0x1.3acecap-15 0x1.f852cap-18 -0x1.4808fcp-18 -0x1.72ff5ap-15
+T mdct 8 1 -0x1p+1
+C mdct_inv 8
+C fft4_ns 4
+O 8 6cb9ea84ab445dae73ed2ac52802b865 -0x1.3acecap+1 -0x1.f852cap-2 0x1.4808fcp-2 0x1.72ff5ap+1
+T mdct 16 0 0x1p+0
+C mdct_fwd 16
+C fft8_ns 8
+O 16 cc547980f6a0c3c0e9b89f2e746f4196 0x1.7ed768p-3 -0x1.41f37cp+0 -0x1.5dbc4ap+0 0x1.a4e71ep+0
+T mdct 16 0 -0x1p+0
+C mdct_fwd 16
+C fft8_ns 8
+O 16 45520592acc5f26300258ada5d7dd832 -0x1.7ed768p-3 0x1.41f37cp+0 0x1.5dbc4ap+0 -0x1.a4e71ep+0
+T mdct 16 0 0x1p-15
+C mdct_fwd 16
+C fft8_ns 8
+O 16 d853aef0dfe7ffdc54059522228869e6 0x1.7ed784p-18 -0x1.41f37cp-15 -0x1.5dbc4ap-15 0x1.a4e71ap-15
+T mdct 16 0 -0x1p+1
+C mdct_fwd 16
+C fft8_ns 8
+O 16 e8aca4acdc5f1e2fa028df01fb5a4465 -0x1.7ed784p-2 0x1.41f37cp+1 0x1.5dbc4ap+1 -0x1.a4e71ap+1
+T mdct 16 1 0x1p+0
+C mdct_inv 16
+C fft8_ns 8
+O 16 9dc32f806c21b253c82216b92226133a 0x1.0f4348p+1 0x1.db11cap-3 -0x1.b7259p-1 -0x1.ecde36p-1
+T mdct 16 1 -0x1p+0
+C mdct_inv 16
+C fft8_ns 8
+O 16 b3473fe2e21f08392aa9438c67daa1be -0x1.0f4348p+1 -0x1.db11cap-3 0x1.b7259p-1 0x1.ecde36p-1
+T mdct 16 1 0x1p-15
+C mdct_inv 16
+C fft8_ns 8
+O 16 8655694881adc783be8c56d4b6591c79 0x1.0f4348p-14 0x1.db11dp-18 -0x1.b7258cp-16 -0x1.ecde3cp-16
+T mdct 16 1 -0x1p+1
+C mdct_inv 16
+C fft8_ns 8
+O 16 2d7f80978b98395a7fdf05eda04d51f3 -0x1.0f4348p+2 -0x1.db11dp-2 0x1.b7258cp+0 0x1.ecde3cp+0
+T mdct 32 0 0x1p+0
+C mdct_fwd 32
+C fft16_ns 16
+O 32 f3e454d90f7ffcabb63f581e1fb69297 0x1.a7007p-1 -0x1.5882cep+0 0x1.53eb64p-1 0x1.12a5bep-1
+T mdct 32 0 -0x1p+0
+C mdct_fwd 32
+C fft16_ns 16
+O 32 91bf60598fd7c19c22fe089044ccc235 -0x1.a7007p-1 0x1.5882cep+0 -0x1.53eb64p-1 -0x1.12a5bep-1
+T mdct 32 0 0x1p-15
+C mdct_fwd 32
+C fft16_ns 16
+O 32 a745589bd89cf9fe06de2a97f2dadc42 0x1.a70066p-16 -0x1.5882dep-15 0x1.53eb58p-16 0x1.12a5cap-16
+T mdct 32 0 -0x1p+1
+C mdct_fwd 32
+C fft16_ns 16
+O 32 0521e78c47b677d8939e263903cf5eae -0x1.a70066p+0 0x1.5882dep+1 -0x1.53eb58p+0 -0x1.12a5cap+0
+T mdct 32 1 0x1p+0
+C mdct_inv 32
+C fft16_ns 16
+O 32 98c8c723888faf062abf83e8eacd7017 0x1.34c244p-1 -0x1.7cf24ep-2 0x1.d9a918p+0 -0x1.2701eap+2
+T mdct 32 1 -0x1p+0
+C mdct_inv 32
+C fft16_ns 16
+O 32 98c01742a49e7413ae1faa78f4575a3c -0x1.34c244p-1 0x1.7cf24ep-2 -0x1.d9a918p+0 0x1.2701eap+2
+T mdct 32 1 0x1p-15
+C mdct_inv 32
+C fft16_ns 16
+O 32 2e4d4ffeaa9c74c7d1881dd5a0c94c61 0x1.34c24ap-16 -0x1.7cf262p-17 0x1.d9a916p-15 -0x1.2701eep-13
+T mdct 32 1 -0x1p+1
+C mdct_inv 32
+C fft16_ns 16
+O 32 abc464b4d9e45112726f83e6d9ed97c9 -0x1.34c24ap+0 0x1.7cf262p-1 -0x1.d9a916p+1 0x1.2701eep+3
+T mdct 64 0 0x1p+0
+C mdct_fwd 64
+C fft32_ns 32
+O 64 9c2e2386315eab01e74f61dfd21ff74b 0x1.eb75c4p-1 0x1.a63f2cp-1 -0x1.89054cp-1 0x1.6d54f2p-1
+T mdct 64 0 -0x1p+0
+C mdct_fwd 64
+C fft32_ns 32
+O 64 75227bd33f2aa36462c85e1b8faa6f86 -0x1.eb75c4p-1 -0x1.a63f2cp-1 0x1.89054cp-1 -0x1.6d54f2p-1
+T mdct 64 0 0x1p-15
+C mdct_fwd 64
+C fft32_ns 32
+O 64 699dd367a59370e085c297a3272d791d 0x1.eb75a8p-16 0x1.a63f12p-16 -0x1.890544p-16 0x1.6d54e8p-16
+T mdct 64 0 -0x1p+1
+C mdct_fwd 64
+C fft32_ns 32
+O 64 6663d081083e99946843c90e385f57ea -0x1.eb75a8p+0 -0x1.a63f12p+0 0x1.890544p+0 -0x1.6d54e8p+0
+T mdct 64 1 0x1p+0
+C mdct_inv 64
+C fft32_ns 32
+O 64 cac4c31b6e086608e1d765386b07092e 0x1.1ce3fep+1 -0x1.04ebp+0 0x1.3c3f32p+1 -0x1.2e21dp+1
+T mdct 64 1 -0x1p+0
+C mdct_inv 64
+C fft32_ns 32
+O 64 c20a7d30de4feb6a2cf90a93892f9bf8 -0x1.1ce3fep+1 0x1.04ebp+0 -0x1.3c3f32p+1 0x1.2e21dp+1
+T mdct 64 1 0x1p-15
+C mdct_inv 64
+C fft32_ns 32
+O 64 7bfc658d867677857e0ca486aae8c6f4 0x1.1ce3fep-14 -0x1.04eb04p-15 0x1.3c3f3p-14 -0x1.2e21ccp-14
+T mdct 64 1 -0x1p+1
+C mdct_inv 64
+C fft32_ns 32
+O 64 9e45317bd4d89d6e8ef768f350a9773c -0x1.1ce3fep+2 0x1.04eb04p+1 -0x1.3c3f3p+2 0x1.2e21ccp+2
+T mdct 128 0 0x1p+0
+C mdct_fwd 128
+C fft64_ns 64
+O 128 4f6d325f625bf5fcd8269c000f90ce28 -0x1.e7faf2p-9 -0x1.86f8bp-1 -0x1.db2bd4p-4 0x1.0a9aecp+2
+T mdct 128 0 -0x1p+0
+C mdct_fwd 128
+C fft64_ns 64
+O 128 bb007d48147c960ac3426ec14f9955b6 0x1.e7faf2p-9 0x1.86f8bp-1 0x1.db2bd4p-4 -0x1.0a9aecp+2
+T mdct 128 0 0x1p-15
+C mdct_fwd 128
+C fft64_ns 64
+O 128 8b83204310e68b08c5ec66e801243cb1 -0x1.e8011p-24 -0x1.86f8c8p-16 -0x1.db2ad4p-19 0x1.0a9aecp-13
+T mdct 128 0 -0x1p+1
+C mdct_fwd 128
+C fft64_ns 64
+O 128 ef49e4a5cec8dc64ee64fdb7176fb473 0x1.e8011p-8 0x1.86f8c8p+0 0x1.db2ad4p-3 -0x1.0a9aecp+3
+T mdct 128 1 0x1p+0
+C mdct_inv 128
+C fft64_ns 64
+O 128 d1bcb3221d59c60767ad936d60b05e52 -0x1.9b61eap+0 0x1.44b0fp+1 0x1.d4bb36p-2 0x1.5be27cp-1
+T mdct 128 1 -0x1p+0
+C mdct_inv 128
+C fft64_ns 64
+O 128 079c0f8e770e432c5d73c0b5b0d28d4f 0x1.9b61eap+0 -0x1.44b0fp+1 -0x1.d4bb36p-2 -0x1.5be27cp-1
+T mdct 128 1 0x1p-15
+C mdct_inv 128
+C fft64_ns 64
+O 128 c3beeeb8ecdf141e23db8fc29cd61f04 -0x1.9b61eap-15 0x1.44b0f4p-14 0x1.d4bb24p-17 0x1.5be27ap-16
+T mdct 128 1 -0x1p+1
+C mdct_inv 128
+C fft64_ns 64
+O 128 72a9c053183136be5534ac165fd15435 0x1.9b61eap+1 -0x1.44b0f4p+2 -0x1.d4bb24p-1 -0x1.5be27ap+0
+T mdct 256 0 0x1p+0
+C mdct_fwd 256
+C fft128_ns 128
+O 256 1c28e1919a04fd56c52a171eeb7ade59 0x1.907566p+1 -0x1.fe8e68p-2 -0x1.326776p+0 0x1.5dbaap-1
+T mdct 256 0 -0x1p+0
+C mdct_fwd 256
+C fft128_ns 128
+O 256 a1effc81f87c2f9721512026e47750e9 -0x1.907566p+1 0x1.fe8e68p-2 0x1.326776p+0 -0x1.5dbaap-1
+T mdct 256 0 0x1p-15
+C mdct_fwd 256
+C fft128_ns 128
+O 256 fcf51d5c2363198e86aa88029a120437 0x1.907568p-14 -0x1.fe8e2cp-17 -0x1.32676cp-15 0x1.5dbab6p-16
+T mdct 256 0 -0x1p+1
+C mdct_fwd 256
+C fft128_ns 128
+O 256 7b128dd6bf566a6af1fca179f03b8349 -0x1.907568p+2 0x1.fe8e2cp-1 0x1.32676cp+1 -0x1.5dbab6p+0
+T mdct 256 1 0x1p+0
+C mdct_inv 256
+C fft128_ns 128
+O 256 78bf4081c78ea9addaa785fb16fa3bca 0x1.055528p+1 -0x1.ad6d7ap+0 0x1.dbf4e4p+1 -0x1.532f9ap-1
+T mdct 256 1 -0x1p+0
+C mdct_inv 256
+C fft128_ns 128
+O 256 a5f1d1ed39eac8116b6d6d2ccfe0f40a -0x1.055528p+1 0x1.ad6d7ap+0 -0x1.dbf4e4p+1 0x1.532f9ap-1
+T mdct 256 1 0x1p-15
+C mdct_inv 256
+C fft128_ns 128
+O 256 fba556d27309011c9f54a4d45eb011cb 0x1.055522p-14 -0x1.ad6d7p-15 0x1.dbf4dep-14 -0x1.532f7cp-16
+T mdct 256 1 -0x1p+1
+C mdct_inv 256
+C fft128_ns 128
+O 256 2965af65bc41da4bb7054b83c87cfac8 -0x1.055522p+2 0x1.ad6d7p+1 -0x1.dbf4dep+2 0x1.532f7cp+0
+T mdct 512 0 0x1p+0
+C mdct_fwd 512
+C fft256_ns 256
+O 512 1accedca33bb222a8649232d7236806e 0x1.6daf22p+1 -0x1.82769cp-4 0x1.d3a3fep-2 -0x1.e4c14ep-2
+T mdct 512 0 -0x1p+0
+C mdct_fwd 512
+C fft256_ns 256
+O 512 1d0ae8b647ef219d5c5c1501b1f36ec5 -0x1.6daf22p+1 0x1.82769cp-4 -0x1.d3a3fep-2 0x1.e4c14ep-2
+T mdct 512 0 0x1p-15
+C mdct_fwd 512
+C fft256_ns 256
+O 512 b71f3d81b427a1e1bba6b1f4cba36a31 0x1.6daf1ep-14 -0x1.82773ap-19 0x1.d3a44ap-17 -0x1.e4c0f6p-17
+T mdct 512 0 -0x1p+1
+C mdct_fwd 512
+C fft256_ns 256
+O 512 507dc505016c481ac37e9e2f5e04625a -0x1.6daf1ep+2 0x1.82773ap-3 -0x1.d3a44ap-1 0x1.e4c0f6p-1
+T mdct 512 1 0x1p+0
+C mdct_inv 512
+C fft256_ns 256
+O 512 198256edafaf7183c08c6287abb68568 0x1.5e61bep-1 -0x1.1fd5fp-2 0x1.75da4ap-2 0x1.c05052p-1
+T mdct 512 1 -0x1p+0
+C mdct_inv 512
+C fft256_ns 256
+O 512 a41fe3de4cf6f9a0de9d436c6ba73a49 -0x1.5e61bep-1 0x1.1fd5fp-2 -0x1.75da4ap-2 -0x1.c05052p-1
+T mdct 512 1 0x1p-15
+C mdct_inv 512
+C fft256_ns 256
+O 512 56f5d5348282a0cc11289dd05fbbdcdc 0x1.5e616ep-16 -0x1.1fd598p-17 0x1.75da92p-17 0x1.c05068p-16
+T mdct 512 1 -0x1p+1
+C mdct_inv 512
+C fft256_ns 256
+O 512 b1127df76fdbd552c491464aacc87741 -0x1.5e616ep+0 0x1.1fd598p-1 -0x1.75da92p-1 -0x1.c05068p+0
+T mdct 1024 0 0x1p+0
+C mdct_fwd 1024
+C fft512_ns 512
+O 1024 c9df43403fa461779e5147ad889e9774 0x1.77f432p+0 -0x1.80704ep+2 0x1.4ae5d4p+1 0x1.9527c2p+0
+T mdct 1024 0 -0x1p+0
+C mdct_fwd 1024
+C fft512_ns 512
+O 1024 25f2fabe68f2a9add08fbe45e605836c -0x1.77f432p+0 0x1.80704ep+2 -0x1.4ae5d4p+1 -0x1.9527c2p+0
+T mdct 1024 0 0x1p-15
+C mdct_fwd 1024
+C fft512_ns 512
+O 1024 ae2858e0f3930c9800d495a6c3664f88 0x1.77f40cp-15 -0x1.807052p-13 0x1.4ae592p-14 0x1.9527f8p-15
+T mdct 1024 0 -0x1p+1
+C mdct_fwd 1024
+C fft512_ns 512
+O 1024 bf4458a485c989b62f65c20b730c8b37 -0x1.77f40cp+1 0x1.807052p+3 -0x1.4ae592p+2 -0x1.9527f8p+1
+T mdct 1024 1 0x1p+0
+C mdct_inv 1024
+C fft512_ns 512
+O 1024 1e7efcba7f0a1013e06f94c253a6637c -0x1.39cec8p+0 0x1.6cf892p+1 -0x1.f536ecp+0 0x1.f057fap-1
+T mdct 1024 1 -0x1p+0
+C mdct_inv 1024
+C fft512_ns 512
+O 1024 47215110c5b2bd07dd5485df1f820b53 0x1.39cec8p+0 -0x1.6cf892p+1 0x1.f536ecp+0 -0x1.f057fap-1
+T mdct 1024 1 0x1p-15
+C mdct_inv 1024
+C fft512_ns 512
+O 1024 314e4885d94dc95bd92db031e7e4a22a -0x1.39ced6p-15 0x1.6cf89ep-14 -0x1.f536f2p-15 0x1.f05814p-16
+T mdct 1024 1 -0x1p+1
+C mdct_inv 1024
+C fft512_ns 512
+O 1024 bf76de9eb8f3b4c737ebc3050a7ddf04 0x1.39ced6p+1 -0x1.6cf89ep+2 0x1.f536f2p+1 -0x1.f05814p+0
+T mdct 2048 0 0x1p+0
+C mdct_fwd 2048
+C fft1024_ns 1024
+O 2048 39f07a0558fc4c66f47e179b4cc8eb99 0x1.5a31e4p-2 -0x1.170ebp+1 -0x1.891a3ap+0 0x1.58af24p+3
+T mdct 2048 0 -0x1p+0
+C mdct_fwd 2048
+C fft1024_ns 1024
+O 2048 8376dbd882a8e3c0ba30c99a44e3f97e -0x1.5a31e4p-2 0x1.170ebp+1 0x1.891a3ap+0 -0x1.58af24p+3
+T mdct 2048 0 0x1p-15
+C mdct_fwd 2048
+C fft1024_ns 1024
+O 2048 e3e069be1d2c0afaaaa495b2b753f180 0x1.5a31c8p-17 -0x1.170eccp-14 -0x1.891a3cp-15 0x1.58af2ep-12
+T mdct 2048 0 -0x1p+1
+C mdct_fwd 2048
+C fft1024_ns 1024
+O 2048 8e7eae204516b2ca5ce9141ba7d45da9 -0x1.5a31c8p-1 0x1.170eccp+2 0x1.891a3cp+1 -0x1.58af2ep+4
+T mdct 2048 1 0x1p+0
+C mdct_inv 2048
+C fft1024_ns 1024
+O 2048 0f917d4db35e56aece81cab3451594d4 -0x1.d46254p-2 0x1.eb8bdcp-1 0x1.bfb608p+0 -0x1.b28e88p-2
+T mdct 2048 1 -0x1p+0
+C mdct_inv 2048
+C fft1024_ns 1024
+O 2048 a804390bc06563a92f331ac0d0d96a92 0x1.d46254p-2 -0x1.eb8bdcp-1 -0x1.bfb608p+0 0x1.b28e88p-2
+T mdct 2048 1 0x1p-15
+C mdct_inv 2048
+C fft1024_ns 1024
+O 2048 19852b78e662248e586f613977d2380b -0x1.d4627ep-17 0x1.eb8b9ap-16 0x1.bfb5eap-15 -0x1.b28ecp-17
+T mdct 2048 1 -0x1p+1
+C mdct_inv 2048
+C fft1024_ns 1024
+O 2048 44d266c5d7aa45f740b79661556ea842 0x1.d4627ep-1 -0x1.eb8b9ap+0 -0x1.bfb5eap+1 0x1.b28ecp-1
+T mdct 4096 0 0x1p+0
+C mdct_fwd 4096
+C fft2048_ns 2048
+O 4096 f8a99caef04f49c460c7e290a53914cc 0x1.bd9bc2p-1 -0x1.74657ap+1 -0x1.050bbp+1 0x1.cdb714p+1
+T mdct 4096 0 -0x1p+0
+C mdct_fwd 4096
+C fft2048_ns 2048
+O 4096 c7c0bf34d0377f5bd48e2c38916db1d5 -0x1.bd9bc2p-1 0x1.74657ap+1 0x1.050bbp+1 -0x1.cdb714p+1
+T mdct 4096 0 0x1p-15
+C mdct_fwd 4096
+C fft2048_ns 2048
+O 4096 e8f125b37f0c24e97afea60ee99190a5 0x1.bd9c96p-16 -0x1.74657cp-14 -0x1.050b94p-14 0x1.cdb724p-14
+T mdct 4096 0 -0x1p+1
+C mdct_fwd 4096
+C fft2048_ns 2048
+O 4096 119216fd226bb9f55da4a217a1c4ef93 -0x1.bd9c96p+0 0x1.74657cp+2 0x1.050b94p+2 -0x1.cdb724p+2
+T mdct 4096 1 0x1p+0
+C mdct_inv 4096
+C fft2048_ns 2048
+O 4096 10eec2b460c89df43202497d07d6652b -0x1.e15174p-2 0x1.f13edap-2 -0x1.f0fd52p-1 0x1.08556ap+1
+T mdct 4096 1 -0x1p+0
+C mdct_inv 4096
+C fft2048_ns 2048
+O 4096 dd70e5c70b9bd5f818ab0bf8ca203996 0x1.e15174p-2 -0x1.f13edap-2 0x1.f0fd52p-1 -0x1.08556ap+1
+T mdct 4096 1 0x1p-15
+C mdct_inv 4096
+C fft2048_ns 2048
+O 4096 a89f843c3a4ad13fbefadfbb8d49cc65 -0x1.e151f4p-17 0x1.f13fcap-17 -0x1.f0fd72p-16 0x1.085546p-14
+T mdct 4096 1 -0x1p+1
+C mdct_inv 4096
+C fft2048_ns 2048
+O 4096 b7d58b43fd9290983fee0c4ea731662d 0x1.e151f4p-1 -0x1.f13fcap-1 0x1.f0fd72p+0 -0x1.085546p+2
+T mdct 8192 0 0x1p+0
+C mdct_fwd 8192
+C fft4096_ns 4096
+O 8192 7c0414c86d75981d09748531f02b5ef4 -0x1.28c85ep+0 -0x1.00141p+0 -0x1.056cdap+0 0x1.9d345cp+0
+T mdct 8192 0 -0x1p+0
+C mdct_fwd 8192
+C fft4096_ns 4096
+O 8192 fc74a011bf07e089ccca302873ea556d 0x1.28c85ep+0 0x1.00141p+0 0x1.056cdap+0 -0x1.9d345cp+0
+T mdct 8192 0 0x1p-15
+C mdct_fwd 8192
+C fft4096_ns 4096
+O 8192 2a44dc61558f0a4b5c1f1bbcdf6fc9d1 -0x1.28c816p-15 -0x1.001472p-15 -0x1.056ceep-15 0x1.9d33b4p-15
+T mdct 8192 0 -0x1p+1
+C mdct_fwd 8192
+C fft4096_ns 4096
+O 8192 3b19b6b617eaa816893bc353a2232a09 0x1.28c816p+1 0x1.001472p+1 0x1.056ceep+1 -0x1.9d33b4p+1
+T mdct 8192 1 0x1p+0
+C mdct_inv 8192
+C fft4096_ns 4096
+O 8192 2afc863b95e88d3df2a257426fe8ed76 -0x1.205ff4p-1 0x1.20b3c4p-1 -0x1.4cc9ecp-1 0x1.5469b2p-1
+T mdct 8192 1 -0x1p+0
+C mdct_inv 8192
+C fft4096_ns 4096
+O 8192 33472fd2c608b35773a421330b159387 0x1.205ff4p-1 -0x1.20b3c4p-1 0x1.4cc9ecp-1 -0x1.5469b2p-1
+T mdct 8192 1 0x1p-15
+C mdct_inv 8192
+C fft4096_ns 4096
+O 8192 82e9049ddff527e172d67e0f80367808 -0x1.205f84p-16 0x1.20b3b8p-16 -0x1.4cca0ap-16 0x1.546a0ap-16
+T mdct 8192 1 -0x1p+1
+C mdct_inv 8192
+C fft4096_ns 4096
+O 8192 04db475440619992c76919d957f6955c 0x1.205f84p+0 -0x1.20b3b8p+0 0x1.4cca0ap+0 -0x1.546a0ap+0
+T mdct 16384 0 0x1p+0
+C mdct_fwd 16384
+C fft8192_ns 8192
+O 16384 4e617512b7546c2ee6959afe8a1a4da9 0x1.ee4c4cp+1 -0x1.a96932p+2 0x1.cf1e6p+0 0x1.44f628p+1
+T mdct 16384 0 -0x1p+0
+C mdct_fwd 16384
+C fft8192_ns 8192
+O 16384 72d5a9d6060f43bef493430af122bf3c -0x1.ee4c4cp+1 0x1.a96932p+2 -0x1.cf1e6p+0 -0x1.44f628p+1
+T mdct 16384 0 0x1p-15
+C mdct_fwd 16384
+C fft8192_ns 8192
+O 16384 a02f97f1be228af3d0f25771ba98e6be 0x1.ee4c02p-14 -0x1.a9697cp-13 0x1.cf1e78p-15 0x1.44f678p-14
+T mdct 16384 0 -0x1p+1
+C mdct_fwd 16384
+C fft8192_ns 8192
+O 16384 7cb83c3eba8ce67d5535c03f1517ad91 -0x1.ee4c02p+2 0x1.a9697cp+3 -0x1.cf1e78p+1 -0x1.44f678p+2
+T mdct 16384 1 0x1p+0
+C mdct_inv 16384
+C fft8192_ns 8192
+O 16384 efb77ed35bd7e3f69f94c79a6193254c -0x1.6a3858p+0 -0x1.7bcc14p-4 -0x1.e8aa92p-2 0x1.e47b32p+0
+T mdct 16384 1 -0x1p+0
+C mdct_inv 16384
+C fft8192_ns 8192
+O 16384 4d68247cd204953a84637913ca0874ae 0x1.6a3858p+0 0x1.7bcc14p-4 0x1.e8aa92p-2 -0x1.e47b32p+0
+T mdct 16384 1 0x1p-15
+C mdct_inv 16384
+C fft8192_ns 8192
+O 16384 eef3b66f771815685aa22628250e4c59 -0x1.6a388p-15 -0x1.7bcdf4p-19 -0x1.e8ab16p-17 0x1.e47b1ep-15
+T mdct 16384 1 -0x1p+1
+C mdct_inv 16384
+C fft8192_ns 8192
+O 16384 9b38e942949b6dc4a68cd90073dc1eac 0x1.6a388p+1 0x1.7bcdf4p-3 0x1.e8ab16p-1 -0x1.e47b1ep+1

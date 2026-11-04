@@ -226,6 +226,14 @@ jobs:
             -lm -pthread -o flacenc-vectors
           ./flacenc-vectors | diff -u zig/testing/vectors/flacenc.txt -
 
+      # The committed T27c oracle must be what this build's libavutil
+      # transforms give.
+      - name: Check the transform vectors (T27c)
+        run: |
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/tx_vectors.c \
+            .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o tx-vectors
+          ./tx-vectors | diff -u zig/testing/vectors/tx.txt -
+
       # The committed T27b oracle must be what this build's Ogg muxer writes.
       - name: Check the Ogg muxer vectors (T27b)
         run: |

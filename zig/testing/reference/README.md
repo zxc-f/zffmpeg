@@ -180,6 +180,17 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/ogg_vectors
 LC_ALL=C ./ogg-vectors zig/testing/fixtures/ogg/*.ogg | diff -u zig/testing/vectors/ogg.txt -
 ```
 
+The T27c transform vectors come from the reference's `libavutil`:
+`tx_vectors.c` runs `av_tx_init`'s float FFT (2 to 131072 points, both
+directions) and MDCT (4 to 16384 coefficients, both directions, four
+scales) on generated inputs and prints the codelet tree it builds and the
+MD5 of each output's float bits:
+
+```bash
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/tx_vectors.c .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o tx-vectors
+./tx-vectors | diff -u zig/testing/vectors/tx.txt -
+```
+
 The T27b Ogg muxer vectors come from the reference's `libavformat`:
 `oggmux_vectors.c` muxes generated FLAC, Opus and Vorbis packets, headers
 and tags through the Ogg muxer as the ffmpeg program drives it under
