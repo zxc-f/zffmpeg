@@ -62,6 +62,8 @@ const raw = @import("raw.zig");
 const caf = @import("caf.zig");
 const flac = @import("flac.zig");
 const codecs = @import("../codec/registry.zig");
+/// FLAC's block size limit, the dither's call size for a headerless input.
+const flac_max_frames = 65535;
 const detect = @import("detect.zig");
 const audioconvert = @import("../resample/audioconvert.zig");
 const dither = @import("../resample/dither.zig");
@@ -312,7 +314,11 @@ pub const Conversion = struct {
                 .wav => |*parser| parser.tags = null,
                 .au, .aiff, .caf, .flac, .raw => {},
             }
-            var generic = try wav.genericTags(t.gpa, &stored);
+            // FLAC's tags are already under FFmpeg's names (T26b).
+            var generic = switch (input) {
+                .flac => |*reader| try reader.demuxer.?.info.tags.clone(t.gpa),
+                else => try wav.genericTags(t.gpa, &stored),
+            };
             defer generic.deinit(t.gpa);
             const carried = try carriedTags(t.gpa, &generic, request.mode);
             t.dictionary.deinit(t.gpa);
@@ -354,7 +360,7 @@ pub const Conversion = struct {
         }
         const packet_frames = switch (input) {
             // FFmpeg's packets are the FLAC frames.
-            .flac => |*reader| reader.demuxer.?.info.stream_info.max_blocksize,
+            .flac => |*reader| if (reader.demuxer.?.info.stream_info) |si| si.max_blocksize else flac_max_frames,
             else => ffmpegPacketFrames(summary.input, summary.input_codec, summary.format),
         };
         return .{
@@ -1730,13 +1736,22 @@ test "every accepted FLAC fixture converts to the samples it encodes" {
             var reader: std.Io.Reader = .fixed(fixtures.flac.bytes(fixture.name));
             var out: std.Io.Writer.Allocating = .init(gpa);
             defer out.deinit();
-            const summary = try convert(&reader, &out.writer, .{ .output = .s16le, .mode = .transcode, .gpa = gpa }, .{});
-            try std.testing.expectEqual(Container.flac, summary.input);
-            try std.testing.expect(summary.input_stream == .flac);
-            try std.testing.expectEqual(stream.frames, summary.frame_count);
-            var digest: [32]u8 = undefined;
-            std.crypto.hash.sha2.Sha256.hash(out.written(), &digest, .{});
-            try std.testing.expectEqualStrings(stream.pcm_sha256, &std.fmt.bytesToHex(digest, .lower));
+            // FFmpeg's decoded storage, kept exactly.
+            const output: Container = if (stream.bps > 16) .s32le else .s16le;
+            var header_reader: std.Io.Reader = .fixed(fixtures.flac.bytes(fixture.name));
+            const declared = (try flac.readHeader(&header_reader)).duration;
+            if (declared != null and declared.? != stream.frames) {
+                // The header's count is written first (port.md "FLAC contract").
+                try std.testing.expectError(error.FrameCountMismatch, convert(&reader, &out.writer, .{ .output = output, .mode = .transcode, .gpa = gpa }, .{}));
+            } else {
+                const summary = try convert(&reader, &out.writer, .{ .output = output, .mode = .transcode, .gpa = gpa }, .{});
+                try std.testing.expectEqual(Container.flac, summary.input);
+                try std.testing.expect(summary.input_stream == .flac);
+                try std.testing.expectEqual(stream.frames, summary.frame_count);
+                var digest: [32]u8 = undefined;
+                std.crypto.hash.sha2.Sha256.hash(out.written(), &digest, .{});
+                try std.testing.expectEqualStrings(stream.pcm_sha256, &std.fmt.bytesToHex(digest, .lower));
+            }
         }
     }
 }

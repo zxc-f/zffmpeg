@@ -60,7 +60,7 @@ fn run(init: std.process.Init) Status {
     var out_buffer: [4096]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(io, &out_buffer);
     const out = &stdout.interface;
-    const result = if (av.flac.probeScore(bytes) >= 50)
+    const result = if (av.detect.probeHead(bytes, std.fs.path.basename(args[3])) == .flac)
         hashFlac(io, gpa, kind, mode, bytes, out)
     else if (kind != .streamhash)
         error.PcmNeedsStreamhash
@@ -85,13 +85,17 @@ fn hashFlac(io: std.Io, gpa: std.mem.Allocator, kind: av.framehash.Kind, mode: M
     var stream: av.framehash.Stream = .{
         .time_base = info.time_base,
         .codec = "flac",
-        .sample_rate = info.stream_info.sample_rate,
+        .sample_rate = info.sample_rate,
         .layout = info.layout,
-        .extradata = &info.extradata,
+        .extradata = if (info.extradata != null) &info.extradata.? else null,
     };
+    // Decoded packets take the encoder's 1/rate time base, as the ffmpeg
+    // program's output stream does.
+    const decoded_tb = try av.time.TimeBase.ofSampleRate(info.sample_rate);
     if (mode == .decode) {
-        stream.codec = "pcm_s16le";
+        stream.codec = if (info.bps > 16) "pcm_s32le" else "pcm_s16le";
         stream.extradata = null;
+        stream.time_base = decoded_tb;
     }
     var w: av.framehash.Writer = .init(kind, out, stream);
     try w.writeHeader();
@@ -111,16 +115,19 @@ fn hashFlac(io: std.Io, gpa: std.mem.Allocator, kind: av.framehash.Kind, mode: M
                 continue;
             } orelse break;
             pcm.clearRetainingCapacity();
-            for (frame.samples) |s| {
-                var le: [2]u8 = undefined;
-                std.mem.writeInt(i16, &le, s, .little);
-                try pcm.appendSlice(gpa, &le);
+            switch (frame.samples) {
+                inline else => |samples| for (samples) |s| {
+                    var le: [@sizeOf(@TypeOf(s))]u8 = undefined;
+                    std.mem.writeInt(@TypeOf(s), &le, s, .little);
+                    try pcm.appendSlice(gpa, &le);
+                },
             }
+            const pts = try av.time.rescaleTimestamp(frame.pts, info.time_base, decoded_tb, .nearest);
             try w.writePacket(.{
                 .data = pcm.items,
-                .time_base = info.time_base,
-                .pts = frame.pts,
-                .dts = frame.pts,
+                .time_base = decoded_tb,
+                .pts = pts,
+                .dts = pts,
                 .duration = frame.nb_samples,
                 .flags = .{ .key = true },
             });

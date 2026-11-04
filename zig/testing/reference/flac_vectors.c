@@ -12,12 +12,18 @@
 //   F <name>                 a fixture, by file name without .flac
 //   O <result>               opening it: ok, or the error (INVALIDDATA, EOF,
 //                            or the number)
-//   S <format> <rate> <channels> <layout> <bits> <tb> <duration> <start>
+//   S <format> <rate> <channels> <layout> <bits> <tb> <duration> <start> <fmt>
 //                            the stream after avformat_find_stream_info: the
 //                            demuxer, the sample rate, the channel count,
 //                            av_channel_layout_describe's text, the bits per
-//                            raw sample, the time base num/den, the duration
-//                            and the start time (N when unset)
+//                            raw sample, the time base num/den, the duration,
+//                            the start time (N when unset) and the decoder's
+//                            sample format
+//   M <key>=<value>          each format tag, in order
+//   C <start> <end> <tb> <title>
+//                            each chapter (T26b's CUESHEET)
+//   A <stream> <codec> <size> <adler>
+//                            each attached picture (T26b's PICTURE)
 //   P <size> <pts> <dts> <duration> <flags> <adler>
 //                            each packet av_read_frame returns: pts and dts N
 //                            when unset, the flags in hex, and the Adler-32
@@ -26,9 +32,11 @@
 //                            avcodec_send_packet or avcodec_receive_frame
 //                            returns)
 //   D <samples> <pts> <adler>
-//                            each frame the decoder gives, as packed s16:
+//                            each frame the decoder gives, packed (s16, or
+//                            s32 above 16 bits):
 //                            the samples per channel, the pts (N when unset)
 //                            and the Adler-32 from 0 of the samples' bytes
+//   E <error>                the decoder refuses the stream's parameters
 //   R <result>               how reading ended: EOF, or the error
 //
 // After the last packet the decoder is drained, which gives no frames for
@@ -44,6 +52,7 @@
 #include "libavformat/avformat.h"
 #include "libavutil/adler32.h"
 #include "libavutil/channel_layout.h"
+#include "libavutil/dict.h"
 #include "libavutil/error.h"
 #include "libavutil/frame.h"
 #include "libavutil/log.h"
@@ -87,9 +96,9 @@ static void print_frames(AVCodecContext *dec, AVFrame *frame, const char *name)
             printf("\n");
             continue;
         }
-        if (frame->format != AV_SAMPLE_FMT_S16)
-            fail("the s16 output", name);
-        int bytes = frame->nb_samples * frame->ch_layout.nb_channels * 2;
+        if (frame->format != AV_SAMPLE_FMT_S16 && frame->format != AV_SAMPLE_FMT_S32)
+            fail("packed output", name);
+        int bytes = frame->nb_samples * frame->ch_layout.nb_channels * av_get_bytes_per_sample(frame->format);
         printf("D %d", frame->nb_samples);
         print_ts(frame->pts);
         printf(" 0x%08" PRIx32 "\n", (uint32_t)av_adler32_update(0, frame->data[0], bytes));
@@ -132,7 +141,23 @@ static void run(const char *path)
            layout, par->bits_per_raw_sample, st->time_base.num, st->time_base.den);
     print_ts(st->duration);
     print_ts(st->start_time);
-    printf("\n");
+    const char *sample_fmt = av_get_sample_fmt_name(par->format);
+    printf(" %s\n", sample_fmt ? sample_fmt : "none");
+    const AVDictionaryEntry *tag = NULL;
+    while ((tag = av_dict_iterate(fmt->metadata, tag)))
+        printf("M %s=%s\n", tag->key, tag->value);
+    for (unsigned i = 0; i < fmt->nb_chapters; i++) {
+        const AVChapter *c = fmt->chapters[i];
+        const AVDictionaryEntry *title = av_dict_get(c->metadata, "title", NULL, 0);
+        printf("C %" PRId64 " %" PRId64 " %d/%d %s\n", c->start, c->end, c->time_base.num, c->time_base.den,
+               title ? title->value : "-");
+    }
+    for (unsigned i = 1; i < fmt->nb_streams; i++) {
+        const AVStream *pic = fmt->streams[i];
+        if (pic->disposition & AV_DISPOSITION_ATTACHED_PIC)
+            printf("A %u %s %d 0x%08" PRIx32 "\n", i, avcodec_get_name(pic->codecpar->codec_id),
+                   pic->attached_pic.size, (uint32_t)av_adler32_update(0, pic->attached_pic.data, pic->attached_pic.size));
+    }
 
     const AVCodec *codec = avcodec_find_decoder(par->codec_id);
     if (!codec)
@@ -141,8 +166,17 @@ static void run(const char *path)
     if (!dec || avcodec_parameters_to_context(dec, par) < 0)
         fail("the decoder context", name);
     dec->pkt_timebase = st->time_base;
-    if (avcodec_open2(dec, codec, NULL) < 0)
-        fail("avcodec_open2", name);
+    int opened = avcodec_open2(dec, codec, NULL);
+    if (opened < 0) {
+        // The decoder refuses the stream's parameters, as the ffmpeg
+        // program's input then fails.
+        printf("E ");
+        print_error(opened);
+        printf("\n");
+        avcodec_free_context(&dec);
+        avformat_close_input(&fmt);
+        return;
+    }
 
     AVPacket *pkt = av_packet_alloc();
     AVFrame *frame = av_frame_alloc();
@@ -152,6 +186,11 @@ static void run(const char *path)
         ret = av_read_frame(fmt, pkt);
         if (ret < 0)
             break;
+        // An attached picture's packet belongs to its own stream.
+        if (pkt->stream_index != 0) {
+            av_packet_unref(pkt);
+            continue;
+        }
         printf("P %d", pkt->size);
         print_ts(pkt->pts);
         print_ts(pkt->dts);

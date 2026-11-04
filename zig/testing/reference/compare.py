@@ -1581,6 +1581,14 @@ KNOWN_FLAC_CONVERSION_DIFFERENCES = {
     "flac_junk_between_frames": "FFmpeg's parser drops a valid frame after the junk, so the samples fall short "
                                 "of STREAMINFO's count, which zffmpeg writes in the WAV header first "
                                 "(`FrameCountMismatch`); FFmpeg rewrites its seekable output's header",
+    "flac_bps24": "no frames for STREAMINFO's 576 samples (`FrameCountMismatch`), as above",
+    "flac_no_total": "no sample count for the WAV header written first (`UnsupportedStreamingSize`); FFmpeg "
+                     "rewrites its header",
+    "flac_headerless": "no STREAMINFO, so no sample count for the WAV header written first, as above",
+    "flac_streaminfo_rate0": "no sample count in STREAMINFO without a rate, as above",
+    "flac_channel_change": "a mid-stream channel change, which the WAV header written first cannot follow "
+                           "(`UnsupportedFormat`); the ffmpeg program's filters convert it",
+    "flac_rate_change": "a mid-stream rate change, as above",
 }
 
 
@@ -1621,7 +1629,11 @@ def compare_flac(args, lines, failures):
             theirs = ffmpeg_verdict(args, path)
         else:
             code, fields, err = zffprobe(args.zffprobe, path)
-            their_code, their_fields, their_err = ffprobe(args.ffprobe, path)
+            # The audio stream: a PICTURE block is FFmpeg's second stream.
+            their = run(args.ffprobe, "-v", "error", "-select_streams", "a:0", "-show_entries",
+                        "stream=codec_name,sample_fmt,channels,channel_layout,sample_rate,time_base,duration_ts"
+                        ":format=format_name", "-of", "default=noprint_wrappers=1", path)
+            their_code, their_fields, their_err = their.returncode, key_values(text(their.stdout)), text(their.stderr)
             ours = "accepts" if code == 0 else f"exit {code}: {err}"
             theirs = "accepts" if their_code == 0 else f"rejects: {clean(first_line(their_err), path)}"
             expected = {
@@ -1633,14 +1645,20 @@ def compare_flac(args, lines, failures):
                 "sample_rate": their_fields.get("sample_rate"),
                 "nb_samples": their_fields.get("duration_ts"),
                 "duration_num": their_fields.get("duration_ts"),
-                "duration_den": their_fields.get("sample_rate"),
+                # zffprobe's three count fields are N/A together.
+                "duration_den": "N/A" if their_fields.get("duration_ts") == "N/A" else their_fields.get("sample_rate"),
             }
             if code != 0 or their_code != 0:
                 problems.append(f"zffprobe exit {code}, ffprobe exit {their_code}")
             elif fields != expected:
                 problems.append(f"zffprobe {fields}, ffprobe {expected}")
-            if their_fields.get("time_base") != f"1/{their_fields.get('sample_rate')}":
+            # The time base (FFmpeg's 1/90000 without a STREAMINFO rate) is
+            # checked against flac.txt by the Zig tests.
+            if their_fields.get("time_base") not in (f"1/{their_fields.get('sample_rate')}", "1/90000"):
                 problems.append(f"ffprobe's time base {their_fields.get('time_base')}")
+            want_tags = [(k.encode(), v.encode()) for k, v in (fixture.tags or [])]
+            if zffprobe_tags(args.zffprobe, path) != want_tags or ffprobe_tags(args.ffprobe, path) != want_tags:
+                problems.append("the tags differ from the manifest's in zffprobe or ffprobe")
             with tempfile.TemporaryDirectory() as work:
                 out_ours = pathlib.Path(work) / "ours.wav"
                 out_theirs = pathlib.Path(work) / "theirs.wav"
@@ -1676,6 +1694,13 @@ KNOWN_HASH_DIFFERENCES = {
     ("caf_chan_after_data", "copy"): "`chan` after `data` is not read",
     ("caf_chan_after_data", "decode"): "`chan` after `data` is not read",
     ("caf_chunks_around_data", "copy"): "FFmpeg keeps a `kuki` chunk as the stream's extradata",
+    ("flac_picture", "copy"): "FFmpeg makes the PICTURE block a second, attached-picture stream; the port keeps it "
+                              "as data",
+    ("flac_picture", "decode"): "the attached-picture stream, as above, which the ffmpeg program cannot encode "
+                                "in this build",
+    ("flac_channel_change", "decode"): "the ffmpeg program's filters convert a mid-stream change; the driver "
+                                       "hashes the decoder's frames",
+    ("flac_rate_change", "decode"): "a mid-stream rate change, as above",
     # The driver copies through the codec's raw format, and FFmpeg has none
     # for s64; the decoded stream is still compared.
     ("s64_mono_8k_extensible", "copy"): "the hash driver has no raw format to copy s64 into",
@@ -1692,9 +1717,13 @@ def compare_hashes(args, lines, failures):
     copied and decoded, in streamhash, the one whose text does not depend on
     FFmpeg's PCM packet sizes."""
     cases = []
+    # The decoded storage: s32 above 16 bits.
+    s32_inputs = set()
     for fixture in generate.build_flac_fixtures():
         if fixture.reject is None:
             cases.append((FIXTURES / "flac" / f"{fixture.name}.flac", ("framecrc", "framemd5", "streamhash")))
+            if fixture.bps > 16:
+                s32_inputs.add(fixture.name)
     for fixture in generate.build_fixtures():
         if fixture.accept is not None:
             cases.append((FIXTURES / "wav" / f"{fixture.name}.wav", ("streamhash",)))
@@ -1706,7 +1735,8 @@ def compare_hashes(args, lines, failures):
     for path, kinds in cases:
         for kind in kinds:
             for mode in ("copy", "decode"):
-                codec = ["-c", "copy"] if mode == "copy" else ["-c:a", "pcm_s16le"]
+                decoder_codec = "pcm_s32le" if path.stem in s32_inputs else "pcm_s16le"
+                codec = ["-c", "copy"] if mode == "copy" else ["-c:a", decoder_codec]
                 theirs = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", str(path), "-fflags", "+bitexact",
                              *codec, "-f", kind, "-")
                 ours = run(args.hasher, kind, mode, str(path))

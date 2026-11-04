@@ -34,6 +34,8 @@ const channel_layout = @import("../core/channel_layout.zig");
 const audio = @import("../core/audio.zig");
 const pcm = @import("../codec/pcm.zig");
 const diagnostics = @import("../core/diagnostics.zig");
+const metadata = @import("../core/metadata.zig");
+const bits = @import("../codec/bits.zig");
 
 /// Contract errors (see the FLAC fixture README), plus `IoFailure` for a
 /// failing reader and `OutOfMemory`.
@@ -44,21 +46,95 @@ pub const Error = error{
     /// The decoded samples differ from STREAMINFO's count, which an output
     /// header written before them already holds (`DecodedReader`).
     FrameCountMismatch,
+    /// STREAMINFO's MD5 differs from the decoded samples' (`DecodedReader`
+    /// with `verify_md5`).
+    Md5Mismatch,
     IoFailure,
     OutOfMemory,
 };
 
-/// The stream STREAMINFO describes.
-pub const Info = struct {
-    stream_info: flac.StreamInfo,
-    /// The STREAMINFO block's bytes, FFmpeg's extradata for the stream.
-    extradata: [flac.streaminfo_size]u8,
-    layout: channel_layout.Layout,
-    /// 1 / the sample rate.
-    time_base: time.TimeBase,
-    /// Samples per channel, when STREAMINFO gives them.
-    duration: ?u64,
+/// A PICTURE block (ff_flac_parse_picture), which FFmpeg turns into an
+/// attached picture; owned by the `Info`.
+pub const Picture = struct {
+    /// The ID3v2 picture type, 0 for one out of range.
+    picture_type: u32,
+    mime: []const u8,
+    /// The codec FFmpeg gives the picture by its MIME type.
+    codec: []const u8,
+    description: []const u8,
+    width: u32,
+    height: u32,
+    data: []const u8,
 };
+
+/// A CUESHEET track before the lead-out, which FFmpeg makes a chapter: from
+/// its offset to the next track's, in samples, titled by its ISRC.
+pub const Chapter = struct {
+    start: u64,
+    end: u64,
+    title: []const u8,
+};
+
+/// A SEEKTABLE point.
+pub const SeekPoint = struct {
+    /// The first sample of the target frame; all ones for a placeholder.
+    sample: u64,
+    /// The frame's byte offset from the first frame.
+    offset: u64,
+    samples: u16,
+};
+
+/// The stream the header describes.
+pub const Info = struct {
+    /// Null for headerless input, whose parameters come from its first
+    /// frame header.
+    stream_info: ?flac.StreamInfo,
+    /// The STREAMINFO block's bytes, FFmpeg's extradata for the stream.
+    extradata: ?[flac.streaminfo_size]u8,
+    channels: u8,
+    layout: channel_layout.Layout,
+    /// The rate the stream reports: STREAMINFO's, else the first frame's.
+    sample_rate: u32,
+    /// 4 to 32; 0 when neither STREAMINFO nor the first frame gives it.
+    bps: u8,
+    /// 1 / STREAMINFO's rate; for headerless input, 1 / the rate FFmpeg
+    /// reads from the first frame's code; else FFmpeg's default 1/90000.
+    time_base: time.TimeBase,
+    /// Samples per channel, when STREAMINFO gives them with a rate.
+    duration: ?u64,
+    /// The frames' first bytes, already read past the metadata, which the
+    /// demuxer reads first.
+    prefix: [prefix_capacity]u8 = undefined,
+    prefix_len: u8 = 0,
+    /// Kept with an allocator (`readHeaderAlloc`): the format tags as FFmpeg
+    /// reports them, the pictures, chapters and seek points.
+    tags: metadata.Dictionary = .empty,
+    pictures: []Picture = &.{},
+    chapters: []Chapter = &.{},
+    seek_points: []SeekPoint = &.{},
+
+    pub fn deinit(info: *Info, gpa: std.mem.Allocator) void {
+        info.tags.deinit(gpa);
+        for (info.pictures) |p| {
+            gpa.free(p.mime);
+            gpa.free(p.description);
+            gpa.free(p.data);
+        }
+        gpa.free(info.pictures);
+        for (info.chapters) |c| gpa.free(c.title);
+        gpa.free(info.chapters);
+        gpa.free(info.seek_points);
+        info.* = undefined;
+    }
+
+    /// The decoded storage: s16 up to 16 bits, else s32.
+    pub fn sampleFormat(info: Info) audio.SampleFormat {
+        return if (info.bps > 16) .s32 else .s16;
+    }
+};
+
+/// The longest frame header with its first subframe byte.
+const prefix_capacity = 17;
 
 /// FFmpeg's `RAW_PACKET_SIZE`: the demuxer's reads.
 pub const raw_packet_size = 1024;
@@ -92,50 +168,162 @@ pub fn probeScore(head: []const u8) u8 {
     return 50;
 }
 
-const metadata_streaminfo = 0;
+const block_streaminfo = 0;
+const block_seektable = 3;
+const block_vorbis_comment = 4;
+const block_cuesheet = 5;
+const block_picture = 6;
 
-/// Reads `fLaC` and the metadata blocks, STREAMINFO checked.
+/// flacdec.c's rates for headerless input, by the first frame's code, in
+/// units of 50 Hz.
+const headerless_rates = [16]u16{ 0, 1764, 3528, 3840, 160, 320, 441, 480, 640, 882, 960, 1920, 0, 0, 0, 0 };
+
+/// Reads the header without keeping tags, pictures, chapters or the seek
+/// table: what probing needs, without allocating.
 pub fn readHeader(reader: *std.Io.Reader) Error!Info {
+    return readHeaderWith(reader, null);
+}
+
+/// Reads the header and keeps tags, pictures, chapters and the seek table,
+/// allocated with `gpa`; free them with `Info.deinit`.
+pub fn readHeaderAlloc(reader: *std.Io.Reader, gpa: std.mem.Allocator) Error!Info {
+    return readHeaderWith(reader, gpa);
+}
+
+/// flac_read_header: `fLaC` and the metadata blocks, or headerless input.
+fn readHeaderWith(reader: *std.Io.Reader, gpa: ?std.mem.Allocator) Error!Info {
     var marker: [4]u8 = undefined;
-    readExact(reader, &marker) catch |err| return err;
-    // FFmpeg reads input without fLaC as frames: its headerless mode.
-    if (!std.mem.eql(u8, &marker, "fLaC")) return error.UnsupportedFormat;
-    var info: ?flac.StreamInfo = null;
-    var extradata: [flac.streaminfo_size]u8 = undefined;
-    while (true) {
+    try readExact(reader, &marker);
+    if (!std.mem.eql(u8, &marker, "fLaC")) return headerless(reader, marker);
+
+    var info: Info = .{
+        .stream_info = null,
+        .extradata = null,
+        .channels = 0,
+        .layout = .{ .unspecified = 0 },
+        .sample_rate = 0,
+        .bps = 0,
+        .time_base = time.TimeBase.init(1, 90000) catch unreachable,
+        .duration = null,
+    };
+    errdefer if (gpa) |a| info.deinit(a);
+    var builder: TagBuilder = .{};
+    defer if (gpa) |a| builder.deinit(a);
+    var pictures: std.ArrayList(Picture) = .empty;
+    var chapters: std.ArrayList(Chapter) = .empty;
+    defer if (gpa) |a| {
+        for (pictures.items) |p| {
+            a.free(p.mime);
+            a.free(p.description);
+            a.free(p.data);
+        }
+        pictures.deinit(a);
+        for (chapters.items) |c| a.free(c.title);
+        chapters.deinit(a);
+    };
+    var channel_mask: ?u64 = null;
+    var last = false;
+    while (!last) {
         var block: [4]u8 = undefined;
         try readExact(reader, &block);
-        const last = block[0] & 0x80 != 0;
+        last = block[0] & 0x80 != 0;
         const block_type = block[0] & 0x7f;
         const size = std.mem.readInt(u24, block[1..4], .big);
-        if (block_type == metadata_streaminfo) {
-            // STREAMINFO comes once, with 34 bytes.
-            if (info != null or size != flac.streaminfo_size) return error.InvalidFlac;
-            try readExact(reader, &extradata);
-            info = flac.StreamInfo.parse(&extradata);
-        } else {
-            // STREAMINFO must come first. FFmpeg also accepts SEEKTABLE,
-            // CUESHEET and PICTURE before it, which it reads and T26b will.
-            if (info == null) return error.InvalidFlac;
-            reader.discardAll(size) catch |err| return switch (err) {
-                error.EndOfStream => error.Truncated,
-                error.ReadFailed => error.IoFailure,
-            };
+        switch (block_type) {
+            block_streaminfo => {
+                if (info.extradata != null or size != flac.streaminfo_size) return error.InvalidFlac;
+                var body: [flac.streaminfo_size]u8 = undefined;
+                try readExact(reader, &body);
+                info.extradata = body;
+                info.stream_info = flac.StreamInfo.parse(&body);
+            },
+            // FFmpeg reads these before STREAMINFO too.
+            block_seektable => {
+                if (gpa) |a| {
+                    info.seek_points = try readSeekTable(reader, a, size);
+                } else try skipBytes(reader, size);
+            },
+            block_cuesheet => try readCueSheet(reader, size, gpa, &chapters),
+            block_picture => try readPicture(reader, size, gpa, &pictures),
+            else => {
+                // STREAMINFO must come first among the rest.
+                if (info.extradata == null) return error.InvalidFlac;
+                if (block_type == block_vorbis_comment) {
+                    try readVorbisComment(reader, size, gpa, &builder, &channel_mask);
+                } else try skipBytes(reader, size);
+            },
         }
-        if (last) break;
     }
-    const si = info orelse return error.InvalidFlac;
-    // ff_flac_parse_streaminfo refuses these, and the decoder with them.
-    if (si.max_blocksize < flac.min_blocksize) return error.InvalidFlac;
-    // T26b: other sample sizes, and a rate only the frames give.
-    if (si.bps != 16 or si.sample_rate == 0) return error.UnsupportedFormat;
-    return .{
-        .stream_info = si,
-        .extradata = extradata,
-        .layout = flac.channelLayout(si.channels),
-        .time_base = time.TimeBase.ofSampleRate(si.sample_rate) catch return error.UnsupportedFormat,
-        .duration = if (si.samples > 0) si.samples else null,
+    const si = info.stream_info orelse return error.InvalidFlac;
+    // ff_flac_parse_streaminfo refuses these, and with them the decoder.
+    if (si.max_blocksize < flac.min_blocksize or si.bps < 4) return error.InvalidFlac;
+    info.channels = si.channels;
+    info.layout = flac.channelLayout(si.channels);
+    if (channel_mask) |mask| info.layout = .{ .native = mask };
+    info.bps = si.bps;
+    info.sample_rate = si.sample_rate;
+    if (si.sample_rate > 0) {
+        info.time_base = time.TimeBase.ofSampleRate(si.sample_rate) catch unreachable;
+        if (si.samples > 0) info.duration = si.samples;
+    } else {
+        // The frames give the rate.
+        try peekFirstFrame(reader, &info);
+    }
+    if (gpa) |a| {
+        // ff_compute_chapters_end: each chapter ends where the next starts,
+        // the last where the stream does.
+        const items = chapters.items;
+        for (items, 0..) |*c, i| {
+            c.end = if (i + 1 < items.len) items[i + 1].start else @max(c.start, info.duration orelse c.start);
+        }
+        info.tags = try builder.finish(a);
+        info.pictures = try pictures.toOwnedSlice(a);
+        info.chapters = try chapters.toOwnedSlice(a);
+    }
+    return info;
+}
+
+/// FFmpeg's headerless mode: the marker is the first frame's start, its
+/// rate code giving the time base; the first frame header gives the rest.
+fn headerless(reader: *std.Io.Reader, marker: [4]u8) Error!Info {
+    const rate = 50 * @as(u32, headerless_rates[marker[2] & 0xf]);
+    var info: Info = .{
+        .stream_info = null,
+        .extradata = null,
+        .channels = 0,
+        .layout = .{ .unspecified = 0 },
+        .sample_rate = 0,
+        .bps = 0,
+        .time_base = if (rate != 0) time.TimeBase.ofSampleRate(rate) catch unreachable else time.TimeBase.init(1, 90000) catch unreachable,
+        .duration = null,
     };
+    @memcpy(info.prefix[0..4], &marker);
+    info.prefix_len = 4;
+    try peekFirstFrame(reader, &info);
+    if (info.channels == 0) return error.UnsupportedFormat;
+    return info;
+}
+
+/// Reads the first frame's header into `info.prefix` and takes the stream's
+/// parameters FFmpeg's parser reports from it: the channels and layout, the
+/// rate and the sample size where STREAMINFO lacks them.
+fn peekFirstFrame(reader: *std.Io.Reader, info: *Info) Error!void {
+    const start = info.prefix_len;
+    const n = reader.readSliceShort(info.prefix[start..]) catch return error.IoFailure;
+    info.prefix_len += @intCast(n);
+    var r = bits.BitReader.init(info.prefix[0..info.prefix_len]) catch unreachable;
+    const fi = switch (flac.decodeFrameHeader(&r)) {
+        .ok => |fi| fi,
+        // No frame where the stream starts: what FFmpeg's parser finds
+        // later is not modeled.
+        .invalid => return,
+    };
+    if (info.stream_info == null) {
+        info.channels = fi.channels;
+        info.layout = flac.channelLayout(fi.channels);
+        info.bps = fi.bps;
+    }
+    if (info.sample_rate == 0) info.sample_rate = fi.sample_rate;
 }
 
 fn readExact(reader: *std.Io.Reader, buffer: []u8) Error!void {
@@ -143,6 +331,275 @@ fn readExact(reader: *std.Io.Reader, buffer: []u8) Error!void {
         error.EndOfStream => error.Truncated,
         error.ReadFailed => error.IoFailure,
     };
+}
+
+fn skipBytes(reader: *std.Io.Reader, n: u64) Error!void {
+    reader.discardAll64(n) catch |err| return switch (err) {
+        error.EndOfStream => error.Truncated,
+        error.ReadFailed => error.IoFailure,
+    };
+}
+
+fn readBytes(reader: *std.Io.Reader, gpa: std.mem.Allocator, n: usize) Error![]u8 {
+    const out = try gpa.alloc(u8, n);
+    errdefer gpa.free(out);
+    try readExact(reader, out);
+    return out;
+}
+
+/// A SEEKTABLE body: 18-byte points; a remainder is ignored, as FFmpeg's
+/// division does.
+fn readSeekTable(reader: *std.Io.Reader, gpa: std.mem.Allocator, size: u24) Error![]SeekPoint {
+    const count = size / 18;
+    const points = try gpa.alloc(SeekPoint, count);
+    errdefer gpa.free(points);
+    for (points) |*p| {
+        var raw: [18]u8 = undefined;
+        try readExact(reader, &raw);
+        p.* = .{
+            .sample = std.mem.readInt(u64, raw[0..8], .big),
+            .offset = std.mem.readInt(u64, raw[8..16], .big),
+            .samples = std.mem.readInt(u16, raw[16..18], .big),
+        };
+    }
+    try skipBytes(reader, size % 18);
+    return points;
+}
+
+/// The CUESHEET as flac_read_header reads it: at least 431 bytes, the track
+/// count at offset 395, each track but the lead-out a chapter of its
+/// offset, number and ISRC; a track without index points is `InvalidFlac`.
+fn readCueSheet(reader: *std.Io.Reader, size: u24, gpa: ?std.mem.Allocator, chapters: *std.ArrayList(Chapter)) Error!void {
+    if (size < 431) return error.InvalidFlac;
+    try skipBytes(reader, 395);
+    var count_byte: [1]u8 = undefined;
+    try readExact(reader, &count_byte);
+    var used: u64 = 396;
+    const tracks = @as(i32, count_byte[0]) - 1;
+    if (tracks <= 0) return error.InvalidFlac;
+    var starts: [255]u64 = undefined;
+    var titles: [255][12]u8 = undefined;
+    for (0..@intCast(tracks)) |i| {
+        if (used + 36 > size) return error.InvalidFlac;
+        var track: [36]u8 = undefined;
+        try readExact(reader, &track);
+        used += 36;
+        starts[i] = std.mem.readInt(u64, track[0..8], .big);
+        @memcpy(&titles[i], track[9..21]);
+        const index_points = track[35];
+        if (index_points == 0) return error.InvalidFlac;
+        // The index points are skipped; FFmpeg does not bound them.
+        const skip = @as(u64, index_points) * 12;
+        if (used + skip > size) return error.Truncated;
+        try skipBytes(reader, skip);
+        used += skip;
+    }
+    try skipBytes(reader, size - used);
+    const a = gpa orelse return;
+    for (0..@intCast(tracks)) |i| {
+        // avpriv_new_chapter gives each chapter its own start and no end;
+        // FFmpeg's chapter end is the next one's start, or unknown.
+        const title_len = std.mem.findScalar(u8, &titles[i], 0) orelse 12;
+        const title = try a.dupe(u8, titles[i][0..title_len]);
+        errdefer a.free(title);
+        try chapters.append(a, .{ .start = starts[i], .end = 0, .title = title });
+    }
+}
+
+/// ff_flac_parse_picture without AV_EF_EXPLODE: a malformed block is
+/// skipped, as FFmpeg skips it with a log message.
+fn readPicture(reader: *std.Io.Reader, size: u24, gpa: ?std.mem.Allocator, pictures: *std.ArrayList(Picture)) Error!void {
+    const a = gpa orelse return skipBytes(reader, size);
+    const body = try readBytes(reader, a, size);
+    defer a.free(body);
+    if (body.len < 34) return;
+    var at: usize = 0;
+    const field = struct {
+        fn be32(b: []const u8, i: *usize) u32 {
+            const v = std.mem.readInt(u32, b[i.*..][0..4], .big);
+            i.* += 4;
+            return v;
+        }
+    }.be32;
+    var picture_type = field(body, &at);
+    if (picture_type >= id3v2_picture_types) picture_type = 0;
+    const mime_len = field(body, &at);
+    if (mime_len == 0 or mime_len >= 64) return;
+    if (mime_len + 24 > body.len - at) return;
+    const mime = body[at..][0..mime_len];
+    at += mime_len;
+    const codec = pictureCodec(mime) orelse return;
+    const desc_len = field(body, &at);
+    if (desc_len > body.len - at -| 20 or body.len - at < 20) return;
+    const description = body[at..][0..desc_len];
+    at += desc_len;
+    const width = field(body, &at);
+    const height = field(body, &at);
+    at += 8;
+    const data_len = field(body, &at);
+    // FFmpeg's workaround for a 24-bit block size is not modeled: such a
+    // picture runs past its block, which the parser refuses here.
+    if (data_len == 0 or data_len > body.len - at) return;
+    const owned_mime = try a.dupe(u8, mime);
+    errdefer a.free(owned_mime);
+    const owned_desc = try a.dupe(u8, description);
+    errdefer a.free(owned_desc);
+    const data = try a.dupe(u8, body[at..][0..data_len]);
+    errdefer a.free(data);
+    try pictures.append(a, .{
+        .picture_type = picture_type,
+        .mime = owned_mime,
+        .codec = codec,
+        .description = owned_desc,
+        .width = width,
+        .height = height,
+        .data = data,
+    });
+}
+
+/// `ff_id3v2_picture_types`' length.
+const id3v2_picture_types = 21;
+
+/// `ff_id3v2_mime_tags`: the codec FFmpeg gives a picture's MIME type.
+fn pictureCodec(mime: []const u8) ?[]const u8 {
+    const table = [_]struct { []const u8, []const u8 }{
+        .{ "image/gif", "gif" },
+        .{ "image/jpeg", "mjpeg" },
+        .{ "image/jpg", "mjpeg" },
+        .{ "image/png", "png" },
+        .{ "image/tiff", "tiff" },
+        .{ "image/bmp", "bmp" },
+        .{ "image/webp", "webp" },
+        .{ "image/jxl", "jpegxl" },
+        .{ "JPG", "mjpeg" },
+        .{ "PNG", "png" },
+    };
+    for (table) |entry| if (std.mem.eql(u8, entry[0], mime)) return entry[1];
+    return null;
+}
+
+/// ff_vorbis_comment's tags, built as libavutil's dictionary builds them.
+const TagBuilder = struct {
+    tags: metadata.Dictionary = .empty,
+
+    fn deinit(b: *TagBuilder, gpa: std.mem.Allocator) void {
+        b.tags.deinit(gpa);
+    }
+
+    /// `av_dict_set` with AV_DICT_APPEND: the old value and `value`, the
+    /// entry replaced (the last one moves into its place).
+    fn append(b: *TagBuilder, gpa: std.mem.Allocator, key: []const u8, value: []const u8) Error!void {
+        const old = b.tags.get(key) orelse "";
+        const joined = try std.mem.concat(gpa, u8, &.{ old, value });
+        defer gpa.free(joined);
+        b.tags.put(gpa, key, joined, .replace) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            // Keys and values from comments hold no NUL here: a comment with
+            // one is cut there, as FFmpeg's C strings are.
+            else => unreachable,
+        };
+    }
+
+    /// ff_metadata_conv: five keys renamed, exact duplicates dropped.
+    fn finish(b: *TagBuilder, gpa: std.mem.Allocator) Error!metadata.Dictionary {
+        var out: metadata.Dictionary = .empty;
+        errdefer out.deinit(gpa);
+        for (b.tags.items()) |entry| {
+            var key = entry.key;
+            for (vorbis_conv) |conv| {
+                if (std.ascii.eqlIgnoreCase(key, conv[0])) key = conv[1];
+            }
+            out.put(gpa, key, entry.value, .keep_distinct) catch |err| return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                else => unreachable,
+            };
+        }
+        return out;
+    }
+};
+
+/// ff_vorbiscomment_metadata_conv.
+const vorbis_conv = [_]struct { []const u8, []const u8 }{
+    .{ "ALBUMARTIST", "album_artist" },
+    .{ "TRACKNUMBER", "track" },
+    .{ "DISCNUMBER", "disc" },
+    .{ "DISCSUBTITLE", "disc_subtitle" },
+    .{ "DESCRIPTION", "comment" },
+};
+
+/// The longest comment `readVorbisComment` reads into memory without an
+/// allocator, enough for the channel mask's key and value.
+const mask_comment_capacity = 64;
+
+/// ff_vorbis_comment: the vendor string, then comments of `KEY=value`;
+/// a comment without '=', an empty key or value, or a picture is not a tag.
+/// FFmpeg only logs a malformed block, so it is not an error. The
+/// `WAVEFORMATEXTENSIBLE_CHANNEL_MASK` tag sets the layout, as
+/// flac_read_header reads it, and is not reported.
+fn readVorbisComment(reader: *std.Io.Reader, size: u24, gpa: ?std.mem.Allocator, builder: *TagBuilder, mask: *?u64) Error!void {
+    var left: u64 = size;
+    if (size < 8) return skipBytes(reader, size);
+    var word: [4]u8 = undefined;
+    try readExact(reader, &word);
+    left -= 4;
+    const vendor = std.mem.readInt(u32, &word, .little);
+    if (vendor > std.math.maxInt(i32) or left - 4 < vendor) return skipBytes(reader, left);
+    try skipBytes(reader, vendor);
+    left -= vendor;
+    try readExact(reader, &word);
+    left -= 4;
+    var count = std.mem.readInt(u32, &word, .little);
+    var first_mask: ?[]const u8 = null;
+    var mask_text: [mask_comment_capacity]u8 = undefined;
+    while (left >= 4 and count > 0) : (count -= 1) {
+        try readExact(reader, &word);
+        left -= 4;
+        const len = std.mem.readInt(u32, &word, .little);
+        if (len > left or len > std.math.maxInt(i32)) break;
+        left -= len;
+        if (gpa) |a| {
+            const comment = try readBytes(reader, a, len);
+            defer a.free(comment);
+            try addComment(a, builder, comment);
+        } else if (len <= mask_text.len) {
+            try readExact(reader, mask_text[0..len]);
+            const comment = mask_text[0..len];
+            if (first_mask == null) first_mask = maskValue(comment);
+        } else try skipBytes(reader, len);
+    }
+    try skipBytes(reader, left);
+    // The mask, by the first comment carrying it (`strtol` stops at the
+    // ';' a repeated key's value gets).
+    const value = if (gpa != null) builder.tags.get("WAVEFORMATEXTENSIBLE_CHANNEL_MASK") else first_mask;
+    if (value) |text| {
+        const number = channel_layout.strtol(text, 0);
+        const m: u64 = @bitCast(number.value);
+        if (m != 0 and m & ~@as(u64, 0x3ffff) == 0) {
+            mask.* = m;
+            if (gpa) |a| _ = builder.tags.remove(a, "WAVEFORMATEXTENSIBLE_CHANNEL_MASK");
+        }
+    }
+}
+
+/// The channel mask's value in a comment, if it is that tag.
+fn maskValue(comment: []const u8) ?[]const u8 {
+    const eq = std.mem.findScalar(u8, comment, '=') orelse return null;
+    if (!std.ascii.eqlIgnoreCase(comment[0..eq], "WAVEFORMATEXTENSIBLE_CHANNEL_MASK") or eq + 1 == comment.len) return null;
+    return comment[eq + 1 ..];
+}
+
+/// vorbis_parse_single_comment for one comment.
+fn addComment(gpa: std.mem.Allocator, builder: *TagBuilder, raw: []const u8) Error!void {
+    // FFmpeg's C strings end at a NUL.
+    const comment = raw[0 .. std.mem.findScalar(u8, raw, 0) orelse raw.len];
+    const eq = std.mem.findScalar(u8, comment, '=') orelse return;
+    const key = comment[0..eq];
+    const value = comment[eq + 1 ..];
+    if (key.len == 0 or value.len == 0) return;
+    // Pictures in comments and OGM chapters are not tags.
+    if (std.ascii.eqlIgnoreCase(key, "METADATA_BLOCK_PICTURE")) return;
+    if (builder.tags.get(key) != null) try builder.append(gpa, key, ";");
+    try builder.append(gpa, key, value);
 }
 
 /// libavformat's base for timestamps it counts before knowing the first.
@@ -187,13 +644,15 @@ pub const Demuxer = struct {
     probing: bool = true,
     eof: bool = false,
 
-    /// Reads the header; packets follow with `next`.
+    /// Reads the header, keeping its tags, pictures, chapters and seek
+    /// table; packets follow with `next`.
     pub fn init(gpa: std.mem.Allocator, reader: *std.Io.Reader) Error!Demuxer {
-        const info = try readHeader(reader);
+        const info = try readHeaderAlloc(reader, gpa);
         return .{ .gpa = gpa, .reader = reader, .info = info, .parser = .init(gpa) };
     }
 
     pub fn deinit(d: *Demuxer) void {
+        d.info.deinit(d.gpa);
         for (d.packet_buffer.items) |q| d.gpa.free(q.data);
         for (d.parse_queue.items) |q| d.gpa.free(q.data);
         d.packet_buffer.deinit(d.gpa);
@@ -252,7 +711,12 @@ pub const Demuxer = struct {
                 break;
             }
             var chunk: [raw_packet_size]u8 = undefined;
-            const n = d.reader.readSliceShort(&chunk) catch return error.IoFailure;
+            // The frame bytes the header peeked come first, as FFmpeg's
+            // reads start where the frames do.
+            const prefix = d.info.prefix_len;
+            @memcpy(chunk[0..prefix], d.info.prefix[0..prefix]);
+            d.info.prefix_len = 0;
+            const n = prefix + (d.reader.readSliceShort(chunk[prefix..]) catch return error.IoFailure);
             if (n == 0) {
                 d.eof = true;
                 try d.parsePacket(&.{}, true);
@@ -280,7 +744,8 @@ pub const Demuxer = struct {
             var duration: i64 = 0;
             if (out.sample_rate > 0 and out.duration > 0) {
                 // av_rescale_q_rnd from 1/rate to the time base, rounding down.
-                duration = @intCast(@as(u64, out.duration) * d.info.stream_info.sample_rate / out.sample_rate);
+                const tb = d.info.time_base;
+                duration = @intCast(@as(u64, out.duration) * tb.den / (@as(u64, out.sample_rate) * tb.num));
             }
             const data = try d.gpa.dupe(u8, frame);
             errdefer d.gpa.free(data);
@@ -389,27 +854,36 @@ pub const Demuxer = struct {
 };
 
 /// A FLAC input as the conversion pipeline reads PCM (format/convert.zig):
-/// the decoder's frames as pcm_s16le bytes, whole frames per read.
+/// the decoder's frames as pcm_s16le bytes, or pcm_s32le above 16 bits per
+/// sample, whole frames per read.
 ///
 /// A packet the decoder refuses is reported to the diagnostic sink and
 /// skipped, as the ffmpeg program skips it. Because the pipeline writes an
-/// output header holding STREAMINFO's sample count before the samples, a
-/// stream that decodes to another count fails with `FrameCountMismatch`
-/// (before the extra samples, or at `finish` for missing ones), where
-/// FFmpeg would rewrite a seekable output's header.
+/// output header holding STREAMINFO's sample count, rate and channels
+/// before the samples, a stream that decodes to another count fails with
+/// `FrameCountMismatch` (before the extra samples, or at `finish` for
+/// missing ones), and a frame that changes the rate or the channels with
+/// `UnsupportedFormat`, where FFmpeg would rewrite a seekable output's
+/// header or reconfigure its filters. With `verify_md5`, `finish` checks
+/// STREAMINFO's MD5, when it has one, against the decoded samples
+/// (`Md5Mismatch`); FFmpeg never checks it.
 pub const DecodedReader = struct {
     gpa: std.mem.Allocator,
     reader: *std.Io.Reader,
     sink: ?diagnostics.Sink,
+    verify_md5: bool = false,
     demuxer: ?Demuxer = null,
     decoder: ?decoder.Decoder = null,
     /// The current frame's samples not yet delivered, borrowed from the
     /// decoder.
-    pending: []const i16 = &.{},
+    pending: decoder.Samples = .{ .s16 = &.{} },
     channels: u8 = 0,
+    sample_rate: u32 = 0,
+    bps: u8 = 0,
     delivered: u64 = 0,
     expected: ?u64 = null,
     ended: bool = false,
+    md5: std.crypto.hash.Md5 = .init(.{}),
 
     pub const Header = struct {
         /// The encoding of the bytes `readData` gives.
@@ -417,7 +891,6 @@ pub const DecodedReader = struct {
         format: audio.Format,
         /// STREAMINFO's sample count, when it has one.
         frame_count: ?u64,
-        info: Info,
     };
 
     pub fn init(gpa: std.mem.Allocator, reader: *std.Io.Reader, sink: ?diagnostics.Sink) DecodedReader {
@@ -436,32 +909,68 @@ pub const DecodedReader = struct {
         const info = r.demuxer.?.info;
         r.decoder = decoder.Decoder.init(r.gpa, info.stream_info) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
-            // readHeader accepted only 16-bit streams.
-            error.UnsupportedFormat => unreachable,
+            // readHeader refused what the decoder refuses.
+            error.InvalidData => unreachable,
         };
-        r.channels = info.stream_info.channels;
+        // A rate or sample size neither STREAMINFO nor the first frame gives
+        // cannot head an output.
+        if (info.sample_rate == 0 or info.bps == 0) return error.UnsupportedFormat;
+        r.channels = info.channels;
+        r.sample_rate = info.sample_rate;
+        r.bps = info.bps;
         r.expected = info.duration;
-        const format = audio.Format.initLayout(info.stream_info.sample_rate, info.layout, .s16) catch return error.UnsupportedFormat;
-        return .{ .codec = .s16le, .format = format, .frame_count = info.duration, .info = info };
+        const format = audio.Format.initLayout(info.sample_rate, info.layout, info.sampleFormat()) catch return error.UnsupportedFormat;
+        return .{ .codec = if (info.bps > 16) .s32le else .s16le, .format = format, .frame_count = info.duration };
     }
 
-    /// Whole frames of s16le samples into `output`, at least one while any
-    /// remain (one frame fits in 16 bytes); empty at the end.
+    fn pendingFrames(r: *const DecodedReader) usize {
+        return switch (r.pending) {
+            inline else => |s| s.len / r.channels,
+        };
+    }
+
+    /// Whole frames of samples into `output`, at least one while any remain
+    /// (one frame fits in 32 bytes); empty at the end.
     pub fn readData(r: *DecodedReader, output: []u8) Error![]u8 {
-        while (r.pending.len == 0) {
+        while (r.pendingFrames() == 0) {
             if (!try r.nextFrame()) return output[0..0];
         }
-        const frame_bytes = 2 * @as(usize, r.channels);
-        const frames = @min(output.len / frame_bytes, r.pending.len / r.channels);
+        const width: usize = if (r.bps > 16) 4 else 2;
+        const frame_bytes = width * r.channels;
+        const frames = @min(output.len / frame_bytes, r.pendingFrames());
         std.debug.assert(frames > 0);
         if (r.expected) |expected| {
             if (r.delivered + frames > expected) return error.FrameCountMismatch;
         }
-        const samples = r.pending[0 .. frames * r.channels];
-        for (samples, 0..) |sample, i| std.mem.writeInt(i16, output[2 * i ..][0..2], sample, .little);
-        r.pending = r.pending[samples.len..];
+        const count = frames * r.channels;
+        switch (r.pending) {
+            .s16 => |s| {
+                for (s[0..count], 0..) |sample, i| std.mem.writeInt(i16, output[2 * i ..][0..2], sample, .little);
+                r.pending = .{ .s16 = s[count..] };
+            },
+            .s32 => |s| {
+                for (s[0..count], 0..) |sample, i| std.mem.writeInt(i32, output[4 * i ..][0..4], sample, .little);
+                r.pending = .{ .s32 = s[count..] };
+            },
+        }
         r.delivered += frames;
-        return output[0 .. frames * frame_bytes];
+        const data = output[0 .. frames * frame_bytes];
+        if (r.verify_md5) r.hashSamples(data, width);
+        return data;
+    }
+
+    /// The FLAC format's MD5 input: each sample unshifted, signed
+    /// little-endian in the fewest whole bytes holding `bps`.
+    fn hashSamples(r: *DecodedReader, data: []const u8, width: usize) void {
+        const shift: u5 = @intCast(@as(u8, @intCast(width * 8)) - r.bps);
+        const bytes_out = (r.bps + 7) / 8;
+        var i: usize = 0;
+        while (i < data.len) : (i += width) {
+            const stored: i32 = if (width == 2) std.mem.readInt(i16, data[i..][0..2], .little) else std.mem.readInt(i32, data[i..][0..4], .little);
+            var le: [4]u8 = undefined;
+            std.mem.writeInt(i32, &le, stored >> shift, .little);
+            r.md5.update(le[0..bytes_out]);
+        }
     }
 
     /// The next decoded frame into `pending`; false at the end.
@@ -469,14 +978,15 @@ pub const DecodedReader = struct {
         if (r.ended) return false;
         const dec = &r.decoder.?;
         while (true) {
-            const frame = dec.receive() catch |err| {
-                diagnostics.report(r.sink, .err, "Decoding error: {s}", .{switch (err) {
-                    error.InvalidData => "Invalid data found when processing input",
-                    error.UnsupportedFormat => "a frame left to T26b (a variable block size, or another rate or channel count)",
-                }});
-                continue;
+            const frame = dec.receive() catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidData => {
+                    diagnostics.report(r.sink, .err, "Decoding error: Invalid data found when processing input", .{});
+                    continue;
+                },
             };
             if (frame) |f| {
+                if (f.channels != r.channels or f.sample_rate != r.sample_rate) return error.UnsupportedFormat;
                 r.pending = f.samples;
                 return true;
             }
@@ -488,11 +998,19 @@ pub const DecodedReader = struct {
         }
     }
 
-    /// Checks that the stream decoded to STREAMINFO's count.
+    /// Checks that the stream decoded to STREAMINFO's count and, with
+    /// `verify_md5`, to its MD5.
     pub fn finish(r: *DecodedReader) Error!void {
-        std.debug.assert(r.pending.len == 0);
+        std.debug.assert(r.pendingFrames() == 0);
         if (r.expected) |expected| {
             if (r.delivered != expected) return error.FrameCountMismatch;
+        }
+        if (r.verify_md5) {
+            const info = r.demuxer.?.info.stream_info orelse return;
+            if (std.mem.allEqual(u8, &info.md5, 0)) return;
+            var digest: [16]u8 = undefined;
+            r.md5.final(&digest);
+            if (!std.mem.eql(u8, &digest, &info.md5)) return error.Md5Mismatch;
         }
     }
 };
@@ -508,7 +1026,7 @@ const fixtures = @import("../testing/fixtures.zig");
 test "the probe scores FFmpeg's way" {
     try testing.expectEqual(100, probeScore(fixtures.flac.bytes("flac_constant_mono_8k")));
     try testing.expectEqual(50, probeScore(fixtures.flac.bytes("flac_no_streaminfo")));
-    try testing.expectEqual(13, probeScore(fixtures.flac.bytes("flac_no_marker")));
+    try testing.expectEqual(13, probeScore(fixtures.flac.bytes("flac_headerless")));
     try testing.expectEqual(0, probeScore("RIFF"));
     try testing.expectEqual(0, probeScore(""));
 }
@@ -634,16 +1152,18 @@ fn decodeLines(gpa: std.mem.Allocator, bytes: []const u8, out: *std.ArrayList(u8
             const frame = dec.receive() catch |err| {
                 try out.appendSlice(gpa, switch (err) {
                     error.InvalidData => "X INVALIDDATA\n",
-                    error.UnsupportedFormat => "X UNSUPPORTED\n",
+                    error.OutOfMemory => return error.OutOfMemory,
                 });
                 continue;
             } orelse break;
             var adler: std.hash.Adler32 = .{ .adler = 0 };
-            for (frame.samples) |s| {
-                var le: [2]u8 = undefined;
-                std.mem.writeInt(i16, &le, s, .little);
-                adler.update(&le);
-                samples_sha.update(&le);
+            switch (frame.samples) {
+                inline else => |samples| for (samples) |s| {
+                    var le: [@sizeOf(@TypeOf(s))]u8 = undefined;
+                    std.mem.writeInt(@TypeOf(s), &le, s, .little);
+                    adler.update(&le);
+                    samples_sha.update(&le);
+                },
             }
             frames.* += frame.nb_samples;
             try out.appendSlice(gpa, try std.fmt.bufPrint(&line_buf, "D {d} {s} 0x{x:0>8}\n", .{ frame.nb_samples, formatTs(&a, frame.pts), adler.adler }));
@@ -722,4 +1242,90 @@ test "fuzz: the demuxer and decoder on arbitrary input" {
         fixtures.flac.bytes("flac_junk_between_frames"),
         fixtures.flac.bytes("flac_mid_side"),
     } });
+}
+
+test "every fixture's tags, chapters and pictures equal FFmpeg's" {
+    const gpa = testing.allocator;
+    inline for (fixtures.flac.all) |fixture| {
+        if (fixture.expected != .reject) {
+            const block = vectorBlock(fixture.name) orelse return error.MissingVector;
+            var expected: std.ArrayList(u8) = .empty;
+            defer expected.deinit(gpa);
+            var lines = std.mem.splitScalar(u8, block, '\n');
+            while (lines.next()) |line| {
+                if (line.len < 2 or std.mem.findScalar(u8, "MCA", line[0]) == null or line[1] != ' ') continue;
+                try expected.appendSlice(gpa, line);
+                try expected.append(gpa, '\n');
+            }
+            var reader: std.Io.Reader = .fixed(fixtures.flac.bytes(fixture.name));
+            var info = try readHeaderAlloc(&reader, gpa);
+            defer info.deinit(gpa);
+            var actual: std.ArrayList(u8) = .empty;
+            defer actual.deinit(gpa);
+            for (info.tags.items()) |tag| {
+                const line = try std.fmt.allocPrint(gpa, "M {s}={s}\n", .{ tag.key, tag.value });
+                defer gpa.free(line);
+                try actual.appendSlice(gpa, line);
+            }
+            for (info.chapters) |c| {
+                const line = try std.fmt.allocPrint(gpa, "C {d} {d} {d}/{d} {s}\n", .{ c.start, c.end, info.time_base.num, info.time_base.den, c.title });
+                defer gpa.free(line);
+                try actual.appendSlice(gpa, line);
+            }
+            for (info.pictures, 1..) |p, i| {
+                const line = try std.fmt.allocPrint(gpa, "A {d} {s} {d} 0x{x:0>8}\n", .{ i, p.codec, p.data.len, std.hash.Adler32.permute(0, p.data) });
+                defer gpa.free(line);
+                try actual.appendSlice(gpa, line);
+            }
+            testing.expectEqualStrings(expected.items, actual.items) catch |err| {
+                std.debug.print("fixture {s}\n", .{fixture.name});
+                return err;
+            };
+            // The manifest's tags, written independently.
+            try testing.expectEqual(fixture.tags.len, info.tags.count());
+            for (fixture.tags, info.tags.items()) |want, got| {
+                try testing.expectEqualStrings(want.key, got.key);
+                try testing.expectEqualStrings(want.value, got.value);
+            }
+        }
+    }
+}
+
+test "STREAMINFO's MD5 is checked when asked, and only then" {
+    const gpa = testing.allocator;
+    inline for (fixtures.flac.all) |fixture| {
+        if (fixture.md5) |md5| {
+            for ([_]bool{ false, true }) |verify| {
+                var reader: std.Io.Reader = .fixed(fixtures.flac.bytes(fixture.name));
+                var r: DecodedReader = .init(gpa, &reader, null);
+                defer r.deinit();
+                r.verify_md5 = verify;
+                _ = try r.readHeader();
+                var out: [4096]u8 = undefined;
+                while ((try r.readData(&out)).len > 0) {}
+                if (verify and md5 == .mismatch) {
+                    try testing.expectError(error.Md5Mismatch, r.finish());
+                } else {
+                    try r.finish();
+                }
+            }
+        }
+    }
+}
+
+test "headers read without an allocator keep nothing and agree" {
+    inline for (fixtures.flac.all) |fixture| {
+        if (fixture.expected != .reject) {
+            var plain: std.Io.Reader = .fixed(fixtures.flac.bytes(fixture.name));
+            const a = try readHeader(&plain);
+            var kept: std.Io.Reader = .fixed(fixtures.flac.bytes(fixture.name));
+            var b = try readHeaderAlloc(&kept, testing.allocator);
+            defer b.deinit(testing.allocator);
+            try testing.expectEqual(a.channels, b.channels);
+            try testing.expect(a.layout.eql(&b.layout));
+            try testing.expectEqual(a.sample_rate, b.sample_rate);
+            try testing.expectEqual(a.duration, b.duration);
+            try testing.expectEqual(0, a.tags.count());
+        }
+    }
 }

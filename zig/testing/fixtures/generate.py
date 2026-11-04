@@ -2316,26 +2316,33 @@ def write_subframe(w, samples, bps, kind, order=0, wasted=0, precision=12, coeff
         write_residual(w, lpc_residual(samples, coeffs, shift), len(samples), order, **residual)
 
 
+FLAC_BPS_CODES = {8: 1, 12: 2, 16: 4, 20: 5, 24: 6, 32: 7}
+
+
 def flac_frame(number, channels_data, rate, assignment="independent", subframes=None, block_code=None,
-               rate_code=None, corrupt=None):
-    """A frame of 16-bit samples: `channels_data` per channel; `subframes`
+               rate_code=None, corrupt=None, bps=16, bps_code=None, var_size=False):
+    """A frame of `bps`-bit samples: `channels_data` per channel; `subframes`
     gives each channel's (kind, options); the header's codes default to the
-    table's, else 8 or 16 bits at the end."""
+    table's, else 8 or 16 bits at the end, and a sample size outside the
+    table to STREAMINFO's (code 0). With `var_size`, `number` is the first
+    sample's number (variable blocking)."""
     block = len(channels_data[0])
     channels = len(channels_data)
     if block_code is None:
         block_code = FLAC_BLOCK_CODES.get(block, 6 if block <= 256 else 7)
     if rate_code is None:
         rate_code = FLAC_RATE_CODES.get(rate, 0)
+    if bps_code is None:
+        bps_code = FLAC_BPS_CODES.get(bps, 0)
     h = BitWriter()
     h.put(14, 0x3FFE)
     h.put(1, 0)
-    h.put(1, 0)  # fixed block size
+    h.put(1, 1 if var_size else 0)
     h.put(4, block_code)
     h.put(4, rate_code)
     codes = {"independent": channels - 1, "left_side": 8, "right_side": 9, "mid_side": 10}
     h.put(4, codes[assignment])
-    h.put(3, 4)  # 16 bits
+    h.put(3, bps_code)
     h.put(1, 0)
     header = h.bytes() + flac_utf8(number)
     if block_code == 6:
@@ -2353,16 +2360,16 @@ def flac_frame(number, channels_data, rate, assignment="independent", subframes=
     right = channels_data[1] if channels > 1 else None
     if assignment == "left_side":
         coded = [left, [l - r for l, r in zip(left, right)]]
-        widths = [16, 17]
+        widths = [bps, bps + 1]
     elif assignment == "right_side":
         coded = [[l - r for l, r in zip(left, right)], right]
-        widths = [17, 16]
+        widths = [bps + 1, bps]
     elif assignment == "mid_side":
         coded = [[(l + r) >> 1 for l, r in zip(left, right)], [l - r for l, r in zip(left, right)]]
-        widths = [16, 17]
+        widths = [bps, bps + 1]
     else:
         coded = channels_data
-        widths = [16] * channels
+        widths = [bps] * channels
     w = BitWriter()
     for i, data in enumerate(coded):
         kind, options = (subframes[i] if subframes else ("fixed", {"order": 2}))
@@ -2378,7 +2385,7 @@ def flac_block(kind, body, last=False, size=None):
     return bytes([(0x80 if last else 0) | kind]) + struct.pack(">I", len(body) if size is None else size)[1:] + body
 
 
-def streaminfo(rate, channels, total, min_block=4096, max_block=4096, bps=16, min_frame=0, max_frame=0):
+def streaminfo(rate, channels, total, min_block=4096, max_block=4096, bps=16, min_frame=0, max_frame=0, md5=None):
     w = BitWriter()
     w.put(16, min_block)
     w.put(16, max_block)
@@ -2388,14 +2395,15 @@ def streaminfo(rate, channels, total, min_block=4096, max_block=4096, bps=16, mi
     w.put(3, channels - 1)
     w.put(5, bps - 1)
     w.put(36, total)
-    w.put(128, 0)  # no MD5 (FFmpeg does not check it here)
+    # No MD5 unless given (FFmpeg never checks it).
+    w.put(128, int.from_bytes(md5, "big") if md5 else 0)
     return w.bytes()
 
 
-def flac_file(rate, channels, frames, total, blocks=(), block_size=None, bps=16):
+def flac_file(rate, channels, frames, total, blocks=(), block_size=None, bps=16, md5=None, sizes=None):
     """fLaC, STREAMINFO, `blocks` (type, body), then the frames."""
-    sizes = [block_size or 4096] * 2
-    info = flac_block(0, streaminfo(rate, channels, total, sizes[0], sizes[1], bps), last=not blocks)
+    sizes = sizes or [block_size or 4096] * 2
+    info = flac_block(0, streaminfo(rate, channels, total, sizes[0], sizes[1], bps, md5=md5), last=not blocks)
     rest = b"".join(flac_block(t, b, last=i == len(blocks) - 1) for i, (t, b) in enumerate(blocks))
     return b"fLaC" + info + rest + b"".join(frames)
 
@@ -2427,10 +2435,17 @@ class FlacFixture:
     data: bytes  # None for FFmpeg-made fixtures, checked by hash
     channels: int = 0
     rate: int = 0
-    samples: list = None  # interleaved s16, the expected output
+    samples: list = None  # interleaved samples at `bps` bits, the expected output
     reject: str = None
     made_by: str = "generate.py"
     sha256: str = None
+    bps: int = 16
+    # The format tags ffprobe reports, (key, value) in order, from
+    # VORBIS_COMMENT (T26b).
+    tags: list = None
+    # STREAMINFO's MD5 against the decoded samples: "match", "mismatch" or
+    # None when it is unset (T26b).
+    md5: str = None
 
 
 # FFmpeg-made fixtures: name -> (channels, rate, samples per channel, seed,
@@ -2457,14 +2472,102 @@ def flac_ffmpeg_input(name):
     return interleave(flac_signal(count, channels, seed=seed))
 
 
+def vorbis_comment_block(vendor, comments):
+    """A VORBIS_COMMENT body: little-endian lengths, the vendor, the count
+    and each `KEY=value`."""
+    body = struct.pack("<I", len(vendor)) + vendor + struct.pack("<I", len(comments))
+    for c in comments:
+        body += struct.pack("<I", len(c)) + c
+    return body
+
+
+# ff_vorbiscomment_metadata_conv's renamings.
+VORBIS_CONV = {"ALBUMARTIST": "album_artist", "TRACKNUMBER": "track", "DISCNUMBER": "disc",
+               "DISCSUBTITLE": "disc_subtitle", "DESCRIPTION": "comment"}
+
+
+def vorbis_tags(comments):
+    """The format tags FFmpeg makes of `comments` (ff_vorbis_comment, then
+    ff_metadata_conv): no '=', an empty key or value skipped; a key seen
+    before, in any case, gets `;` and then the value appended, each
+    av_dict_set with AV_DICT_APPEND replacing the entry as libavutil does
+    (the last entry moves into its slot, the new spelling goes last); five
+    keys renamed."""
+    tags = []
+
+    def append(key, value):
+        for i, tag in enumerate(tags):
+            if tag[0].lower() == key.lower():
+                old = tag[1]
+                last = tags.pop()
+                if i < len(tags):
+                    tags[i] = last
+                tags.append([key, old + value])
+                return
+        tags.append([key, value])
+
+    for c in comments:
+        text = c.decode()
+        if "=" not in text:
+            continue
+        key, value = text.split("=", 1)
+        if not key or not value:
+            continue
+        if any(tag[0].lower() == key.lower() for tag in tags):
+            append(key, ";")
+        append(key, value)
+    out = []
+    for key, value in tags:
+        key = VORBIS_CONV.get(key.upper(), key)
+        if not any(k.lower() == key.lower() and v == value for k, v in out):
+            out.append((key, value))
+    return out
+
+
+def seektable_block(points):
+    """A SEEKTABLE body: (sample number, byte offset, samples) per point."""
+    return b"".join(struct.pack(">QQH", *point) for point in points)
+
+
+def picture_block(picture_type, mime, description, width, height, depth, colors, data):
+    """A PICTURE body, big-endian fields."""
+    return (struct.pack(">II", picture_type, len(mime)) + mime + struct.pack(">I", len(description)) + description
+            + struct.pack(">IIIII", width, height, depth, colors, len(data)) + data)
+
+
+def cuesheet_block(lead_in, tracks):
+    """A CUESHEET body: (offset, number, ISRC, [(index offset, number)]) per
+    track, the lead-out last."""
+    body = b"0123456789012" + bytes(128 - 13) + struct.pack(">Q", lead_in) + bytes([0x80]) + bytes(258)
+    body += bytes([len(tracks)])
+    for offset, number, isrc, indices in tracks:
+        body += struct.pack(">QB", offset, number) + isrc + bytes(14) + bytes([len(indices)])
+        for index_offset, index_number in indices:
+            body += struct.pack(">QB", index_offset, index_number) + bytes(3)
+    return body
+
+
+def scaled_signal(count, channels, bps, seed):
+    """flac_signal scaled to `bps` bits."""
+    full = flac_signal(count, channels, seed=seed, amplitude=12000)
+    shift = bps - 16
+    limit = (1 << (bps - 1)) - 1
+    return [[max(-limit - 1, min(limit, v << shift if shift >= 0 else v >> -shift)) for v in ch] for ch in full]
+
+
 def build_flac_fixtures():
     fx = []
 
-    def ok(name, rule, rate, channels_data, frames, blocks=(), group="accepted", block_size=None):
-        total = len(channels_data[0])
+    def ok(name, rule, rate, channels_data, frames, blocks=(), group="accepted", block_size=None, bps=16, md5=None,
+           tags=None, sizes=None, info_rate=None, total=None):
+        total = len(channels_data[0]) if total is None else total
         fx.append(FlacFixture(name, group, rule,
-                              flac_file(rate, len(channels_data), frames, total, blocks, block_size),
-                              channels=len(channels_data), rate=rate, samples=interleave(channels_data)))
+                              flac_file(rate if info_rate is None else info_rate, len(channels_data), frames, total,
+                                        blocks, block_size, bps, md5, sizes),
+                              channels=len(channels_data), rate=rate, samples=interleave(channels_data), bps=bps,
+                              md5=None if md5 is None else ("match" if md5 == flac_md5(interleave(channels_data), bps)
+                                                             else "mismatch"),
+                              tags=tags))
 
     def framed(rate, channels_data, block, **frame_options):
         """Frames of `block` samples (the last shorter), with options."""
@@ -2546,18 +2649,112 @@ def build_flac_fixtures():
     ok("flac_junk_between_frames", "Junk with false sync codes between the first two frames.", 44100, mono, frames,
        group="damaged", block_size=192)
 
+    # T26b: every sample size, variable blocking, metadata blocks, MD5.
+    def depth(name, rule, bps, channels, rate, assignment="independent", subframes=None, block=576, frames_count=2,
+              seed=20):
+        data = scaled_signal(block * frames_count, channels, bps, seed)
+        if bps > 16:
+            # Rice2's 5-bit parameters for wide residuals.
+            subframes = [(kind, dict(options, method=1) if kind in ("fixed", "lpc") else options)
+                         for kind, options in (subframes or [("fixed", {"order": 2})] * channels)]
+        ok(name, rule, rate, data, framed(rate, data, block, assignment=assignment, subframes=subframes, bps=bps),
+           block_size=block, bps=bps)
+
+    depth("flac_bps8_mono", "8-bit samples, the header's code 1: s16 output shifted by 8.", 8, 1, 8000,
+          subframes=[("fixed", {"order": 1})])
+    depth("flac_bps12_left_side", "12-bit left/side stereo (a 13-bit side channel).", 12, 2, 22050,
+          assignment="left_side")
+    depth("flac_bps20_lpc", "20-bit samples with LPC of order 8: s32 output shifted by 12.", 20, 1, 44100,
+          subframes=[("lpc", {"order": 8, "precision": 14})])
+    depth("flac_bps24_mid_side", "24-bit mid/side with LPC: a 25-bit side channel on the 64-bit prediction path.",
+          24, 2, 48000, assignment="mid_side",
+          subframes=[("lpc", {"order": 12, "precision": 15}), ("lpc", {"order": 12, "precision": 15})])
+    depth("flac_bps32_left_side_fixed", "32-bit left/side: a 33-bit side channel with a fixed predictor.", 32, 2,
+          96000, assignment="left_side", subframes=[("fixed", {"order": 1}), ("fixed", {"order": 2})], block=192)
+    depth("flac_bps32_right_side_lpc", "32-bit right/side: a 33-bit side channel with LPC.", 32, 2, 96000,
+          assignment="right_side", subframes=[("lpc", {"order": 4, "precision": 12}), ("lpc", {"order": 4})],
+          block=192)
+    depth("flac_bps32_mid_side_verbatim", "32-bit mid/side, verbatim: a 33-bit side channel read raw.", 32, 2,
+          44100, assignment="mid_side", subframes=[("verbatim", {}), ("verbatim", {})], block=64)
+    data = scaled_signal(256, 1, 32, 21)
+    data = [[(v >> 3) << 3 for v in data[0]]]
+    ok("flac_bps32_wasted_bits", "32-bit samples with three wasted bits.", 32000, data,
+       framed(32000, data, 256, bps=32, subframes=[("fixed", {"order": 2, "wasted": 3, "method": 1})]), block_size=256,
+       bps=32)
+    depth("flac_bps4_mono", "4-bit samples: the header defers the size to STREAMINFO (code 0).", 4, 1, 8000,
+          subframes=[("verbatim", {})], block=192)
+    depth("flac_bps10_stereo", "10-bit independent stereo, the size from STREAMINFO.", 10, 2, 16000, block=192)
+    depth("flac_bps28_lpc", "28-bit samples with LPC, the size from STREAMINFO.", 28, 1, 48000,
+          subframes=[("lpc", {"order": 6, "precision": 12})], block=256)
+
+    sizes_list = [100, 576, 32, 1000, 7]
+    data = scaled_signal(sum(sizes_list), 2, 16, 22)
+    frames, at = [], 0
+    for size in sizes_list:
+        frames.append(flac_frame(at, [c[at:at + size] for c in data], 44100, assignment="mid_side", var_size=True))
+        at += size
+    ok("flac_variable_blocksize", "Variable blocking: frames of 100, 576, 32, 1000 and 7 samples, each numbered by "
+       "its first sample.", 44100, data, frames, sizes=[7, 1000])
+
+    mono = flac_signal(576, 1, seed=3)
+    comments = [b"TITLE=Fixture", b"ARTIST=first", b"ALBUMARTIST=both", b"artist=second", b"DESCRIPTION=notes",
+                b"NOEQUALSIGN", b"=novalue", b"EMPTY=", "LANGUAGE=Português".encode(), b"TRACKNUMBER=3"]
+    ok("flac_vorbis_comment", "VORBIS_COMMENT: tags, a repeated key joined with ';', FFmpeg's renamings, entries "
+       "without a key or value skipped.", 44100, mono, framed(44100, mono, 576),
+       blocks=((4, vorbis_comment_block(b"zffmpeg fixtures", comments)),), block_size=576,
+       tags=vorbis_tags(comments))
+    ok("flac_vorbis_comment_truncated", "VORBIS_COMMENT claiming more comments than it holds: the ones present are "
+       "read.", 44100, mono, framed(44100, mono, 576),
+       blocks=((4, struct.pack("<I", 1) + b"v" + struct.pack("<I", 10) + struct.pack("<I", 10) + b"TITLE=kept"),),
+       block_size=576,
+       tags=[("TITLE", "kept")])
+    two = flac_signal(1152, 1, seed=23)
+    frames = framed(44100, two, 576)
+    ok("flac_seektable", "A SEEKTABLE with two points and a placeholder before the frames.", 44100, two, frames,
+       blocks=((3, seektable_block([(0, 0, 576), (576, len(frames[0]), 576), (0xFFFFFFFFFFFFFFFF, 0, 0)])),),
+       block_size=576)
+    png = bytes.fromhex("89504e470d0a1a0a0000000d4948445200000001000000010806000000")
+    ok("flac_picture", "A PICTURE block (a front cover in PNG) and PADDING.", 44100, mono, framed(44100, mono, 576),
+       blocks=((6, picture_block(3, b"image/png", b"cover", 1, 1, 32, 0, png)), (1, bytes(8))), block_size=576)
+    ok("flac_cuesheet", "A CUESHEET of two tracks and the lead-out: FFmpeg's chapters.", 44100, two,
+       framed(44100, two, 576),
+       blocks=((5, cuesheet_block(88200, [(0, 1, b"ABCDE1234567", [(0, 1)]), (576, 2, bytes(12), [(0, 1)]),
+                                          (1152, 170, bytes(12), [])])),), block_size=576)
+    ok("flac_md5_match", "STREAMINFO's MD5 matches the samples.", 44100, mono, framed(44100, mono, 576),
+       block_size=576, md5=flac_md5(interleave(mono), 16))
+    ok("flac_md5_mismatch", "STREAMINFO's MD5 does not match: decoding is unaffected; verification fails.", 44100,
+       mono, framed(44100, mono, 576), block_size=576, md5=bytes(range(16)))
+    ok("flac_streaminfo_rate0", "STREAMINFO's rate is 0: the frames give it.", 22050, mono, framed(22050, mono, 576),
+       block_size=576, info_rate=0)
+    ok("flac_no_total", "STREAMINFO without a sample count.", 44100, mono, framed(44100, mono, 576), block_size=576,
+       total=0)
+    ok("flac_headerless", "Frames without fLaC or metadata: FFmpeg's headerless mode.", 44100, mono,
+       framed(44100, mono, 576))
+    fx[-1].data = b"".join(framed(44100, mono, 576))
+    first = flac_signal(576, 1, seed=24)
+    second = flac_signal(576, 2, seed=25)
+    fx.append(FlacFixture("flac_channel_change", "damaged", "Mono, then a stereo frame: FFmpeg follows the change.",
+                          flac_file(44100, 1, [flac_frame(0, first, 44100), flac_frame(1, second, 44100)], 1152,
+                                    block_size=576)))
+    fx.append(FlacFixture("flac_rate_change", "damaged", "44.1 kHz, then a 48 kHz frame: FFmpeg follows the change.",
+                          flac_file(44100, 1, [flac_frame(0, first, 44100), flac_frame(1, first, 48000)], 1152,
+                                    block_size=576)))
+
     # Refused.
     info = streaminfo(44100, 1, 576)
-    bad("flac_bps24", "unsupported", "24-bit samples (STREAMINFO): T26b.",
-        b"fLaC" + flac_block(0, streaminfo(44100, 1, 576, bps=24), last=True), "UnsupportedFormat")
+    fx.append(FlacFixture("flac_bps24", "accepted", "24-bit STREAMINFO and no frames: an empty stream.",
+                          b"fLaC" + flac_block(0, streaminfo(44100, 1, 576, bps=24), last=True), channels=1,
+                          rate=44100, samples=[], bps=24))
+    bad("flac_bps3", "rejected", "STREAMINFO's sample size of 3 bits, below FLAC's 4.",
+        b"fLaC" + flac_block(0, streaminfo(44100, 1, 576, bps=3), last=True), "InvalidFlac")
+    bad("flac_second_streaminfo", "rejected", "A second STREAMINFO.",
+        b"fLaC" + flac_block(0, info) + flac_block(0, info, last=True), "InvalidFlac")
     bad("flac_no_streaminfo", "rejected", "The first block is PADDING: STREAMINFO must come first.",
         b"fLaC" + flac_block(1, bytes(8)) + flac_block(0, info, last=True), "InvalidFlac")
     bad("flac_streaminfo_short", "rejected", "STREAMINFO of 33 bytes.",
         b"fLaC" + flac_block(0, info[:33], last=True), "InvalidFlac")
     bad("flac_truncated_metadata", "rejected", "The file ends inside STREAMINFO.",
         b"fLaC" + flac_block(0, info, last=True)[:20], "Truncated")
-    bad("flac_no_marker", "unsupported", "Frames without fLaC and metadata: FFmpeg's headerless mode, T26b.",
-        b"".join(framed(44100, mono, 576)), "UnsupportedFormat")
 
     for name, (channels, rate, count, seed, options, digest) in FLAC_FFMPEG.items():
         fx.append(FlacFixture(name, "ffmpeg", f"FFmpeg's encoder, `{options}`; VORBIS_COMMENT and PADDING "
@@ -2571,8 +2768,23 @@ def chunks(items, size):
     return [items[i:i + size] for i in range(0, len(items), size)]
 
 
-def flac_pcm_sha256(samples):
-    return hashlib.sha256(b"".join(struct.pack("<h", v) for v in samples)).hexdigest()
+def flac_output_bytes(samples, bps):
+    """The decoder's output, FFmpeg's: s16 for at most 16 bits, else s32,
+    each sample shifted to the top of its storage, little-endian."""
+    if bps <= 16:
+        return b"".join(struct.pack("<h", v << (16 - bps)) for v in samples)
+    return b"".join(struct.pack("<i", v << (32 - bps)) for v in samples)
+
+
+def flac_pcm_sha256(samples, bps=16):
+    return hashlib.sha256(flac_output_bytes(samples, bps)).hexdigest()
+
+
+def flac_md5(samples, bps):
+    """STREAMINFO's MD5, the FLAC format's definition: the interleaved
+    samples, signed little-endian in the fewest whole bytes holding `bps`."""
+    width = (bps + 7) // 8
+    return hashlib.md5(b"".join(v.to_bytes(width, "little", signed=True) for v in samples)).digest()
 
 
 def render_flac_manifest(fixtures):
@@ -2593,8 +2805,16 @@ def render_flac_manifest(fixtures):
         elif f.group == "damaged":
             lines.append("        .expected = .damaged,")
         else:
+            extra = "" if f.bps == 16 else f", .bps = {f.bps}"
             lines.append(f"        .expected = .{{ .accept = .{{ .channels = {f.channels}, .sample_rate = {f.rate}, "
-                         f".frames = {len(f.samples) // f.channels}, .pcm_sha256 = \"{flac_pcm_sha256(f.samples)}\" }} }},")
+                         f".frames = {len(f.samples) // f.channels}, .pcm_sha256 = \"{flac_pcm_sha256(f.samples, f.bps)}\"{extra} }} }},")
+        if f.md5:
+            lines.append(f"        .md5 = .{f.md5},")
+        if f.tags:
+            lines.append("        .tags = .{")
+            for key, value in f.tags:
+                lines.append(f"            .{{ .key = {zig_string(key.encode())}, .value = {zig_string(value.encode())} }},")
+            lines.append("        },")
         lines.append("    },")
     lines.append("}")
     return "\n".join(lines) + "\n"

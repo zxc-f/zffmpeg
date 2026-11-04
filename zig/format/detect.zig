@@ -200,8 +200,9 @@ pub const Options = struct {
     /// The format, file name, length and raw parameters the caller knows.
     source: Source = .{},
     /// Also add the stream's tags to the empty `tags.dictionary`, under
-    /// FFmpeg's names (`wav.genericTags`). Only RIFF and RF64 streams carry
-    /// tags so far. On failure the dictionary may hold some of them.
+    /// FFmpeg's names (`wav.genericTags`): RIFF and RF64's INFO and `bext`,
+    /// and FLAC's VORBIS_COMMENT (T26b). On failure the dictionary may hold
+    /// some of them.
     tags: ?wav.Tags = null,
 };
 
@@ -260,21 +261,35 @@ pub fn probeWith(reader: *std.Io.Reader, limits: Limits, options: Options) Error
         },
         .flac => {
             // The frames are the decoder's to check; FFmpeg's probe reads
-            // the header, and the duration comes from STREAMINFO.
-            const info = try flac.readHeader(input.reader());
-            return .{
+            // the header, and the duration comes from STREAMINFO. Tags come
+            // from VORBIS_COMMENT (T26b).
+            var info = if (options.tags) |t| try flac.readHeaderAlloc(input.reader(), t.gpa) else try flac.readHeader(input.reader());
+            const probed: Probed = .{
                 .container = .flac,
                 .codec = .flac,
-                .format = try flacFormat(info),
+                .format = flacFormat(info) catch |err| {
+                    if (options.tags) |t| info.deinit(t.gpa);
+                    return err;
+                },
                 .frame_count = info.duration,
             };
+            if (options.tags) |t| {
+                std.debug.assert(t.dictionary.count() == 0);
+                t.dictionary.deinit(t.gpa);
+                t.dictionary.* = info.tags;
+                info.tags = .empty;
+                info.deinit(t.gpa);
+            }
+            return probed;
         },
     }
 }
 
-/// The decoded stream of a FLAC input: interleaved s16 in FFmpeg's layout.
+/// The decoded stream of a FLAC input: packed s16 or s32 in FFmpeg's
+/// layout; a rate neither STREAMINFO nor the first frame gives is
+/// `UnsupportedFormat`.
 pub fn flacFormat(info: flac.Info) error{UnsupportedFormat}!audio.Format {
-    return audio.Format.initLayout(info.stream_info.sample_rate, info.layout, .s16) catch error.UnsupportedFormat;
+    return audio.Format.initLayout(info.sample_rate, info.layout, info.sampleFormat()) catch error.UnsupportedFormat;
 }
 
 const fixtures = @import("../testing/fixtures.zig");

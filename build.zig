@@ -426,7 +426,10 @@ const probe_cases = [_]ProbeCase{
     // T26a: FLAC's report comes from STREAMINFO.
     .{ .name = "FLAC", .set = .flac, .fixture = "flac_mid_side", .exit_code = 0, .stdout = flac_mid_side_report, .stderr = "" },
     .{ .name = "FLAC 5.1 from a pipe", .set = .flac, .args = &.{"-"}, .stdin_fixture = "flac_six_channels_48k", .exit_code = 0, .stdout = flac_six_channels_report, .stderr = "" },
-    .{ .name = "24-bit FLAC", .set = .flac, .fixture = "flac_bps24", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
+    // T26b: every sample size; above 16 bits the samples are s32.
+    .{ .name = "24-bit FLAC", .set = .flac, .fixture = "flac_bps24", .exit_code = 0, .stdout = flac_bps24_report, .stderr = "" },
+    .{ .name = "FLAC tags", .set = .flac, .fixture = "flac_vorbis_comment", .exit_code = 0, .stdout_contains = "tag:artist=first;second\n", .stderr = "" },
+    .{ .name = "FLAC below 4 bits", .set = .flac, .fixture = "flac_bps3", .exit_code = 2, .stderr_contains = ": InvalidFlac\n" },
     .{ .name = "FLAC without STREAMINFO first", .set = .flac, .fixture = "flac_no_streaminfo", .exit_code = 2, .stderr_contains = ": InvalidFlac\n" },
     .{ .name = "a truncated FLAC header from a pipe", .set = .flac, .args = &.{"-"}, .stdin_fixture = "flac_truncated_metadata", .exit_code = 2, .stderr = "zffprobe: -: Truncated\n" },
 };
@@ -440,6 +443,19 @@ const flac_mid_side_report =
     \\sample_rate=44100
     \\nb_samples=1152
     \\duration_num=1152
+    \\duration_den=44100
+    \\
+;
+
+const flac_bps24_report =
+    \\format=flac
+    \\codec=flac
+    \\sample_fmt=s32
+    \\channels=1
+    \\channel_layout=mono
+    \\sample_rate=44100
+    \\nb_samples=576
+    \\duration_num=576
     \\duration_den=44100
     \\
 ;

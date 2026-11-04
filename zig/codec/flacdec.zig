@@ -1,13 +1,18 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Original file for this project; not translated from FFmpeg source.
 // libavcodec/flacdec.c (flac_decode_frame, decode_frame, decode_subframe,
-// decode_residuals, decode_subframe_fixed, decode_subframe_lpc,
-// lpc_analyze_remodulate), flacdsp.c (flac_lpc_16_c, flac_lpc_32_c,
-// flac_wasted_32_c), flacdsp_template.c (the s16 decorrelations) and
-// decode.c (decode_simple_internal's packet remainders) at the pinned
-// reference revision describe the behavior, restated here.
-//! The FLAC decoder for 16-bit streams (TODO.md T26a), as FFmpeg's decoder
-//! decodes them to interleaved s16 with its default options.
+// decode_residuals, decode_subframe_fixed and _wide and _33bps,
+// decode_subframe_lpc and _33bps, lpc_analyze_remodulate,
+// decorrelate_33bps, flac_set_bps, allocate_buffers), flacdsp.c
+// (flac_lpc_16_c, flac_lpc_32_c, flac_lpc_33_c, flac_wasted_32_c,
+// flac_wasted_33_c), flacdsp_template.c (the decorrelations) and decode.c
+// (decode_simple_internal's packet remainders) at the pinned reference
+// revision describe the behavior, restated here.
+//! The FLAC decoder (TODO.md T26a, T26b), as FFmpeg's decoder decodes a
+//! stream to packed samples with its default options: s16 for 4 to 16 bits
+//! per sample, s32 for 17 to 32, each sample shifted to the top of its
+//! storage. The side channel of 32-bit stereo has 33 bits, which the
+//! decoder keeps in 64 bits, as FFmpeg does.
 //!
 //! A packet is decoded as libavcodec feeds an audio decoder: the decoder
 //! reads one frame and reports the bytes it used, and what remains of the
@@ -15,11 +20,13 @@
 //! fails. So a packet with junk after a frame gives the frame and then an
 //! error, as FFmpeg's does. A failure drops the rest of the packet; the
 //! next packet decodes normally. The CRC-16 is not checked, FFmpeg's
-//! default.
+//! default. A frame with another channel count or rate than the stream's
+//! changes them, as FFmpeg's decoder follows such a change; its sample size
+//! may not change.
 //!
 //! Arithmetic follows FFmpeg's C: prediction wraps at 32 bits where the C
 //! code uses unsigned or 32-bit sums, uses 64-bit sums where it does, and
-//! the output keeps the low 16 bits of each sample.
+//! the output keeps the low bits of each shifted sample.
 
 const std = @import("std");
 const bits = @import("bits.zig");
@@ -28,17 +35,21 @@ const flac = @import("flac.zig");
 pub const DecodeError = error{
     /// FFmpeg's decoder refuses the frame (`AVERROR_INVALIDDATA`).
     InvalidData,
-    /// A frame the FLAC contract leaves to T26b: a variable block size, or
-    /// a channel count or rate other than STREAMINFO's.
-    UnsupportedFormat,
+    OutOfMemory,
+};
+
+/// A decoded frame's samples, interleaved; borrowed until the next call.
+pub const Samples = union(enum) {
+    s16: []const i16,
+    s32: []const i32,
 };
 
 /// A decoded frame, borrowed until the next call on the decoder.
 pub const Frame = struct {
-    /// Interleaved s16, `nb_samples * channels` values.
-    samples: []const i16,
+    samples: Samples,
     nb_samples: u32,
     channels: u8,
+    sample_rate: u32,
     /// The packet's timestamp; null for a packet's remainder.
     pts: ?i64,
 };
@@ -46,8 +57,11 @@ pub const Frame = struct {
 /// Why a frame failed, FFmpeg's log message for it.
 pub const Problem = enum {
     frame_header,
+    bps_missing,
     bps_switch,
     blocksize,
+    rate_missing,
+    streaminfo,
     subframe_padding,
     wasted_bits,
     coding_type,
@@ -61,12 +75,27 @@ pub const Problem = enum {
     metadata,
 };
 
+/// What the decoder knows of the stream: FFmpeg's FLACStreaminfo.
+const Stream = struct {
+    /// 0 until a header or frame gives it.
+    bps: u8 = 0,
+    channels: u8 = 0,
+    sample_rate: u32 = 0,
+    max_blocksize: u32 = 0,
+};
+
 pub const Decoder = struct {
     gpa: std.mem.Allocator,
-    info: flac.StreamInfo,
+    stream: Stream = .{},
+    got_streaminfo: bool = false,
     /// One buffer of `max_blocksize` samples per channel.
-    decoded: [][]i32,
-    output: []i16,
+    decoded: [][]i32 = &.{},
+    /// The 33-bit side channel of 32-bit stereo.
+    decoded_33: []i64 = &.{},
+    output16: []i16 = &.{},
+    output32: []i32 = &.{},
+    /// FFmpeg's `sample_shift`: to the top of the s16 or s32 storage.
+    sample_shift: u5 = 0,
     /// What remains of the packet being decoded, borrowed from the caller.
     pending: []const u8 = &.{},
     pending_pts: ?i64 = null,
@@ -75,28 +104,69 @@ pub const Decoder = struct {
     blocksize: u32 = 0,
     ch_mode: flac.ChannelMode = .independent,
 
-    /// flac_decode_init with STREAMINFO as extradata.
-    pub fn init(gpa: std.mem.Allocator, info: flac.StreamInfo) error{ OutOfMemory, UnsupportedFormat }!Decoder {
-        if (info.bps != 16 or info.max_blocksize < flac.min_blocksize) return error.UnsupportedFormat;
-        const decoded = try gpa.alloc([]i32, info.channels);
-        var made: usize = 0;
-        errdefer {
-            for (decoded[0..made]) |d| gpa.free(d);
-            gpa.free(decoded);
+    /// flac_decode_init: with STREAMINFO as extradata, or without (a
+    /// headerless stream), when the first frame gives the parameters.
+    pub fn init(gpa: std.mem.Allocator, info: ?flac.StreamInfo) error{ OutOfMemory, InvalidData }!Decoder {
+        var d: Decoder = .{ .gpa = gpa };
+        if (info) |si| {
+            errdefer d.deinit();
+            try d.setStreamInfo(si);
         }
-        for (decoded) |*d| {
-            d.* = try gpa.alloc(i32, info.max_blocksize);
-            made += 1;
-        }
-        const output = try gpa.alloc(i16, @as(usize, info.max_blocksize) * info.channels);
-        return .{ .gpa = gpa, .info = info, .decoded = decoded, .output = output };
+        return d;
     }
 
     pub fn deinit(d: *Decoder) void {
         for (d.decoded) |c| d.gpa.free(c);
         d.gpa.free(d.decoded);
-        d.gpa.free(d.output);
+        d.gpa.free(d.decoded_33);
+        d.gpa.free(d.output16);
+        d.gpa.free(d.output32);
         d.* = undefined;
+    }
+
+    /// ff_flac_parse_streaminfo, then allocate_buffers and flac_set_bps.
+    fn setStreamInfo(d: *Decoder, si: flac.StreamInfo) error{ OutOfMemory, InvalidData }!void {
+        if (si.max_blocksize < flac.min_blocksize or si.bps < 4) return error.InvalidData;
+        d.stream = .{ .bps = si.bps, .channels = si.channels, .sample_rate = si.sample_rate, .max_blocksize = si.max_blocksize };
+        try d.allocateBuffers();
+        d.setBps();
+        d.got_streaminfo = true;
+    }
+
+    fn setBps(d: *Decoder) void {
+        d.sample_shift = @intCast(if (d.stream.bps > 16) 32 - @as(u8, d.stream.bps) else 16 - @as(u8, d.stream.bps));
+    }
+
+    /// allocate_buffers: per-channel buffers of `max_blocksize`, the 64-bit
+    /// one for 32-bit stereo, and the output.
+    fn allocateBuffers(d: *Decoder) error{OutOfMemory}!void {
+        const gpa = d.gpa;
+        const n: usize = d.stream.max_blocksize;
+        const channels: usize = d.stream.channels;
+        const decoded = try gpa.alloc([]i32, channels);
+        var made: usize = 0;
+        errdefer {
+            for (decoded[0..made]) |c| gpa.free(c);
+            gpa.free(decoded);
+        }
+        for (decoded) |*c| {
+            c.* = try gpa.alloc(i32, n);
+            made += 1;
+        }
+        const wide = if (d.stream.bps == 32 and channels == 2) try gpa.alloc(i64, n) else try gpa.alloc(i64, 0);
+        errdefer gpa.free(wide);
+        const out16 = try gpa.alloc(i16, n * channels);
+        errdefer gpa.free(out16);
+        const out32 = try gpa.alloc(i32, n * channels);
+        for (d.decoded) |c| gpa.free(c);
+        gpa.free(d.decoded);
+        gpa.free(d.decoded_33);
+        gpa.free(d.output16);
+        gpa.free(d.output32);
+        d.decoded = decoded;
+        d.decoded_33 = wide;
+        d.output16 = out16;
+        d.output32 = out32;
     }
 
     /// avcodec_send_packet: `data` is borrowed until `receive` returns null
@@ -123,10 +193,12 @@ pub const Decoder = struct {
                 d.pending_pts = null;
             }
             if (result.frame) {
+                const count = @as(usize, d.blocksize) * d.stream.channels;
                 return .{
-                    .samples = d.output[0 .. @as(usize, d.blocksize) * d.info.channels],
+                    .samples = if (d.stream.bps > 16) .{ .s32 = d.output32[0..count] } else .{ .s16 = d.output16[0..count] },
                     .nb_samples = d.blocksize,
-                    .channels = d.info.channels,
+                    .channels = d.stream.channels,
+                    .sample_rate = d.stream.sample_rate,
                     .pts = pts,
                 };
             }
@@ -148,7 +220,9 @@ pub const Decoder = struct {
         // Smaller than the smallest decodable frame.
         if (buf.len < flac.min_frame_size) return .{ .consumed = buf.len, .frame = false };
         if (std.mem.readInt(u32, buf[0..4], .big) == std.mem.readInt(u32, "fLaC", .big)) {
-            // An inline header after STREAMINFO: skipped by its size.
+            // An inline header: its STREAMINFO if none came before, then
+            // skipped by its size.
+            if (!d.got_streaminfo) try d.inlineStreamInfo(buf);
             return .{ .consumed = try d.metadataSize(buf), .frame = false };
         }
         var r = bits.BitReader.init(buf) catch return d.fail(.overread);
@@ -157,6 +231,18 @@ pub const Decoder = struct {
         d.decorrelate();
         if (bytes_read > buf.len) return d.fail(.overread);
         return .{ .consumed = bytes_read, .frame = true };
+    }
+
+    /// parse_streaminfo: an inline header's first block.
+    fn inlineStreamInfo(d: *Decoder, buf: []const u8) DecodeError!void {
+        // FFmpeg waits for more data with fewer bytes, which a packet never
+        // brings; the size check below then refuses it.
+        if (buf.len < flac.streaminfo_size + 8) return;
+        if (buf[4] & 0x7f != 0 or std.mem.readInt(u24, buf[5..8], .big) != flac.streaminfo_size) return d.fail(.streaminfo);
+        d.setStreamInfo(flac.StreamInfo.parse(buf[8..][0..flac.streaminfo_size])) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.InvalidData => d.fail(.streaminfo),
+        };
     }
 
     /// get_metadata_size: the bytes of `fLaC` and its blocks.
@@ -175,27 +261,45 @@ pub const Decoder = struct {
 
     /// decode_frame.
     fn decodeFrame(d: *Decoder, r: *bits.BitReader) DecodeError!void {
-        const fi = switch (flac.decodeFrameHeader(r)) {
+        var fi = switch (flac.decodeFrameHeader(r)) {
             .ok => |fi| fi,
             .invalid => return d.fail(.frame_header),
         };
-        // T26b: FFmpeg follows a change of channels or rate mid-stream, and
-        // reads variable block sizes.
-        if (fi.channels != d.info.channels or fi.is_var_size) return error.UnsupportedFormat;
-        if (fi.sample_rate != 0 and fi.sample_rate != d.info.sample_rate) return error.UnsupportedFormat;
+        if (d.stream.channels != 0 and fi.channels != d.stream.channels and d.got_streaminfo) {
+            d.stream.channels = fi.channels;
+            try d.allocateBuffers();
+        }
+        d.stream.channels = fi.channels;
         d.ch_mode = fi.ch_mode;
-        if (fi.bps != 0 and fi.bps != d.info.bps) return d.fail(.bps_switch);
-        if (fi.blocksize > d.info.max_blocksize) return d.fail(.blocksize);
+        if (d.stream.bps == 0 and fi.bps == 0) return d.fail(.bps_missing);
+        if (fi.bps == 0) {
+            fi.bps = d.stream.bps;
+        } else if (d.stream.bps != 0 and fi.bps != d.stream.bps) {
+            return d.fail(.bps_switch);
+        }
+        if (d.stream.bps == 0) {
+            d.stream.bps = fi.bps;
+            d.setBps();
+        }
+        if (d.stream.max_blocksize == 0) d.stream.max_blocksize = flac.max_blocksize;
+        if (fi.blocksize > d.stream.max_blocksize) return d.fail(.blocksize);
         d.blocksize = fi.blocksize;
-        for (0..d.info.channels) |ch| try d.decodeSubframe(r, ch);
+        if (d.stream.sample_rate == 0 and fi.sample_rate == 0) return d.fail(.rate_missing);
+        if (fi.sample_rate == 0) fi.sample_rate = d.stream.sample_rate;
+        d.stream.sample_rate = fi.sample_rate;
+        if (!d.got_streaminfo) {
+            try d.allocateBuffers();
+            d.got_streaminfo = true;
+        }
+        for (0..d.stream.channels) |ch| try d.decodeSubframe(r, ch);
         r.alignByte();
         r.skip(16); // the CRC-16, unchecked
     }
 
-    /// decode_subframe for a channel of at most 32 bits.
+    /// decode_subframe.
     fn decodeSubframe(d: *Decoder, r: *bits.BitReader, channel: usize) DecodeError!void {
         const decoded = d.decoded[channel][0..d.blocksize];
-        var bps: u6 = @intCast(d.info.bps);
+        var bps: u7 = @intCast(d.stream.bps);
         if (channel == 0) {
             if (d.ch_mode == .right_side) bps += 1;
         } else {
@@ -203,26 +307,40 @@ pub const Decoder = struct {
         }
         if (r.bit() != 0) return d.fail(.subframe_padding);
         const subframe_type = r.bits(6);
-        var wasted: u6 = 0;
+        var wasted: u7 = 0;
         if (r.bit() != 0) {
             const left = r.left();
             if (left <= 0 or
                 (left < bps and r.peek(@intCast(left)) == 0) or
-                r.peek(bps - 1) == 0) return d.fail(.wasted_bits);
+                r.peek(@intCast(bps - 1)) == 0) return d.fail(.wasted_bits);
             wasted = @intCast(1 + r.unary(1, r.left()));
             bps -= wasted;
         }
+        const wide = d.decoded_33[0..if (bps >= 33 or wasted + bps == 33) d.blocksize else 0];
         switch (subframe_type) {
-            0 => @memset(decoded, r.signed(bps)),
-            1 => for (decoded) |*s| {
-                s.* = r.signed(bps);
+            0 => if (bps < 33) @memset(decoded, r.signed(@intCast(bps))) else @memset(wide, r.signed64(33)),
+            1 => if (bps < 33) {
+                for (decoded) |*s| s.* = r.signed(@intCast(bps));
+            } else {
+                for (wide) |*s| s.* = r.signed64(33);
             },
-            8...12 => try d.decodeFixed(r, decoded, @intCast(subframe_type & ~@as(u32, 0x8)), bps),
-            32...63 => try d.decodeLpc(r, decoded, @intCast((subframe_type & ~@as(u32, 0x20)) + 1), bps),
+            8...12 => {
+                const order: u32 = subframe_type & ~@as(u32, 0x8);
+                if (bps < 33) try d.decodeFixed(r, decoded, order, @intCast(bps)) else try d.decodeFixed33(r, wide, decoded, order);
+            },
+            32...63 => {
+                const order: u32 = (subframe_type & ~@as(u32, 0x20)) + 1;
+                if (bps < 33) try d.decodeLpc(r, decoded, order, @intCast(bps)) else try d.decodeLpc33(r, wide, decoded, order);
+            },
             else => return d.fail(.coding_type),
         }
-        if (wasted > 0 and wasted < 32) {
-            for (decoded) |*s| s.* = @bitCast(@as(u32, @bitCast(s.*)) << @intCast(wasted));
+        if (wasted > 0) {
+            if (wasted + bps == 33) {
+                // flac_wasted_33_c: into the 64-bit buffer.
+                for (wide, decoded) |*w, s| w.* = @bitCast(@as(u64, @bitCast(@as(i64, s))) << @intCast(wasted));
+            } else if (wasted < 32) {
+                for (decoded) |*s| s.* = @bitCast(@as(u32, @bitCast(s.*)) << @intCast(wasted));
+            }
         }
     }
 
@@ -261,7 +379,8 @@ pub const Decoder = struct {
         }
     }
 
-    /// decode_subframe_fixed: unsigned (wrapping) recurrences, as FFmpeg's.
+    /// decode_subframe_fixed (and _wide, which gives the same 32-bit
+    /// results): unsigned, wrapping recurrences, as FFmpeg's.
     fn decodeFixed(d: *Decoder, r: *bits.BitReader, decoded: []i32, order: u32, bps: u6) DecodeError!void {
         for (decoded[0..order]) |*s| s.* = r.signed(bps);
         try d.decodeResiduals(r, decoded, order);
@@ -303,57 +422,136 @@ pub const Decoder = struct {
         }
     }
 
-    /// decode_subframe_lpc, without FFmpeg's `use_buggy_lpc` emulation.
-    fn decodeLpc(d: *Decoder, r: *bits.BitReader, decoded: []i32, order: u32, bps: u6) DecodeError!void {
-        for (decoded[0..order]) |*s| s.* = r.signed(bps);
+    /// decode_subframe_fixed_33bps: 33-bit warm-up samples, 64-bit
+    /// wrapping prediction from the 32-bit residual.
+    fn decodeFixed33(d: *Decoder, r: *bits.BitReader, wide: []i64, residual: []i32, order: u32) DecodeError!void {
+        for (wide[0..order]) |*s| s.* = r.signed64(33);
+        try d.decodeResiduals(r, residual, order);
+        const u = struct {
+            fn of(v: i64) u64 {
+                return @bitCast(v);
+            }
+        }.of;
+        for (order..wide.len) |i| {
+            const res = u(residual[i]);
+            const v: u64 = switch (order) {
+                0 => res,
+                1 => res +% u(wide[i - 1]),
+                2 => res +% 2 *% u(wide[i - 1]) -% u(wide[i - 2]),
+                3 => res +% 3 *% u(wide[i - 1]) -% 3 *% u(wide[i - 2]) +% u(wide[i - 3]),
+                4 => res +% 4 *% u(wide[i - 1]) -% 6 *% u(wide[i - 2]) +% 4 *% u(wide[i - 3]) -% u(wide[i - 4]),
+                else => unreachable,
+            };
+            wide[i] = @bitCast(v);
+        }
+    }
+
+    /// The precision, shift and coefficients of an LPC subframe.
+    fn lpcParameters(d: *Decoder, r: *bits.BitReader, order: u32, coeffs: *[32]i32) DecodeError!struct { prec: u6, qlevel: u5 } {
         const coeff_prec: u6 = @intCast(r.bits(4) + 1);
         if (coeff_prec == 16) return d.fail(.coeff_precision);
         const qlevel_signed = r.signed(5);
         if (qlevel_signed < 0) return d.fail(.qlevel);
-        const qlevel: u5 = @intCast(qlevel_signed);
-        var coeffs: [32]i32 = undefined;
         for (0..order) |i| coeffs[order - i - 1] = r.signed(coeff_prec);
+        return .{ .prec = coeff_prec, .qlevel = @intCast(qlevel_signed) };
+    }
+
+    /// decode_subframe_lpc, without FFmpeg's `use_buggy_lpc` emulation.
+    fn decodeLpc(d: *Decoder, r: *bits.BitReader, decoded: []i32, order: u32, bps: u6) DecodeError!void {
+        for (decoded[0..order]) |*s| s.* = r.signed(bps);
+        var coeffs: [32]i32 = undefined;
+        const p = try d.lpcParameters(r, order, &coeffs);
         try d.decodeResiduals(r, decoded, order);
         const log2_order: u32 = std.math.log2_int(u32, order);
-        if (bps <= 16 and bps + coeff_prec + log2_order <= 32) {
-            lpc16(decoded, coeffs[0..order], qlevel);
+        if (bps <= 16 and bps + p.prec + log2_order <= 32) {
+            lpc16(decoded, coeffs[0..order], p.qlevel);
         } else {
-            lpc32(decoded, coeffs[0..order], qlevel);
-            if (d.info.bps <= 16) lpcAnalyzeRemodulate(decoded, coeffs[0..order], qlevel, bps);
+            lpc32(decoded, coeffs[0..order], p.qlevel);
+            if (d.stream.bps <= 16) lpcAnalyzeRemodulate(decoded, coeffs[0..order], p.qlevel, bps);
         }
     }
 
-    /// The s16 decorrelations for the frame's channel mode.
+    /// decode_subframe_lpc_33bps with flac_lpc_33_c.
+    fn decodeLpc33(d: *Decoder, r: *bits.BitReader, wide: []i64, residual: []i32, order: u32) DecodeError!void {
+        for (wide[0..order]) |*s| s.* = r.signed64(33);
+        var coeffs: [32]i32 = undefined;
+        const p = try d.lpcParameters(r, order, &coeffs);
+        try d.decodeResiduals(r, residual, order);
+        for (order..wide.len) |i| {
+            var sum: i64 = 0;
+            for (coeffs[0..order], wide[i - order .. i]) |c, s| sum +%= @as(i64, c) *% s;
+            wide[i] = @bitCast(@as(u64, @bitCast(@as(i64, residual[i]))) +% @as(u64, @bitCast(sum >> p.qlevel)));
+        }
+    }
+
+    /// decorrelate_33bps for 32-bit stereo, then the decorrelations into the
+    /// shifted s16 or s32 output.
     fn decorrelate(d: *Decoder) void {
         const n = d.blocksize;
-        const channels = d.info.channels;
-        const out = d.output[0 .. @as(usize, n) * channels];
-        switch (d.ch_mode) {
-            .independent => for (0..n) |i| {
-                for (0..channels) |ch| out[i * channels + ch] = @truncate(d.decoded[ch][i]);
-            },
-            .left_side => for (0..n) |i| {
-                const a: u32 = @bitCast(d.decoded[0][i]);
-                const b: u32 = @bitCast(d.decoded[1][i]);
-                out[2 * i] = @bitCast(@as(u16, @truncate(a)));
-                out[2 * i + 1] = @bitCast(@as(u16, @truncate(a -% b)));
-            },
-            .right_side => for (0..n) |i| {
-                const a: u32 = @bitCast(d.decoded[0][i]);
-                const b: u32 = @bitCast(d.decoded[1][i]);
-                out[2 * i] = @bitCast(@as(u16, @truncate(a +% b)));
-                out[2 * i + 1] = @bitCast(@as(u16, @truncate(b)));
-            },
-            .mid_side => for (0..n) |i| {
-                var a: u32 = @bitCast(d.decoded[0][i]);
-                const b: i32 = d.decoded[1][i];
-                a -%= @bitCast(b >> 1);
-                out[2 * i] = @bitCast(@as(u16, @truncate(a +% @as(u32, @bitCast(b)))));
-                out[2 * i + 1] = @bitCast(@as(u16, @truncate(a)));
-            },
+        const channels = d.stream.channels;
+        var mode = d.ch_mode;
+        if (d.stream.bps == 32 and mode != .independent) {
+            const left = d.decoded[0];
+            const right = d.decoded[1];
+            for (0..n) |i| {
+                const w: u64 = @bitCast(d.decoded_33[i]);
+                switch (mode) {
+                    .left_side => right[i] = @truncate(@as(i64, @bitCast(@as(u64, @bitCast(@as(i64, left[i]))) -% w))),
+                    .right_side => left[i] = @truncate(@as(i64, @bitCast(@as(u64, @bitCast(@as(i64, right[i]))) +% w))),
+                    .mid_side => {
+                        var a: u64 = @bitCast(@as(i64, left[i]));
+                        a -%= @bitCast(d.decoded_33[i] >> 1);
+                        left[i] = @truncate(@as(i64, @bitCast(a +% w)));
+                        right[i] = @truncate(@as(i64, @bitCast(a)));
+                    },
+                    .independent => unreachable,
+                }
+            }
+            mode = .independent;
+        }
+        const shift = d.sample_shift;
+        if (d.stream.bps > 16) {
+            decorrelateInto(i32, d.output32[0 .. @as(usize, n) * channels], d.decoded, channels, n, mode, shift);
+        } else {
+            decorrelateInto(i16, d.output16[0 .. @as(usize, n) * channels], d.decoded, channels, n, mode, shift);
         }
     }
 };
+
+/// flacdsp_template.c's packed decorrelations: `(unsigned)sample << shift`,
+/// truncated to the output's width.
+fn decorrelateInto(comptime T: type, out: []T, decoded: []const []i32, channels: usize, n: u32, mode: flac.ChannelMode, shift: u5) void {
+    const U = @Int(.unsigned, @bitSizeOf(T));
+    const store = struct {
+        fn of(v: u32, s: u5) T {
+            return @bitCast(@as(U, @truncate(v << s)));
+        }
+    }.of;
+    switch (mode) {
+        .independent => for (0..n) |i| {
+            for (0..channels) |ch| out[i * channels + ch] = store(@bitCast(decoded[ch][i]), shift);
+        },
+        .left_side => for (0..n) |i| {
+            const a: u32 = @bitCast(decoded[0][i]);
+            const b: u32 = @bitCast(decoded[1][i]);
+            out[2 * i] = store(a, shift);
+            out[2 * i + 1] = store(a -% b, shift);
+        },
+        .right_side => for (0..n) |i| {
+            const a: u32 = @bitCast(decoded[0][i]);
+            const b: u32 = @bitCast(decoded[1][i]);
+            out[2 * i] = store(a +% b, shift);
+            out[2 * i + 1] = store(b, shift);
+        },
+        .mid_side => for (0..n) |i| {
+            var a: u32 = @bitCast(decoded[0][i]);
+            const b: i32 = decoded[1][i];
+            a -%= @bitCast(b >> 1);
+            out[2 * i] = store(a +% @as(u32, @bitCast(b)), shift);
+            out[2 * i + 1] = store(a, shift);
+        },
+    }
+}
 
 /// flac_lpc_16_c: 32-bit wrapping sums. FFmpeg computes two samples at a
 /// time; wrapping addition makes the order irrelevant.
@@ -486,7 +684,7 @@ test "a constant frame decodes, and a verbatim one with wasted bits" {
     const got = (try d.receive()).?;
     try testing.expectEqual(16, got.nb_samples);
     try testing.expectEqual(7, got.pts);
-    for (got.samples) |s| try testing.expectEqual(-1234, s);
+    for (got.samples.s16) |s| try testing.expectEqual(-1234, s);
     try testing.expectEqual(null, try d.receive());
 
     var w: TestBits = .{};
@@ -502,7 +700,7 @@ test "a constant frame decodes, and a verbatim one with wasted bits" {
     const verbatim = w.finish();
     d.send(verbatim, null);
     const v = (try d.receive()).?;
-    for (v.samples, 0..) |s, i| {
+    for (v.samples.s16, 0..) |s, i| {
         const index: i16 = @intCast(i);
         try testing.expectEqual((index - 8) * 8, s);
     }
@@ -666,23 +864,54 @@ test "every refusal of a frame" {
     }
 }
 
-test "frames left to T26b" {
+test "a frame that changes the channels or blocking decodes, as FFmpeg's does" {
+    var d = try Decoder.init(testing.allocator, test_info);
+    defer d.deinit();
     {
-        // Stereo in a mono stream.
+        // Stereo in a mono stream: two constant subframes.
         var t: TestBits = .{};
         t.header(16, 1, 4, false);
-        t.put(16, 0);
-        try testing.expectError(error.UnsupportedFormat, decodeOne(test_info, t.finish()));
+        for (0..2) |_| {
+            t.put(1, 0);
+            t.put(6, 0);
+            t.put(1, 0);
+            t.signed(16, 7);
+        }
+        d.send(t.finish(), 0);
+        const frame = (try d.receive()).?;
+        try testing.expectEqual(2, frame.channels);
+        try testing.expectEqual(32, frame.samples.s16.len);
     }
     {
+        // A variable-blocking frame.
         var t: TestBits = .{};
         t.header(16, 0, 4, true);
-        t.put(16, 0);
-        try testing.expectError(error.UnsupportedFormat, decodeOne(test_info, t.finish()));
+        t.put(1, 0);
+        t.put(6, 0);
+        t.put(1, 0);
+        t.signed(16, 7);
+        d.send(t.finish(), 0);
+        try testing.expectEqual(16, (try d.receive()).?.nb_samples);
     }
+}
+
+test "STREAMINFO the decoder refuses, and output above 16 bits" {
     var info = test_info;
+    info.bps = 3;
+    try testing.expectError(error.InvalidData, Decoder.init(testing.allocator, info));
     info.bps = 24;
-    try testing.expectError(error.UnsupportedFormat, Decoder.init(testing.allocator, info));
+    var d = try Decoder.init(testing.allocator, info);
+    defer d.deinit();
+    // A 24-bit constant frame (code 6): s32, shifted by 8.
+    var t: TestBits = .{};
+    t.header(16, 0, 6, false);
+    t.put(1, 0);
+    t.put(6, 0);
+    t.put(1, 0);
+    t.signed(24, -3);
+    d.send(t.finish(), 0);
+    const frame = (try d.receive()).?;
+    for (frame.samples.s32) |s| try testing.expectEqual(-3 * 256, s);
 }
 
 test "allocation failures leave nothing behind" {

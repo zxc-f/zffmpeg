@@ -1,10 +1,108 @@
+F flac_bps10_stereo
+O ok
+S flac 16000 2 stereo 10 1/16000 384 0 s16
+P 406 0 0 192 0x1 0x7aa4bc81
+D 192 0 0x55862a61
+P 400 192 192 192 0x1 0x86b2c575
+D 192 192 0xcb5d680d
+R EOF
+F flac_bps12_left_side
+O ok
+S flac 22050 2 stereo 12 1/22050 1152 0 s16
+P 1515 0 0 576 0x1 0x84d3e599
+D 576 0 0x11d36df0
+P 1509 576 576 576 0x1 0x2a5ce5d3
+D 576 576 0xb4786627
+R EOF
+F flac_bps20_lpc
+O ok
+S flac 44100 1 mono 20 1/44100 1152 0 s32
+P 1302 0 0 576 0x1 0x7f9c8453
+D 576 0 0x07c41665
+P 1305 576 576 576 0x1 0xb4928330
+D 576 576 0x458674be
+R EOF
 F flac_bps24
 O ok
-S flac 44100 1 mono 24 1/44100 576 N
+S flac 44100 1 mono 24 1/44100 576 N s32
+R EOF
+F flac_bps24_mid_side
+O ok
+S flac 48000 2 stereo 24 1/48000 1152 0 s32
+P 3180 0 0 576 0x1 0x2b760e5f
+D 576 0 0x76228eb4
+P 3176 576 576 576 0x1 0xe87f041f
+D 576 576 0x6ef28702
+R EOF
+F flac_bps28_lpc
+O ok
+S flac 48000 1 mono 28 1/48000 512 0 s32
+P 846 0 0 256 0x1 0x935c9ecb
+D 256 0 0x07cad5e8
+P 844 256 256 256 0x1 0xa61293c0
+D 256 256 0x67d50a10
+R EOF
+F flac_bps32_left_side_fixed
+O ok
+S flac 96000 2 stereo 32 1/96000 384 0 s32
+P 1468 0 0 192 0x1 0xa645cd0e
+D 192 0 0x698f5a2a
+P 1460 192 192 192 0x1 0x93b1c954
+D 192 192 0xd2be99ac
+R EOF
+F flac_bps32_mid_side_verbatim
+O ok
+S flac 44100 2 stereo 32 1/44100 128 0 s32
+P 531 0 0 64 0x1 0x5a808d6e
+D 64 0 0x9ee88259
+P 531 64 64 64 0x1 0x5e2a7f9e
+D 64 64 0x581760b8
+R EOF
+F flac_bps32_right_side_lpc
+O ok
+S flac 96000 2 stereo 32 1/96000 384 0 s32
+P 1469 0 0 192 0x1 0x8165acff
+D 192 0 0x698f5a2a
+P 1462 192 192 192 0x1 0x8821cfbf
+D 192 192 0xd2be99ac
+R EOF
+F flac_bps32_wasted_bits
+O ok
+S flac 32000 1 mono 32 1/32000 256 N s32
+P 880 0 0 256 0x1 0xd7649311
+D 256 0 0xfdf4fdef
+R EOF
+F flac_bps3
+O ok
+S flac 0 0 0 channels 0 1/44100 576 N none
+E INVALIDDATA
+F flac_bps4_mono
+O ok
+S flac 8000 1 mono 4 1/8000 384 0 s16
+P 105 0 0 192 0x1 0x24112465
+D 192 0 0x3ed73cc0
+P 105 192 192 192 0x1 0x9d873032
+D 192 192 0xb03255b0
+R EOF
+F flac_bps8_mono
+O ok
+S flac 8000 1 mono 8 1/8000 1152 0 s16
+P 422 0 0 576 0x1 0x471ad640
+D 576 0 0x30680273
+P 425 576 576 576 0x1 0xc990d151
+D 576 576 0x2a9f501e
+R EOF
+F flac_channel_change
+O ok
+S flac 44100 1 mono 16 1/44100 1152 0 s16
+P 1031 0 0 576 0x1 0x6c13f549
+D 576 0 0x6b481d84
+P 2055 576 576 576 0x1 0xff0afc9e
+D 576 576 0xce4564ef
 R EOF
 F flac_constant_mono_8k
 O ok
-S flac 8000 1 mono 16 1/8000 256 0
+S flac 8000 1 mono 16 1/8000 256 0 s16
 P 12 0 0 64 0x1 0x20810402
 D 64 0 0x00000000
 P 12 64 64 64 0x1 0x21c00454
@@ -16,7 +114,7 @@ D 64 192 0x21285f80
 R EOF
 F flac_corrupt_frame_data
 O ok
-S flac 44100 1 mono 16 1/44100 576 0
+S flac 44100 1 mono 16 1/44100 576 0 s16
 P 351 0 0 192 0x1 0x7d5ca9b1
 D 192 0 0xf170abdc
 P 348 192 192 192 0x1 0x53fcaad7
@@ -24,9 +122,19 @@ D 192 192 0xc937b0a5
 P 349 384 384 192 0x1 0x7152a345
 D 192 384 0x8173c541
 R EOF
+F flac_cuesheet
+O ok
+S flac 44100 1 mono 16 1/44100 1152 0 s16
+C 0 576 1/44100 ABCDE1234567
+C 576 1152 1/44100 
+P 1027 0 0 576 0x1 0xdbfff04c
+D 576 0 0xe2d15a1c
+P 1028 576 576 576 0x1 0x9ed9ea40
+D 576 576 0xbf156de2
+R EOF
 F flac_ffmpeg_level0_stereo
 O ok
-S flac 44100 2 stereo 16 1/44100 9216 0
+S flac 44100 2 stereo 16 1/44100 9216 0 s16
 P 4095 0 0 1152 0x1 0x840aac88
 D 1152 0 0x3322bd32
 P 4090 1152 1152 1152 0x1 0xfbfbb5fb
@@ -46,7 +154,7 @@ D 1152 8064 0x356d375a
 R EOF
 F flac_ffmpeg_level12_stereo
 O ok
-S flac 48000 2 stereo 16 1/48000 6000 0
+S flac 48000 2 stereo 16 1/48000 6000 0 s16
 P 6884 0 0 2000 0x1 0x05166d62
 D 2000 0 0x3f15f824
 P 6881 2000 2000 2000 0x1 0x906187a0
@@ -56,7 +164,7 @@ D 2000 4000 0x7c7801b1
 R EOF
 F flac_ffmpeg_level5_stereo
 O ok
-S flac 44100 2 stereo 16 1/44100 9216 0
+S flac 44100 2 stereo 16 1/44100 9216 0 s16
 P 3973 0 0 1152 0x1 0xd898d477
 D 1152 0 0x3322bd32
 P 3976 1152 1152 1152 0x1 0xa5d9be24
@@ -76,7 +184,7 @@ D 1152 8064 0x356d375a
 R EOF
 F flac_ffmpeg_level8_mono
 O ok
-S flac 8000 1 mono 16 1/8000 4000 0
+S flac 8000 1 mono 16 1/8000 4000 0 s16
 P 897 0 0 512 0x1 0x320bbc33
 D 512 0 0x79e60903
 P 901 512 512 512 0x1 0xc208c303
@@ -96,7 +204,7 @@ D 416 3584 0xcd3a7506
 R EOF
 F flac_ffmpeg_lpc_orders
 O ok
-S flac 44100 1 mono 16 1/44100 8192 0
+S flac 44100 1 mono 16 1/44100 8192 0 s16
 P 895 0 0 512 0x1 0x4b87bfee
 D 512 0 0x5f98cf8b
 P 890 512 512 512 0x1 0x49c7c435
@@ -132,7 +240,7 @@ D 512 7680 0xa22002ae
 R EOF
 F flac_fixed_orders_mono
 O ok
-S flac 44100 1 mono 16 1/44100 2880 0
+S flac 44100 1 mono 16 1/44100 2880 0 s16
 P 1091 0 0 576 0x1 0x145e160e
 D 576 0 0x6bb52624
 P 998 576 576 576 0x1 0xf97ff87a
@@ -144,9 +252,15 @@ D 576 1728 0x67e3571e
 P 1157 2304 2304 576 0x1 0xc99640e2
 D 576 2304 0xf5943d08
 R EOF
+F flac_headerless
+O ok
+S flac 44100 1 mono 16 1/44100 N N s16
+P 1027 0 0 576 0x1 0x420dfdf7
+D 576 0 0x1d8622a5
+R EOF
 F flac_junk_between_frames
 O ok
-S flac 44100 1 mono 16 1/44100 576 N
+S flac 44100 1 mono 16 1/44100 576 N s16
 P 361 0 0 192 0x1 0x3e0eaf9e
 D 192 0 0xf170abdc
 X INVALIDDATA
@@ -155,7 +269,7 @@ D 192 192 0x8173c541
 R EOF
 F flac_left_side
 O ok
-S flac 44100 2 stereo 16 1/44100 1152 0
+S flac 44100 2 stereo 16 1/44100 1152 0 s16
 P 2090 0 0 576 0x1 0xa755f6f7
 D 576 0 0x471c6ba4
 P 2095 576 576 576 0x1 0x112804aa
@@ -163,7 +277,7 @@ D 576 576 0x667a8045
 R EOF
 F flac_lpc_orders_mono
 O ok
-S flac 44100 1 mono 16 1/44100 16384 0
+S flac 44100 1 mono 16 1/44100 16384 0 s16
 P 7035 0 0 4096 0x1 0x4deeae06
 D 4096 0 0xbceabde9
 P 7050 4096 4096 4096 0x1 0x45e5bccd
@@ -175,19 +289,19 @@ D 4096 12288 0xe188d46f
 R EOF
 F flac_lpc_precision
 O ok
-S flac 48000 2 stereo 16 1/48000 1152 N
+S flac 48000 2 stereo 16 1/48000 1152 N s16
 P 3951 0 0 1152 0x1 0x38d47083
 D 1152 0 0xaa5debe9
 R EOF
 F flac_lpc_zero_shift
 O ok
-S flac 32000 1 mono 16 1/32000 576 N
+S flac 32000 1 mono 16 1/32000 576 N s16
 P 1031 0 0 576 0x1 0xcfa2f666
 D 576 0 0x1d8622a5
 R EOF
 F flac_many_frames
 O ok
-S flac 8000 1 mono 16 1/8000 4800 0
+S flac 8000 1 mono 16 1/8000 4800 0 s16
 P 40 0 0 16 0x1 0x542b11f1
 D 16 0 0x3e0011e9
 P 40 16 16 16 0x1 0x5f8a1151
@@ -789,85 +903,142 @@ D 16 4768 0xc98a0a75
 P 41 4784 4784 16 0x1 0x807112b6
 D 16 4784 0x6b5a16a7
 R EOF
+F flac_md5_match
+O ok
+S flac 44100 1 mono 16 1/44100 576 N s16
+P 1027 0 0 576 0x1 0x420dfdf7
+D 576 0 0x1d8622a5
+R EOF
+F flac_md5_mismatch
+O ok
+S flac 44100 1 mono 16 1/44100 576 N s16
+P 1027 0 0 576 0x1 0x420dfdf7
+D 576 0 0x1d8622a5
+R EOF
 F flac_metadata_blocks
 O ok
-S flac 44100 1 mono 16 1/44100 576 N
+S flac 44100 1 mono 16 1/44100 576 N s16
 P 1027 0 0 576 0x1 0x420dfdf7
 D 576 0 0x1d8622a5
 R EOF
 F flac_mid_side
 O ok
-S flac 44100 2 stereo 16 1/44100 1152 0
+S flac 44100 2 stereo 16 1/44100 1152 0 s16
 P 2057 0 0 576 0x1 0xbbb90eec
 D 576 0 0x471c6ba4
 P 2057 576 576 576 0x1 0x5a7e16c3
 D 576 576 0x667a8045
 R EOF
-F flac_no_marker
+F flac_no_streaminfo
+O INVALIDDATA
+F flac_no_total
 O ok
-S flac 44100 1 mono 16 1/44100 N N
+S flac 44100 1 mono 16 1/44100 N N s16
 P 1027 0 0 576 0x1 0x420dfdf7
 D 576 0 0x1d8622a5
 R EOF
-F flac_no_streaminfo
-O INVALIDDATA
+F flac_picture
+O ok
+S flac 44100 1 mono 16 1/44100 576 N s16
+A 1 png 29 0x402702ed
+P 1027 0 0 576 0x1 0x420dfdf7
+D 576 0 0x1d8622a5
+R EOF
+F flac_rate_change
+O ok
+S flac 44100 1 mono 16 1/44100 1152 0 s16
+P 1031 0 0 576 0x1 0x6c13f549
+D 576 0 0x6b481d84
+P 1031 576 576 529 0x1 0x8b85f4fb
+D 576 576 0x6b481d84
+R EOF
 F flac_rate_hz
 O ok
-S flac 12345 1 mono 16 1/12345 192 N
+S flac 12345 1 mono 16 1/12345 192 N s16
 P 353 0 0 192 0x1 0xb3cb9fa9
 D 192 0 0x99c2ca1c
 R EOF
 F flac_rate_khz
 O ok
-S flac 11000 1 mono 16 1/11000 192 N
+S flac 11000 1 mono 16 1/11000 192 N s16
 P 352 0 0 192 0x1 0x826f9fc1
 D 192 0 0x99c2ca1c
 R EOF
 F flac_rate_streaminfo
 O ok
-S flac 37800 1 mono 16 1/37800 192 N
+S flac 37800 1 mono 16 1/37800 192 N s16
 P 351 N N 0 0x1 0xa0e69f35
 D 192 N 0x99c2ca1c
 R EOF
 F flac_rate_tens
 O ok
-S flac 50000 1 mono 16 1/50000 192 N
+S flac 50000 1 mono 16 1/50000 192 N s16
 P 353 0 0 192 0x1 0x30bba040
 D 192 0 0x99c2ca1c
 R EOF
 F flac_rice2_params
 O ok
-S flac 48000 1 mono 16 1/48000 576 N
+S flac 48000 1 mono 16 1/48000 576 N s16
 P 1215 0 0 576 0x1 0x772b8083
 D 576 0 0x5e202169
 R EOF
 F flac_rice_escape
 O ok
-S flac 22050 1 mono 16 1/22050 576 N
+S flac 22050 1 mono 16 1/22050 576 N s16
 P 1013 0 0 576 0x1 0xecb9df17
 D 576 0 0x1d8622a5
 R EOF
 F flac_right_side
 O ok
-S flac 44100 2 stereo 16 1/44100 1152 0
+S flac 44100 2 stereo 16 1/44100 1152 0 s16
 P 2086 0 0 576 0x1 0x7abf0b5b
 D 576 0 0x471c6ba4
 P 2088 576 576 576 0x1 0x1d461861
 D 576 576 0x667a8045
 R EOF
+F flac_second_streaminfo
+O INVALIDDATA
+F flac_seektable
+O ok
+S flac 44100 1 mono 16 1/44100 1152 0 s16
+P 1027 0 0 576 0x1 0xdbfff04c
+D 576 0 0xe2d15a1c
+P 1028 576 576 576 0x1 0x9ed9ea40
+D 576 576 0xbf156de2
+R EOF
 F flac_six_channels_48k
 O ok
-S flac 48000 6 5.1(side) 16 1/48000 256 N
+S flac 48000 6 5.1(side) 16 1/48000 256 N s16
 P 2748 0 0 256 0x1 0xeb0e2cd4
 D 256 0 0x2fc5b865
+R EOF
+F flac_streaminfo_rate0
+O ok
+S flac 22050 1 mono 16 1/90000 N N s16
+P 1027 0 0 2351 0x1 0x3927fcd5
+D 576 0 0x1d8622a5
 R EOF
 F flac_streaminfo_short
 O INVALIDDATA
 F flac_truncated_metadata
 O INVALIDDATA
+F flac_variable_blocksize
+O ok
+S flac 44100 2 stereo 16 1/44100 1715 0 s16
+P 370 0 0 100 0x1 0xee3ab55c
+D 100 0 0x826ec861
+P 2059 100 100 576 0x1 0x2a95089b
+D 576 100 0xa2df2ea2
+P 130 676 676 32 0x1 0xcbd83b08
+D 32 676 0x1f203ecb
+P 3568 708 708 1000 0x1 0x4d0d0f6a
+D 1000 708 0x914ed716
+P 42 1708 1708 7 0x1 0xdc8c1476
+D 7 1708 0xa6720c38
+R EOF
 F flac_verbatim_stereo_44k1
 O ok
-S flac 44100 2 stereo 16 1/44100 500 0
+S flac 44100 2 stereo 16 1/44100 500 0 s16
 P 778 0 0 192 0x1 0xb9be6022
 D 192 0 0xcf395be6
 P 778 192 192 192 0x1 0xb3bd909d
@@ -875,9 +1046,28 @@ D 192 192 0xffcc8ce0
 P 475 384 384 116 0x1 0xd848e5e4
 D 116 384 0x5a7ae0e8
 R EOF
+F flac_vorbis_comment
+O ok
+S flac 44100 1 mono 16 1/44100 576 N s16
+M TITLE=Fixture
+M album_artist=both
+M artist=first;second
+M comment=notes
+M LANGUAGE=Português
+M track=3
+P 1027 0 0 576 0x1 0x420dfdf7
+D 576 0 0x1d8622a5
+R EOF
+F flac_vorbis_comment_truncated
+O ok
+S flac 44100 1 mono 16 1/44100 576 N s16
+M TITLE=kept
+P 1027 0 0 576 0x1 0x420dfdf7
+D 576 0 0x1d8622a5
+R EOF
 F flac_wasted_bits
 O ok
-S flac 16000 1 mono 16 1/16000 576 N
+S flac 16000 1 mono 16 1/16000 576 N s16
 P 883 0 0 576 0x1 0x60b2aaaf
 D 576 0 0xc39c1f4b
 R EOF

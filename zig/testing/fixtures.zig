@@ -392,9 +392,15 @@ pub const flac = struct {
         /// Samples per channel the decoder gives.
         frames: u64,
         /// Lowercase hexadecimal SHA-256 of the decoded samples, interleaved
-        /// s16 little-endian.
+        /// little-endian: s16 for at most 16 bits per sample, else s32,
+        /// each shifted to the top of its storage, FFmpeg's output.
         pcm_sha256: []const u8,
+        /// STREAMINFO's bits per sample.
+        bps: u8 = 16,
     };
+
+    /// STREAMINFO's MD5 against the decoded samples (T26b).
+    pub const Md5 = enum { match, mismatch };
 
     pub const Expected = union(enum) {
         accept: Flac.Stream,
@@ -420,6 +426,10 @@ pub const flac = struct {
         /// The format FFmpeg's content probing picks, or null for none (T16).
         detected: ?Container,
         expected: Flac.Expected,
+        /// Null when STREAMINFO has no MD5.
+        md5: ?Flac.Md5 = null,
+        /// The format tags ffprobe reports, in order (VORBIS_COMMENT).
+        tags: []const Tag = &.{},
     };
 
     pub const all: []const Flac.Fixture = @import("fixtures/flac/manifest.zon");

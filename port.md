@@ -1027,27 +1027,31 @@ FFmpeg's probe detects `caff`, version 1 and a `desc` of size 32.
 
 ### FLAC contract
 
-T26a adds native FLAC (`fLaC` and metadata blocks, then frames) with 16-bit
-samples, read only, as FFmpeg's FLAC demuxer, parser and decoder read it.
-The canonical fixture contract is
+T26a adds native FLAC (`fLaC` and metadata blocks, then frames), read only,
+as FFmpeg's FLAC demuxer, parser and decoder read it; T26b widens it to
+every sample size, variable blocking, headerless input and the metadata
+blocks. The canonical fixture contract is
 [zig/testing/fixtures/flac/README.md](zig/testing/fixtures/flac/README.md),
 and [flac.txt](zig/testing/vectors/flac.txt), printed by
 [flac_vectors.c](zig/testing/reference/flac_vectors.c) from the pinned
-libavformat and libavcodec, is the oracle for every fixture's stream,
-packets, decoded frames and decoding errors. In summary:
+libavformat and libavcodec, is the oracle for every fixture's stream, tags,
+chapters, attached pictures, packets, decoded frames and decoding errors. In
+summary:
 
 | Case | Behavior |
 | --- | --- |
-| Metadata | `fLaC`, then blocks of a 1-byte type with the last-block flag and a 24-bit size. STREAMINFO (34 bytes) first and once (`InvalidFlac` otherwise); other blocks skipped (VORBIS_COMMENT, PICTURE, SEEKTABLE and CUESHEET are read in T26b). A cut block is `Truncated`. Without `fLaC`, FFmpeg's headerless mode, `UnsupportedFormat` until T26b. |
-| STREAMINFO | A maximum block size of at least 16 (`InvalidFlac`), 16 bits per sample and a nonzero rate (`UnsupportedFormat` otherwise, T26b); 1 to 8 channels, FFmpeg's layouts for them; the 36-bit sample count is the stream's duration when nonzero; the MD5 is not checked (T26b). |
-| Packets | The input in 1024-byte reads through FFmpeg's FLAC parser: frame headers checked by their CRC-8 and scored by the CRC-16s and the frame numbers between them, ten headers buffered before the first frame is returned; junk before a header is a packet of its own, and a frame the scoring rejects is dropped, as FFmpeg drops it. Timestamps and durations are libavformat's for a parsed raw stream. |
-| Frames | Fixed block sizes, constant, verbatim, fixed and LPC subframes, wasted bits, Rice and Rice2 residuals with escapes, independent channels and left/side, right/side and mid/side stereo, decoded to interleaved s16 bit for bit. A frame FFmpeg's decoder refuses (a bad header, reserved codes, another sample size, a residual that does not fit) is an error for that packet only (`InvalidData`), as FFmpeg's decoder returns one, and what follows a frame in its packet is decoded again, as libavcodec feeds an audio decoder; the CRC-16 is not checked, FFmpeg's default. A variable-block-size frame, or one whose rate or channel count differs from STREAMINFO's, is `UnsupportedFormat` for its packet (T26b). |
-| Probe output | `format=flac`, `codec=flac`, `sample_fmt=s16`, STREAMINFO's channels, FFmpeg's layout and rate, and STREAMINFO's sample count (`N/A` when it has none). The frames are not read, as ffprobe does not decode them. |
-| Conversion | A FLAC input decodes in `av.convert` (and `zffmpeg`), which needs `Request.gpa` (`UnsupportedOperation` without it), into every output a PCM s16 input reaches: any encoder, layout and rate. Copy is `UnsupportedOperation` until a FLAC muxer exists (T26c). A packet the decoder refuses is reported to the diagnostic sink and skipped, as the ffmpeg program skips it; because the output header holds STREAMINFO's sample count before the samples, decoding to another count fails with `FrameCountMismatch` (an intentional difference: FFmpeg rewrites a seekable output's header). Dither and resampler calls follow FFmpeg's frames, STREAMINFO's maximum block size each. |
+| Metadata | `fLaC`, then blocks of a 1-byte type with the last-block flag and a 24-bit size. STREAMINFO (34 bytes) once (`InvalidFlac` otherwise), before every block but SEEKTABLE, CUESHEET and PICTURE, which FFmpeg also reads first. A cut block is `Truncated`. VORBIS_COMMENT gives the format tags as `ff_vorbis_comment` builds them (a repeated key joined with `;`, five keys renamed, entries without a key or value dropped; a malformed block is not an error) and a `WAVEFORMATEXTENSIBLE_CHANNEL_MASK` tag the layout; SEEKTABLE's points, CUESHEET's tracks (FFmpeg's chapters; fewer than 431 bytes, no tracks or a track without index points `InvalidFlac`) and PICTURE blocks (FFmpeg's attached pictures, a malformed or unknown one skipped) are kept in `flac.Info` when the caller passes an allocator. Others are skipped. Without `fLaC`, FFmpeg's headerless mode: the frames from the start, the time base from the first frame's rate code. |
+| STREAMINFO | A maximum block size of at least 16 and 4 to 32 bits per sample (`InvalidFlac`, as FFmpeg's decoder refuses them); 1 to 8 channels, FFmpeg's layouts for them; a rate of 0 leaves the time base at FFmpeg's 1/90000 and the rate to the first frame; the 36-bit sample count is the duration when it and the rate are nonzero. |
+| Packets | The input in 1024-byte reads through FFmpeg's FLAC parser: frame headers checked by their CRC-8 and scored by the CRC-16s and the frame or sample numbers between them, ten headers buffered before the first frame is returned; junk before a header is a packet of its own, and a frame the scoring rejects is dropped, as FFmpeg drops it. Timestamps and durations are libavformat's for a parsed raw stream; a variable-blocking frame's timestamp is its first sample's number. |
+| Frames | Fixed or variable block sizes; constant, verbatim, fixed and LPC subframes at every sample size, the 33-bit side channel of 32-bit stereo in 64 bits; wasted bits, Rice and Rice2 residuals with escapes, independent channels and left/side, right/side and mid/side stereo; decoded bit for bit to packed s16 up to 16 bits and s32 above, each sample shifted to the top of its storage, as FFmpeg's decoder outputs them. A frame FFmpeg's decoder refuses (a bad header, reserved codes, another sample size, a residual that does not fit) is an error for that packet only (`InvalidData`), and what follows a frame in its packet is decoded again, as libavcodec feeds an audio decoder; the CRC-16 is not checked, FFmpeg's default. A frame with another channel count or rate changes the decoder's, as FFmpeg's follows such a change. |
+| MD5 | FFmpeg never checks STREAMINFO's MD5. `flac.DecodedReader`'s `verify_md5` checks it, when set, against the decoded samples as the FLAC format defines the input (each sample signed little-endian in the fewest bytes holding its size), `Md5Mismatch` at `finish`. |
+| Probe output | `format=flac`, `codec=flac`, `sample_fmt` `s16` or `s32`, the channels, FFmpeg's layout and the rate from STREAMINFO (or the first frame header), STREAMINFO's sample count (`N/A` when it has none or no rate), and the VORBIS_COMMENT tags. The frames are not read, as ffprobe does not decode them; pictures and chapters, which FFmpeg reports as a stream and chapters, are not printed. |
+| Conversion | A FLAC input decodes in `av.convert` (and `zffmpeg`), which needs `Request.gpa` (`UnsupportedOperation` without it), as pcm_s16le or pcm_s32le, into every output a PCM input reaches: any encoder, layout and rate; its tags carry into a WAV output as FFmpeg's command carries them. Copy is `UnsupportedOperation` until a FLAC muxer exists (T26c). A packet the decoder refuses is reported to the diagnostic sink and skipped, as the ffmpeg program skips it. Because the output header holds STREAMINFO's sample count, rate and channels before the samples, decoding to another count fails with `FrameCountMismatch`, a mid-stream change with `UnsupportedFormat`, and a stream without a count writes only raw output (intentional differences: FFmpeg rewrites a seekable output's header and reconfigures its filters). Dither and resampler calls follow FFmpeg's frames, STREAMINFO's maximum block size each. |
 | Writing | None until T26c. |
 
 FFmpeg's probe scores `fLaC` with a plausible STREAMINFO 100, other `fLaC`
-input 50, and a frame header at the start 13.
+input 50, and a frame header at the start 13 (a winner FFmpeg accepts after
+its probe retries, the same one).
 
 ### Raw PCM contract
 

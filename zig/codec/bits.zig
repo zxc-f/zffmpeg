@@ -96,6 +96,22 @@ pub const BitReader = struct {
         return wide >> shift;
     }
 
+    /// `get_bits64`: the next `n` bits (0 to 64), the high part first.
+    pub fn bits64(r: *BitReader, n: u7) u64 {
+        std.debug.assert(n <= 64);
+        if (n <= 32) return r.bits(@intCast(n));
+        const high: u64 = r.bits(@intCast(n - 32));
+        return high << 32 | r.bits(32);
+    }
+
+    /// `get_sbits64`: the next `n` bits (1 to 64), sign-extended.
+    pub fn signed64(r: *BitReader, n: u7) i64 {
+        std.debug.assert(n >= 1 and n <= 64);
+        const shift: u6 = @intCast(64 - @as(u8, n));
+        const wide: i64 = @bitCast(r.bits64(n) << shift);
+        return wide >> shift;
+    }
+
     /// `align_get_bits`: skips to the next byte boundary.
     pub fn alignByte(r: *BitReader) void {
         r.skip((8 - (r.index & 7)) & 7);
@@ -230,6 +246,17 @@ test "over-reads give zeros and saturate the count 8 bits past the end" {
     var empty = try BitReader.init(&.{});
     try testing.expectEqual(0, empty.bits(17));
     try testing.expectEqual(-8, empty.left());
+}
+
+test "64-bit reads: 33-bit samples, sign-extended" {
+    const bytes = [_]u8{ 0x80, 0x00, 0x00, 0x00, 0x7f, 0xff, 0xff, 0xff, 0xc0 };
+    var r = try BitReader.init(&bytes);
+    // 1 followed by 32 zeros: -2^32 in 33 bits.
+    try testing.expectEqual(-(@as(i64, 1) << 32), r.signed64(33));
+    try testing.expectEqual(33, r.count());
+    r = try BitReader.init(&bytes);
+    try testing.expectEqual(0x8000_0000_7fff_ffff, r.bits64(64));
+    try testing.expectEqual(0xc0, r.bits64(8));
 }
 
 test "alignment and unary codes" {
