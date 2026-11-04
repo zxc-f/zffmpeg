@@ -46,7 +46,7 @@ pub const CreateError = options.SetError || error{
     OutOfMemory,
 };
 
-pub const Kind = enum { anull, aformat, volume, aresample };
+pub const Kind = enum { anull, aformat, volume, aresample, atrim, asetpts };
 
 pub const Descriptor = struct {
     name: []const u8,
@@ -60,6 +60,8 @@ pub const descriptors = [_]Descriptor{
     .{ .name = "aformat", .kind = .aformat, .description = "Convert the input audio to one of the specified formats." },
     .{ .name = "volume", .kind = .volume, .description = "Change input volume." },
     .{ .name = "aresample", .kind = .aresample, .description = "Resample audio data." },
+    .{ .name = "atrim", .kind = .atrim, .description = "Pick one continuous section from the input, drop the rest." },
+    .{ .name = "asetpts", .kind = .asetpts, .description = "Set PTS for the output audio frame." },
 };
 
 comptime {
@@ -84,6 +86,8 @@ pub const Filter = union(Kind) {
     aformat: AFormat,
     volume: Volume,
     aresample: AResample,
+    atrim: ATrim,
+    asetpts: ASetPts,
 
     /// The filter `name` with no options set (`avfilter_graph_alloc_filter`).
     pub fn alloc(name: []const u8) CreateError!Filter {
@@ -93,6 +97,8 @@ pub const Filter = union(Kind) {
             .aformat => .{ .aformat = .{} },
             .volume => .{ .volume = .{} },
             .aresample => .{ .aresample = .{} },
+            .atrim => .{ .atrim = .{} },
+            .asetpts => .{ .asetpts = .{} },
         };
     }
 
@@ -112,6 +118,8 @@ pub const Filter = union(Kind) {
             .aformat => |*a| try a.set(gpa, name, value),
             .volume => |*v| try v.set(gpa, name, value),
             .aresample => |*a| try a.set(name, value),
+            .atrim => |*a| try options.set(ATrim, a, name, value),
+            .asetpts => |*a| try a.set(gpa, name, value),
         }
     }
 
@@ -120,6 +128,7 @@ pub const Filter = union(Kind) {
     pub fn init(f: *Filter, gpa: std.mem.Allocator, sink: ?diagnostics.Sink) CreateError!void {
         switch (f.*) {
             .volume => |*v| try v.init(gpa, sink),
+            .asetpts => |*a| try a.init(gpa, sink),
             else => {},
         }
     }
@@ -132,6 +141,8 @@ pub const Filter = union(Kind) {
             .aformat => &.{ "sample_fmts", "sample_rates", "channel_layouts" },
             .volume => &.{ "volume", "precision", "eval", "replaygain", "replaygain_preamp", "replaygain_noclip" },
             .aresample => &.{"sample_rate"},
+            .atrim => &.{ "start", "end", "start_pts", "end_pts", "duration", "start_sample", "end_sample" },
+            .asetpts => &.{"expr"},
         };
     }
 
@@ -139,6 +150,7 @@ pub const Filter = union(Kind) {
         switch (f.*) {
             .aformat => |*a| a.deinit(gpa),
             .volume => |*v| v.deinit(gpa),
+            .asetpts => |*a| a.deinit(gpa),
             else => {},
         }
         f.* = undefined;
@@ -604,6 +616,265 @@ pub const AResample = struct {
     }
 };
 
+// atrim ---------------------------------------------------------------------
+
+const int64_min: f64 = -9223372036854775808.0;
+const int64_max: f64 = 9223372036854775807.0;
+
+pub const ATrim = struct {
+    /// Microseconds; `maxInt` when unset.
+    start_time: i64 = std.math.maxInt(i64),
+    end_time: i64 = std.math.maxInt(i64),
+    /// In 1 / sample rate; `minInt` (FFmpeg's `AV_NOPTS_VALUE`) when unset.
+    start_pts: i64 = std.math.minInt(i64),
+    end_pts: i64 = std.math.minInt(i64),
+    /// Microseconds; 0 when unset.
+    duration: i64 = 0,
+    /// -1 when unset.
+    start_sample: i64 = -1,
+    /// `maxInt` when unset.
+    end_sample: i64 = std.math.maxInt(i64),
+
+    pub const option_specs = [_]options.Spec{
+        .{ .name = "start", .field = "start_time", .kind = .duration, .help = "Timestamp of the first frame that should be passed", .min = int64_min, .max = int64_max },
+        .{ .name = "starti", .field = "start_time", .kind = .duration, .help = "Timestamp of the first frame that should be passed", .min = int64_min, .max = int64_max },
+        .{ .name = "end", .field = "end_time", .kind = .duration, .help = "Timestamp of the first frame that should be dropped again", .min = int64_min, .max = int64_max },
+        .{ .name = "endi", .field = "end_time", .kind = .duration, .help = "Timestamp of the first frame that should be dropped again", .min = int64_min, .max = int64_max },
+        .{ .name = "start_pts", .field = "start_pts", .kind = .int64, .help = "Timestamp of the first frame that should be  passed", .min = int64_min, .max = int64_max },
+        .{ .name = "end_pts", .field = "end_pts", .kind = .int64, .help = "Timestamp of the first frame that should be dropped again", .min = int64_min, .max = int64_max },
+        .{ .name = "duration", .field = "duration", .kind = .duration, .help = "Maximum duration of the output", .min = 0, .max = int64_max },
+        .{ .name = "durationi", .field = "duration", .kind = .duration, .help = "Maximum duration of the output", .min = 0, .max = int64_max },
+        .{ .name = "start_sample", .field = "start_sample", .kind = .int64, .help = "Number of the first audio sample that should be passed to the output", .min = -1, .max = int64_max },
+        .{ .name = "end_sample", .field = "end_sample", .kind = .int64, .help = "Number of the first audio sample that should be dropped again", .min = 0, .max = int64_max },
+    };
+
+    comptime {
+        options.check(ATrim);
+    }
+};
+
+/// atrim on a configured link (`config_input`, `atrim_filter_frame`).
+pub const TrimRun = struct {
+    start_pts: ?i64,
+    end_pts: ?i64,
+    duration_tb: i64,
+    start_sample: i64,
+    end_sample: i64,
+    in_time_base: time.TimeBase,
+    rate: u32,
+    nb_samples: i64 = 0,
+    first_pts: ?i64 = null,
+    next_pts: i64 = 0,
+    /// The end was reached: the filter's output ended.
+    eof: bool = false,
+
+    pub fn init(a: ATrim, in: audio.Format, in_time_base: time.TimeBase) TrimRun {
+        const usec = time.TimeBase.init(1, 1000000) catch unreachable;
+        const tb = time.TimeBase.ofSampleRate(in.sample_rate) catch unreachable;
+        var r: TrimRun = .{
+            .start_pts = if (a.start_pts == std.math.minInt(i64)) null else a.start_pts,
+            .end_pts = if (a.end_pts == std.math.minInt(i64)) null else a.end_pts,
+            .duration_tb = 0,
+            .start_sample = a.start_sample,
+            .end_sample = a.end_sample,
+            .in_time_base = in_time_base,
+            .rate = in.sample_rate,
+        };
+        if (a.start_time != std.math.maxInt(i64)) {
+            const p = rescaleQ(a.start_time, usec, tb);
+            if (r.start_pts == null or p < r.start_pts.?) r.start_pts = p;
+        }
+        if (a.end_time != std.math.maxInt(i64)) {
+            const p = rescaleQ(a.end_time, usec, tb);
+            if (r.end_pts == null or p > r.end_pts.?) r.end_pts = p;
+        }
+        if (a.duration != 0) r.duration_tb = rescaleQ(a.duration, usec, tb);
+        return r;
+    }
+
+    /// The part of `frame` that passes, or null (dropped); `eof` is set
+    /// once the end is reached.
+    pub fn filterFrame(r: *TrimRun, gpa: std.mem.Allocator, frame: *Owned) error{OutOfMemory}!?Owned {
+        if (r.eof) return null;
+        const count: i64 = frame.frameCount();
+        const sr_tb = time.TimeBase.ofSampleRate(r.rate) catch unreachable;
+        const pts: i64 = if (frame.pts) |p| rescaleQ(p, r.in_time_base, sr_tb) else r.next_pts;
+        r.next_pts = pts + count;
+        var start_sample: i64 = 0;
+        if (r.start_sample >= 0 or r.start_pts != null) {
+            var drop = true;
+            start_sample = count;
+            if (r.start_sample >= 0 and r.nb_samples + count > r.start_sample) {
+                drop = false;
+                start_sample = @min(start_sample, r.start_sample - r.nb_samples);
+            }
+            if (r.start_pts) |sp| {
+                if (pts + count > sp) {
+                    drop = false;
+                    start_sample = @min(start_sample, sp - pts);
+                }
+            }
+            if (drop) return r.dropped(count);
+        }
+        if (r.first_pts == null) r.first_pts = pts + start_sample;
+        var end_sample: i64 = count;
+        if (r.end_sample != std.math.maxInt(i64) or r.end_pts != null or r.duration_tb != 0) {
+            var drop = true;
+            end_sample = 0;
+            if (r.end_sample != std.math.maxInt(i64) and r.nb_samples < r.end_sample) {
+                drop = false;
+                end_sample = @max(end_sample, r.end_sample - r.nb_samples);
+            }
+            if (r.end_pts) |ep| {
+                if (pts < ep) {
+                    drop = false;
+                    end_sample = @max(end_sample, ep - pts);
+                }
+            }
+            if (r.duration_tb != 0 and pts - r.first_pts.? < r.duration_tb) {
+                drop = false;
+                end_sample = @max(end_sample, r.first_pts.? + r.duration_tb - pts);
+            }
+            if (drop) {
+                r.eof = true;
+                return r.dropped(count);
+            }
+        }
+        r.nb_samples += count;
+        start_sample = @max(0, start_sample);
+        end_sample = @min(count, end_sample);
+        if (start_sample >= end_sample or count == 0) return null;
+        if (start_sample == 0 and end_sample == count) return frame.take();
+        const s: u32 = @intCast(start_sample);
+        const e: u32 = @intCast(end_sample);
+        var out = try Owned.alloc(gpa, frame.format, e - s, frame.pts);
+        audioconvert.convert(out.buffer(), frame.buffer().view(), 0, s, e - s);
+        if (out.pts) |p| out.pts = p + rescaleQ(start_sample, sr_tb, r.in_time_base);
+        return out;
+    }
+
+    fn dropped(r: *TrimRun, count: i64) ?Owned {
+        r.nb_samples += count;
+        return null;
+    }
+
+    /// `av_rescale_q`: rounded to the nearest, halves away from zero.
+    fn rescaleQ(value: i64, from: time.TimeBase, to: time.TimeBase) i64 {
+        return time.rescale(value, from, to, .nearest) catch if (value < 0) std.math.minInt(i64) else std.math.maxInt(i64);
+    }
+};
+
+// asetpts -------------------------------------------------------------------
+
+pub const ASetPts = struct {
+    /// The `expr` expression, owned; null for FFmpeg's default, "PTS".
+    text: ?[]u8 = null,
+    expr: ?eval.Expr = null,
+
+    /// The expression's constants (`var_names`), in FFmpeg's order.
+    pub const variables = [_][]const u8{
+        "FRAME_RATE",  "INTERLACED", "N",        "NB_CONSUMED_SAMPLES", "NB_SAMPLES", "PREV_INPTS", "PREV_INT",
+        "PREV_OUTPTS", "PREV_OUTT",  "PTS",      "SAMPLE_RATE",         "STARTPTS",   "STARTT",     "T",
+        "TB",          "RTCTIME",    "RTCSTART", "S",                   "SR",         "FR",         "T_CHANGE",
+    };
+
+    fn set(a: *ASetPts, gpa: std.mem.Allocator, name: []const u8, text: []const u8) CreateError!void {
+        if (!std.mem.eql(u8, name, "expr")) return error.UnknownOption;
+        const copy = try gpa.dupe(u8, text);
+        if (a.text) |old| gpa.free(old);
+        a.text = copy;
+    }
+
+    fn init(a: *ASetPts, gpa: std.mem.Allocator, sink: ?diagnostics.Sink) CreateError!void {
+        const text = a.text orelse "PTS";
+        var e = eval.Expr.parse(gpa, text, &variables, sink) catch |err| {
+            diagnostics.report(sink, .err, "Error while parsing expression '{s}'", .{text});
+            return switch (err) {
+                error.InvalidExpression => error.InvalidValue,
+                error.UnsupportedFunction => error.UnsupportedFunction,
+                error.OutOfMemory => error.OutOfMemory,
+            };
+        };
+        // The wall clock: the port reads no clock.
+        if (e.usesConstant(15) or e.usesConstant(16)) {
+            e.deinit();
+            return error.UnsupportedFunction;
+        }
+        a.expr = e;
+    }
+
+    fn deinit(a: *ASetPts, gpa: std.mem.Allocator) void {
+        if (a.text) |t| gpa.free(t);
+        if (a.expr) |*e| e.deinit();
+    }
+};
+
+/// asetpts on a configured link; owns the expression.
+pub const SetPtsRun = struct {
+    expr: eval.Expr,
+    vars: [ASetPts.variables.len]f64,
+    tb: f64,
+
+    const Var = enum(u8) { frame_rate, interlaced, n, nb_consumed_samples, nb_samples, prev_inpts, prev_int, prev_outpts, prev_outt, pts, sample_rate, startpts, startt, t, tb, rtctime, rtcstart, s, sr, fr, t_change };
+
+    /// Takes `a`'s expression.
+    pub fn init(a: *ASetPts, in: audio.Format, in_time_base: time.TimeBase) SetPtsRun {
+        const num: f64 = @floatFromInt(in_time_base.num);
+        const den: f64 = @floatFromInt(in_time_base.den);
+        var r: SetPtsRun = .{ .expr = a.expr.?, .vars = @splat(0), .tb = num / den };
+        a.expr = null;
+        const nan = std.math.nan(f64);
+        for ([_]Var{ .prev_inpts, .prev_int, .prev_outpts, .prev_outt, .startpts, .startt, .t_change, .frame_rate, .fr }) |v| r.set(v, nan);
+        r.set(.tb, r.tb);
+        const rate: f64 = @floatFromInt(in.sample_rate);
+        r.set(.sr, rate);
+        r.set(.sample_rate, rate);
+        return r;
+    }
+
+    pub fn deinit(r: *SetPtsRun) void {
+        r.expr.deinit();
+        r.* = undefined;
+    }
+
+    fn set(r: *SetPtsRun, v: Var, value: f64) void {
+        r.vars[@backingInt(v)] = value;
+    }
+
+    fn get(r: *const SetPtsRun, v: Var) f64 {
+        return r.vars[@backingInt(v)];
+    }
+
+    /// `filter_frame`: the frame's new timestamp.
+    pub fn filterFrame(r: *SetPtsRun, pts: ?i64, frames: u32) ?i64 {
+        const nan = std.math.nan(f64);
+        const pts_d: f64 = if (pts) |p| @floatFromInt(p) else nan;
+        if (std.math.isNan(r.get(.startpts))) {
+            r.set(.startpts, pts_d);
+            r.set(.startt, pts_d * r.tb);
+        }
+        if (std.math.isNan(r.get(.t_change))) r.set(.t_change, pts_d * r.tb);
+        r.set(.pts, pts_d);
+        r.set(.t, pts_d * r.tb);
+        const count: f64 = @floatFromInt(frames);
+        r.set(.s, count);
+        r.set(.nb_samples, count);
+        const d = r.expr.eval(&r.vars);
+        // D2TS: NaN is no timestamp; C's conversion, as x86 makes it.
+        // INT64_MIN is FFmpeg's AV_NOPTS_VALUE.
+        const whole: i64 = if (std.math.isNan(d) or !(d >= int64_min and d < 9223372036854775808.0)) std.math.minInt(i64) else @intFromFloat(@trunc(d));
+        const out: ?i64 = if (whole == std.math.minInt(i64)) null else whole;
+        r.set(.n, r.get(.n) + count);
+        r.set(.prev_inpts, pts_d);
+        r.set(.prev_int, pts_d * r.tb);
+        const out_d: f64 = if (out) |o| @floatFromInt(o) else nan;
+        r.set(.prev_outpts, out_d);
+        r.set(.prev_outt, out_d * r.tb);
+        r.set(.nb_consumed_samples, r.get(.nb_consumed_samples) + count);
+        return out;
+    }
+};
+
 /// A frame the graph owns: whole frames of `format`, one plane after
 /// another when planar, with no padding.
 pub const Owned = struct {
@@ -619,6 +890,13 @@ pub const Owned = struct {
     pub fn free(o: *Owned, gpa: std.mem.Allocator) void {
         gpa.free(o.data);
         o.* = undefined;
+    }
+
+    /// Moves the frame out, leaving `o` empty for `free`.
+    pub fn take(o: *Owned) Owned {
+        const moved = o.*;
+        o.data = &.{};
+        return moved;
     }
 
     pub fn frameCount(o: *const Owned) u32 {

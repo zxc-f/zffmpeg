@@ -363,6 +363,11 @@ configure:
             }
             av_frame_unref(frame);
             ret = drain(sink, out);
+            if (ret == AVERROR_EOF) {
+                /* The graph ended early (atrim). */
+                printf("D\n");
+                goto done;
+            }
             if (ret != AVERROR(EAGAIN)) {
                 printf("E run\n");
                 goto done;
@@ -643,6 +648,52 @@ static const struct graph_case cases[] = {
     { "text_labels", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "[in]volume=0.5[out]", .refused = 1 },
     { "text_output_label", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume=0.5[x]", .refused = 1 },
     { "text_time", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume=time(0)", .refused = 1 },
+    /* atrim and asetpts (T25b). */
+    { "atrim_samples", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 64, 64), 0,
+      .chain = { F("atrim", { { "start_sample", "50" }, { "end_sample", "150" } }) } },
+    { "atrim_start_only", AV_SAMPLE_FMT_FLTP, 44100, "stereo", 0, 0, SIZES(64, 64), 0,
+      .chain = { F("atrim", { { "start_sample", "70" } }) } },
+    { "atrim_end_only", AV_SAMPLE_FMT_S16P, 44100, "stereo", 0, 0, SIZES(64, 64, 64, 64), 0,
+      .chain = { F("atrim", { { "end_sample", "100" } }) } },
+    { "atrim_time", AV_SAMPLE_FMT_S16, 8000, "mono", 0, 0, SIZES(40, 40, 40, 40), 0,
+      .chain = { F("atrim", { { "start", "0.006" }, { "end", "0.015" } }) } },
+    { "atrim_duration", AV_SAMPLE_FMT_S16, 8000, "mono", 0, 0, SIZES(40, 40, 40, 40), 0,
+      .chain = { F("atrim", { { "start", "1ms" }, { "duration", "10ms" } }) } },
+    { "atrim_pts", AV_SAMPLE_FMT_S16, 8000, "mono", 0, 0, SIZES(40, 40, 40), 0,
+      .chain = { F("atrim", { { "start_pts", "30" }, { "end_pts", "90" } }) } },
+    { "atrim_ms_time_base", AV_SAMPLE_FMT_FLT, 8000, "mono", 1, 1000, SIZES(40, 40, 40), 1000,
+      .chain = { F("atrim", { { "start", "1.006" }, { "end", "1.012" } }) } },
+    { "atrim_nopts", AV_SAMPLE_FMT_S16, 8000, "mono", 0, 0, SIZES(40, 40, 40), NOPTS,
+      .chain = { F("atrim", { { "start_sample", "50" }, { "end_sample", "90" } }) } },
+    { "atrim_negative_start", AV_SAMPLE_FMT_S16, 8000, "mono", 0, 0, SIZES(40, 40), -60,
+      .chain = { F("atrim", { { "start", "0" } }) } },
+    { "atrim_nothing", AV_SAMPLE_FMT_S16, 8000, "mono", 0, 0, SIZES(40, 40), 0,
+      .chain = { F("atrim", { { "start_sample", "1000" } }) } },
+    { "atrim_then_aresample", AV_SAMPLE_FMT_S16, 44100, "mono", 0, 0, SIZES(300, 300, 300), 0,
+      .chain = { F("atrim", { { "end_sample", "500" } }), F("aresample", { { "sample_rate", "48000" } }) } },
+    { "atrim_bad_duration", AV_SAMPLE_FMT_S16, 8000, "mono", 0, 0, SIZES(40), 0,
+      .chain = { F("atrim", { { "start", "1x" } }) } },
+    { "atrim_negative_duration", AV_SAMPLE_FMT_S16, 8000, "mono", 0, 0, SIZES(40), 0,
+      .chain = { F("atrim", { { "duration", "-1" } }) } },
+    { "asetpts_default", AV_SAMPLE_FMT_S16, 44100, "mono", 0, 0, SIZES(64, 64), 10, .chain = { F("asetpts") } },
+    { "asetpts_zero_start", AV_SAMPLE_FMT_S16, 44100, "mono", 0, 0, SIZES(64, 64), 1000,
+      .chain = { F("asetpts", { { "expr", "PTS-STARTPTS" } }) } },
+    { "asetpts_n", AV_SAMPLE_FMT_S16, 44100, "mono", 0, 0, SIZES(64, 30, 70), NOPTS,
+      .chain = { F("asetpts", { { "expr", "N/SR/TB" } }) } },
+    { "asetpts_variables", AV_SAMPLE_FMT_FLT, 8000, "mono", 1, 1000, SIZES(40, 40, 40), 500,
+      .chain = { F("asetpts", { { "expr", "PREV_OUTPTS*0+if(isnan(PREV_INPTS),PTS*2,PREV_OUTPTS+S+NB_CONSUMED_SAMPLES*0+T_CHANGE*0)" } }) } },
+    { "asetpts_nan", AV_SAMPLE_FMT_S16, 44100, "mono", 0, 0, SIZES(32, 32), 0,
+      .chain = { F("asetpts", { { "expr", "0/0" } }) } },
+    { "asetpts_frame_rate", AV_SAMPLE_FMT_S16, 44100, "mono", 0, 0, SIZES(32), 0,
+      .chain = { F("asetpts", { { "expr", "if(isnan(FRAME_RATE),7,8)+INTERLACED" } }) } },
+    { "asetpts_clock", AV_SAMPLE_FMT_S16, 44100, "mono", 0, 0, SIZES(32), 0, .refused = 1,
+      .chain = { F("asetpts", { { "expr", "RTCTIME" } }) } },
+    { "asetpts_bad", AV_SAMPLE_FMT_S16, 44100, "mono", 0, 0, SIZES(32), 0,
+      .chain = { F("asetpts", { { "expr", "PTS+" } }) } },
+    { "text_atrim_shorthand", AV_SAMPLE_FMT_S16, 8000, "mono", 0, 0, SIZES(40, 40, 40), 0, .text = "atrim=0.002:0.01" },
+    { "text_asetpts", AV_SAMPLE_FMT_S16, 8000, "mono", 0, 0, SIZES(40, 40), 0, .text = "asetpts=N/SR/TB+5,volume=0.5" },
+    { "text_trim_chain", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(300, 300, 300), 0,
+      .text = "atrim=start_sample=100:end_sample=700,asetpts=PTS-STARTPTS,aresample=22050" },
 };
 
 int main(void)

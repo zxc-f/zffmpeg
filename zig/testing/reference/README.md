@@ -150,7 +150,7 @@ with the install prefix and:
 --disable-network --disable-x86asm --disable-ffplay --disable-avdevice
 --enable-protocol=file,pipe --enable-demuxer=wav,w64,au,aiff,caf,$pcm_formats
 --enable-decoder=$pcm_codecs --enable-encoder=$pcm_codecs
---enable-muxer=wav,w64,au,aiff,$pcm_formats --enable-filter=aresample,volume
+--enable-muxer=wav,w64,au,aiff,$pcm_formats --enable-filter=aresample,volume,asetpts
 
 pcm_codecs=pcm_u8,pcm_s8,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,
   pcm_s32be,pcm_s64le,pcm_s64be,pcm_f32le,pcm_f32be,pcm_f64le,pcm_f64be,
@@ -170,8 +170,9 @@ whose copies of the AU writer-output fixtures must be byte-identical (T22a), the
 AIFF muxer, likewise for AIFF (T22b), the raw PCM demuxers and muxers of every
 codec FFmpeg has one for, all but s64 (T22c), and the
 `aresample` filter for the
-`ffmpeg` program's audio filter graph, and the `volume` filter, which the
-T25a graph vectors run (`anull` and `aformat` come with the program, which
+`ffmpeg` program's audio filter graph, and the `volume` and `asetpts`
+filters, which the T25a and T25b graph vectors run (`anull`, `aformat` and
+`atrim` come with the program, which
 selects the few other filters it always needs). There are no GPL, nonfree, external-library or
 hardware components, and autodetection is off. `--disable-x86asm` keeps the C
 code paths as the reference and avoids a NASM dependency. The broad FATE

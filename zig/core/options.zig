@@ -20,8 +20,19 @@
 
 const std = @import("std");
 const eval = @import("eval.zig");
+const number = @import("number.zig");
 
-pub const Kind = enum { int, bool, double, float };
+pub const Kind = enum {
+    int,
+    /// `AV_OPT_TYPE_INT64`: an `i64` field.
+    int64,
+    bool,
+    double,
+    float,
+    /// `AV_OPT_TYPE_DURATION`: microseconds in an `i64` field, set from
+    /// `av_parse_time`'s duration text (T25b).
+    duration,
+};
 
 /// A named value of an option (`AV_OPT_TYPE_CONST` in its unit).
 pub const Constant = struct { name: []const u8, value: f64 };
@@ -73,6 +84,7 @@ pub fn check(comptime T: type) void {
                     .int, .@"enum" => {},
                     else => @compileError("an int option needs an integer or enum field: " ++ spec.field),
                 },
+                .int64, .duration => if (F != i64) @compileError("an int64 or duration option needs an i64 field: " ++ spec.field),
             }
             const default = defaultOf(T, spec);
             if (default < spec.min or default > spec.max) @compileError("default out of range: " ++ spec.name);
@@ -111,6 +123,16 @@ fn setOne(comptime T: type, comptime spec: Spec, target: *T, text: []const u8) S
         @field(target, spec.field) = n != 0;
         return;
     }
+    if (spec.kind == .duration) {
+        const usecs = number.parseDuration(text) catch |err| return switch (err) {
+            error.InvalidDuration => error.InvalidValue,
+            error.OutOfRange => error.OutOfRange,
+        };
+        const usecs_f: f64 = @floatFromInt(usecs);
+        if (usecs_f < spec.min or usecs_f > spec.max) return error.OutOfRange;
+        @field(target, spec.field) = usecs;
+        return;
+    }
     const value = try numberValue(spec, defaultOf(T, spec), text);
     if (value < spec.min or value > spec.max) return error.OutOfRange;
     switch (spec.kind) {
@@ -126,7 +148,12 @@ fn setOne(comptime T: type, comptime spec: Spec, target: *T, text: []const u8) S
                 else => @intCast(int),
             };
         },
-        .bool => unreachable,
+        .int64 => {
+            // write_number: INT64_MAX as a double stays INT64_MAX.
+            const two63: f64 = 9223372036854775808.0;
+            @field(target, spec.field) = if (value == two63) std.math.maxInt(i64) else @intFromFloat(roundEven(value));
+        },
+        .bool, .duration => unreachable,
     }
 }
 

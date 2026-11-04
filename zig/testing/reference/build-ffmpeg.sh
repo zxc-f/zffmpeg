@@ -44,7 +44,7 @@ configure_args=(
     --enable-decoder="$pcm_codecs"
     --enable-encoder="$pcm_codecs"
     --enable-muxer=wav,w64,au,aiff,"$pcm_formats"
-    --enable-filter=aresample,volume
+    --enable-filter=aresample,volume,asetpts
 )
 
 if [ ! -d "$src/.git" ]; then

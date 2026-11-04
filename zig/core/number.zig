@@ -209,8 +209,114 @@ pub fn parseInt(text: []const u8) ParseError!i32 {
     return @intFromFloat(d);
 }
 
+pub const DurationError = error{
+    /// Not a duration (`AVERROR(EINVAL)`).
+    InvalidDuration,
+    /// Too large for 64-bit microseconds (`AVERROR(ERANGE)`).
+    OutOfRange,
+};
+
+/// `av_parse_time` of a duration: `[-][HH:]MM:SS[.m...]` or
+/// `[-]S+[.m...]`, then `s`, `ms` or `us`, as microseconds (TODO.md T25b).
+pub fn parseDuration(text: []const u8) DurationError!i64 {
+    var p: usize = 0;
+    var negative = false;
+    if (p < text.len and text[p] == '-') {
+        negative = true;
+        p += 1;
+    }
+    var t: i64 = undefined;
+    var q: usize = undefined;
+    if (clock(text, p, true) orelse clock(text, p, false)) |c| {
+        t = c.seconds;
+        q = c.end;
+    } else {
+        // strtoll in base 10.
+        var i = p;
+        while (i < text.len and isCSpace(text[i])) i += 1;
+        var minus = false;
+        if (i < text.len and (text[i] == '+' or text[i] == '-')) {
+            minus = text[i] == '-';
+            i += 1;
+        }
+        const digits_start = i;
+        var value: i64 = 0;
+        var overflow = false;
+        while (i < text.len and std.ascii.isDigit(text[i])) : (i += 1) {
+            const digit: i64 = text[i] - '0';
+            const times = std.math.mul(i64, value, 10) catch null;
+            const next = if (times) |m| (if (minus) std.math.sub(i64, m, digit) else std.math.add(i64, m, digit)) catch null else null;
+            if (next) |n| value = n else overflow = true;
+        }
+        if (i == digits_start) return error.InvalidDuration;
+        if (overflow) return error.OutOfRange;
+        t = value;
+        q = i;
+    }
+    var microseconds: i64 = 0;
+    if (q < text.len and text[q] == '.') {
+        q += 1;
+        var n: i64 = 100000;
+        while (n >= 1 and q < text.len and std.ascii.isDigit(text[q])) : ({
+            n = @divTrunc(n, 10);
+            q += 1;
+        }) microseconds += n * (text[q] - '0');
+        while (q < text.len and std.ascii.isDigit(text[q])) q += 1;
+    }
+    var suffix: i64 = 1000000;
+    if (std.mem.startsWith(u8, text[q..], "ms")) {
+        suffix = 1000;
+        microseconds = @divTrunc(microseconds, 1000);
+        q += 2;
+    } else if (std.mem.startsWith(u8, text[q..], "us")) {
+        suffix = 1;
+        microseconds = 0;
+        q += 2;
+    } else if (q < text.len and text[q] == 's') {
+        q += 1;
+    }
+    if (q != text.len) return error.InvalidDuration;
+    if (@divTrunc(std.math.maxInt(i64), suffix) < t or t < @divTrunc(std.math.minInt(i64), suffix)) return error.OutOfRange;
+    t *= suffix;
+    if (std.math.maxInt(i64) - microseconds < t) return error.OutOfRange;
+    t += microseconds;
+    if (t == std.math.minInt(i64) and negative) return error.OutOfRange;
+    return if (negative) -t else t;
+}
+
+fn isCSpace(c: u8) bool {
+    return c == ' ' or (c >= '\t' and c <= '\r');
+}
+
+/// `av_small_strptime` with `%J:%M:%S` (`hours`) or `%M:%S`.
+fn clock(text: []const u8, start: usize, hours: bool) ?struct { seconds: i64, end: usize } {
+    var p = start;
+    var h: i64 = 0;
+    if (hours) {
+        h = clockNumber(text, &p, std.math.maxInt(i32), 4) orelse return null;
+        if (p >= text.len or text[p] != ':') return null;
+        p += 1;
+    }
+    const m = clockNumber(text, &p, 59, 2) orelse return null;
+    if (p >= text.len or text[p] != ':') return null;
+    p += 1;
+    const s = clockNumber(text, &p, 59, 2) orelse return null;
+    return .{ .seconds = h * 3600 + m * 60 + s, .end = p };
+}
+
+/// `date_get_num`: up to `len_max` digits, at most `max`.
+fn clockNumber(text: []const u8, p: *usize, max: i64, len_max: usize) ?i64 {
+    var i = p.*;
+    var value: i64 = 0;
+    while (i < text.len and i - p.* < len_max and std.ascii.isDigit(text[i])) : (i += 1) value = value * 10 + (text[i] - '0');
+    if (i == p.*) return null;
+    if (value > max) return null;
+    p.* = i;
+    return value;
+}
+
 const vectors = @embedFile("../testing/vectors/number.txt");
-const vector_count = 214;
+const vector_count = 261;
 
 fn unhex(field: []const u8, buffer: []u8) ![]const u8 {
     if (std.mem.eql(u8, field, "-")) return "";
@@ -242,6 +348,16 @@ test "numbers equal av_strtod's and parse_number's on every vector" {
                 const want_bits: u64 = @bitCast(want);
                 const got_bits: u64 = @bitCast(n.value);
                 try std.testing.expectEqual(want_bits, got_bits);
+            }
+        } else if (kind[0] == 'D') {
+            const verdict = fields.next().?;
+            const result = parseDuration(text);
+            if (std.mem.eql(u8, verdict, "E")) {
+                try std.testing.expectError(error.InvalidDuration, result);
+            } else if (std.mem.eql(u8, verdict, "R")) {
+                try std.testing.expectError(error.OutOfRange, result);
+            } else {
+                try std.testing.expectEqual(try std.fmt.parseInt(i64, verdict, 10), try result);
             }
         } else {
             const verdict = fields.next().?;

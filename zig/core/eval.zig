@@ -219,6 +219,15 @@ pub const Expr = struct {
         e.* = undefined;
     }
 
+    /// Whether the expression names constant `index` (of the parse's
+    /// `names`).
+    pub fn usesConstant(e: *const Expr, index: usize) bool {
+        for (e.nodes) |n| {
+            if (n.kind == .constant and n.index == index) return true;
+        }
+        return false;
+    }
+
     /// `av_expr_eval` with the constants' `values`.
     pub fn eval(e: *Expr, values: []const f64) f64 {
         return e.evalNode(e.root, values);

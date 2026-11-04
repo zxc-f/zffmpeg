@@ -2138,8 +2138,10 @@ names, not as an empty framework.
       random generators. Part 2, the filtergraph text of a linear chain
       (av_get_token's quoting and escaping, filter=options with FFmpeg's
       shorthand order, ',' between filters, instance names), and volume
-      with expressions and its per-frame variables. Part 3, atrim and
-      asetpts. Excluded: link labels and several chains (T25c), commands.
+      with expressions and its per-frame variables. Part 3, atrim (with
+      av_parse_time's durations) and asetpts. Excluded: link labels and
+      several chains (T25c), commands, asetpts' RTCTIME and RTCSTART (the
+      clock).
     Needs (verified) / lands with / verified after: T25a.
     Contract and source provenance: libavutil/eval.c, sfc64.h, reverse.c;
       libavfilter/graphparser.c, avfilter.c (ff_filter_opt_parse),
@@ -2158,18 +2160,22 @@ names, not as an empty framework.
     Implementation files and test entry points: core/eval.zig,
       core/options.zig (expressions in option values), filter/filters.zig
       (volume's expression and variables); eval_vectors.c, vectors/eval.txt,
-      graph_vectors.c (now 154 cases: volume's per-frame variables,
-      expressions in aresample and aformat options, 45 filtergraph texts);
-      filter/parse.zig and Graph.initText (part 2b).
+      graph_vectors.c (now 178 cases: volume's per-frame variables,
+      expressions in aresample and aformat options, 48 filtergraph texts,
+      atrim and asetpts); filter/parse.zig and Graph.initText (part 2b);
+      core/number.zig parseDuration and options.zig's int64 and duration
+      kinds, number_vectors.c's 47 durations (part 3).
     Evidence commit / Linux CI run / reference report: pending.
     Required cases: part 1 passes (200/200, bit-exact); part 2 passes
       (options' 136 texts, the 5 expressions among them; 154/154 graphs,
       the 18 syntax and expression messages the port reports equal to
-      FFmpeg's); part 3 to come.
+      FFmpeg's); part 3 passes (178/178 graphs; 261/261 number vectors,
+      the 47 durations among them).
     Optional cases: none
     Fuzz seeds, budget and result: graph.zig's filtergraph-text entry, 4
       seeds, under zig build test; the local fuzzer fails as T25a records.
-    Remaining work or blocker / next action: part 3, atrim and asetpts.
+    Remaining work or blocker / next action: the local reference job, then
+      T25b's G5 record.
     ```
   - [ ] **T25c — Several inputs and outputs.** Needs T25b. Scheduling with
     several inputs and outputs; amix, pan, channelmap, channelsplit and asplit.

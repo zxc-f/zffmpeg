@@ -12,6 +12,9 @@
 //   I <text> <verdict>
 //       parse_number(OPT_TYPE_INT, INT_MIN, INT_MAX): "number", "range",
 //       "integer" for its three errors, else the value as a decimal
+//   D <text> <verdict>
+//       av_parse_time(duration = 1), TODO.md T25b: "E" (EINVAL), "R"
+//       (ERANGE), else the microseconds as a decimal
 //
 // See zig/testing/reference/README.md for the build commands.
 
@@ -20,7 +23,9 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include "libavutil/error.h"
 #include "libavutil/eval.h"
+#include "libavutil/parseutils.h"
 
 static void hex(const char *text)
 {
@@ -75,6 +80,25 @@ int main(void)
             printf(" integer\n");
         else
             printf(" %d\n", (int)d);
+    }
+    static const char *durations[] = {
+        "1", "1.5", "-1.5", "0", "-0", "1s", "1ms", "1us", "1.5ms", "1.0005ms", "1.25us", "12:34", "1:02:03",
+        "100:00:00", "10000:00:00", "1:60", "1:2", "01:02.5", "00:01:02.123456789", "1.", ".5", "", "-", "s",
+        "1x", "1 s", " 1", "+1", "--1", "-+1", "1:2:3:4", "9223372036854775807", "9223372036854775807us",
+        "9223372036854775808", "9223372036854775", "-9223372036854775", "1e3", "0x10", "2.000001", "3.9999999",
+        "1:00ms", "5mss", "12:3", "abc", "1.5s", "-0.5", "99999:00",
+    };
+    for (int i = 0; i < (int)(sizeof(durations) / sizeof(*durations)); i++) {
+        int64_t t;
+        int ret = av_parse_time(&t, durations[i], 1);
+        printf("D ");
+        hex(durations[i]);
+        if (ret == AVERROR(ERANGE))
+            printf(" R\n");
+        else if (ret < 0)
+            printf(" E\n");
+        else
+            printf(" %lld\n", (long long)t);
     }
     return 0;
 }

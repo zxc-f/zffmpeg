@@ -101,6 +101,9 @@ pub const SendError = stage.SendError || error{
     FormatChange,
     /// A frame of no samples; the port refuses it.
     EmptyFrame,
+    /// The graph's output has ended (atrim's end), as
+    /// `av_buffersrc_add_frame`'s `AVERROR_EOF`.
+    GraphEnded,
     OutOfMemory,
 };
 
@@ -127,6 +130,8 @@ const Run = union(enum) {
     none,
     volume: filters.VolumeRun,
     resample: filters.ResampleRun,
+    trim: filters.TrimRun,
+    setpts: filters.SetPtsRun,
 };
 
 /// A link between two nodes and, once configured, its format.
@@ -295,7 +300,8 @@ pub const Graph = struct {
             switch (n.run) {
                 .resample => |*r| r.deinit(),
                 .volume => |*v| v.deinit(),
-                .none => {},
+                .setpts => |*r| r.deinit(),
+                .none, .trim => {},
             }
         }
         g.nodes.deinit(g.gpa);
@@ -500,7 +506,8 @@ pub const Graph = struct {
                 if (g.sink_layouts.len > 0) g.setCommon(pool, node, .layouts, try layoutList(pool, g.sink_layouts));
             },
             .filter => |*f| switch (f.*) {
-                .anull => checks = false,
+                // No format query: every format, rate and layout.
+                .anull, .atrim, .asetpts => checks = false,
                 .aformat => |*a| {
                     if (a.formats.items.len > 0) g.setCommon(pool, node, .formats, try pool.newValues(a.formatList()));
                     if (a.rates.items.len > 0) g.setCommon(pool, node, .samplerates, try pool.newValues(a.rates.items));
@@ -782,6 +789,8 @@ pub const Graph = struct {
                     n.run = .{ .resample = run };
                     l.time_base = time.TimeBase.ofSampleRate(l.sample_rate) catch unreachable;
                 },
+                .atrim => |a| n.run = .{ .trim = .init(a, in.format(), in.time_base) },
+                .asetpts => |*a| n.run = .{ .setpts = .init(a, in.format(), in.time_base) },
                 else => {},
             }
         }
@@ -800,6 +809,7 @@ pub const Graph = struct {
     pub fn send(g: *Graph, frame: Frame) SendError!stage.Send {
         if (!g.configured) return error.NotConfigured;
         if (g.input_ended) return error.InputAfterEnd;
+        if (g.drained) return error.GraphEnded;
         if (g.pending != null) return .full;
         g.freeLast();
         const want = g.source.format;
@@ -877,6 +887,25 @@ pub const Graph = struct {
                     n.frames_in += 1;
                 }
                 return r;
+            },
+            .trim => |*t| {
+                while (true) {
+                    if (t.eof) return .eof;
+                    switch (try g.pull(upstream)) {
+                        .frame => |in| {
+                            var frame = in;
+                            defer frame.free(g.gpa);
+                            if (try t.filterFrame(g.gpa, &frame)) |o| return .{ .frame = o };
+                        },
+                        .need_input => return .need_input,
+                        .eof => return .eof,
+                    }
+                }
+            },
+            .setpts => |*r| {
+                var result = try g.pull(upstream);
+                if (result == .frame) result.frame.pts = r.filterFrame(result.frame.pts, result.frame.frameCount());
+                return result;
             },
             .resample => |*r| {
                 // aresample's activate: buffered output, then input, then
@@ -1174,12 +1203,13 @@ test "fuzz: arbitrary filtergraph text never crashes a graph" {
         "aresample=48000:osf=s16p, volume@a='if(lt(t,1),n,2)':eval=frame",
         "[a]anull[b];volume",
         "sws_flags=x;volume=1\\,5",
+        "atrim=0.001:duration=2ms,asetpts=N/SR/TB",
     } });
 }
 
 fn textChain(gpa: std.mem.Allocator) !void {
     const format = try audio.Format.init(44100, 2, .s16);
-    var g = try Graph.initText(gpa, .{ .format = format }, "aformat=cl=mono, volume=n+0.5:eval=frame , aresample=48000", .{ .sample_formats = &.{.s16} }, .{});
+    var g = try Graph.initText(gpa, .{ .format = format }, "atrim=start_sample=50:end_sample=700,asetpts=PTS-STARTPTS,aformat=cl=mono, volume=n+0.5:eval=frame , aresample=48000", .{ .sample_formats = &.{.s16} }, .{});
     defer g.deinit();
     try g.configure();
     var values: [400]i16 = @splat(100);
@@ -1197,7 +1227,7 @@ test "a graph from text leaks nothing when an allocation fails" {
 // through zig/testing/reference/graph_vectors.c, which documents its
 // lines. Every case is run, and the count makes a truncated file fail.
 const vectors = @embedFile("../testing/vectors/graph.txt");
-const case_count = 154;
+const case_count = 178;
 const resample = @import("../resample/resample.zig");
 const native_endian = @import("builtin").cpu.arch.endian();
 
@@ -1389,7 +1419,12 @@ fn runCase(gpa: std.mem.Allocator, lines: []const []const u8) !void {
                     at += 1;
                 },
                 .need_input => break,
-                .drained => return error.TestUnexpectedResult,
+                // The graph ended early (atrim).
+                .drained => {
+                    try testing.expectEqualStrings("D", lines[at]);
+                    try testing.expectEqual(lines.len, at + 1);
+                    return;
+                },
             }
         }
     }
