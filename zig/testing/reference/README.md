@@ -160,6 +160,19 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/flac_vector
 LC_ALL=C ./flac-vectors zig/testing/fixtures/flac/*.flac | diff -u zig/testing/vectors/flac.txt -
 ```
 
+The T27a Ogg vectors come from the reference's `libavformat`:
+`ogg_vectors.c` opens each Ogg fixture as the ffmpeg program opens an input
+and prints its streams (codec, rate, channels, time base, duration, start
+time, initial padding, seek preroll, extradata) and tags, then every packet
+`av_read_frame` returns with its stream, size, pts, dts, duration, flags,
+byte position and Adler-32, and its skip-samples, new-extradata and
+strings-metadata side data:
+
+```bash
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/ogg_vectors.c .references/ffmpeg-install/lib/libavformat.a .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o ogg-vectors
+LC_ALL=C ./ogg-vectors zig/testing/fixtures/ogg/*.ogg | diff -u zig/testing/vectors/ogg.txt -
+```
+
 The T26c FLAC encoder vectors come from the reference's `libavcodec`
 through its public API: `flacenc_vectors.c` encodes deterministic integer
 signals (the Zig test regenerates them from the printed parameters) at

@@ -206,6 +206,16 @@ jobs:
             -lm -pthread -o flac-vectors
           LC_ALL=C ./flac-vectors zig/testing/fixtures/flac/*.flac | diff -u zig/testing/vectors/flac.txt -
 
+      # The committed T27a oracle must be what this build's libavformat makes
+      # of every Ogg fixture.
+      - name: Check the Ogg vectors (T27a)
+        run: |
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/ogg_vectors.c \
+            .references/ffmpeg-install/lib/libavformat.a .references/ffmpeg-install/lib/libavcodec.a \
+            .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a \
+            -lm -pthread -o ogg-vectors
+          LC_ALL=C ./ogg-vectors zig/testing/fixtures/ogg/*.ogg | diff -u zig/testing/vectors/ogg.txt -
+
       # The committed T26c oracle must be what this build's FLAC encoder makes
       # of the generated signals.
       - name: Check the FLAC encoder vectors (T26c)

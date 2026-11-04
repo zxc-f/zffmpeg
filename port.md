@@ -1060,6 +1060,31 @@ FFmpeg's probe scores `fLaC` with a plausible STREAMINFO 100, other `fLaC`
 input 50, and a frame header at the start 13 (a winner FFmpeg accepts after
 its probe retries, the same one).
 
+### Ogg contract
+
+T27a adds the Ogg demuxer, read only, as FFmpeg's `libavformat/oggdec.c`
+reads it with the FLAC, Opus and Vorbis mappings (`oggparseflac.c`,
+`oggparseopus.c`, `oggparsevorbis.c` with `libavcodec/vorbis_parser.c`),
+without decoding. The fixtures are
+[zig/testing/fixtures/ogg/](zig/testing/fixtures/ogg/README.md), written by
+`generate.py`, and [ogg.txt](zig/testing/vectors/ogg.txt), printed by
+[ogg_vectors.c](zig/testing/reference/ogg_vectors.c) from the pinned
+libavformat, is the oracle for every fixture's streams and packets: codec,
+rate, channels, time base, duration, start time, initial padding, seek
+preroll, extradata and tags, then each packet's stream, bytes, pts, dts,
+duration, flags, byte position and side data (skip samples, new extradata,
+strings metadata). In summary (G0; the parts in TODO.md T27a widen it):
+
+| Case | Behavior |
+| --- | --- |
+| Pages | The capture pattern `OggS`, searched for up to 65307 bytes (FFmpeg's `MAX_PAGE_SIZE`); a 27-byte header, the segment table and the body; Ogg's CRC-32 checked, and a page with a wrong CRC, or of a stream structure version other than 0, skipped by searching again from after its capture pattern, as FFmpeg does. Packets are laced across segments and pages; a page that continues a packet whose start was lost is discarded up to the packet's end. |
+| Streams | A BOS page before any data opens a logical stream; a new serial after data replaces the only stream when it carries the same codec (a chain, whose first packet has no timestamps) and is refused otherwise. A stream whose first packet matches no supported mapping is kept without a codec, and none of its packets is returned, as FFmpeg does. |
+| Mappings | FLAC (`0x7F FLAC` version 1 and STREAMINFO, then VORBIS_COMMENT; frames through FFmpeg's FLAC parser for their headers), Opus (OpusHead, OpusTags; packet durations from the TOC byte, pre-skip and end trimming as skip-samples side data, a granule above 2^62 refused) and Vorbis (identification, comment and setup headers as extradata; durations from the block sizes and the setup header's mode table as `vorbis_parser.c` reads it; pages whose granule is 0 lose their timestamps). Chained headers become new-extradata and strings-metadata side data. |
+| Timestamps | Each mapping's granule-to-timestamp rule, applied at the packet that ends a page, then libavformat's for the stream, as `ogg.txt` records them. |
+| Errors | Opening fails where FFmpeg's does: `InvalidOgg` for its INVALIDDATA and UNKNOWN (a header it cannot parse), `Truncated` for the input ending before the headers; after opening, a refused page or packet ends reading with `InvalidOgg`, as FFmpeg's `av_read_frame` returns its error. |
+| Seeking | Planned with T27a: `ogg_read_timestamp` under `ff_seek_frame_binary`, and the duration scan from the input's end (`ogg_get_length`). |
+| Writing | None until T27b. |
+
 ### Raw PCM contract
 
 T22c adds FFmpeg's raw PCM formats: header-less interleaved samples, one

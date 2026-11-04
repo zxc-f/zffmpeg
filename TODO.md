@@ -2599,8 +2599,7 @@ names, not as an empty framework.
 
     ```text
     ID / parent: T27a / T27
-    State: G0 (the reference build reads Ogg; contract, fixtures and
-      oracle next)
+    State: G1 (contract, fixtures and oracle written; the demuxer next)
     Plan: part 0, the contract (port.md "Ogg contract"), Python-made
       fixtures (generate.py: pages with CRC-32, FLAC, Opus and Vorbis
       mappings, a synthetic Vorbis setup header whose mode table
@@ -2615,7 +2614,11 @@ names, not as an empty framework.
       (ogg_read_timestamp under ff_seek_frame_binary) and the duration
       scan from the end (ogg_get_length).
     Evidence so far: build-ffmpeg.sh enables the Ogg demuxer (the
-      registry lists it as a T27a difference until it is registered).
+      registry lists it as a T27a difference until it is registered),
+      0cc5d89; port.md "Ogg contract"; 20 Ogg fixtures from generate.py
+      (FLAC, Opus and Vorbis mappings, a multiplexed and a chained
+      stream, 9 damaged ones, 3 FFmpeg refuses) with vectors/ogg.txt from
+      ogg_vectors.c (164 packets), checked by CI and local CI.
     ```
   - [ ] **T27b — Ogg mux.** Needs T27a.
     Done when FFmpeg demuxes our output to identical packets and timestamps.

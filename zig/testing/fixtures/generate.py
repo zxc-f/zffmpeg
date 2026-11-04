@@ -2834,7 +2834,362 @@ def render_flac_table(fixtures):
     return "\n".join(rows) + "\n"
 
 
-def outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures, flac_fixtures):
+# Ogg fixtures (T27a): pages with Ogg's CRC-32, the FLAC, Opus and Vorbis
+# mappings, and multiplexed, chained and damaged streams. Their expected
+# packets and timestamps are FFmpeg's, from zig/testing/reference/
+# ogg_vectors.c (vectors/ogg.txt); the manifest records whether FFmpeg
+# opens each one.
+
+OGG_DIR = HERE / "ogg"
+OGG_MANIFEST = OGG_DIR / "manifest.zon"
+OGG_README = OGG_DIR / "README.md"
+
+
+def _ogg_crc_table():
+    table = []
+    for i in range(256):
+        r = i << 24
+        for _ in range(8):
+            r = ((r << 1) ^ 0x04C11DB7) if r & 0x80000000 else (r << 1)
+        table.append(r & 0xFFFFFFFF)
+    return table
+
+
+OGG_CRC_TABLE = _ogg_crc_table()
+
+
+def ogg_crc(data):
+    """Ogg's CRC-32: polynomial 0x04C11DB7, initial 0, MSB first, no final
+    XOR."""
+    crc = 0
+    for b in data:
+        crc = ((crc << 8) & 0xFFFFFFFF) ^ OGG_CRC_TABLE[((crc >> 24) ^ b) & 0xFF]
+    return crc
+
+
+def ogg_page(serial, seq, granule, body_segments, flags=0, version=0, crc=None):
+    """One page: `body_segments` are its lacing values' bytes, each at most
+    255 (a 255 continues the packet). A granule of None is -1."""
+    lacing = bytes(len(seg) for seg in body_segments)
+    assert len(lacing) <= 255
+    gp = 0xFFFFFFFFFFFFFFFF if granule is None else granule & 0xFFFFFFFFFFFFFFFF
+    header = (b"OggS" + bytes([version, flags]) + struct.pack("<QII", gp, serial, seq) + b"\0\0\0\0"
+              + bytes([len(lacing)]) + lacing)
+    body = b"".join(body_segments)
+    page = bytearray(header + body)
+    value = ogg_crc(bytes(page)) if crc is None else crc
+    page[22:26] = struct.pack("<I", value)
+    return bytes(page)
+
+
+def ogg_lace(packet):
+    """A packet's lacing: 255-byte segments, then one shorter (possibly
+    empty)."""
+    segs = [packet[i:i + 255] for i in range(0, len(packet) - len(packet) % 255, 255)]
+    segs.append(packet[len(packet) - len(packet) % 255:])
+    return segs
+
+
+def ogg_stream_pages(serial, packets, granules, per_page=None, bos=True, eos=True, seq=0, max_segments=255):
+    """Pages for a logical stream as libogg lays them out: `packets` with
+    the granule each one ends at; a page is cut after `per_page` packets
+    (or when its segments run out), and its granule is that of the last
+    packet completed on it, or -1. The first packet (the codec's first
+    header) has a page of its own."""
+    pages = []
+    segments = []  # (segment bytes, packet index or None while it continues)
+    for n, packet in enumerate(packets):
+        laced = ogg_lace(packet)
+        for k, seg in enumerate(laced):
+            segments.append((seg, n if k == len(laced) - 1 else None))
+    current, completed, cont, page_index = [], [], False, 0
+
+    def flush(last):
+        nonlocal current, completed, cont, page_index, seq
+        if not current:
+            return
+        flags = (1 if cont else 0) | (2 if bos and page_index == 0 else 0) | (4 if eos and last else 0)
+        granule = granules[completed[-1]] if completed else None
+        pages.append(ogg_page(serial, seq, granule, [seg for seg, _ in current], flags))
+        cont = current[-1][1] is None
+        seq += 1
+        page_index += 1
+        current, completed = [], []
+
+    for i, (seg, ends) in enumerate(segments):
+        current.append((seg, ends))
+        if ends is not None:
+            completed.append(ends)
+        full = len(current) == max_segments
+        cut = ends is not None and (ends == 0 or (per_page and len(completed) == per_page))
+        if full or cut:
+            flush(i == len(segments) - 1)
+    flush(True)
+    return pages
+
+
+def ogg_interleave(*streams):
+    """Pages of several streams, the first page of each first (the BOS
+    pages), then the rest in turn."""
+    out = [p[0] for p in streams]
+    rest = [list(p[1:]) for p in streams]
+    while any(rest):
+        for r in rest:
+            if r:
+                out.append(r.pop(0))
+    return b"".join(out)
+
+
+def vorbis_comment_packet(prefix, vendor, tags, framing):
+    body = struct.pack("<I", len(vendor)) + vendor + struct.pack("<I", len(tags))
+    for tag in tags:
+        body += struct.pack("<I", len(tag)) + tag
+    return prefix + body + (b"\x01" if framing else b"")
+
+
+def ogg_flac_headers(rate, channels, total, block, tags=(b"TITLE=Ogg FLAC",)):
+    """The FLAC mapping's first packet (0x7F, "FLAC", version 1.0, the
+    header count, "fLaC", STREAMINFO's block) and a VORBIS_COMMENT."""
+    info = streaminfo(rate, channels, total, block, block)
+    first = b"\x7fFLAC\x01\x00\x00\x01fLaC" + b"\x00" + (34).to_bytes(3, "big") + info
+    comment = vorbis_comment_packet(b"", b"generate.py", list(tags), framing=False)
+    return [first, b"\x84" + len(comment).to_bytes(3, "big") + comment]
+
+
+def ogg_flac_stream(serial, rate=44100, channels=2, count=2000, block=576, per_page=1, seed=7, **pages):
+    data = flac_signal(count, channels, seed=seed)
+    frames = []
+    granules = [0, 0]
+    for n, start in enumerate(range(0, count, block)):
+        part = [c[start:start + block] for c in data]
+        frames.append(flac_frame(n, part, rate))
+        granules.append(min(start + block, count))
+    packets = ogg_flac_headers(rate, channels, count, block) + frames
+    return ogg_stream_pages(serial, packets, granules, per_page=per_page, **pages)
+
+
+def opus_head(channels=2, pre_skip=312, rate=48000):
+    return b"OpusHead" + bytes([1, channels]) + struct.pack("<HIhB", pre_skip, rate, 0, 0)
+
+
+OPUS_TAGS = vorbis_comment_packet(b"OpusTags", b"generate.py", [b"TITLE=Ogg Opus"], framing=False)
+
+
+def opus_packet(config, count_code, frames=None, size=40, fill=0x55):
+    """A packet with a TOC byte (config, stereo, frame count code) and
+    `size` bytes after it; with code 3, the frame count byte."""
+    toc = (config << 3) | 4 | count_code
+    body = bytes([toc]) + (bytes([frames]) if count_code == 3 else b"")
+    return body + bytes([fill] * (size - len(body)))
+
+
+def opus_duration(packet):
+    toc = packet[0]
+    config, code = toc >> 3, toc & 3
+    frame = max(480, 960 * (config & 3)) if config < 12 else (480 << (config & 1)) if config < 16 else 120 << (config & 3)
+    count = (packet[1] & 0x3F) if code == 3 else 2 if code else 1
+    return frame * count
+
+
+def ogg_opus_stream(serial, packets, pre_skip=312, granule_end=None, per_page=4, head=None, **pages):
+    total = 0
+    granules = [0, 0]
+    for packet in packets:
+        total += opus_duration(packet)
+        granules.append(total)
+    if granule_end is not None:
+        granules[-1] = granule_end
+    allp = [head if head is not None else opus_head(pre_skip=pre_skip), OPUS_TAGS] + packets
+    return ogg_stream_pages(serial, allp, granules, per_page=per_page, **pages)
+
+
+def vorbis_id_header(channels=2, rate=44100, bs0=8, bs1=11):
+    return (b"\x01vorbis" + struct.pack("<IBIiii", 0, channels, rate, 0, 128000, 0)
+            + bytes([(bs1 << 4) | bs0, 1]))
+
+
+def vorbis_setup_header(blockflags):
+    """A setup header FFmpeg's vorbis_parser.c reads: filler where the
+    codebooks, floors, residues and mappings would be (0xFF bytes, which
+    its backward scan cannot mistake for modes), then the mode table and
+    the framing bit, packed LSB first as Vorbis packs it."""
+    bits = []
+
+    def put(value, n):
+        for i in range(n):
+            bits.append((value >> i) & 1)
+
+    put(len(blockflags) - 1, 6)
+    for flag in blockflags:
+        put(flag, 1)
+        put(0, 16)
+        put(0, 16)
+        put(0, 8)
+    put(1, 1)
+    while len(bits) % 8:
+        bits.append(0)
+    packed = bytes(sum(bits[i + k] << k for k in range(8)) for i in range(0, len(bits), 8))
+    return b"\x05vorbis" + b"\xff" * 16 + packed
+
+
+def vorbis_audio_packet(mode, prev_long=0, next_long=0, size=30, mode_bits=1):
+    first = (mode << 1) | (prev_long << (1 + mode_bits)) | (next_long << (2 + mode_bits))
+    return bytes([first & 0xFF]) + bytes([0x33] * (size - 1))
+
+
+def vorbis_durations(packets, bs=(256, 2048), blockflags=(0, 1)):
+    """Each audio packet's duration as vorbis_parser.c gives it, from the
+    first packet's start (the previous block taken as short)."""
+    previous = bs[0]
+    out = []
+    for packet in packets:
+        mode = (packet[0] >> 1) & 1 if len(blockflags) > 1 else 0
+        prev = previous
+        if blockflags[mode]:
+            prev = bs[(packet[0] >> 2) & 1]
+        current = bs[blockflags[mode]]
+        out.append((prev + current) >> 2)
+        previous = current
+    return out
+
+
+def ogg_vorbis_stream(serial, packets, per_page=4, granule_shift=0, zero_granules=False, **pages):
+    headers = [vorbis_id_header(),
+               vorbis_comment_packet(b"\x03vorbis", b"generate.py", [b"TITLE=Ogg Vorbis"], framing=True),
+               vorbis_setup_header([0, 1])]
+    durations = vorbis_durations(packets)
+    granules = [0, 0, 0]
+    total = 0
+    for d in durations:
+        total += d
+        granules.append(0 if zero_granules else max(total - durations[0] + granule_shift, 0))
+    return ogg_stream_pages(serial, headers + packets, granules, per_page=per_page, **pages)
+
+
+@dataclasses.dataclass
+class OggFixture:
+    name: str
+    group: str
+    rule: str
+    data: bytes
+    # FFmpeg opens it ("accept") or fails with this error.
+    reject: str = None
+
+
+def vorbis_packets(count):
+    """Short and long blocks in a pattern with the window flags long
+    blocks carry."""
+    out = []
+    for i in range(count):
+        long_block = i % 3 == 2
+        out.append(vorbis_audio_packet(1 if long_block else 0, prev_long=0, next_long=0, size=20 + i % 7))
+    return out
+
+
+def build_ogg_fixtures():
+    fx = []
+
+    def ok(name, rule, data, group="accepted"):
+        fx.append(OggFixture(name, group, rule, data))
+
+    def bad(name, rule, data, error, group="rejected"):
+        fx.append(OggFixture(name, group, rule, data, reject=error))
+
+    opus_ps = [opus_packet(31, 0, size=40 + i % 5) for i in range(12)]
+    vorbis_ps = vorbis_packets(20)
+
+    flac_pages = ogg_flac_stream(0x1001)
+    ok("ogg_flac_stereo", "FLAC in Ogg (the 0x7F FLAC mapping): STREAMINFO and a VORBIS_COMMENT as headers, one "
+       "576-sample frame per page.", b"".join(flac_pages))
+    ok("ogg_flac_packed_pages", "FLAC frames, four to a page; a page's granule is its last frame's end.",
+       b"".join(ogg_flac_stream(0x1002, per_page=4)))
+    ok("ogg_opus_stereo", "Opus: OpusHead (pre-skip 312) and OpusTags, then 20 ms CELT packets four to a page; "
+       "the EOS page's granule ends the stream exactly.", b"".join(ogg_opus_stream(0x2001, opus_ps)))
+    ok("ogg_opus_end_trim", "Opus whose EOS granule falls inside the last packet: FFmpeg trims its end "
+       "(skip-samples side data).", b"".join(ogg_opus_stream(0x2002, opus_ps, granule_end=12 * 960 - 500)))
+    ok("ogg_opus_frame_counts", "Opus TOC frame counts 1, 2 (codes 1 and 2) and code 3 with a count byte, and "
+       "configurations of 2.5 to 60 ms.", b"".join(ogg_opus_stream(0x2003, [
+           opus_packet(0, 0), opus_packet(1, 1), opus_packet(3, 2), opus_packet(16, 3, frames=3),
+           opus_packet(13, 0), opus_packet(19, 3, frames=6), opus_packet(31, 0), opus_packet(31, 0)])))
+    ok("ogg_vorbis_stereo", "Vorbis: identification, comment and a setup header whose mode table (a short and a "
+       "long mode) the parser reads; packet durations from the block sizes, four packets to a page.",
+       b"".join(ogg_vorbis_stream(0x3001, vorbis_ps)))
+    ok("ogg_vorbis_granule_zero", "Vorbis data pages whose granule is 0: FFmpeg drops their timestamps "
+       "(trac ticket 3710).", b"".join(ogg_vorbis_stream(0x3002, vorbis_ps, zero_granules=True)))
+    ok("ogg_multiplexed", "Two logical streams, FLAC and Opus, their BOS pages first, then pages interleaved.",
+       ogg_interleave(ogg_flac_stream(0x4001), ogg_opus_stream(0x4002, opus_ps)))
+    ok("ogg_chained_opus", "Two Opus streams one after the other (a chain): the second replaces the first, "
+       "its first packet without timestamps.",
+       b"".join(ogg_opus_stream(0x5001, opus_ps[:6])) + b"".join(ogg_opus_stream(0x5002, opus_ps[:6])))
+    ok("ogg_packet_spanning_pages", "A 700-byte FLAC frame continued across pages of at most 2 segments.",
+       b"".join(ogg_flac_stream(0x6001, count=1152, block=1152, max_segments=2)))
+    ok("ogg_junk_before_first_page", "64 zero bytes before the first page: no probe scores it, so detection "
+       "falls back on the .ogg extension, and the demuxer resyncs on the capture pattern.",
+       b"\x00" * 64 + b"".join(ogg_opus_stream(0x7001, opus_ps)), group="damaged")
+    pages = ogg_opus_stream(0x7002, opus_ps)
+    broken = bytearray(pages[3])
+    broken[-1] ^= 0xFF
+    ok("ogg_bad_crc_page", "A data page with a wrong CRC: FFmpeg skips it and resyncs on the next page.",
+       b"".join(pages[:3]) + bytes(broken) + b"".join(pages[4:]), group="damaged")
+    pages = ogg_opus_stream(0x7003, opus_ps)
+    v1 = bytearray(pages[3])
+    v1[4] = 1
+    v1[22:26] = b"\0\0\0\0"
+    v1[22:26] = struct.pack("<I", ogg_crc(bytes(v1)))
+    ok("ogg_version1_page", "A data page of stream structure version 1 (with a valid CRC): FFmpeg skips it.",
+       b"".join(pages[:3]) + bytes(v1) + b"".join(pages[4:]), group="damaged")
+    pages = ogg_flac_stream(0x7004, count=1152, block=1152, max_segments=2)
+    ok("ogg_lost_continued_page", "The first page of a packet spanning pages is lost: the next page starts with "
+       "a continuation, which FFmpeg discards.", b"".join(pages[:3]) + b"".join(pages[4:]), group="damaged")
+    data = b"".join(ogg_opus_stream(0x7005, opus_ps))
+    ok("ogg_truncated", "The file ends inside a data page.", data[:len(data) - 30], group="damaged")
+    ok("ogg_unknown_codec", "A stream of an unknown codec beside an Opus one: FFmpeg keeps it without a codec "
+       "and returns none of its packets.",
+       ogg_interleave(ogg_stream_pages(0x8001, [b"\x80unknown-codec", b"data" * 10], [0, 100], per_page=1),
+                      ogg_opus_stream(0x8002, opus_ps)), group="damaged")
+    pages = ogg_opus_stream(0x7006, opus_ps, per_page=2)
+    nogp = bytearray(pages[3])
+    nogp[6:14] = b"\xff" * 8
+    nogp[22:26] = b"\0\0\0\0"
+    nogp[22:26] = struct.pack("<I", ogg_crc(bytes(nogp)))
+    ok("ogg_page_without_granule", "An Opus data page whose granule is -1 although packets end on it: "
+       "FFmpeg's Opus mapping refuses the granule (above 2^62) and reading stops with an error.",
+       b"".join(pages[:3]) + bytes(nogp) + b"".join(pages[4:]), group="damaged")
+    bad("ogg_opus_short_head", "An OpusHead shorter than 19 bytes.",
+        b"".join(ogg_opus_stream(0x9001, opus_ps, head=opus_head()[:15])), "INVALIDDATA")
+    bad("ogg_no_pages", "OggS and nothing else: the input ends before a page.", b"OggS\x00\x02", "EOF")
+    bad("ogg_vorbis_bad_setup", "A Vorbis setup header without a mode table the parser can find.",
+        b"".join(ogg_stream_pages(0x9002, [vorbis_id_header(),
+                                           vorbis_comment_packet(b"\x03vorbis", b"x", [], framing=True),
+                                           b"\x05vorbis" + b"\xff" * 20] + vorbis_ps,
+                                  [0, 0, 0] + list(range(100, 2100, 100)), per_page=4)), "UNKNOWN")
+    return fx
+
+
+def render_ogg_manifest(fixtures):
+    lines = ["// Generated by zig/testing/fixtures/generate.py from its Ogg fixtures; do not edit.",
+             "// Each entry names ogg/<name>.ogg; see ogg/README.md. Packets and timestamps are",
+             "// FFmpeg's, in zig/testing/vectors/ogg.txt.",
+             ".{"]
+    for f in fixtures:
+        lines.append("    .{")
+        lines.append(f'        .name = "{f.name}",')
+        lines.append(f'        .sha256 = "{hashlib.sha256(f.data).hexdigest()}",')
+        lines.append(f'        .expected = {".accept" if f.reject is None else "." + "reject"},')
+        lines.append("    },")
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
+def render_ogg_table(fixtures):
+    rows = [TABLE_BEGIN.rstrip("\n"), "| Fixture | Group | FFmpeg opens it | Rule |", "| --- | --- | --- | --- |"]
+    for f in fixtures:
+        rows.append(f"| `{f.name}` | {f.group} | {'yes' if f.reject is None else '`' + f.reject + '`'} | {f.rule} |")
+    rows.append(TABLE_END.rstrip("\n"))
+    return "\n".join(rows) + "\n"
+
+
+def outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures, flac_fixtures, ogg_fixtures):
     files = {WAV_DIR / f"{f.name}.wav": f.data for f in fixtures}
     files[MANIFEST] = render_manifest(
         fixtures, "// Each entry names wav/<name>.wav; see README.md for the rules and decisions.")
@@ -2858,6 +3213,9 @@ def outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures, fl
     files.update({FLAC_DIR / f"{f.name}.flac": f.data for f in flac_fixtures if f.made_by != "ffmpeg"})
     files[FLAC_MANIFEST] = render_flac_manifest(flac_fixtures).encode()
     files[FLAC_README] = render_readme(FLAC_README, render_flac_table(flac_fixtures))
+    files.update({OGG_DIR / f"{f.name}.ogg": f.data for f in ogg_fixtures})
+    files[OGG_MANIFEST] = render_ogg_manifest(ogg_fixtures).encode()
+    files[OGG_README] = render_readme(OGG_README, render_ogg_table(ogg_fixtures))
     return files
 
 
@@ -2892,15 +3250,17 @@ def main():
     raw_fixtures = build_raw_fixtures()
     caf_fixtures = build_caf_fixtures()
     flac_fixtures = build_flac_fixtures()
-    expected = outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures, flac_fixtures)
+    ogg_fixtures = build_ogg_fixtures()
+    expected = outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures, flac_fixtures, ogg_fixtures)
     stale = [path for path, content in expected.items() if not path.exists() or path.read_bytes() != content]
     ffmpeg_made = {FLAC_DIR / f"{f.name}.flac" for f in flac_fixtures if f.made_by == "ffmpeg"}
     extra = sorted((set(WAV_DIR.glob("*.wav")) | set(AU_DIR.glob("*.au")) | set(AIFF_DIR.glob("*.aiff"))
-             | set(RAW_DIR.glob("*.raw")) | set(CAF_DIR.glob("*.caf")) | set(FLAC_DIR.glob("*.flac")))
+             | set(RAW_DIR.glob("*.raw")) | set(CAF_DIR.glob("*.caf")) | set(FLAC_DIR.glob("*.flac"))
+             | set(OGG_DIR.glob("*.ogg")))
                    - set(expected) - ffmpeg_made)
     problems = check_ffmpeg_made(flac_fixtures)
     counts = (f"{len(fixtures)} WAV, {len(au_fixtures)} AU, {len(aiff_fixtures)} AIFF, {len(raw_fixtures)} raw PCM, "
-              f"{len(caf_fixtures)} CAF and {len(flac_fixtures)} FLAC fixtures")
+              f"{len(caf_fixtures)} CAF, {len(flac_fixtures)} FLAC and {len(ogg_fixtures)} Ogg fixtures")
 
     if args.check:
         for path in stale:
@@ -2924,6 +3284,7 @@ def main():
     RAW_DIR.mkdir(exist_ok=True)
     CAF_DIR.mkdir(exist_ok=True)
     FLAC_DIR.mkdir(exist_ok=True)
+    OGG_DIR.mkdir(exist_ok=True)
     for path in extra:
         path.unlink()
     for path in stale:
