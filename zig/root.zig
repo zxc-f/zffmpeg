@@ -23,6 +23,8 @@
 //! - `metadata`: the tag dictionary, ordered with owned storage and FFmpeg's
 //!   duplicate-key policies (`core/metadata.zig`).
 //! - `eval`: FFmpeg's expression evaluator (`core/eval.zig`).
+//! - `bits`: an MSB-first bit reader with FFmpeg's over-read rules, Rice
+//!   codes, and the CRC-8 and CRC-16 FLAC uses (`codec/bits.zig`).
 //! - `wav`: bounded RIFF/WAVE, RF64/BW64 and Sony Wave64 parsing and
 //!   known-length writing for the WAV PCM encodings (`format/wav.zig`).
 //! - `au`: bounded Sun AU parsing and known-length writing for s16 big-endian
@@ -70,6 +72,7 @@ pub const number = @import("core/number.zig");
 pub const options = @import("core/options.zig");
 pub const diagnostics = @import("core/diagnostics.zig");
 pub const eval = @import("core/eval.zig");
+pub const bits = @import("codec/bits.zig");
 pub const wav = @import("format/wav.zig");
 pub const au = @import("format/au.zig");
 pub const aiff = @import("format/aiff.zig");
@@ -88,6 +91,7 @@ test {
     _ = @import("codec/pcm.zig");
     _ = @import("codec/g711.zig");
     _ = @import("codec/registry.zig");
+    _ = @import("codec/bits.zig");
     _ = @import("core/audio.zig");
     _ = @import("core/channel_layout.zig");
     _ = @import("core/time.zig");
