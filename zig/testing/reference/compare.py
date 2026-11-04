@@ -2104,13 +2104,6 @@ FATE_VORBIS = ["1.0.1-test_small", "1.0-test_small", "beta3-test_small", "beta4-
                "rc3-test_small", "sleepzor_small", "test-short2_small", "6"]
 
 
-# Ogg fixtures FFmpeg decodes and the port does not yet: zffmpeg must
-# refuse them with UnsupportedOpusMode, before any output.
-PENDING_OGG_DECODE = {
-    "ogg_opus_frame_counts": "its hybrid frame (T28c)",
-}
-
-
 # Ogg decodes that differ from the ffmpeg program's for an understood
 # reason: (fixture, options or None for every output) -> reason.
 KNOWN_OGG_DECODE_DIFFERENCES = {
@@ -2120,6 +2113,13 @@ KNOWN_OGG_DECODE_DIFFERENCES = {
                                  "frames keep the Opus packets' timestamps, with gaps where the SILK resampler "
                                  "delays samples, and the Ogg muxer's granules follow them (the program's "
                                  "timestamps, T53)",
+    ("ogg_opus_frame_counts", "-f ogg"): "the same samples; the last granule differs: the program's decoded frames "
+                                         "keep the packets' timestamps, so the packets the decoder refuses leave "
+                                         "gaps the Ogg muxer's granules follow (the program's timestamps, T53)",
+    ("ogg_opus_multistream", "-f ogg"): "the same samples; their timestamps differ: the program's decoded frames "
+                                        "keep the packets' timestamps, with gaps where the streams' sync buffers "
+                                        "shorten a frame, and the Ogg muxer's granules follow them (T53)",
+    ("ogg_opus_mapped", "-f ogg"): "the same samples; the last granule differs, as for ogg_opus_multistream (T53)",
     ("ogg_page_without_granule", None): "the demuxer fails mid-stream (a granule above 2^62): the ffmpeg program "
                                         "ends the input there and exits 0, zffmpeg fails (port.md: a late parse "
                                         "error stays a failure), before any output from a file",
@@ -2134,8 +2134,7 @@ def compare_opus_vectors(args, lines, failures):
     packets whose final range differs from the encoder's are reported
     beside it: FFmpeg's SILK path, resampled by libswresample, fails
     opus_compare on some vectors, and its mono SILK decoding reads other
-    bits than libopus' (notes.md "Opus"). Vectors with hybrid frames wait
-    for T28c and are reported as skipped."""
+    bits than libopus' (notes.md "Opus")."""
     folder = pathlib.Path(args.opus_vectors)
     ffmpeg = {}
     for line in (HERE.parent / "vectors" / "opus_rfc.txt").read_text().splitlines():
@@ -2156,11 +2155,6 @@ def compare_opus_vectors(args, lines, failures):
                 continue
             p = run(args.opus_vector_driver, bit, str(channels), *refs[label])
             out = text(p.stdout).split()
-            if p.returncode == 3:
-                skipped += 1
-                reasons.add("hybrid frames (T28c)")
-                rows.append(f"| {name} | {label} | skipped: hybrid frames (T28c) |")
-                continue
             fields = dict(zip(out[0::2], out[1::2])) if p.returncode == 0 else {}
             theirs = ffmpeg.get((name, channels))
             note = (f"opus_compare {fields.get('opus_compare')} ({fields.get('quality')}), "
@@ -2195,7 +2189,7 @@ def compare_ogg_decode(args, lines, failures):
     (optional), as `tests/fate/vorbis.mak` runs them (s16le), byte for
     byte against the ffmpeg program's."""
     rows = []
-    same = total = pending = 0
+    same = total = understood = 0
     understood_notes = set()
     with tempfile.TemporaryDirectory() as work:
         work = pathlib.Path(work)
@@ -2204,18 +2198,6 @@ def compare_ogg_decode(args, lines, failures):
                         "-of", "default=nw=1:nk=1", path)
             codec = text(probe.stdout).strip()
             if probe.returncode != 0 or codec not in ("vorbis", "flac", "opus") or path.stem == "ogg_multiplexed":
-                continue
-            if path.stem in PENDING_OGG_DECODE:
-                # FFmpeg decodes it; the port stops with UnsupportedOpusMode.
-                for opts, ext in OGG_DECODE_OUTPUTS:
-                    total += 1
-                    zp = run(args.zffmpeg, "-y", "-i", path, *opts, work / f"ours.{ext}")
-                    if zp.returncode == 3 and b"UnsupportedOpusMode" in zp.stderr:
-                        same += 1
-                        pending += 1
-                    else:
-                        failures.append(f"Ogg decode {path.stem}: zffmpeg {zp.returncode}, expected UnsupportedOpusMode")
-                rows.append(f"| `{path.stem}` | {codec} | pending: {PENDING_OGG_DECODE[path.stem]} |")
                 continue
             problems = []
             for opts, ext in OGG_DECODE_OUTPUTS:
@@ -2230,7 +2212,7 @@ def compare_ogg_decode(args, lines, failures):
                          or KNOWN_OGG_DECODE_DIFFERENCES.get((path.stem, None)))
                 if known and (tp.returncode != 0 or zp.returncode != 0 or theirs.read_bytes() != ours.read_bytes()):
                     same += 1
-                    pending += 1
+                    understood += 1
                     understood_notes.add(f"`{path.stem}`: {known}")
                 elif tp.returncode != 0 and zp.returncode != 0 and not ours.exists():
                     # Both refuse (a decode error rate past -max_error_rate),
@@ -2246,7 +2228,7 @@ def compare_ogg_decode(args, lines, failures):
             result = "pass" if not problems else "**FAIL**: " + "; ".join(problems)
             rows.append(f"| `{path.stem}` | {codec} | {result} |")
             failures.extend(f"Ogg decode {path.stem}: {p}" for p in problems)
-    record("Ogg decoding (T27d, T28a)", same, total, understood=pending)
+    record("Ogg decoding (T27d, T28a)", same, total, understood=understood)
     suite = pathlib.Path(args.fate_suite)
     fate_rows = []
     passed = failed = skipped = 0
@@ -2273,8 +2255,8 @@ def compare_ogg_decode(args, lines, failures):
         "## Ogg decoding (T27d, T28a)",
         "",
         f"Ogg fixtures decoded by zffmpeg into WAV, AU, AIFF, FLAC, Ogg and raw PCM (and resampled, and downmixed) "
-        f"equal to the ffmpeg program's with `-bitexact`: {same}/{total}, {pending} of them as understood "
-        f"differences or pending decoders:",
+        f"equal to the ffmpeg program's with `-bitexact`: {same}/{total}, {understood} of them as understood "
+        f"differences:",
         "",
     ] + [f"- {note}" for note in sorted(understood_notes)] + [
         "",

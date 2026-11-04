@@ -33,6 +33,21 @@
         .expected = .accept,
     },
     .{
+        .name = "ogg_opus_hybrid",
+        .sha256 = "ef9de43f03ebd34145723e31485601b8870e074a82fcca6cb213adad810c1eb4",
+        .expected = .accept,
+    },
+    .{
+        .name = "ogg_opus_multistream",
+        .sha256 = "053c3b31453062b08ce7484d8f5c5d52ba70fe8bd2dcd6a14fc45a638ff908fb",
+        .expected = .accept,
+    },
+    .{
+        .name = "ogg_opus_mapped",
+        .sha256 = "6bfca71063100a075000843647ee7a067566d738a85a778392c20a5ac6c66d71",
+        .expected = .accept,
+    },
+    .{
         .name = "ogg_vorbis_stereo",
         .sha256 = "b3d4d010868fe7885cd03e9dd87f923ad0576734674fca52e68a807ce0a2ab95",
         .expected = .accept,

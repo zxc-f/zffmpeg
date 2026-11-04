@@ -2972,6 +2972,28 @@ def opus_head(channels=2, pre_skip=312, rate=48000):
     return b"OpusHead" + bytes([1, channels]) + struct.pack("<HIhB", pre_skip, rate, 0, 0)
 
 
+def opus_head_mapped(family, streams, coupled, mapping, gain=0, pre_skip=312):
+    """An OpusHead with a channel mapping table (families 1 and 255): one
+    output channel per `mapping` entry, a decoded channel's index or 255
+    for silence."""
+    return (b"OpusHead" + bytes([1, len(mapping)]) + struct.pack("<HIhB", pre_skip, 48000, gain, family)
+            + bytes([streams, coupled]) + bytes(mapping))
+
+
+def opus_self_delimited(packet):
+    """A code 0 packet in RFC 6716's self-delimiting framing (appendix B),
+    as a multistream packet carries every stream but its last: the
+    frame's length (one byte, or two from 252) after the TOC byte."""
+    assert packet[0] & 3 == 0
+    n = len(packet) - 1
+    size = bytes([n]) if n < 252 else bytes([252 + (n - 252) % 4, (n - 252) // 4])
+    return packet[:1] + size + packet[1:]
+
+
+def opus_multistream_packet(parts):
+    return b"".join(opus_self_delimited(p) for p in parts[:-1]) + parts[-1]
+
+
 OPUS_TAGS = vorbis_comment_packet(b"OpusTags", b"generate.py", [b"TITLE=Ogg Opus"], framing=False)
 
 
@@ -3171,6 +3193,54 @@ def build_ogg_fixtures():
     ok("ogg_opus_silk", "Opus SILK packets of random bytes (any bytes decode): narrow, medium and wide band, 10 to "
        "60 ms, mono and stereo, frame count codes 0, 1 and 3, CELT packets between and frames large enough to "
        "carry redundancy (T28b).", b"".join(ogg_opus_stream(0x2004, silk_ps)))
+    hybrid = [
+        # (config, stereo, size, seed, count code, frames): super-wide and full band, 10 and 20 ms, the
+        # seeds whose frames carry a redundancy frame (found by decoding: random bytes carry one in 4096)
+        # before (pos 1) or after (pos 0) the frame, a SILK wide band packet at the same rate between (no
+        # flush, the held-back CELT samples kept), CELT packets (the resampler and the CELT samples flushed).
+        (13, True, 160, 49960, 0, None), (13, True, 150, 0x6001, 0, None), (15, False, 120, 46340, 0, None),
+        (13, True, 130, 0x6003, 0, None), (9, True, 140, 0x6004, 0, None), (14, True, 140, 19536, 0, None),
+        (12, False, 100, 13757, 0, None), (31, True, 90, 0x6007, 0, None), (12, False, 100, 17464, 0, None),
+        (12, True, 200, 0x6009, 3, 3), (15, False, 120, 13782, 0, None), (14, True, 140, 52892, 0, None),
+        (13, True, 160, 229909, 0, None), (30, False, 70, 0x600d, 0, None), (15, True, 180, 0x600e, 0, None),
+    ]
+    hybrid_ps = [opus_random_packet(c, st, seed, size, code, frames) for c, st, size, seed, code, frames in hybrid]
+    ok("ogg_opus_hybrid", "Opus hybrid packets of random bytes: super-wide and full band, 10 and 20 ms, mono "
+       "and stereo, frame count code 3, redundancy frames before and after the frame, SILK and CELT packets "
+       "between (T28c).", b"".join(ogg_opus_stream(0x2005, hybrid_ps)))
+    multistream = [
+        # Per packet, each stream's (config, stereo, size): streams 0 and 1 coupled. SILK at 8, 12 and
+        # 16 kHz, hybrid and CELT side by side, so the streams' resampler delays differ and the
+        # sync buffers even them out.
+        [(1, True, 60), (9, True, 90), (31, False, 50), (15, False, 110)],
+        [(5, True, 70), (13, True, 140), (1, False, 50), (31, False, 40)],
+        [(31, True, 80), (31, True, 80), (9, False, 70), (5, False, 60)],
+        [(0, True, 40), (12, True, 100), (30, False, 40), (8, False, 50)],
+        [(2, True, 120), (6, True, 130), (10, False, 110), (10, False, 90)],
+        [(13, True, 150), (1, True, 60), (15, False, 120), (9, False, 80)],
+        [(31, True, 90), (31, True, 90), (31, False, 60), (31, False, 50)],
+        [(9, True, 300), (9, True, 90), (9, False, 70), (9, False, 260)],
+    ]
+    ms_ps = [opus_multistream_packet([opus_random_packet(c, st, 0x7100 + 4 * i + j, size)
+                                      for j, (c, st, size) in enumerate(streams)])
+             for i, streams in enumerate(multistream)]
+    ok("ogg_opus_multistream", "Opus 5.1 (mapping family 1): four streams, two coupled, each packet's streams "
+       "self-delimited but the last, their modes and SILK rates mixed, so their delays differ (FFmpeg's sync "
+       "buffers, T28c).", b"".join(ogg_opus_stream(0x2006, ms_ps, head=opus_head_mapped(
+           1, 4, 2, [0, 4, 1, 2, 3, 5]))))
+    mapped = [
+        [(9, True, 90), (31, False, 50), (1, False, 60)],
+        [(13, True, 140), (9, False, 70), (15, False, 110)],
+        [(31, True, 80), (31, False, 60), (31, False, 50)],
+        [(5, True, 70), (1, False, 50), (9, False, 80)],
+    ]
+    mapped_ps = [opus_multistream_packet([opus_random_packet(c, st, 0x7200 + 4 * i + j, size)
+                                          for j, (c, st, size) in enumerate(streams)])
+                 for i, streams in enumerate(mapped)]
+    ok("ogg_opus_mapped", "Opus of mapping family 255 with a gain of -3 dB: a silenced channel, a channel "
+       "copying another (the gain applied twice, as FFmpeg's), and a stream mapped to no channel (T28c).",
+       b"".join(ogg_opus_stream(0x2007, mapped_ps, head=opus_head_mapped(
+           255, 3, 1, [255, 0, 1, 2, 0], gain=-768))))
     ok("ogg_vorbis_stereo", "Vorbis: identification, comment and a setup header whose mode table (a short and a "
        "long mode) the parser reads; packet durations from the block sizes, four packets to a page.",
        b"".join(ogg_vorbis_stream(0x3001, vorbis_ps)))

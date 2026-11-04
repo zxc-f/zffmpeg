@@ -64,9 +64,6 @@ pub const Error = wav.Error || au.Error || aiff.Error || raw.Error || caf.Error 
     /// FFmpeg's Opus decoder refuses the OpusHead, so ffprobe cannot open
     /// it (T28a).
     InvalidOpus,
-    /// An Opus SILK or hybrid frame, which FFmpeg decodes and the port
-    /// does not yet (T28b, T28c).
-    UnsupportedOpusMode,
     /// More than two thirds of an Ogg stream's decodes failed, which the
     /// ffmpeg program's `-max_error_rate` fails (T27d).
     DecodeErrorRate,

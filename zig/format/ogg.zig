@@ -1656,8 +1656,6 @@ fn opusAfterSeek(gpa: std.mem.Allocator, info: *const StreamInfo, p: demux.Packe
     var planes: [255][]f32 = undefined;
     for (0..channels) |c| planes[c] = storage[c * opusdec.max_output ..][0..opusdec.max_output];
     const n = dec.decodePacket(p.data, planes[0..channels]) catch |err| switch (err) {
-        // No seek of the fixtures lands on a hybrid packet (T28c).
-        error.UnsupportedMode => return error.UnsupportedMode,
         error.InvalidData => return out.appendSlice(gpa, "D none\n"),
         error.OutOfMemory => return error.OutOfMemory,
     };
@@ -1744,7 +1742,7 @@ test "every Ogg fixture seeks as FFmpeg seeks it (vectors/seek_ogg.txt)" {
         }
     }
     // Every seek of the fixtures FFmpeg opens.
-    try testing.expectEqual(1458, compared);
+    try testing.expectEqual(1620, compared);
 }
 
 test "a demuxer that cannot seek fails a seek instead of repositioning" {
@@ -1808,6 +1806,7 @@ test "every Vorbis fixture decodes as FFmpeg's decoder decodes it (vectors/vorbi
     const gpa = testing.allocator;
     var frames: usize = 0;
     inline for (fixtures.ogg.all) |fixture| {
+        @setEvalBranchQuota(4000);
         if (comptime std.mem.indexOf(u8, fixture.name, "vorbis") != null) {
             const want = vorbisBlock(fixture.name) orelse return error.MissingVector;
             var actual: std.ArrayList(u8) = .empty;
@@ -1909,24 +1908,18 @@ test "every Ogg fixture's Opus stream decodes as FFmpeg's decoder decodes it (ve
         const want = opusBlock(fixture.name) orelse return error.MissingVector;
         var actual: std.ArrayList(u8) = .empty;
         defer actual.deinit(gpa);
-        if (decodeOpusFixture(gpa, fixtures.ogg.bytes(fixture.name), &actual, &frames)) {
-            var expected_lines = std.mem.splitScalar(u8, want, '\n');
-            if (!std.mem.eql(u8, expected_lines.next().?, "O ok")) {
-                try testing.expectEqualStrings("O refused\n", actual.items);
-            } else {
-                testing.expectEqualStrings(want, actual.items) catch |err| {
-                    std.debug.print("opus fixture {s}\n", .{fixture.name});
-                    return err;
-                };
-            }
-        } else |err| switch (err) {
-            // Its hybrid packet decodes with T28c.
-            error.UnsupportedMode => try testing.expectEqualStrings("ogg_opus_frame_counts", fixture.name),
-            else => return err,
+        try decodeOpusFixture(gpa, fixtures.ogg.bytes(fixture.name), &actual, &frames);
+        var expected_lines = std.mem.splitScalar(u8, want, '\n');
+        if (!std.mem.eql(u8, expected_lines.next().?, "O ok")) {
+            try testing.expectEqualStrings("O refused\n", actual.items);
+        } else {
+            testing.expectEqualStrings(want, actual.items) catch |err| {
+                std.debug.print("opus fixture {s}\n", .{fixture.name});
+                return err;
+            };
         }
     }
-    // ogg_opus_frame_counts' frames before its hybrid packet included.
-    try testing.expectEqual(214, frames);
+    try testing.expectEqual(244, frames);
 }
 
 /// opus_vectors.c's lines for one file: the input opened as the ffmpeg
@@ -1966,7 +1959,6 @@ fn decodeOpusFixture(gpa: std.mem.Allocator, bytes: []const u8, out: *std.ArrayL
                 try out.appendSlice(gpa, try std.fmt.bufPrint(&line, "P {d} INVALIDDATA\n", .{p.data.len}));
                 continue;
             },
-            error.UnsupportedMode => return error.UnsupportedMode,
             error.OutOfMemory => return error.OutOfMemory,
         };
         try out.appendSlice(gpa, try std.fmt.bufPrint(&line, "P {d} 0\n", .{p.data.len}));

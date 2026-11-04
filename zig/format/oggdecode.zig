@@ -39,9 +39,6 @@ pub const ReadError = ogg.Error || error{
     /// More than two thirds of the decodes failed: the ffmpeg program's
     /// `-max_error_rate` (2/3), which fails the decoding.
     DecodeErrorRate,
-    /// An Opus hybrid frame, or SILK in a multistream packet, which FFmpeg
-    /// decodes and the port does not yet (T28c).
-    UnsupportedOpusMode,
 };
 
 /// What opening can fail with, and reading.
@@ -344,7 +341,7 @@ pub const DecodedReader = struct {
                     .opus => |*dec| {
                         const n = dec.decodePacket(null, r.planes[0..r.channels]) catch |err| switch (err) {
                             error.OutOfMemory => return error.OutOfMemory,
-                            error.InvalidData, error.UnsupportedMode => return false,
+                            error.InvalidData => return false,
                         };
                         if (n == 0) return false;
                         const kept = r.discard.apply(n, null) orelse return false;
@@ -386,10 +383,6 @@ pub const DecodedReader = struct {
                             diagnostics.report(r.sink, .err, "Decoding error: Invalid data found when processing input", .{});
                             r.decode_errors += 1;
                             continue;
-                        },
-                        error.UnsupportedMode => {
-                            diagnostics.report(r.sink, .err, "Opus hybrid frames and multistream SILK are not decoded yet", .{});
-                            return error.UnsupportedOpusMode;
                         },
                         error.OutOfMemory => return error.OutOfMemory,
                     };

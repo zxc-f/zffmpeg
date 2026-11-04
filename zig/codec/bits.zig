@@ -49,6 +49,17 @@ pub const BitReader = struct {
         return .{ .bytes = bytes, .size = bytes.len * 8 };
     }
 
+    /// `init_get_bits8` over the first `size` bytes of `memory`: the reads
+    /// past them, up to the count's 8 bits of slack, see the bytes that
+    /// follow in `memory` (zeros past it), as FFmpeg's reader sees the rest
+    /// of the packet in a frame that is not the packet's last.
+    pub fn initIn(memory: []const u8, size: usize) InitError!BitReader {
+        std.debug.assert(size <= memory.len);
+        var r = try init(memory[0..size]);
+        r.bytes = memory;
+        return r;
+    }
+
     fn byteAt(r: *const BitReader, at: usize) u8 {
         return if (at < r.bytes.len) r.bytes[at] else 0;
     }
@@ -417,6 +428,22 @@ test "over-reads give zeros and saturate the count 8 bits past the end" {
     var empty = try BitReader.init(&.{});
     try testing.expectEqual(0, empty.bits(17));
     try testing.expectEqual(-8, empty.left());
+}
+
+test "a frame inside a packet reads the packet's next bytes past its end, as FFmpeg's reader does" {
+    const packet = [_]u8{ 0xab, 0xcd, 0x12, 0x34, 0x56 };
+    var r = try BitReader.initIn(&packet, 2);
+    try testing.expectEqual(0xabcd, r.bits(16));
+    try testing.expectEqual(0, r.left());
+    // The count stops 8 bits on, so every later read sees the byte after.
+    try testing.expectEqual(0x12, r.bits(8));
+    try testing.expectEqual(0x34, r.bits(8));
+    try testing.expectEqual(0x34, r.bits(8));
+    try testing.expectEqual(24, r.count());
+    // Past the packet, its zero padding.
+    var last = try BitReader.initIn(packet[3..], 1);
+    try testing.expectEqual(0x34, last.bits(8));
+    try testing.expectEqual(0x5600, last.bits(16));
 }
 
 test "64-bit reads: 33-bit samples, sign-extended" {

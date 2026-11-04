@@ -58,8 +58,9 @@
 //! - `vlc`: FFmpeg's VLC decoding tables and lookup, for the LSB-first
 //!   reader in `bits` (`codec/vlc.zig`).
 //! - `vorbis`: FFmpeg's Vorbis decoder, bit for bit (`codec/vorbis.zig`).
-//! - `opusdec`: FFmpeg's Opus decoder for CELT frames, bit for bit
-//!   (`codec/opusdec.zig`, with `codec/celt.zig`).
+//! - `opusdec`: FFmpeg's Opus decoder, CELT, SILK and hybrid frames and
+//!   multistream packets, bit for bit (`codec/opusdec.zig`, with
+//!   `codec/celt.zig` and `codec/silk.zig`).
 //! - `oggdecode`: an Ogg stream decoded as the ffmpeg program decodes it
 //!   (`format/oggdecode.zig`).
 //! - `framehash`: FFmpeg's framecrc, framemd5 and streamhash muxers' text

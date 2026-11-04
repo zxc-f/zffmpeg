@@ -320,7 +320,11 @@ pub const Conversion = struct {
                     },
                     .format = guessed: {
                         var format = info.format;
-                        if (request.guess_layout) {
+                        // The program guesses before opening the decoder; the
+                        // Opus and Vorbis decoders then set their own layout,
+                        // an unspecified one included (Opus' mapping family
+                        // 255, Vorbis past 8 channels), which the output keeps.
+                        if (request.guess_layout and !decoderSetsLayout(streamOf(info))) {
                             const guessed = audio.guessLayout(format.layout);
                             if (format.layout == .unspecified and guessed != .unspecified) {
                                 var name: [64]u8 = undefined;
@@ -785,6 +789,16 @@ fn carryStreamTags(gpa: std.mem.Allocator, out: *metadata.Dictionary, input: *co
 
 /// The stream a parser's header describes: a PCM codec, or the codec a
 /// decoded reader decodes.
+/// Whether the input's decoder replaces the layout the ffmpeg program
+/// guessed for the demuxed stream (`ff_opus_parse_extradata`,
+/// `vorbis_parse_id_hdr`).
+fn decoderSetsLayout(stream: codecs.Codec) bool {
+    return switch (stream) {
+        .opus, .vorbis => true,
+        else => false,
+    };
+}
+
 fn streamOf(info: anytype) codecs.Codec {
     if (@TypeOf(info) == flac.DecodedReader.Header) return .flac;
     if (@TypeOf(info) == oggdecode.DecodedReader.Header) return info.stream;

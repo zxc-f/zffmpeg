@@ -248,7 +248,8 @@ bash zig/testing/reference/opus_vectors_sync.sh
 ./zig-out/bin/opus-vector-driver .references/opus-testvectors/testvector01.bit 2 .references/opus-testvectors/testvector01.dec
 ```
 
-Since T28b compare.py requires each vector's decoding to equal FFmpeg's,
+Since T28b compare.py requires each vector's decoding to equal FFmpeg's
+(since T28c every vector's, hybrid frames included),
 whose digests `opus_rfc_vectors.c` prints (stereo and mono, after a null
 packet drains the decoder) into `opus_rfc.txt`; opus_compare's verdict and
 the final ranges are reported beside it, as FFmpeg's SILK decoding fails

@@ -8,16 +8,15 @@
 // the terms of the GNU Lesser General Public License as published by the
 // Free Software Foundation; either version 2.1 of the License, or (at your
 // option) any later version.
-//! FFmpeg's Opus decoder (TODO.md T28a): the OpusHead's channels, gain and
+//! FFmpeg's Opus decoder (TODO.md T28): the OpusHead's channels, gain and
 //! channel mapping, then each packet split into its streams (self-delimited
 //! but the last) and their frames, each frame decoded by CELT
-//! (codec/celt.zig), the decoded channels mapped, copied or silenced into
-//! the output, and the head's gain applied. Output is planar float at
-//! 48 kHz, as FFmpeg's.
-//!
-//! SILK and hybrid frames (T28b, T28c) are `error.UnsupportedMode`: FFmpeg
-//! decodes them, so the port stops rather than differ. A frame CELT
-//! refuses is silence, as FFmpeg makes it.
+//! (codec/celt.zig, T28a), SILK (codec/silk.zig, resampled to 48 kHz by
+//! libswresample's algorithm, T28b) or both (hybrid, T28c), the streams'
+//! different delays evened out by sync buffers, the decoded channels
+//! mapped, copied or silenced into the output, and the head's gain
+//! applied. Output is planar float at 48 kHz, as FFmpeg's. A frame that
+//! fails to decode is silence, as FFmpeg makes it.
 
 const std = @import("std");
 const opus = @import("opus.zig");
@@ -53,11 +52,10 @@ pub const HeadError = error{
 
 pub const DecodeError = error{
     /// FFmpeg's AVERROR_INVALIDDATA for the packet: it does not parse, or a
-    /// stream's sample count differs from the first's.
+    /// stream's sample count differs from the first's; or its AVERROR_BUG,
+    /// where the delays of the resampler, the hybrid CELT samples and the
+    /// sync buffers disagree.
     InvalidData,
-    /// A hybrid frame, or a SILK frame in a multistream packet, whose
-    /// streams' delays differ (T28c).
-    UnsupportedMode,
     OutOfMemory,
 };
 
@@ -174,12 +172,19 @@ fn silkSamplerate(config: u5) u32 {
 }
 
 /// One of the packet's streams (`OpusStreamContext`): its SILK and CELT
-/// decoders, the resampler from the SILK rate and its delayed samples,
-/// and the stream's output for the packet.
+/// decoders, the resampler from the SILK rate and its delayed samples, the
+/// CELT samples a hybrid frame holds back to meet the resampled SILK
+/// (`celt_delay`), and the samples held back to meet the other streams
+/// (`sync_buffer`). Both FIFOs are always read whole, so each is a buffer
+/// and its length.
 const Stream = struct {
     output_channels: u32,
     celt: *celt.Decoder,
     silk: silk.Decoder,
+    /// The output channel each decoded channel writes into
+    /// (`streams[map->stream_idx].out[map->channel_idx]`, the last output
+    /// channel that names it), or none: a mono stream's second always.
+    plane: [2]?u8 = .{ null, null },
     /// libswresample, initialized at `swr_rate` while present.
     swr: ?Resampler = null,
     swr_rate: u32 = 0,
@@ -193,16 +198,37 @@ const Stream = struct {
     /// OPUS_GET_FINAL_RANGE (0 for a frame of at most a byte, which
     /// libopus conceals).
     final_range: u32 = 0,
+    /// The samples the last packet decoded to, `decoded_samples`.
+    decoded_samples: u32 = 0,
     silk_buf: [2][960]f32 = undefined,
+    celt_buf: [2][960]f32 = undefined,
     redundancy_buf: [2][960]f32 = undefined,
-    /// The packet's output, `cur_out` an offset into it.
-    out: [2][max_output]f32 = undefined,
+    /// `celt_delay`: at most a frame, the CELT samples past the resampled
+    /// SILK ones.
+    celt_delay: [2][960]f32 = undefined,
+    celt_delay_len: u32 = 0,
+    /// `sync_buffer`, by channel.
+    sync: [2]std.ArrayList(f32) = .{ .empty, .empty },
+    /// The sync samples read into the mapped planes for the packet.
+    sync_read: u32 = 0,
+    /// `out_dummy`, where an unmapped channel decodes (allocated at the
+    /// first need, both channels' planes).
+    dummy: ?[]f32 = null,
+    /// The packet's output (`cur_out`): each channel's plane past the sync
+    /// samples, or the dummy, and the offset decoded so far.
+    dest: [2][]f32 = undefined,
     cur_out: u32 = 0,
 
     fn deinit(s: *Stream, gpa: std.mem.Allocator) void {
         if (s.swr) |*r| r.deinit();
+        for (&s.sync) |*l| l.deinit(gpa);
+        if (s.dummy) |dm| gpa.free(dm);
         s.celt.deinit();
         gpa.destroy(s.celt);
+    }
+
+    fn syncLen(s: *const Stream) u32 {
+        return @intCast(s.sync[0].items.len);
     }
 
     /// swr_close.
@@ -211,11 +237,23 @@ const Stream = struct {
         s.swr = null;
     }
 
-    fn view(s: *Stream, buffer: *[2][max_output]f32, at: u32) Resampler.View {
-        _ = s;
+    /// opus_decode_subpacket's output: the mapped planes past the sync
+    /// samples, the dummy for a channel mapped to none.
+    fn bindOutput(s: *Stream, gpa: std.mem.Allocator, out: []const []f32) DecodeError!void {
+        const need_dummy = s.plane[0] == null or (s.output_channels == 2 and s.plane[1] == null);
+        if (need_dummy and s.dummy == null) s.dummy = try gpa.alloc(f32, 2 * max_output);
+        for (0..s.output_channels) |c| {
+            s.dest[c] = if (s.plane[c]) |p| out[p][s.sync_read..] else s.dummy.?[c * max_output ..][0..max_output];
+        }
+        // A mono stream's second channel is never written.
+        if (s.output_channels == 1) s.dest[1] = s.dest[0];
+        s.cur_out = 0;
+    }
+
+    fn view(s: *Stream, at: u32) Resampler.View {
         var v: Resampler.View = .{};
-        v.planes[0] = buffer[0][at..].ptr;
-        v.planes[1] = buffer[1][at..].ptr;
+        v.planes[0] = s.dest[0][at..].ptr;
+        v.planes[1] = s.dest[1][at..].ptr;
         return v;
     }
 
@@ -228,22 +266,28 @@ const Stream = struct {
         var in: Resampler.View = .{};
         in.planes[0] = &zeros;
         in.planes[1] = &zeros;
-        _ = s.swr.?.resample(s.view(&s.out, 0), 0, in, silk_resample_delay[@backingInt(s.packet.bandwidth)]) catch return error.OutOfMemory;
+        _ = s.swr.?.resample(s.view(0), 0, in, silk_resample_delay[@backingInt(s.packet.bandwidth)]) catch return error.OutOfMemory;
     }
 
-    /// opus_flush_resample: the delayed samples drained into the output.
+    /// opus_flush_resample: the delayed samples drained into the output,
+    /// with the CELT samples a hybrid frame held back.
     fn flushResample(s: *Stream, nb_samples: u32) DecodeError!void {
         const r = &s.swr.?;
         r.flush() catch return error.OutOfMemory;
         var none: Resampler.View = .{};
         none.planes[0] = &s.silk_buf[0];
         none.planes[1] = &s.silk_buf[1];
-        const got = r.resample(s.view(&s.out, s.cur_out), @intCast(nb_samples), none, 0) catch return error.OutOfMemory;
-        // FFmpeg's AVERROR_BUG otherwise.
+        const got = r.resample(s.view(s.cur_out), @intCast(nb_samples), none, 0) catch return error.OutOfMemory;
+        // FFmpeg's AVERROR_BUG otherwise, both.
         if (got != nb_samples) return error.InvalidData;
+        if (s.celt_delay_len != 0) {
+            if (s.celt_delay_len != nb_samples) return error.InvalidData;
+            for (0..s.output_channels) |c| float_dsp.fmacScalar(s.dest[c][s.cur_out..][0..nb_samples], &s.celt_delay[c], 1.0);
+            s.celt_delay_len = 0;
+        }
         if (s.redundancy_idx != 0) {
             const idx = s.redundancy_idx;
-            for (0..s.output_channels) |c| fade(s.out[c][s.cur_out..], s.out[c][s.cur_out..], s.redundancy_buf[c][120 + idx ..], tab.celt_window2[idx..], 120 - idx);
+            for (0..s.output_channels) |c| fade(s.dest[c][s.cur_out..], s.dest[c][s.cur_out..], s.redundancy_buf[c][120 + idx ..], tab.celt_window2[idx..], 120 - idx);
             s.redundancy_idx = 0;
         }
         s.cur_out += nb_samples;
@@ -264,10 +308,15 @@ pub const Decoder = struct {
     streams: []Stream,
     /// The head's gain as a factor, `c->gain`.
     gain: f32,
+    /// Output channels no stream writes: a silenced channel takes stream
+    /// 0's first channel in FFmpeg (its map's indices are 0), so a channel
+    /// mapped there earlier is left as allocated, unwritten memory in
+    /// FFmpeg's frame; here it is silence.
+    unwritten: std.StaticBitSet(255),
 
-    /// opus_decode_init: the head parsed, a CELT decoder per stream
-    /// (`apply_phase_inv`, the decoder's option of that name, true by
-    /// default).
+    /// opus_decode_init: the head parsed, a SILK and a CELT decoder per
+    /// stream (`apply_phase_inv`, the decoder's option of that name, true
+    /// by default).
     pub fn init(gpa: std.mem.Allocator, extradata: []const u8, apply_phase_inv: bool) (HeadError || std.mem.Allocator.Error)!Decoder {
         const head = try Head.parse(extradata);
         // ff_exp10(gain_i / (20.0 * 256)): exp2(M_LOG2_10 * x).
@@ -290,7 +339,17 @@ pub const Decoder = struct {
             s.* = .{ .output_channels = output_channels, .celt = c, .silk = silk.Decoder.init(output_channels) catch unreachable };
             made += 1;
         }
-        return .{ .gpa = gpa, .head = head, .streams = streams, .gain = gain };
+        // opus_decode_packet's `out` pointers: every map but a copy, the
+        // silenced ones included, in channel order.
+        for (head.maps[0..head.channels], 0..) |m, i| {
+            if (m.copy == null) streams[m.stream].plane[m.channel] = @intCast(i);
+        }
+        var unwritten: std.StaticBitSet(255) = .empty;
+        for (head.maps[0..head.channels], 0..) |m, i| {
+            const writer = streams[m.stream].plane[m.channel];
+            if (m.copy == null and !m.silence and (writer == null or writer.? != i)) unwritten.set(i);
+        }
+        return .{ .gpa = gpa, .head = head, .streams = streams, .gain = gain, .unwritten = unwritten };
     }
 
     pub fn deinit(d: *Decoder) void {
@@ -309,11 +368,14 @@ pub const Decoder = struct {
         return d.streams[0].final_range;
     }
 
-    /// opus_decode_flush.
+    /// opus_decode_flush. Like FFmpeg's, it keeps a pending redundancy
+    /// fade.
     pub fn flush(d: *Decoder) void {
         for (d.streams) |*s| {
             s.delayed_samples = 0;
+            s.celt_delay_len = 0;
             s.closeResampler();
+            for (&s.sync) |*l| l.clearRetainingCapacity();
             s.silk.flush();
             s.celt.flush();
         }
@@ -321,13 +383,15 @@ pub const Decoder = struct {
 
     /// opus_decode_packet: `buf` decoded into `out[0 .. channels]`, each
     /// at least `max_output` samples, or, for a null `buf` (the end), the
-    /// samples the resampler still owes; the samples per channel (FFmpeg's
-    /// frame, none when 0).
+    /// samples the resamplers still owe; the samples per channel (FFmpeg's
+    /// frame, none when 0). Each stream's samples past the fewest any
+    /// stream decoded wait in its sync buffer for the next packet.
     pub fn decodePacket(d: *Decoder, buf_in: ?[]const u8, out: [][]f32) DecodeError!u32 {
         std.debug.assert(out.len == d.head.channels);
+        for (out) |plane| std.debug.assert(plane.len >= max_output);
         const nb = d.streams.len;
         var delayed: u32 = 0;
-        for (d.streams) |*s| delayed = @max(delayed, s.delayed_samples);
+        for (d.streams) |*s| delayed = @max(delayed, s.delayed_samples + s.syncLen());
         var coded_samples: u32 = 0;
         if (buf_in) |b| {
             d.streams[0].packet = opus.parsePacket(b, nb > 1) orelse return error.InvalidData;
@@ -336,6 +400,22 @@ pub const Decoder = struct {
             d.streams[0].silk_samplerate = silkSamplerate(first.config);
         }
         if (coded_samples + delayed == 0) return 0;
+        // FFmpeg allocates the frame at this size; the planes hold
+        // max_output, more than the resamplers and sync buffers delay.
+        if (coded_samples + delayed > max_output) return error.InvalidData;
+
+        // The sync buffers' samples first. FFmpeg reads a channel mapped to
+        // none into a 32-sample array and fails (AVERROR_BUG) past it,
+        // a mono stream's second channel included.
+        for (d.streams) |*s| {
+            const n = s.syncLen();
+            if ((s.plane[0] == null or s.plane[1] == null) and n > 32) return error.InvalidData;
+            for (0..s.output_channels) |c| {
+                if (s.plane[c]) |p| @memcpy(out[p][0..n], s.sync[c].items);
+                s.sync[c].clearRetainingCapacity();
+            }
+            s.sync_read = n;
+        }
 
         var decoded: u32 = std.math.maxInt(u32);
         var buf = buf_in;
@@ -345,12 +425,21 @@ pub const Decoder = struct {
                 if (s.packet.frame_count * s.packet.frame_duration != coded_samples) return error.InvalidData;
                 s.silk_samplerate = silkSamplerate(s.packet.config);
             };
-            // Streams whose delays could differ keep FFmpeg's sync
-            // buffers, which T28c ports.
-            if (nb > 1 and buf != null and s.packet.mode != .celt) return error.UnsupportedMode;
-            const n = try d.decodeSubpacket(s, buf);
+            const n = try d.decodeSubpacket(s, buf, out);
+            s.decoded_samples = n;
             decoded = @min(decoded, n);
             if (buf) |b| buf = b[@min(s.packet.packet_size, b.len)..];
+        }
+
+        // The samples past the fewest wait, a channel mapped to none
+        // buffering the first output channel's as FFmpeg's does.
+        for (d.streams) |*s| {
+            const extra = s.decoded_samples - decoded;
+            if (extra == 0) continue;
+            for (0..s.output_channels) |c| {
+                const src = if (s.plane[c]) |p| out[p][s.sync_read + decoded ..] else out[0][decoded..];
+                try s.sync[c].appendSlice(d.gpa, src[0..extra]);
+            }
         }
 
         for (out, 0..) |plane, i| {
@@ -358,10 +447,8 @@ pub const Decoder = struct {
             const dst = plane[0..decoded];
             if (map.copy) |j| {
                 @memcpy(dst, out[j][0..decoded]);
-            } else if (map.silence) {
+            } else if (map.silence or d.unwritten.isSet(i)) {
                 @memset(dst, 0);
-            } else {
-                @memcpy(dst, d.streams[map.stream].out[map.channel][0..decoded]);
             }
             // A copied channel takes the gain again, as FFmpeg's loop
             // copies after the source's gain.
@@ -373,14 +460,14 @@ pub const Decoder = struct {
     /// opus_decode_subpacket: the resampler flushed when the mode or the
     /// SILK rate changes (or at the end), then each frame of the stream's
     /// packet; a frame that fails to decode is silence.
-    fn decodeSubpacket(d: *Decoder, s: *Stream, buf: ?[]const u8) DecodeError!u32 {
-        s.cur_out = 0;
+    fn decodeSubpacket(d: *Decoder, s: *Stream, buf: ?[]const u8, out: []const []f32) DecodeError!u32 {
         var output_samples: u32 = 0;
         var flush_needed = false;
         if (s.swr != null) {
             flush_needed = if (buf != null) s.packet.mode == .celt or s.swr_rate != s.silk_samplerate else s.delayed_samples != 0;
         }
         if (buf == null and !flush_needed) return 0;
+        try s.bindOutput(d.gpa, out);
         if (flush_needed) {
             try s.flushResample(s.delayed_samples);
             s.closeResampler();
@@ -391,9 +478,9 @@ pub const Decoder = struct {
         const pkt = &s.packet;
         for (0..pkt.frame_count) |i| {
             const samples = d.decodeFrame(s, buf.?, pkt.frame_offset[i], pkt.frame_size[i]) catch |err| switch (err) {
-                error.UnsupportedMode, error.OutOfMemory => |e| return e,
+                error.OutOfMemory => |e| return e,
                 error.InvalidData => blk: {
-                    for (0..s.output_channels) |c| @memset(s.out[c][s.cur_out..][0..pkt.frame_duration], 0);
+                    for (0..s.output_channels) |c| @memset(s.dest[c][s.cur_out..][0..pkt.frame_duration], 0);
                     break :blk pkt.frame_duration;
                 },
             };
@@ -403,11 +490,13 @@ pub const Decoder = struct {
         return output_samples;
     }
 
-    /// opus_decode_frame: SILK at its rate, resampled, then the CELT
-    /// redundancy frame and its fade, or a CELT frame.
+    /// opus_decode_frame: SILK at its rate, resampled, the redundancy
+    /// frame, then CELT: the whole frame, or a hybrid frame's bands from 17
+    /// added to the SILK samples, its samples past them held back
+    /// (`celt_delay`) for the next frame or the flush; then the
+    /// redundancy frame's fades.
     fn decodeFrame(d: *Decoder, s: *Stream, buf: []const u8, offset: i32, size_in: i32) DecodeError!u32 {
         const pkt = &s.packet;
-        if (pkt.mode == .hybrid) return error.UnsupportedMode;
         var samples: u32 = pkt.frame_duration;
         const delayed_samples = s.delayed_samples;
         // ff_opus_rc_dec_init refuses a negative size; the packet's padding
@@ -417,11 +506,14 @@ pub const Decoder = struct {
         // ff_opus_parse_packet keeps every frame inside the packet.
         if (start + @as(usize, @intCast(size_in)) > buf.len) return error.InvalidData;
         var size: i32 = size_in;
-        const data = buf[start..][0..@intCast(size)];
-        var rc = opus_rc.RangeDecoder.init(data) catch return error.InvalidData;
+        // The packet from the frame on: FFmpeg's range decoder reads ahead
+        // past the frame's end.
+        const memory = buf[start..];
+        const data = memory[0..@intCast(size)];
+        var rc = opus_rc.RangeDecoder.initIn(memory, data.len) catch return error.InvalidData;
 
         // The SILK frame.
-        if (pkt.mode == .silk) {
+        if (pkt.mode != .celt) {
             if (s.swr == null) try s.initResample(d.gpa);
             const bw = @min(@backingInt(pkt.bandwidth), 2);
             const n = s.silk.decodeSuperframe(&rc, .{ &s.silk_buf[0], &s.silk_buf[1] }, bw, @as(u32, @intFromBool(pkt.stereo)) + 1, silk_frame_duration_ms[pkt.config]) catch
@@ -429,56 +521,91 @@ pub const Decoder = struct {
             var in: Resampler.View = .{};
             in.planes[0] = &s.silk_buf[0];
             in.planes[1] = &s.silk_buf[1];
-            const got = s.swr.?.resample(s.view(&s.out, s.cur_out), @intCast(pkt.frame_duration), in, @intCast(n)) catch return error.OutOfMemory;
+            const got = s.swr.?.resample(s.view(s.cur_out), @intCast(pkt.frame_duration), in, @intCast(n)) catch return error.OutOfMemory;
             samples = @intCast(got);
             s.delayed_samples += pkt.frame_duration - samples;
         } else s.silk.flush();
 
         // The redundancy information.
         const consumed = rc.tell();
+        const bits = @as(u32, @intCast(size)) * 8;
         var redundancy = false;
         var redundancy_pos = false;
         var redundancy_size: i32 = 0;
         var redundant_rng: u32 = 0;
-        if (pkt.mode == .silk and consumed + 17 <= @as(u32, @intCast(size)) * 8) redundancy = true;
+        if (pkt.mode == .hybrid and consumed + 37 <= bits) {
+            redundancy = rc.log(12) != 0;
+        } else if (pkt.mode == .silk and consumed + 17 <= bits) redundancy = true;
         if (redundancy) {
             redundancy_pos = rc.log(1) != 0;
-            redundancy_size = size - @as(i32, @intCast((consumed + 7) / 8));
+            redundancy_size = if (pkt.mode == .hybrid)
+                @intCast(rc.uint(256) + 2)
+            else
+                size - @as(i32, @intCast((consumed + 7) / 8));
             size -= redundancy_size;
             if (size < 0) return error.InvalidData;
             if (redundancy_pos) {
-                redundant_rng = try d.decodeRedundancy(s, data[@intCast(size)..][0..@intCast(redundancy_size)]);
+                redundant_rng = try d.decodeRedundancy(s, memory[@intCast(size)..], @intCast(redundancy_size));
                 s.celt.flush();
             }
         }
 
         // The CELT frame.
-        if (pkt.mode == .celt) {
+        if (pkt.mode != .silk) {
+            var at = s.cur_out;
+            var celt_output_samples: i64 = samples;
+            const delay_samples = s.celt_delay_len;
+            if (delay_samples != 0) {
+                // FFmpeg warns of spurious delay samples in a CELT frame and
+                // drops them.
+                if (pkt.mode == .hybrid) {
+                    for (0..s.output_channels) |c| float_dsp.fmacScalar(s.dest[c][at..][0..delay_samples], &s.celt_delay[c], 1.0);
+                    at += delay_samples;
+                    celt_output_samples -= delay_samples;
+                }
+                s.celt_delay_len = 0;
+            }
             rc.initRaw(data[0..@intCast(size)], @intCast(size));
-            const outs = [2][]f32{ s.out[0][s.cur_out..], s.out[1][s.cur_out..] };
-            s.celt.decodeFrame(&rc, outs, @as(u32, @intFromBool(pkt.stereo)) + 1, pkt.frame_duration, 0, tab.celt_band_end[@backingInt(pkt.bandwidth)]) catch
+            const outs: [2][]f32 = if (pkt.mode == .celt)
+                .{ s.dest[0][s.cur_out..], s.dest[1][s.cur_out..] }
+            else
+                .{ &s.celt_buf[0], &s.celt_buf[1] };
+            const start_band: u32 = if (pkt.mode == .hybrid) 17 else 0;
+            s.celt.decodeFrame(&rc, outs, @as(u32, @intFromBool(pkt.stereo)) + 1, pkt.frame_duration, start_band, tab.celt_band_end[@backingInt(pkt.bandwidth)]) catch
                 return error.InvalidData;
+            if (pkt.mode == .hybrid) {
+                // FFmpeg would read before celt_buf; the resampler never
+                // delays SILK past the samples it holds back.
+                if (celt_output_samples < 0) return error.InvalidData;
+                const n: u32 = @intCast(celt_output_samples);
+                const keep = pkt.frame_duration - n;
+                for (0..s.output_channels) |c| {
+                    float_dsp.fmacScalar(s.dest[c][at..][0..n], &s.celt_buf[c], 1.0);
+                    @memcpy(s.celt_delay[c][0..keep], s.celt_buf[c][n..][0..keep]);
+                }
+                s.celt_delay_len = keep;
+            }
         } else s.celt.flush();
 
         if (s.redundancy_idx != 0) {
             const idx = s.redundancy_idx;
-            for (0..s.output_channels) |c| fade(s.out[c][s.cur_out..], s.out[c][s.cur_out..], s.redundancy_buf[c][120 + idx ..], tab.celt_window2[idx..], 120 - idx);
+            for (0..s.output_channels) |c| fade(s.dest[c][s.cur_out..], s.dest[c][s.cur_out..], s.redundancy_buf[c][120 + idx ..], tab.celt_window2[idx..], 120 - idx);
             s.redundancy_idx = 0;
         }
         if (redundancy) {
             if (!redundancy_pos) {
                 s.celt.flush();
-                redundant_rng = try d.decodeRedundancy(s, data[@intCast(size)..][0..@intCast(redundancy_size)]);
+                redundant_rng = try d.decodeRedundancy(s, memory[@intCast(size)..], @intCast(redundancy_size));
                 for (0..s.output_channels) |c| {
                     const at = s.cur_out + samples + delayed_samples - 120;
-                    fade(s.out[c][at..], s.out[c][at..], s.redundancy_buf[c][120..], &tab.celt_window2, 120 - delayed_samples);
+                    fade(s.dest[c][at..], s.dest[c][at..], s.redundancy_buf[c][120..], &tab.celt_window2, 120 - delayed_samples);
                     if (delayed_samples != 0) s.redundancy_idx = 120 - delayed_samples;
                 }
             } else {
                 for (0..s.output_channels) |c| {
                     const at = s.cur_out + delayed_samples;
-                    @memcpy(s.out[c][at..][0..120], s.redundancy_buf[c][0..120]);
-                    fade(s.out[c][at + 120 ..], s.redundancy_buf[c][120..], s.out[c][at + 120 ..], &tab.celt_window2, 120);
+                    @memcpy(s.dest[c][at..][0..120], s.redundancy_buf[c][0..120]);
+                    fade(s.dest[c][at + 120 ..], s.redundancy_buf[c][120..], s.dest[c][at + 120 ..], &tab.celt_window2, 120);
                 }
             }
         }
@@ -487,11 +614,13 @@ pub const Decoder = struct {
         return samples;
     }
 
-    /// opus_decode_redundancy: a 5 ms CELT frame of the packet's bandwidth;
-    /// its range decoder's final state.
-    fn decodeRedundancy(d: *Decoder, s: *Stream, data: []const u8) DecodeError!u32 {
+    /// opus_decode_redundancy: a 5 ms CELT frame of the packet's bandwidth,
+    /// the first `size` bytes of `memory` (the packet from there on); its
+    /// range decoder's final state.
+    fn decodeRedundancy(d: *Decoder, s: *Stream, memory: []const u8, size: u32) DecodeError!u32 {
         _ = d;
-        var rrc = opus_rc.RangeDecoder.init(data) catch return error.InvalidData;
+        const data = memory[0..size];
+        var rrc = opus_rc.RangeDecoder.initIn(memory, size) catch return error.InvalidData;
         rrc.initRaw(data, @intCast(data.len));
         const outs = [2][]f32{ &s.redundancy_buf[0], &s.redundancy_buf[1] };
         s.celt.decodeFrame(&rrc, outs, @as(u32, @intFromBool(s.packet.stereo)) + 1, 240, 0, tab.celt_band_end[@backingInt(s.packet.bandwidth)]) catch
@@ -499,3 +628,55 @@ pub const Decoder = struct {
         return rrc.range;
     }
 };
+
+const testing = std.testing;
+
+test "a channel mapped before a silenced one is silence, where FFmpeg leaves it unwritten" {
+    // Mapping family 255, one mono stream: channel 0 decodes it, channel 1
+    // is silenced, and FFmpeg's silenced map (stream 0, channel 0) takes
+    // the stream's output from channel 0.
+    const head = [_]u8{ 'O', 'p', 'u', 's', 'H', 'e', 'a', 'd', 1, 2, 0, 0, 0x80, 0xbb, 0, 0, 0, 0, 255, 1, 0, 0, 255 };
+    var dec = try Decoder.init(testing.allocator, &head, true);
+    defer dec.deinit();
+    try testing.expect(dec.unwritten.isSet(0));
+    try testing.expect(!dec.unwritten.isSet(1));
+    try testing.expectEqual(1, dec.streams[0].plane[0]);
+
+    const storage = try testing.allocator.alloc(f32, 2 * max_output);
+    defer testing.allocator.free(storage);
+    @memset(storage, 1.0);
+    var planes = [2][]f32{ storage[0..max_output], storage[max_output..] };
+    // A 20 ms CELT packet (configuration 31, mono) of arbitrary bytes.
+    var packet: [40]u8 = undefined;
+    packet[0] = 31 << 3;
+    for (packet[1..], 1..) |*b, i| b.* = @truncate(i *% 0x9d);
+    const n = try dec.decodePacket(&packet, &planes);
+    try testing.expectEqual(960, n);
+    for (planes) |plane| {
+        for (plane[0..n]) |v| try testing.expectEqual(0, v);
+    }
+}
+
+test "the streams of a multistream packet decode with every mode side by side" {
+    // Mapping family 1, three channels: a coupled stream (left, right) and
+    // a mono one (centre), Vorbis order L, C, R.
+    const head = [_]u8{ 'O', 'p', 'u', 's', 'H', 'e', 'a', 'd', 1, 3, 0, 0, 0x80, 0xbb, 0, 0, 0, 0, 1, 2, 1, 0, 2, 1 };
+    var dec = try Decoder.init(testing.allocator, &head, true);
+    defer dec.deinit();
+    const storage = try testing.allocator.alloc(f32, 3 * max_output);
+    defer testing.allocator.free(storage);
+    var planes = [3][]f32{ storage[0..max_output], storage[max_output..][0..max_output], storage[2 * max_output ..] };
+    // Stream 0 self-delimited: a hybrid 20 ms frame; stream 1 SILK at 8 kHz.
+    var packet: [160]u8 = undefined;
+    packet[0] = 13 << 3 | 4;
+    packet[1] = 80;
+    for (packet[2..82], 0..) |*b, i| b.* = @truncate(i *% 0x6b +% 7);
+    packet[82] = 1 << 3;
+    for (packet[83..], 0..) |*b, i| b.* = @truncate(i *% 0x35 +% 3);
+    var total: u32 = 0;
+    for (0..4) |_| total += try dec.decodePacket(&packet, &planes);
+    total += try dec.decodePacket(null, &planes);
+    // Every sample is decoded once, whatever the delays.
+    try testing.expect(total <= 4 * 960);
+    try testing.expect(total > 3 * 960);
+}

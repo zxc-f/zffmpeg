@@ -51,9 +51,19 @@ pub const RangeDecoder = struct {
     value: u32,
     total_bits: u32,
 
-    /// ff_opus_rc_dec_init over a frame's bytes.
+    /// ff_opus_rc_dec_init over a frame's bytes, the last frame of its
+    /// packet.
     pub fn init(data: []const u8) error{InputTooLarge}!RangeDecoder {
-        var rc: RangeDecoder = .{ .gb = try .init(data), .range = 128, .value = 0, .total_bits = 9 };
+        return initIn(data, data.len);
+    }
+
+    /// ff_opus_rc_dec_init over the first `size` bytes of `memory`, the
+    /// rest of the packet from the frame's start: the decoder reads a byte
+    /// or two ahead, so near the frame's end it reads the bytes that follow
+    /// it in the packet (the next frame, the redundancy frame, the next
+    /// stream), then the packet's zero padding, as FFmpeg's does.
+    pub fn initIn(memory: []const u8, size: usize) error{InputTooLarge}!RangeDecoder {
+        var rc: RangeDecoder = .{ .gb = try .initIn(memory, size), .range = 128, .value = 0, .total_bits = 9 };
         rc.value = 127 - rc.gb.bits(7);
         rc.normalize();
         return rc;

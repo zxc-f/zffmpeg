@@ -16,8 +16,7 @@
 //! samples rounded to 16 bits as libopus' float build does; with two
 //! references the better, as libopus' `run_vectors.sh` checks a mono
 //! decoding against testvectorNN.dec and testvectorNNm.dec. Exits 0 once
-//! decoded, 1 on a usage error, 2 on a failure, 3 when the vector holds
-//! frames the decoder does not decode yet (hybrid).
+//! decoded, 1 on a usage error, 2 on a failure.
 
 const std = @import("std");
 const av = @import("av");
@@ -26,7 +25,7 @@ const opus_compare = @import("opus_compare.zig");
 const usage = "usage: opus-vector-driver <file.bit> <channels> <reference.dec> [<reference.dec>]\n";
 const max_input_bytes = 64 << 20;
 
-const Status = enum(u8) { ok = 0, usage = 1, fails = 2, unsupported = 3 };
+const Status = enum(u8) { ok = 0, usage = 1, fails = 2 };
 
 /// The decoding: 16-bit samples for opus_compare, the float samples'
 /// MD5.
@@ -99,10 +98,6 @@ fn run(init: std.process.Init) !Status {
         at += len;
         packets += 1;
         const n = dec.decodePacket(packet, planes[0..channels]) catch |err| switch (err) {
-            error.UnsupportedMode => {
-                print(io, "packet {d}: hybrid frames are not decoded yet\n", .{packets});
-                return .unsupported;
-            },
             error.InvalidData => {
                 print(io, "packet {d}: the decoder refuses it\n", .{packets});
                 return .fails;
