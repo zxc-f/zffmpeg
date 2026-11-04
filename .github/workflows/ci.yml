@@ -155,6 +155,10 @@ jobs:
             .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a \
             -lm -pthread -o rematrix-vectors
           ./rematrix-vectors | diff -u zig/testing/vectors/rematrix.txt -
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/remix_vectors.c \
+            .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a \
+            -lm -pthread -o remix-vectors
+          ./remix-vectors | diff -u zig/testing/vectors/remix.txt -
 
       # The committed T23a oracle must be what this build's libswresample gives.
       - name: Check the sample conversion and dither vectors (T23a)

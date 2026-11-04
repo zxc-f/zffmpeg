@@ -221,15 +221,16 @@ comptime {
     }
 }
 
-/// libswresample's internal format for a conversion without resampling or
-/// rematrixing (`swr_init`'s choice).
-fn internalFormat(in: audio.SampleFormat, out: audio.SampleFormat) audio.SampleFormat {
+/// libswresample's internal format for a conversion without resampling
+/// (`swr_init`'s choice). `mixing`: a rematrix mixes channels, rather than
+/// only copying or silencing them (`swri_rematrix_build`, T23c).
+pub fn internalFormat(in: audio.SampleFormat, out: audio.SampleFormat, mixing: bool) audio.SampleFormat {
     const in_bytes = in.bytesPerSample();
     const out_bytes = out.bytesPerSample();
     if (in_bytes <= 2 and out_bytes <= 2) return .s16p;
     if (in_bytes + out_bytes <= 3) return .s16p;
-    if (in_bytes <= 2) return .s16p;
-    if (in.packedForm() == .s32 and out.packedForm() == .s32) return .s32p;
+    if (in_bytes <= 2 and !mixing) return .s16p;
+    if (in.packedForm() == .s32 and out.packedForm() == .s32 and !mixing) return .s32p;
     if (in_bytes <= 4) return .fltp;
     return .dblp;
 }
@@ -301,7 +302,6 @@ const Noise = struct {
 pub const Dither = struct {
     /// After the fallback for a shaping method without a filter.
     method: Method,
-    in_format: audio.Format,
     out_format: audio.SampleFormat,
     internal: audio.SampleFormat,
     channels: u32,
@@ -328,13 +328,20 @@ pub const Dither = struct {
     /// The dither of a conversion from `in_format` to `out_format` (same
     /// rate and layout), or null when FFmpeg would not dither it.
     pub fn init(in_format: audio.Format, out_format: audio.SampleFormat, options: Options) ?Dither {
+        const internal = internalFormat(in_format.sample_format, out_format, false);
+        return initInternal(internal, in_format.channelCount(), in_format.sample_rate, out_format, options);
+    }
+
+    /// The dither of the `channels` channels libswresample holds in
+    /// `internal` before converting them to `out_format`, at `sample_rate`,
+    /// or null when FFmpeg would not dither them: after a rematrix (T23c),
+    /// the output's channels in the internal format the mix chose.
+    pub fn initInternal(internal: audio.SampleFormat, channels: u32, sample_rate: u32, out_format: audio.SampleFormat, options: Options) ?Dither {
         var method = options.method orelse return null;
-        const channels = in_format.channelCount();
         std.debug.assert(channels <= max_channels);
         const bits = options.output_sample_bits;
         std.debug.assert(bits == 0 or (bits >= 2 and bits <= 32));
         std.debug.assert(options.scale >= 0 and std.math.isFinite(options.scale));
-        const internal = internalFormat(in_format.sample_format, out_format);
         // swr_convert_internal converts straight into a planar output in the
         // internal format, undithered, unless it is s32 with bits to drop.
         if (internal == out_format and !(out_format == .s32p and bits % 32 != 0)) return null;
@@ -348,7 +355,6 @@ pub const Dither = struct {
         if (scale == 0) return null;
         var dither: Dither = .{
             .method = method,
-            .in_format = in_format,
             .out_format = out_format,
             .internal = internal,
             .channels = channels,
@@ -358,7 +364,7 @@ pub const Dither = struct {
             .noise = undefined,
         };
         if (method.shapes()) {
-            const rate: i64 = in_format.sample_rate;
+            const rate: i64 = sample_rate;
             const filter = for (filters) |f| {
                 if (@abs(rate - f.rate) * 20 <= f.rate and f.method == method) break f;
             } else null;
@@ -414,6 +420,15 @@ pub const Dither = struct {
         const layout = samples.Layout.init(d.internal, d.channels, count, .{ .line = 1 }) catch unreachable;
         const internal = samples.Buffer.init(layout, scratch) catch unreachable; // scratchLen bytes
         audioconvert.convert(internal, in, 0, 0, count);
+        d.applyInternal(internal, count);
+        audioconvert.convert(out, internal.view(), 0, 0, count);
+    }
+
+    /// The noise step alone: dithers `count` frames already in the internal
+    /// format (planar, `channels` of them, from the start of `internal`), as
+    /// one `swr_convert` call does unless `setCalls` names the calls.
+    pub fn applyInternal(d: *Dither, internal: samples.Buffer, count: u32) void {
+        std.debug.assert(internal.layout.format == d.internal and internal.layout.channels == d.channels);
         var done: u32 = 0;
         while (done < count) {
             if (d.call_left == 0) d.beginCall(if (d.call_frames == 0) count else d.nextCall());
@@ -437,7 +452,6 @@ pub const Dither = struct {
             if (d.remaining) |*r| r.* -= n;
             done += n;
         }
-        audioconvert.convert(out, internal.view(), 0, 0, count);
     }
 
     /// The size of the next of FFmpeg's calls.
@@ -575,11 +589,11 @@ fn roundEven(x: f64) f64 {
 }
 
 test "the internal format and scale follow swr_init and swri_dither_init" {
-    try std.testing.expectEqual(audio.SampleFormat.fltp, internalFormat(.flt, .s16));
-    try std.testing.expectEqual(audio.SampleFormat.fltp, internalFormat(.s32, .s16));
-    try std.testing.expectEqual(audio.SampleFormat.s16p, internalFormat(.s16, .u8));
-    try std.testing.expectEqual(audio.SampleFormat.dblp, internalFormat(.dbl, .s16));
-    try std.testing.expectEqual(audio.SampleFormat.s32p, internalFormat(.s32p, .s32));
+    try std.testing.expectEqual(audio.SampleFormat.fltp, internalFormat(.flt, .s16, false));
+    try std.testing.expectEqual(audio.SampleFormat.fltp, internalFormat(.s32, .s16, false));
+    try std.testing.expectEqual(audio.SampleFormat.s16p, internalFormat(.s16, .u8, false));
+    try std.testing.expectEqual(audio.SampleFormat.dblp, internalFormat(.dbl, .s16, false));
+    try std.testing.expectEqual(audio.SampleFormat.s32p, internalFormat(.s32p, .s32, false));
     try std.testing.expectEqual(1.0 / 32768.0, ditherScale(.fltp, .s16, 0));
     try std.testing.expectEqual(256, ditherScale(.s16p, .u8, 0));
     try std.testing.expectEqual(0, ditherScale(.fltp, .dbl, 0));

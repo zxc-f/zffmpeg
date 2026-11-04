@@ -1878,19 +1878,23 @@ names, not as an empty framework.
     Contract and source provenance: port.md "Rematrixing"; notes.md
       "Rematrixing"; rematrix.c, options.c, swresample_internal.h.
     Required fixtures / optional corpus: 4833 matrices of the pinned
-      libswresample (rematrix_vectors.c); no optional corpus.
+      libswresample (rematrix_vectors.c); 1792 swr_convert outputs
+      (remix_vectors.c); no optional corpus.
     Ownership, state transitions and limits: a caller-owned 64 x 64 matrix;
       nothing allocates.
     Comparison rule and intentional differences: bit for bit; none.
-    Implementation files and test entry points: resample/rematrix.zig;
-      rematrix_vectors.c.
+    Implementation files and test entry points: resample/rematrix.zig,
+      resample/dither.zig (initInternal, applyInternal); rematrix_vectors.c,
+      remix_vectors.c.
     Evidence commit / Linux CI run / reference report: part 1 local Linux
       runs; CI pending.
-    Required cases: part 1 passes; part 2 is missing.
+    Required cases: part 1 and part 2's kernels pass; zffmpeg's output
+      layout options are missing.
     Optional cases: none
     Fuzz seeds, budget and result: none yet.
-    Remaining work or blocker / next action: part 2, the rematrix kernels in
-      libswresample's internal formats and the output layout options.
+    Remaining work or blocker / next action: part 2's integration: the
+      conversion pipeline and zffmpeg's output -ac/-ch_layout, compared with
+      FFmpeg's own downmixes.
     ```
 
 - [ ] **T24 — Resampling.** Needs T17a and T23a.

@@ -236,7 +236,7 @@ pub const Converter = struct {
     /// `Dither.init`; `scratch` must hold `dither.scratchLen` bytes for the
     /// largest frame, which also bounds the frame size.
     pub fn initDithered(in_format: audio.Format, out_format: audio.Format, storage: []u8, dither: Dither, scratch: []u8) Converter {
-        std.debug.assert(dither.in_format.eql(in_format) and dither.out_format == out_format.sample_format);
+        std.debug.assert(dither.channels == in_format.channelCount() and dither.out_format == out_format.sample_format);
         var c: Converter = .init(in_format, out_format, storage);
         c.dither = dither;
         c.scratch = scratch;

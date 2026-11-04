@@ -592,12 +592,16 @@ part, [resample/rematrix.zig](zig/resample/rematrix.zig), builds the matrix
 | Rules | Shared channels pass through; every other one goes to its nearest outputs by libswresample's rules, the ITU-R BS.2127-1 and IAMF ones for the height channels included, at the center, surround and LFE mix levels, or as Dolby or Dolby Pro Logic II matrixed stereo. |
 | Scaling | The largest sum of an output channel's coefficients is brought down to `maxval` (1 for integer output, which libswresample's command-line path clips at; never for float output, whose `maxval` is `INT_MAX`), or to the absolute value of a negative rematrix volume, then a positive rematrix volume multiplies the matrix. |
 | Options | libswresample's defaults: center and surround mix levels `C_30DB` and LFE 0, as its `float` options store them, so `(float)M_SQRT1_2`; rematrix volume 1. |
-| Not yet | Applying the matrix to samples and zffmpeg's output `-ac`/`-ch_layout` (part 2); custom matrices, `rematrix_maxval`, `internal_sample_fmt`. |
+| Applying it | `rematrix.Remix` and `rematrix.convert` (part 2): `swr_convert` with a layout change and no resampling. The internal format is `swr_init`'s, which differs when the matrix mixes channels rather than copying or silencing them (s16 input to a wider output then goes through float); s16p mixes with each row's coefficients times 32768, rounded through `lrintf` with the error carried along the row, and clips when a row's sum passes 32768; floats and doubles mix in their own precision. The kernels are libswresample's (`copy`, `sum2`, its 5.1 and 7.1 to stereo ones, and the general sum, which for s16p uses unrounded-row coefficients and wraps), in its order of operations, then dither, if any, and the output conversion. |
+| Not yet | zffmpeg's output `-ac`/`-ch_layout`; custom matrices, `rematrix_maxval`, `internal_sample_fmt`. |
 
 The oracle is [rematrix_vectors.c](zig/testing/reference/rematrix_vectors.c):
 4833 matrices from the pinned `libswresample`, every pair of named layouts
 for integer and float output, option sets on downmixes and custom layouts,
-equal coefficient by coefficient, bit for bit.
+equal coefficient by coefficient, bit for bit; and
+[remix_vectors.c](zig/testing/reference/remix_vectors.c): 1792 `swr_convert`
+runs, 25 layout pairs between eight sample formats each way and dithered
+outputs, whose output bytes the port gives exactly (an FNV-1a hash of each).
 
 ## Modern Zig metaprogramming
 

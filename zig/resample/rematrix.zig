@@ -21,6 +21,10 @@
 //! Nothing allocates.
 
 const std = @import("std");
+const audio = @import("../core/audio.zig");
+const samples = @import("../core/samples.zig");
+const audioconvert = @import("audioconvert.zig");
+const dither = @import("dither.zig");
 const channel_layout = @import("../core/channel_layout.zig");
 const Channel = channel_layout.Channel;
 const Layout = channel_layout.Layout;
@@ -559,6 +563,319 @@ fn surroundIntoFronts(m: *[named][named]f64, comptime left: u6, comptime right: 
     }
 }
 
+/// A rematrix as libswresample sets one up for a conversion at one rate
+/// (`swr_init`, `swri_rematrix_init`) and applies it (`swri_rematrix`): the
+/// matrix, the internal format it mixes in, and the coefficients in that
+/// format. Large (about 50 KiB): keep it where it lives, not on a hot stack.
+pub const Remix = struct {
+    in_channels: u32,
+    out_channels: u32,
+    /// libswresample's internal format: s16p, s32p, fltp or dblp.
+    internal: audio.SampleFormat,
+    /// The matrix mixes channels, rather than only copying or silencing
+    /// them (`swri_rematrix_build`), which changes the internal format.
+    mixing: bool,
+    matrix: Matrix,
+    /// `native_matrix` of s16p and s32p: each row's coefficients times
+    /// 32768, rounded through `lrintf` with the rounding error carried on.
+    ints: [max_channels][max_channels]i32,
+    /// s16p's kernels clip: some row's integer coefficients sum past 32768.
+    clip: bool,
+    /// `matrix_ch`: each output channel's inputs with a nonzero coefficient.
+    sources: [max_channels]Sources,
+    special: Special,
+
+    const Sources = struct {
+        count: u8 = 0,
+        index: [max_channels]u8 = undefined,
+    };
+
+    /// `get_mix_any_func`: 5.1 or 5.1(side) to stereo, or 7.1 to stereo,
+    /// with a symmetric center and LFE, mixed by one kernel.
+    const Special = enum { none, six_to_two, eight_to_two };
+
+    /// Sets up the mix from `in` to `out_layout` in `out_format` and
+    /// returns true, or returns false when libswresample would not
+    /// rematrix: the same layout, and a volume of 1. An unspecified layout
+    /// takes the default for its channel count, as `swr_init` gives it.
+    pub fn init(r: *Remix, in: audio.Format, out_layout: Layout, out_format: audio.SampleFormat, options: Options) Error!bool {
+        const in_layout = withDefault(in.layout);
+        const out = withDefault(out_layout);
+        if (in_layout.eql(&out) and options.rematrix_volume == 1) return false;
+        // auto_matrix: integer output is clipped, so mixes keep within 1.
+        const maxval: f64 = switch (out_format.packedForm()) {
+            .u8, .s16, .s32 => 1,
+            else => std.math.maxInt(i32),
+        };
+        try build(in_layout, out, options, maxval, &r.matrix);
+        r.in_channels = in_layout.channelCount();
+        r.out_channels = out.channelCount();
+        r.mixing = false;
+        for (0..r.out_channels) |i| {
+            var count: u32 = 0;
+            for (r.matrix[i][0..r.in_channels]) |coefficient| {
+                if (coefficient == 0) continue;
+                if (coefficient != 1 or count > 0) r.mixing = true;
+                count += 1;
+            }
+        }
+        r.internal = dither.internalFormat(in.sample_format, out_format, r.mixing);
+        r.clip = false;
+        if (r.internal == .s16p or r.internal == .s32p) {
+            var max_sum: i64 = 0;
+            for (0..r.out_channels) |i| {
+                var rem: f64 = 0;
+                var sum: i64 = 0;
+                for (0..r.in_channels) |j| {
+                    const target = r.matrix[i][j] * 32768 + rem;
+                    const native = lrintf(target);
+                    r.ints[i][j] = native;
+                    rem += target - @as(f64, @floatFromInt(native));
+                    sum += @abs(native);
+                }
+                max_sum = @max(max_sum, sum);
+            }
+            r.clip = r.internal == .s16p and max_sum > 32768;
+        }
+        for (0..max_channels) |i| {
+            var sources: Sources = .{};
+            for (0..max_channels) |j| {
+                if (r.matrix[i][j] == 0) continue;
+                sources.index[sources.count] = @intCast(j);
+                sources.count += 1;
+            }
+            r.sources[i] = sources;
+        }
+        r.special = special(&in_layout, &out, &r.matrix);
+        return true;
+    }
+
+    /// Bytes of scratch `convert` needs for `count` frames.
+    pub fn scratchLen(r: *const Remix, count: u32) usize {
+        const frames: usize = count;
+        return frames * (r.in_channels + r.out_channels) * r.internal.bytesPerSample();
+    }
+
+    /// Mixes `count` frames of `in` into `out`, both planar in the internal
+    /// format (`swri_rematrix`).
+    pub fn apply(r: *const Remix, out: samples.Buffer, in: samples.View, count: u32) void {
+        std.debug.assert(out.layout.format == r.internal and in.layout.format == r.internal);
+        std.debug.assert(out.layout.channels == r.out_channels and in.layout.channels == r.in_channels);
+        switch (r.internal) {
+            inline .s16p, .s32p, .fltp, .dblp => |format| r.applyIn(format, out, in, count),
+            else => unreachable, // init picks one of these
+        }
+    }
+
+    fn applyIn(r: *const Remix, comptime format: audio.SampleFormat, out: samples.Buffer, in: samples.View, count: u32) void {
+        const K = Kernel(format);
+        switch (r.special) {
+            .six_to_two => return K.mixToTwo(r, 6, out, in, count),
+            .eight_to_two => return K.mixToTwo(r, 8, out, in, count),
+            .none => {},
+        }
+        for (0..r.out_channels) |o| {
+            const plane = out.plane(@intCast(o));
+            const sources = &r.sources[o];
+            switch (sources.count) {
+                0 => @memset(plane[0 .. count * @sizeOf(K.Sample)], 0),
+                1 => {
+                    const i = sources.index[0];
+                    if (r.matrix[o][i] == 1) {
+                        const bytes = count * @sizeOf(K.Sample);
+                        @memcpy(plane[0..bytes], in.plane(i)[0..bytes]);
+                    } else {
+                        const coefficient = K.coefficient(r, o, i);
+                        for (0..count) |n| K.store(plane, n, K.round(r, K.mul(coefficient, K.load(in.plane(i), n))));
+                    }
+                },
+                2 => {
+                    const a = sources.index[0];
+                    const b = sources.index[1];
+                    const ca = K.coefficient(r, o, a);
+                    const cb = K.coefficient(r, o, b);
+                    for (0..count) |n| {
+                        K.store(plane, n, K.round(r, K.add(K.mul(ca, K.load(in.plane(a), n)), K.mul(cb, K.load(in.plane(b), n)))));
+                    }
+                },
+                else => K.mixMany(r, o, plane, in, count),
+            }
+        }
+    }
+
+    /// The kernels of one internal format, as rematrix_template.c and
+    /// `swri_rematrix` write them: `Inter` is the arithmetic type.
+    fn Kernel(comptime format: audio.SampleFormat) type {
+        return struct {
+            const Sample = switch (format) {
+                .s16p => i16,
+                .s32p => i32,
+                .fltp => f32,
+                .dblp => f64,
+                else => unreachable,
+            };
+            const Inter = switch (format) {
+                .s16p => i32,
+                .s32p => i64,
+                .fltp => f32,
+                .dblp => f64,
+                else => unreachable,
+            };
+            const Bits = @Int(.unsigned, @bitSizeOf(Sample));
+            const integer = format == .s16p or format == .s32p;
+
+            /// C's `int` and `int64_t` arithmetic, which wraps on x86-64
+            /// where an extreme volume overflows it; floats as they are.
+            fn mul(a: Inter, b: Inter) Inter {
+                return if (integer) a *% b else a * b;
+            }
+
+            fn add(a: Inter, b: Inter) Inter {
+                return if (integer) a +% b else a + b;
+            }
+
+            fn load(plane: []const u8, n: usize) Inter {
+                const bits = std.mem.readInt(Bits, plane[n * @sizeOf(Sample) ..][0..@sizeOf(Sample)], native_endian);
+                const sample: Sample = @bitCast(bits);
+                return sample;
+            }
+
+            fn store(plane: []u8, n: usize, value: Sample) void {
+                std.mem.writeInt(Bits, plane[n * @sizeOf(Sample) ..][0..@sizeOf(Sample)], @bitCast(value), native_endian);
+            }
+
+            /// `native_matrix[out][in]`.
+            fn coefficient(r: *const Remix, o: usize, i: usize) Inter {
+                return switch (format) {
+                    .s16p, .s32p => r.ints[o][i],
+                    .fltp => @floatCast(r.matrix[o][i]),
+                    .dblp => r.matrix[o][i],
+                    else => unreachable,
+                };
+            }
+
+            /// `R(x)`: integers round by 2^15, wrapping into the sample
+            /// unless s16p clips; floats are as they are.
+            fn round(r: *const Remix, x: Inter) Sample {
+                switch (format) {
+                    .s16p => {
+                        const scaled = (x +% 16384) >> 15;
+                        if (r.clip) return @intCast(std.math.clamp(scaled, std.math.minInt(i16), std.math.maxInt(i16)));
+                        return @truncate(scaled);
+                    },
+                    .s32p => return @truncate((x +% 16384) >> 15),
+                    .fltp, .dblp => return x,
+                    else => unreachable,
+                }
+            }
+
+            /// `mix6to2` and `mix8to2`: the center and LFE once, shared.
+            fn mixToTwo(r: *const Remix, comptime n_in: usize, out: samples.Buffer, in: samples.View, count: u32) void {
+                const left = out.plane(0);
+                const right = out.plane(1);
+                const c = struct {
+                    fn of(rr: *const Remix, o: usize, i: usize) Inter {
+                        return coefficient(rr, o, i);
+                    }
+                };
+                for (0..count) |n| {
+                    var v: [n_in]Inter = undefined;
+                    inline for (0..n_in) |i| v[i] = load(in.plane(i), n);
+                    // C's order: t, then each product added left to right.
+                    const t = add(mul(v[2], c.of(r, 0, 2)), mul(v[3], c.of(r, 0, 3)));
+                    var l = add(add(t, mul(v[0], c.of(r, 0, 0))), mul(v[4], c.of(r, 0, 4)));
+                    var rr = add(add(t, mul(v[1], c.of(r, 1, 1))), mul(v[5], c.of(r, 1, 5)));
+                    if (n_in == 8) {
+                        l = add(l, mul(v[6], c.of(r, 0, 6)));
+                        rr = add(rr, mul(v[7], c.of(r, 1, 7)));
+                    }
+                    store(left, n, round(r, l));
+                    store(right, n, round(r, rr));
+                }
+            }
+
+            /// More than two inputs: floats in `float` or `double` with the
+            /// plain coefficients; integers as s16 with `lrintf(c * 32768)`
+            /// coefficients, unclipped (s32p never mixes this way).
+            fn mixMany(r: *const Remix, o: usize, plane: []u8, in: samples.View, count: u32) void {
+                const sources = &r.sources[o];
+                for (0..count) |n| {
+                    switch (format) {
+                        .fltp, .dblp => {
+                            var v: Inter = 0;
+                            for (sources.index[0..sources.count]) |i| {
+                                const c: Inter = @floatCast(r.matrix[o][i]);
+                                v += load(in.plane(i), n) * c;
+                            }
+                            store(plane, n, v);
+                        },
+                        .s16p => {
+                            var v: i32 = 0;
+                            for (sources.index[0..sources.count]) |i| {
+                                v +%= @as(i32, @intCast(load(in.plane(i), n))) *% lrintf(r.matrix[o][i] * 32768);
+                            }
+                            store(plane, n, @truncate((v +% 16384) >> 15));
+                        },
+                        else => unreachable,
+                    }
+                }
+            }
+        };
+    }
+};
+
+/// An unspecified layout as `swr_init` takes it: the default for its count.
+fn withDefault(layout: Layout) Layout {
+    return switch (layout) {
+        .unspecified => |count| .default(count),
+        .native, .custom => layout,
+    };
+}
+
+/// `get_mix_any_func`'s condition.
+fn special(in: *const Layout, out: *const Layout, m: *const Matrix) Remix.Special {
+    if (!out.eql(&Layout.stereo)) return .none;
+    const symmetric = m[0][2] == m[1][2] and m[0][3] == m[1][3] and
+        m[0][1] == 0 and m[0][5] == 0 and m[1][0] == 0 and m[1][4] == 0;
+    if (!symmetric) return .none;
+    const five_one: Layout = .{ .native = bit(FL) | bit(FR) | bit(FC) | bit(LFE) | bit(SL) | bit(SR) };
+    const five_one_back: Layout = .{ .native = bit(FL) | bit(FR) | bit(FC) | bit(LFE) | bit(BL) | bit(BR) };
+    if (in.eql(&five_one) or in.eql(&five_one_back)) return .six_to_two;
+    const seven_one: Layout = .{ .native = five_one.native | bit(BL) | bit(BR) };
+    if (in.eql(&seven_one) and m[0][7] == 0 and m[1][6] == 0) return .eight_to_two;
+    return .none;
+}
+
+/// `lrintf` of a double, as C converts it: to `float`, then to the nearest
+/// integer, ties to even. The coefficients keep it far inside `int`.
+fn lrintf(x: f64) i32 {
+    const f: f32 = @floatCast(x);
+    const floor = @floor(f);
+    const diff = f - floor;
+    const up = diff > 0.5 or (diff == 0.5 and @mod(floor, 2) != 0);
+    const rounded = if (up) floor + 1 else floor;
+    return @trunc(rounded);
+}
+
+const native_endian = @import("builtin").cpu.arch.endian();
+
+/// Converts `count` frames from `in` to `out` as `swr_convert` does with a
+/// layout change and no resampling: `in` into the internal format, the mix,
+/// `dither` if given (made by `Dither.initInternal` for the output's
+/// channels in `r.internal`), then into `out`. `scratch` holds
+/// `r.scratchLen(count)` bytes.
+pub fn convert(r: *const Remix, out: samples.Buffer, in: samples.View, count: u32, scratch: []u8, dithering: ?*dither.Dither) void {
+    if (count == 0) return;
+    const in_layout = samples.Layout.init(r.internal, r.in_channels, count, .{ .line = 1 }) catch unreachable;
+    const out_layout = samples.Layout.init(r.internal, r.out_channels, count, .{ .line = 1 }) catch unreachable;
+    const mid_in = samples.Buffer.init(in_layout, scratch[0..in_layout.size]) catch unreachable;
+    const mid_out = samples.Buffer.init(out_layout, scratch[in_layout.size..]) catch unreachable;
+    audioconvert.convert(mid_in, in, 0, 0, count);
+    r.apply(mid_out, mid_in.view(), count);
+    if (dithering) |d| d.applyInternal(mid_out, count);
+    audioconvert.convert(out, mid_out.view(), 0, 0, count);
+}
+
 const vectors = @embedFile("../testing/vectors/rematrix.txt");
 const vector_count = 4833;
 
@@ -644,4 +961,114 @@ test "downmixing 5.1 to stereo uses the default levels" {
     try std.testing.expectEqual(c_30db / sum, matrix[0][2]);
     try std.testing.expectEqual(0, matrix[0][3]);
     try std.testing.expectError(error.UnsupportedLayout, build(.{ .unspecified = 3 }, .stereo, .{}, 1, &matrix));
+}
+
+const remix_vectors = @embedFile("../testing/vectors/remix.txt");
+const remix_vector_count = 1792;
+
+/// The generator's input: a 64-bit LCG, one step per sample (remix_vectors.c).
+const Lcg = struct {
+    state: u64 = 1,
+
+    fn next(g: *Lcg) u64 {
+        g.state = g.state *% 6364136223846793005 +% 1442695040888963407;
+        return g.state;
+    }
+};
+
+fn writeSample(bytes: []u8, format: audio.SampleFormat, v: u64) void {
+    const top: i32 = @bitCast(@as(u32, @truncate(v >> 32)));
+    switch (format.packedForm()) {
+        .u8 => bytes[0] = @truncate(v >> 56),
+        .s16 => std.mem.writeInt(i16, bytes[0..2], @bitCast(@as(u16, @truncate(v >> 48))), native_endian),
+        .s32 => std.mem.writeInt(i32, bytes[0..4], top, native_endian),
+        .s64 => std.mem.writeInt(i64, bytes[0..8], @bitCast(v), native_endian),
+        .flt => {
+            const wide: f64 = @as(f64, @floatFromInt(top)) * 1.25 / 2147483648.0;
+            const narrow: f32 = @floatCast(wide);
+            std.mem.writeInt(u32, bytes[0..4], @bitCast(narrow), native_endian);
+        },
+        .dbl => {
+            const wide: f64 = @as(f64, @floatFromInt(top)) * 1.25 / 2147483648.0;
+            std.mem.writeInt(u64, bytes[0..8], @bitCast(wide), native_endian);
+        },
+        else => unreachable,
+    }
+}
+
+fn checkRemixVector(line: []const u8, gpa: std.mem.Allocator) !void {
+    var fields = std.mem.tokenizeScalar(u8, line, ' ');
+    if (!std.mem.eql(u8, try field(&fields), "X")) return error.MalformedVector;
+    const in_layout = try layoutField(&fields);
+    const out_layout = try layoutField(&fields);
+    const in_format = audio.SampleFormat.fromName(try field(&fields)) orelse return error.MalformedVector;
+    const out_format = audio.SampleFormat.fromName(try field(&fields)) orelse return error.MalformedVector;
+    const frames = try std.fmt.parseInt(u32, try field(&fields), 10);
+    const method: ?dither.Method = switch (try std.fmt.parseInt(u8, try field(&fields), 10)) {
+        0 => null,
+        2 => .triangular,
+        3 => .triangular_hp,
+        69 => .shibata,
+        else => return error.MalformedVector,
+    };
+    const want = try std.fmt.parseInt(u64, try field(&fields), 16);
+
+    const in: audio.Format = try .initLayout(8000, in_layout, in_format);
+    const remix = try gpa.create(Remix);
+    defer gpa.destroy(remix);
+    try std.testing.expect(try remix.init(in, out_layout, out_format, .{}));
+    const in_buffer_layout = try samples.Layout.init(in_format, in_layout.channelCount(), frames, .{ .line = 1 });
+    const out_buffer_layout = try samples.Layout.init(out_format, remix.out_channels, frames, .{ .line = 1 });
+    const in_bytes = try gpa.alloc(u8, in_buffer_layout.size);
+    defer gpa.free(in_bytes);
+    const out_bytes = try gpa.alloc(u8, out_buffer_layout.size);
+    defer gpa.free(out_bytes);
+    const scratch = try gpa.alloc(u8, remix.scratchLen(frames));
+    defer gpa.free(scratch);
+    const in_buffer = try samples.Buffer.init(in_buffer_layout, in_bytes);
+    var lcg: Lcg = .{};
+    const width = in_format.bytesPerSample();
+    for (0..frames) |f| {
+        for (0..in_layout.channelCount()) |c| {
+            const bytes = if (in_format.isPlanar())
+                in_buffer.plane(@intCast(c))[f * width ..]
+            else
+                in_buffer.plane(0)[(f * in_layout.channelCount() + c) * width ..];
+            writeSample(bytes, in_format, lcg.next());
+        }
+    }
+    var dithered: ?dither.Dither = if (method) |m|
+        dither.Dither.initInternal(remix.internal, remix.out_channels, 8000, out_format, .{ .method = m })
+    else
+        null;
+    const out_buffer = try samples.Buffer.init(out_buffer_layout, out_bytes);
+    convert(remix, out_buffer, in_buffer.view(), frames, scratch, if (dithered) |*d| d else null);
+
+    // FNV-1a over the output's bytes, planes in order, little-endian.
+    pcm_little.storedToLittle(out_format, out_bytes);
+    var hash: u64 = 0xcbf29ce484222325;
+    const planes = out_buffer_layout.planeCount();
+    const plane_bytes = if (out_format.isPlanar()) frames * out_format.bytesPerSample() else frames * remix.out_channels * out_format.bytesPerSample();
+    for (0..planes) |p| {
+        for (out_buffer.plane(@intCast(p))[0..plane_bytes]) |b| {
+            hash ^= b;
+            hash *%= 0x100000001b3;
+        }
+    }
+    try std.testing.expectEqual(want, hash);
+}
+
+const pcm_little = @import("../codec/pcm.zig");
+
+test "remixed samples equal libswresample's on every vector" {
+    const gpa = std.testing.allocator;
+    var lines = std.mem.tokenizeScalar(u8, remix_vectors, '\n');
+    var count: usize = 0;
+    while (lines.next()) |line| : (count += 1) {
+        checkRemixVector(line, gpa) catch |err| {
+            std.debug.print("remix vector {d}: {s}\n", .{ count + 1, line });
+            return err;
+        };
+    }
+    try std.testing.expectEqual(remix_vector_count, count);
 }

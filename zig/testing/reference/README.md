@@ -79,7 +79,13 @@ The T23c rematrix vectors come from the reference's `libswresample`
 ```bash
 clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/rematrix_vectors.c .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o rematrix-vectors
 ./rematrix-vectors | diff -u zig/testing/vectors/rematrix.txt -
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/remix_vectors.c .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o remix-vectors
+./remix-vectors | diff -u zig/testing/vectors/remix.txt -
 ```
+
+The second, `remix_vectors.c`, runs `swr_convert` with a layout change on
+generated input (1792 cases: 25 layout pairs, eight sample formats each
+way, and dithered ones) and prints a hash of each output.
 
 On Windows (MSYS2 UCRT64 clang) link with `-lm -lbcrypt` instead of
 `-pthread` and strip the carriage returns MinGW's text output adds
