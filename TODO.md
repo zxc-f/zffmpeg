@@ -3079,7 +3079,7 @@ names, not as an empty framework.
 
     ```text
     ID / parent: T29a / T29
-    State: G0 (planned)
+    State: G2 (in progress)
     Scope: FFmpeg's mp3 demuxer (mp3dec.c) on libavformat's generic layer
       (demux.zig), as the ffmpeg program opens an input: the ID3v2 tag
       read before the demuxer (FF_INFMT_FLAG_ID3V2_AUTO, id3v2.c: versions
@@ -3117,7 +3117,20 @@ names, not as an empty framework.
       full-raw parsing and gapless side data; part 3, the demuxer, its
       probe and detection's ID3v2 skip and probe retry; part 4, zffprobe,
       the framecrc copy in compare.py and seeking (seek_vectors.c).
-    ```
+    Evidence so far: part 0: build-ffmpeg.sh enables the mp3 demuxer and
+      the mpegaudio parser; 42 generated fixtures (zig/testing/fixtures/
+      mp3, FFmpeg opens 40) and vectors/mp3.txt from mp3_vectors.c, checked
+      in CI and local-ci.sh; port.md "MP3 contract"; compare.py records
+      the mp3 format as FFmpeg's only until part 3. With the demuxer
+      enabled FFmpeg's probe picks mp3 for rf64_missing_ds64,
+      rf64_truncated_ds64, raw_s24be_mono_8k and raw_s32be_stereo_8k (a
+      score of 1 wins once a second read meets the end), which the
+      detection check reports until part 3 ports the probe, its retry and
+      generate.py's model with it. Part 1: format/id3v2.zig,
+      format/id3v1.zig and format/avlanguage.zig (avlanguage.c's codes
+      for COMM keys), the dictionary's AV_DICT_DONT_OVERWRITE
+      (`keep_existing`): every opened fixture's format tags (ID3v2 of
+      every version, ID3v1, PRIV) equal mp3.txt's, 40/40.
   - [ ] **T29b — Layer III decoder.** Needs T18c and T29a. Huffman decoding,
     requantization, stereo modes, IMDCT, alias reduction and polyphase
     synthesis.

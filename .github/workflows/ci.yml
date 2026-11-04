@@ -218,6 +218,16 @@ jobs:
             -lm -pthread -o ogg-vectors
           LC_ALL=C ./ogg-vectors zig/testing/fixtures/ogg/*.ogg | diff -u zig/testing/vectors/ogg.txt -
 
+      # The committed T29a oracle must be what this build's libavformat makes
+      # of every MP3 fixture.
+      - name: Check the MP3 vectors (T29a)
+        run: |
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/mp3_vectors.c \
+            .references/ffmpeg-install/lib/libavformat.a .references/ffmpeg-install/lib/libavcodec.a \
+            .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a \
+            -lm -pthread -o mp3-vectors
+          LC_ALL=C ./mp3-vectors zig/testing/fixtures/mp3/*.mp3 | diff -u zig/testing/vectors/mp3.txt -
+
       # The committed T26c oracle must be what this build's FLAC encoder makes
       # of the generated signals.
       - name: Check the FLAC encoder vectors (T26c)

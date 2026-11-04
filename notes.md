@@ -350,6 +350,12 @@ FFmpeg has none of them. Each is `LimitExceeded`.
 | Mapping families | 0, 1 (Vorbis order and layouts) and 255 (unspecified layout) as FFmpeg's; family 2 (ambisonics) is `UnsupportedFormat`: the channel layouts here have no ambisonic order. | `opusdec.Head.parse` with an ambisonic layout in `core/channel_layout.zig`. |
 | RFC test vectors (T28a, revised in T28b and T28c) | Optional coverage, as FATE's samples are: `opus_vectors_sync.sh` fetches RFC 8251's archive (recorded SHA-256s), and compare.py runs `opus-vector-driver` over every vector in stereo and mono. A decoding passes when it equals FFmpeg's, sample for sample (`opus_rfc.txt`, printed by `opus_rfc_vectors.c` through the pinned libavcodec); the driver's native port of libopus' `opus_compare` (BSD-3-Clause) and its final range check are reported beside it. T28b's criterion was opus_compare itself, but FFmpeg's own decoder does not meet it: its SILK output, resampled to 48 kHz by libswresample rather than libopus' resampler, fails on vectors 03 and 04 in stereo, and in mono FFmpeg's SILK decoder reads other bits than libopus' (it returns before marking the uncoded side channel's frame coded, so the next frame's gains are read as absolute), with final ranges that differ. A port that matches FFmpeg cannot pass both, and matching the reference is the comparison rule ("Reference behavior" above); T28c's criterion is the same. All 24 decodings equal FFmpeg's; opus_compare passes 01, 02, 05, 07, 08, 09, 10, 11 and 12 in stereo and 01, 07, 11 and 12 in mono, and fails where FFmpeg's does (the CELT-only vectors pass in both). | `zig/testing/opus_vector_driver.zig`, `compare_opus_vectors`; a stricter criterion would mean departing from FFmpeg's SILK path. |
 
+## MP3
+
+| Decision | Current choice and reason | To change it |
+| --- | --- | --- |
+| The registry during T29a | The reference build enables FFmpeg's mp3 demuxer and mpegaudio parser from T29a part 0, for the oracle (mp3_vectors.c); the port's registry gains the mp3 format with its demuxer in part 3, so until then compare.py records it as a format only FFmpeg has. | `KNOWN_REGISTRY_DIFFERENCES`; T29a part 3 removes the entry and this row. |
+
 ## Floating-point library
 
 | Decision | Current choice and reason | To change it |

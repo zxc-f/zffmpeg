@@ -45,11 +45,11 @@ configure_args=(
     --disable-ffplay
     --disable-avdevice
     --enable-protocol=file,pipe
-    --enable-demuxer=wav,w64,au,aiff,caf,flac,ogg,"$pcm_formats"
+    --enable-demuxer=wav,w64,au,aiff,caf,flac,ogg,mp3,"$pcm_formats"
     --enable-decoder="$pcm_codecs",flac,vorbis,opus
     --enable-encoder="$pcm_codecs",flac,vorbis,opus
     --enable-muxer=wav,w64,au,aiff,flac,ogg,oga,opus,framecrc,framemd5,streamhash,"$pcm_formats"
-    --enable-parser=flac
+    --enable-parser=flac,mpegaudio
     --enable-filter=aresample,volume,asetpts,amix,pan,channelmap,channelsplit,asplit
 )
 

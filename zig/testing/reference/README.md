@@ -180,6 +180,17 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/ogg_vectors
 LC_ALL=C ./ogg-vectors zig/testing/fixtures/ogg/*.ogg | diff -u zig/testing/vectors/ogg.txt -
 ```
 
+The T29a MP3 vectors come the same way: `mp3_vectors.c` prints ogg_vectors.c's
+lines for each MP3 fixture, with each stream's media type, bit rate,
+disposition and ReplayGain side data, the format's start time, duration and
+bit rate, the chapters, and each packet's skip-samples side data as its skip
+and discard counts:
+
+```bash
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/mp3_vectors.c .references/ffmpeg-install/lib/libavformat.a .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o mp3-vectors
+LC_ALL=C ./mp3-vectors zig/testing/fixtures/mp3/*.mp3 | diff -u zig/testing/vectors/mp3.txt -
+```
+
 The T27d Vorbis vectors come from the reference's `libavformat` and
 `libavcodec`: `vorbis_vectors.c` opens each Ogg Vorbis fixture as the
 ffmpeg program opens an input, sends every packet of its Vorbis stream to

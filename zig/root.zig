@@ -168,6 +168,10 @@ test {
     _ = @import("format/flacmux.zig");
     _ = @import("format/vorbiscomment.zig");
     _ = @import("format/ogg.zig");
+    _ = @import("format/avlanguage.zig");
+    _ = @import("format/id3v1.zig");
+    _ = @import("format/id3v2.zig");
+    _ = @import("codec/mpegaudio.zig");
     _ = @import("format/demux.zig");
     _ = @import("format/oggmux.zig");
     _ = @import("format/oggdecode.zig");

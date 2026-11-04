@@ -463,6 +463,29 @@ pub const ogg = struct {
     }
 };
 
+pub const mp3 = struct {
+    const Mp3 = @This();
+
+    /// Whether FFmpeg opens the fixture; what it makes of each one opened
+    /// is vectors/mp3.txt (T29a).
+    pub const Expected = enum { accept, reject };
+
+    pub const Fixture = struct {
+        /// The file is fixtures/mp3/<name>.mp3.
+        name: []const u8,
+        /// Lowercase hexadecimal SHA-256 of the file.
+        sha256: []const u8,
+        expected: Mp3.Expected,
+    };
+
+    pub const all: []const Mp3.Fixture = @import("fixtures/mp3/manifest.zon");
+
+    /// The bytes of fixtures/mp3/<name>.mp3, embedded at compile time.
+    pub fn bytes(comptime name: []const u8) []const u8 {
+        return @embedFile("fixtures/mp3/" ++ name ++ ".mp3");
+    }
+};
+
 /// This file's own declarations: the WAV contract's `all` and `bytes`.
 const wav_contract = @This();
 

@@ -3325,7 +3325,403 @@ def render_ogg_table(fixtures):
     return "\n".join(rows) + "\n"
 
 
-def outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures, flac_fixtures, ogg_fixtures):
+# MPEG audio fixtures (TODO.md T29a): frames with valid headers and arbitrary
+# payloads, which FFmpeg's demuxer and parser never decode, with every kind
+# of tag and info header mp3dec.c reads. What FFmpeg makes of each is
+# mp3_vectors.c's (vectors/mp3.txt); the manifest records whether FFmpeg
+# opens each one.
+
+MP3_DIR = HERE / "mp3"
+MP3_MANIFEST = MP3_DIR / "manifest.zon"
+MP3_README = MP3_DIR / "README.md"
+
+# mpegaudiotabs.h: kbit/s by [lsf][layer - 1][index], and the MPEG-1 rates.
+MPA_BITRATES = (
+    ((0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448),
+     (0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384),
+     (0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320)),
+    ((0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256),
+     (0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160),
+     (0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160)),
+)
+MPA_FREQS = (44100, 48000, 32000)
+MPA_VERSION_BITS = {"1": 3, "2": 2, "2.5": 0}
+
+
+def mpa_frame_size(version, layer, bitrate, rate, padding):
+    """The frame's bytes as ff_mpegaudio_decode_header computes them."""
+    lsf = 0 if version == "1" else 1
+    mpeg25 = 1 if version == "2.5" else 0
+    sr = MPA_FREQS[rate] >> (lsf + mpeg25)
+    kbps = MPA_BITRATES[lsf][layer - 1][bitrate]
+    if layer == 1:
+        return (kbps * 12000 // sr + padding) * 4
+    if layer == 2:
+        return kbps * 144000 // sr + padding
+    return kbps * 144000 // (sr << lsf) + padding
+
+
+def mpa_header(version="1", layer=3, bitrate=9, rate=0, padding=0, mode=0, mode_ext=0, crc=False, private=0,
+               copyright=0, original=1, emphasis=0):
+    h = (0xFFE00000 | MPA_VERSION_BITS[version] << 19 | (4 - layer) << 17 | (0 if crc else 1) << 16
+         | bitrate << 12 | rate << 10 | padding << 9 | private << 8 | mode << 6 | mode_ext << 4
+         | copyright << 3 | original << 2 | emphasis)
+    return struct.pack(">I", h)
+
+
+def mpa_payload(seed, n):
+    """`n` bytes of a 32-bit LCG's high bytes, 0xFF made 0xFE so that no
+    frame payload holds a sync word."""
+    out = bytearray()
+    state = seed & 0xFFFFFFFF
+    while len(out) < n:
+        state = (state * 1103515245 + 12345) & 0xFFFFFFFF
+        b = state >> 24
+        out.append(0xFE if b == 0xFF else b)
+    return bytes(out)
+
+
+def mpa_frame(seed, body=b"", **header):
+    """A frame: the header, then `body`, then payload bytes to its size."""
+    size = mpa_frame_size(header.get("version", "1"), header.get("layer", 3), header.get("bitrate", 9),
+                          header.get("rate", 0), header.get("padding", 0))
+    head = mpa_header(**header) + body
+    assert len(head) <= size
+    return head + mpa_payload(seed, size - len(head))
+
+
+def mpa_frames(count, seed=1, pad_every=3, **header):
+    """`count` frames, every `pad_every`th padded (none for 0)."""
+    return [mpa_frame(seed * 1000 + i, padding=1 if pad_every and i % pad_every == 0 else 0, **header)
+            for i in range(count)]
+
+
+def crc16_arc(data):
+    """FFmpeg's ff_crcA001_update from 0: CRC-16/ARC, the LAME tag's CRC."""
+    crc = 0
+    for b in data:
+        crc ^= b
+        for _ in range(8):
+            crc = (crc >> 1) ^ 0xA001 if crc & 1 else crc >> 1
+    return crc
+
+
+def xing_frame(seed, tag=b"Xing", frames=None, size=None, toc=True, quality=None, encoder=b"LAME3.100",
+               delay=576, padding=1104, radio=None, audiophile=None, peak=0, good_crc=True, **header):
+    """A Layer III frame carrying a Xing (or Info) tag with LAME's extension
+    at FFmpeg's offset (xing_offtbl: after the side information)."""
+    version = header.get("version", "1")
+    mono = header.get("mode", 0) == 3
+    side = ((32, 17), (17, 9))[version != "1"][mono]
+    flags = (1 if frames is not None else 0) | (2 if size is not None else 0) | (4 if toc else 0) \
+        | (8 if quality is not None else 0)
+    body = bytearray(bytes(side) + tag + struct.pack(">I", flags))
+    if frames is not None:
+        body += struct.pack(">I", frames)
+    if size is not None:
+        body += struct.pack(">I", size)
+    if toc:
+        body += bytes(min(255, i * 256 // 100) for i in range(100))
+    if quality is not None:
+        body += struct.pack(">I", quality)
+    body += (encoder + b"\0" * 9)[:9]
+    body += bytes([0x24, 0x9C])                              # revision and VBR method, lowpass
+    body += struct.pack(">I", peak)
+    body += struct.pack(">H", radio if radio is not None else 0)
+    body += struct.pack(">H", audiophile if audiophile is not None else 0)
+    body += bytes([0x00, 128])                               # encoding flags and ATH, bitrate
+    body += bytes([delay >> 4, (delay & 15) << 4 | padding >> 8, padding & 0xFF])
+    body += bytes([0, 0]) + struct.pack(">H", 0) + struct.pack(">I", 0) + struct.pack(">H", 0)
+    frame = bytearray(mpa_frame(seed, bytes(body), **header))
+    at = 4 + len(body)
+    crc = crc16_arc(bytes(frame[:at]))
+    frame[at:at + 2] = struct.pack(">H", crc if good_crc else crc ^ 0x5A5A)
+    return bytes(frame)
+
+
+def vbri_frame(seed, size, frames, **header):
+    """A Layer III frame with Fraunhofer's VBRI header 32 bytes after the
+    frame header (mp3_parse_vbri_tag)."""
+    body = bytes(32) + b"VBRI" + struct.pack(">HHHII", 1, 1105, 75, size, frames) + struct.pack(">HHHH", 0, 1, 2, 1)
+    return mpa_frame(seed, body, **header)
+
+
+def syncsafe(n):
+    return bytes([(n >> 21) & 0x7F, (n >> 14) & 0x7F, (n >> 7) & 0x7F, n & 0x7F])
+
+
+def id3_text(encoding, text):
+    """A text in ID3v2's encodings, NUL-terminated: 0 ISO-8859-1, 1 UTF-16
+    with a BOM (little-endian here), 2 UTF-16BE, 3 UTF-8; 4 is 1 with a
+    big-endian BOM."""
+    if encoding == 0:
+        return text.encode("latin-1") + b"\0"
+    if encoding == 1:
+        return b"\xff\xfe" + text.encode("utf-16-le") + b"\0\0"
+    if encoding == 4:
+        return b"\xfe\xff" + text.encode("utf-16-be") + b"\0\0"
+    if encoding == 2:
+        return text.encode("utf-16-be") + b"\0\0"
+    return text.encode("utf-8") + b"\0"
+
+
+def id3_text_frame(fid, encoding, text, version=3, **kw):
+    return id3_frame(fid, bytes([1 if encoding == 4 else encoding]) + id3_text(encoding, text), version, **kw)
+
+
+def id3_lang_frame(fid, encoding, lang, descriptor, text, version=3):
+    """A COMM or USLT frame: encoding, language, descriptor, text."""
+    enc = 1 if encoding == 4 else encoding
+    return id3_frame(fid, bytes([enc]) + lang + id3_text(encoding, descriptor) + id3_text(encoding, text), version)
+
+
+def id3_frame(fid, data, version=3, flags=0, v3_size=False, unsync=False):
+    """A frame: 3-byte id and size in v2.2; 4-byte id, size (syncsafe in
+    v2.4 unless `v3_size`, the encoders' common bug) and flags otherwise.
+    `unsync` inserts a zero after every 0xFF of the data."""
+    if unsync:
+        data = data.replace(b"\xff", b"\xff\x00")
+    if version == 2:
+        return fid + struct.pack(">I", len(data))[1:] + data
+    size = syncsafe(len(data)) if version == 4 and not v3_size else struct.pack(">I", len(data))
+    return fid + size + struct.pack(">H", flags) + data
+
+
+def id3v2_tag(frames, version=3, flags=0, padding=0, extended=b"", footer=False):
+    body = extended + b"".join(frames) + bytes(padding)
+    flags |= (0x10 if footer else 0) | (0x40 if extended else 0)
+    head = b"ID3" + bytes([version, 0, flags]) + syncsafe(len(body))
+    tag = head + body
+    if footer:
+        tag += b"3DI" + bytes([version, 0, flags]) + syncsafe(len(body))
+    return tag
+
+
+def id3v1_tag(title=b"", artist=b"", album=b"", year=b"", comment=b"", track=None, genre=255):
+    def field(b, n):
+        return (b + bytes(n))[:n]
+    if track is not None:
+        comment_bytes = field(comment, 28) + b"\0" + bytes([track])
+    else:
+        comment_bytes = field(comment, 30)
+    return b"TAG" + field(title, 30) + field(artist, 30) + field(album, 30) + field(year, 4) + comment_bytes \
+        + bytes([genre])
+
+
+def ape_tag(items, header=True):
+    """An APEv2 tag: optional header, items, footer (32 bytes each)."""
+    body = b"".join(struct.pack("<II", len(v), 0) + k + b"\0" + v for k, v in items)
+    size = len(body) + 32
+    flags = 0x80000000 if header else 0
+    head = b"APETAGEX" + struct.pack("<IIII", 2000, size, len(items), flags | 0x20000000) + bytes(8)
+    foot = b"APETAGEX" + struct.pack("<IIII", 2000, size, len(items), flags) + bytes(8)
+    return (head if header else b"") + body + foot
+
+
+@dataclasses.dataclass
+class Mp3Fixture:
+    name: str
+    group: str
+    rule: str
+    data: bytes
+    # FFmpeg opens it ("accept") or fails with this error.
+    reject: str = None
+
+
+def build_mp3_fixtures():
+    fx = []
+
+    def ok(name, rule, data, group="accepted"):
+        fx.append(Mp3Fixture(name, group, rule, data))
+
+    def bad(name, rule, data, error, group="rejected"):
+        fx.append(Mp3Fixture(name, group, rule, data, reject=error))
+
+    j = b"".join
+    ok("mp3_mpeg1_l3_stereo", "MPEG-1 Layer III, 44100 Hz, 128 kbit/s stereo, every third frame padded.",
+       j(mpa_frames(24, seed=1)))
+    ok("mp3_mpeg1_l3_mono_48k", "MPEG-1 Layer III, 48000 Hz, 64 kbit/s mono.",
+       j(mpa_frames(20, seed=2, rate=1, bitrate=5, mode=3)))
+    ok("mp3_mpeg1_l3_32k_crc", "MPEG-1 Layer III, 32000 Hz, 96 kbit/s joint stereo with the mode extension, "
+       "frames protected by a CRC.", j(mpa_frames(20, seed=3, rate=2, bitrate=7, mode=1, mode_ext=2, crc=True)))
+    ok("mp3_mpeg2_l3_22k", "MPEG-2 Layer III (LSF), 22050 Hz, 64 kbit/s stereo: 576 samples a frame.",
+       j(mpa_frames(30, seed=4, version="2", bitrate=8)))
+    ok("mp3_mpeg2_l3_16k_mono", "MPEG-2 Layer III, 16000 Hz, 32 kbit/s mono.",
+       j(mpa_frames(30, seed=5, version="2", rate=2, bitrate=4, mode=3)))
+    ok("mp3_mpeg25_l3_8k", "MPEG-2.5 Layer III, 8000 Hz, 16 kbit/s mono.",
+       j(mpa_frames(30, seed=6, version="2.5", rate=2, bitrate=2, mode=3)))
+    ok("mp3_mpeg25_l3_12k", "MPEG-2.5 Layer III, 12000 Hz, 32 kbit/s stereo.",
+       j(mpa_frames(30, seed=7, version="2.5", rate=1, bitrate=4)))
+    ok("mp3_vbr_bitrates", "MPEG-1 Layer III frames of every bit rate, 32 to 320 kbit/s, in turn.",
+       j(mpa_frame(800 + i, bitrate=1 + i % 14, padding=i % 2) for i in range(28)))
+    ok("mp2_layer2_48k", "MPEG-1 Layer II, 48000 Hz, 192 kbit/s stereo: codec mp2.",
+       j(mpa_frames(20, seed=8, layer=2, rate=1, bitrate=10, pad_every=0)))
+    ok("mp2_layer2_mpeg2_24k", "MPEG-2 Layer II, 24000 Hz, 64 kbit/s mono.",
+       j(mpa_frames(20, seed=9, version="2", layer=2, rate=1, bitrate=8, mode=3)))
+    ok("mp1_layer1_44k", "MPEG-1 Layer I, 44100 Hz, 384 kbit/s stereo, padded slots of 4 bytes: codec mp1.",
+       j(mpa_frames(30, seed=10, layer=1, bitrate=12)))
+
+    vbr = [mpa_frame(900 + i, bitrate=(9, 11, 7, 13, 10)[i % 5], padding=i % 2) for i in range(30)]
+    vbr_bytes = sum(len(f) for f in vbr)
+    ok("mp3_xing_lame", "A Xing tag (frame count, byte count, TOC, quality) with LAME's extension (delay 576, "
+       "padding 1104, radio and audiophile gains, a peak) and its valid CRC, then 30 VBR frames: the gapless "
+       "start and end, the encoder tag and ReplayGain.",
+       j([xing_frame(11, frames=30, size=vbr_bytes + 418, quality=78, radio=0x2000 | 0x0200 | 65,
+                     audiophile=0x4000 | 31, peak=1 << 22)] + vbr))
+    cbr = mpa_frames(24, seed=12)
+    ok("mp3_info_lame", "An Info tag (CBR) with LAME's extension and valid CRC, then 24 CBR frames.",
+       j([xing_frame(12, tag=b"Info", frames=24, size=sum(map(len, cbr)) + 418, delay=1105, padding=300)] + cbr))
+    ok("mp3_xing_bad_crc", "A Xing tag whose LAME CRC is wrong: the delays still apply, but not the encoder "
+       "tag or ReplayGain.",
+       j([xing_frame(13, frames=30, size=vbr_bytes + 418, good_crc=False, radio=0x2000 | 50)] + vbr))
+    ok("mp3_xing_frames_only", "A Xing tag with only a frame count and no LAME extension: no delays.",
+       j([xing_frame(14, frames=30, toc=False, encoder=b"\0" * 9, delay=0, padding=0)] + vbr))
+    ok("mp3_xing_lavf", "A Xing tag written by libavformat (encoder Lavf): its delays apply as LAME's.",
+       j([xing_frame(15, frames=30, size=vbr_bytes + 418, encoder=b"Lavf61.7.", delay=0, padding=1000)] + vbr))
+    ok("mp3_xing_size_mismatch", "A Xing tag whose byte count is far below the file's: FFmpeg takes it for a "
+       "concatenated file and drops the frame count.",
+       j([xing_frame(16, frames=30, size=2000)] + vbr))
+    ok("mp3_xing_mpeg2_mono", "A Xing tag in an MPEG-2 mono frame (side information of 9 bytes).",
+       j([xing_frame(17, frames=20, size=20 * 144 + 144, version="2", rate=2, bitrate=8, mode=3)]
+         + mpa_frames(20, seed=17, version="2", rate=2, bitrate=8, mode=3, pad_every=0)))
+    ok("mp3_vbri", "A Fraunhofer VBRI header: its frame and byte counts give the duration.",
+       j([vbri_frame(18, sum(map(len, vbr)) + 418, 30)] + vbr))
+
+    smpb = " 00000000 00000840 0000037C 0000000000006F84 00000000 00000000 00000000"
+    ok("mp3_itunsmpb", "Gapless data in an iTunSMPB comment (an ID3v2.3 COMM frame), as Apple's encoders "
+       "write it instead of LAME's tag.",
+       id3v2_tag([id3_text_frame(b"TIT2", 0, "iTunes"), id3_lang_frame(b"COMM", 0, b"eng", "iTunSMPB", smpb)])
+       + j(mpa_frames(25, seed=19)))
+
+    v23 = [
+        id3_text_frame(b"TIT2", 0, "Latin-1 title \xe9"),
+        id3_text_frame(b"TPE1", 1, "Artist é中"),
+        id3_text_frame(b"TALB", 4, "Album big-endian BOM"),
+        id3_text_frame(b"TYER", 0, "2009"),
+        id3_text_frame(b"TDAT", 0, "0301"),
+        id3_text_frame(b"TIME", 0, "1230"),
+        id3_text_frame(b"TCON", 0, "(17)"),
+        id3_text_frame(b"TRCK", 0, "3/12"),
+        id3_text_frame(b"TPE2", 1, ""),
+        id3_text_frame(b"TXXX", 0, "MOOD") + b"",
+        id3_lang_frame(b"COMM", 0, b"eng", "", "a plain comment"),
+        id3_lang_frame(b"COMM", 0, b"und", "note", "no language"),
+        id3_lang_frame(b"COMM", 0, b"XXX", "fra", "descriptor like a language"),
+        id3_lang_frame(b"COMM", 0, b"xxx", "Foo-eng", "descriptor ending in a language"),
+        id3_lang_frame(b"COMM", 0, b"ger", "Bar", "a descriptor and a language"),
+        id3_lang_frame(b"USLT", 3, b"eng", "", "la la la"),
+        id3_frame(b"PRIV", b"com.example.owner\0" + bytes([0, 1, 0x5C, 0x41, 0x7F, 0x20])),
+        id3_frame(b"TXXX", b"\0REPLAYGAIN_TRACK_GAIN\0-6.50 dB"),
+        id3_frame(b"TXXX", b"\0REPLAYGAIN_TRACK_PEAK\x000.988"),
+        id3_frame(b"WXXX", b"\0\0http://example.com"),
+    ]
+    v23[9] = id3_frame(b"TXXX", b"\0MOOD\0calm")
+    ok("mp3_id3v23_tags", "ID3v2.3: text frames in every encoding (ISO-8859-1, UTF-16 with either BOM), TYER, "
+       "TDAT and TIME merged into a date, a numeric genre, TXXX, COMM frames with and without a language and "
+       "descriptor, USLT, PRIV, ReplayGain in TXXX and an unread WXXX, with padding.",
+       id3v2_tag(v23, padding=64) + j(mpa_frames(20, seed=20)))
+    v24 = [
+        id3_text_frame(b"TIT2", 3, "UTF-8 title é", version=4),
+        id3_text_frame(b"TDRC", 3, "2011-05-06", version=4),
+        id3_text_frame(b"TSOP", 2, "Sort, Artist", version=4),
+        id3_text_frame(b"TCMP", 3, "1", version=4),
+        id3_frame(b"TPE1", b"\3" + "A v2.3-style size: ".encode() + b"x" * 140 + b"\0", version=4, v3_size=True),
+        id3_frame(b"TALB", b"\0\0\0\x0a\3Data len\0", version=4, flags=0x0001),
+        id3_frame(b"TCOM", b"\3compressed?\0", version=4, flags=0x0008),
+        id3_frame(b"TEXT", b"\3encrypted?\0", version=4, flags=0x0004),
+        id3_frame(b"TCOP", b"\0\xff\xfe copyright", version=4, flags=0x0002, unsync=True),
+        id3_frame(b"TENC", b"", version=4),
+    ]
+    ok("mp3_id3v24_tags", "ID3v2.4: an extended header, UTF-8 and UTF-16BE texts, TDRC, sort and compilation "
+       "frames, a frame sized as v2.3 by mistake, a data length indicator, a compressed and an encrypted frame "
+       "(both skipped), an unsynchronised frame, an empty frame, padding and a footer.",
+       id3v2_tag(v24, version=4, extended=syncsafe(6) + b"\x01\x00", padding=32, footer=True)
+       + j(mpa_frames(20, seed=21)))
+    v22 = [
+        id3_text_frame(b"TT2", 0, "v2.2 title", version=2),
+        id3_text_frame(b"TP1", 0, "v2.2 artist", version=2),
+        id3_text_frame(b"TAL", 1, "v2.2 album", version=2),
+        id3_text_frame(b"TCO", 0, "Rock", version=2),
+        id3_text_frame(b"TYE", 0, "1999", version=2),
+        id3_text_frame(b"TRK", 0, "7", version=2),
+        id3_lang_frame(b"COM", 0, b"eng", "", "v2.2 comment", version=2),
+        id3_frame(b"TXX", b"\0KEY\0value", version=2),
+        id3_frame(b"TBP", b"", version=2),
+    ]
+    ok("mp3_id3v22_tags", "ID3v2.2: three-letter frames (TT2, TP1, TAL, TCO, TYE, TRK, COM, TXX) and an empty "
+       "one.", id3v2_tag(v22, version=2, padding=10) + j(mpa_frames(20, seed=22)))
+    unsync_tag = id3v2_tag([id3_text_frame(b"TIT2", 0, "unsync ÿÿ end"),
+                            id3_frame(b"TPE1", b"\0\xff\xfe\xff\0artist\0", unsync=True)], flags=0x80)
+    ok("mp3_id3v23_unsync", "An ID3v2.3 tag with the unsynchronisation flag: zeros after 0xFF removed from each "
+       "frame.", unsync_tag + j(mpa_frames(20, seed=23)))
+    ok("mp3_two_id3v2", "Two ID3v2 tags in a row: FFmpeg reads both.",
+       id3v2_tag([id3_text_frame(b"TIT2", 0, "first")]) + id3v2_tag([id3_text_frame(b"TPE1", 0, "second")])
+       + j(mpa_frames(20, seed=24)))
+    ok("mp3_large_id3v2", "A 6000-byte ID3v2 tag: probing skips it only once the probe buffer holds more than "
+       "it, so FFmpeg probes again with more data.",
+       id3v2_tag([id3_text_frame(b"TIT2", 0, "large")], padding=6000) + j(mpa_frames(20, seed=25)))
+    ok("mp3_id3v1", "An ID3v1 tag at the end (title, artist with trailing spaces, album, year, a track number, "
+       "genre 13) and no ID3v2 tag: FFmpeg reads it; its parser drops the tag at the end.",
+       j(mpa_frames(20, seed=26)) + id3v1_tag(b"v1 title", b"v1 artist   ", b"v1 album", b"2001", b"v1 comment",
+                                              track=5, genre=13))
+    ok("mp3_id3v1_and_v2", "Both ID3v2 and ID3v1 tags: FFmpeg reads the ID3v1 tag only without ID3v2 tags.",
+       id3v2_tag([id3_text_frame(b"TIT2", 0, "v2 title")]) + j(mpa_frames(20, seed=27))
+       + id3v1_tag(b"v1 title", genre=255))
+    ok("mp3_apic_chap", "An ID3v2.3 tag with an APIC picture and a CHAP chapter (with its own TIT2): FFmpeg "
+       "adds an attached-picture stream and a chapter, which the port does not model.",
+       id3v2_tag([id3_text_frame(b"TIT2", 0, "with picture"),
+                  id3_frame(b"APIC", b"\0image/png\0\x03cover\0" + b"\x89PNG\r\n\x1a\n" + bytes(40)),
+                  id3_frame(b"CHAP", b"ch0\0" + struct.pack(">IIII", 0, 500, 0xFFFFFFFF, 0xFFFFFFFF)
+                            + id3_text_frame(b"TIT2", 0, "chapter one"))])
+       + j(mpa_frames(20, seed=28)))
+    ok("mp3_ape_tag", "An APEv2 tag (with its header) after the frames: the parser drops it at the end.",
+       j(mpa_frames(20, seed=29)) + ape_tag([(b"Title", b"ape title")]))
+    ok("mp3_ape_footer_only", "An APEv2 tag without its header: the parser keeps its bytes as a last packet.",
+       j(mpa_frames(20, seed=30)) + ape_tag([(b"Title", b"ape title")], header=False))
+    ok("mp3_junk_before", "300 bytes of junk before the first frame: the demuxer resyncs on two consecutive "
+       "frames.", mpa_payload(31, 300) + j(mpa_frames(20, seed=31)), group="damaged")
+    ok("mp3_zeros_before", "1000 zero bytes before the first frame: the probe skips leading zeros.",
+       bytes(1000) + j(mpa_frames(20, seed=32)), group="damaged")
+    frames = mpa_frames(24, seed=33)
+    ok("mp3_junk_between", "Junk between frames: the parser resyncs on the next frame header.",
+       j(frames[:10]) + mpa_payload(330, 77) + j(frames[10:]), group="damaged")
+    frames = mpa_frames(20, seed=34)
+    ok("mp3_truncated", "The last frame cut short: the parser returns the partial frame at the end.",
+       j(frames)[:-150], group="damaged")
+    ok("mp3_rate_change", "A sample-rate change mid-stream, 44100 to 48000 Hz.",
+       j(mpa_frames(12, seed=35)) + j(mpa_frames(12, seed=36, rate=1)), group="damaged")
+    ok("mp3_layer_change", "Layer III frames followed by Layer II frames.",
+       j(mpa_frames(12, seed=37)) + j(mpa_frames(12, seed=38, layer=2, bitrate=10, pad_every=0)), group="damaged")
+    emu = [mpa_frame(39 * 1000 + i, body=mpa_header()[:3] * 0 + b"\x00" * 10 + mpa_header() * 3) for i in range(20)]
+    ok("mp3_header_emulation", "Frames whose payload holds copies of the header: the probe stops counting a "
+       "run where more than two emulate it.", j(emu), group="damaged")
+    ok("mp3_short", "Three frames only: the probe's lowest scores.", j(mpa_frames(3, seed=40)), group="damaged")
+    ok("mp3_six_frames", "Six frames: below the seven a first-run score needs.", j(mpa_frames(6, seed=41)),
+       group="damaged")
+    bad("mp3_free_format", "Free-format frames (bit rate index 0), whose size FFmpeg's header decoding does not "
+        "compute: no frame is recognized.",
+        j(mpa_header(bitrate=0) + mpa_payload(42 + i, 400) for i in range(20)), "INVALIDDATA")
+    bad("mp3_no_frames", "Arbitrary bytes and no frame.", mpa_payload(43, 5000), "INVALIDDATA")
+    return fx
+
+
+def render_mp3_manifest(fixtures):
+    lines = ["// Generated by zig/testing/fixtures/generate.py from its MP3 fixtures; do not edit.",
+             "// Each entry names mp3/<name>.mp3; see mp3/README.md. Streams, tags and packets are",
+             "// FFmpeg's, in zig/testing/vectors/mp3.txt.",
+             ".{"]
+    for f in fixtures:
+        lines.append("    .{")
+        lines.append(f'        .name = "{f.name}",')
+        lines.append(f'        .sha256 = "{hashlib.sha256(f.data).hexdigest()}",')
+        lines.append(f'        .expected = {".accept" if f.reject is None else "." + "reject"},')
+        lines.append("    },")
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
+def outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures, flac_fixtures, ogg_fixtures,
+            mp3_fixtures):
     files = {WAV_DIR / f"{f.name}.wav": f.data for f in fixtures}
     files[MANIFEST] = render_manifest(
         fixtures, "// Each entry names wav/<name>.wav; see README.md for the rules and decisions.")
@@ -3352,6 +3748,9 @@ def outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures, fl
     files.update({OGG_DIR / f"{f.name}.ogg": f.data for f in ogg_fixtures if f.made_by != "ffmpeg"})
     files[OGG_MANIFEST] = render_ogg_manifest(ogg_fixtures).encode()
     files[OGG_README] = render_readme(OGG_README, render_ogg_table(ogg_fixtures))
+    files.update({MP3_DIR / f"{f.name}.mp3": f.data for f in mp3_fixtures})
+    files[MP3_MANIFEST] = render_mp3_manifest(mp3_fixtures).encode()
+    files[MP3_README] = render_readme(MP3_README, render_ogg_table(mp3_fixtures))
     return files
 
 
@@ -3399,17 +3798,20 @@ def main():
     caf_fixtures = build_caf_fixtures()
     flac_fixtures = build_flac_fixtures()
     ogg_fixtures = build_ogg_fixtures()
-    expected = outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures, flac_fixtures, ogg_fixtures)
+    mp3_fixtures = build_mp3_fixtures()
+    expected = outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures, flac_fixtures, ogg_fixtures,
+                       mp3_fixtures)
     stale = [path for path, content in expected.items() if not path.exists() or path.read_bytes() != content]
     ffmpeg_made = ({FLAC_DIR / f"{f.name}.flac" for f in flac_fixtures if f.made_by == "ffmpeg"}
                    | {OGG_DIR / f"{name}.ogg" for name in OGG_FFMPEG})
     extra = sorted((set(WAV_DIR.glob("*.wav")) | set(AU_DIR.glob("*.au")) | set(AIFF_DIR.glob("*.aiff"))
              | set(RAW_DIR.glob("*.raw")) | set(CAF_DIR.glob("*.caf")) | set(FLAC_DIR.glob("*.flac"))
-             | set(OGG_DIR.glob("*.ogg")))
+             | set(OGG_DIR.glob("*.ogg")) | set(MP3_DIR.glob("*.mp3")))
                    - set(expected) - ffmpeg_made)
     problems = check_ffmpeg_made(flac_fixtures)
     counts = (f"{len(fixtures)} WAV, {len(au_fixtures)} AU, {len(aiff_fixtures)} AIFF, {len(raw_fixtures)} raw PCM, "
-              f"{len(caf_fixtures)} CAF, {len(flac_fixtures)} FLAC and {len(ogg_fixtures)} Ogg fixtures")
+              f"{len(caf_fixtures)} CAF, {len(flac_fixtures)} FLAC, {len(ogg_fixtures)} Ogg and {len(mp3_fixtures)} MP3 "
+              f"fixtures")
 
     if args.check:
         for path in stale:

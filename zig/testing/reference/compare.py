@@ -2522,6 +2522,8 @@ KNOWN_REGISTRY_DIFFERENCES = {
     ("format only in FFmpeg", "framecrc"): ((None, None), "written by av.framehash for the hash comparison (T19b)"),
     ("format only in FFmpeg", "framemd5"): ((None, None), "written by av.framehash for the hash comparison (T19b)"),
     ("format only in FFmpeg", "streamhash"): ((None, None), "written by av.framehash for the hash comparison (T19b)"),
+    ("format only in FFmpeg", "mp3"): ((None, None), "the MP3 demuxer the reference enables for T29a's oracle, "
+                                                     "registered with the port's demuxer (T29a part 3)"),
     ("codec", "vorbis"): (("D.AIL.", "DEAIL."), "FFmpeg's native Vorbis encoder makes the Vorbis fixtures (T27d); "
                           "the port has no Vorbis encoder"),
     ("codec", "opus"): (("D.AIL.", "DEAIL."), "FFmpeg's native Opus encoder makes the Opus fixtures (T28a); "

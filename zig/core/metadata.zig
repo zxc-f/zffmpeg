@@ -44,6 +44,8 @@ pub const Duplicates = enum {
     /// Append, unless an entry already has the key and exactly this value
     /// (`AV_DICT_MULTIKEY | AV_DICT_DEDUP`).
     keep_distinct,
+    /// Nothing, when an entry already has the key (`AV_DICT_DONT_OVERWRITE`).
+    keep_existing,
 };
 
 pub const Dictionary = struct {
@@ -86,6 +88,7 @@ pub const Dictionary = struct {
         const replaced: ?usize = switch (duplicates) {
             .replace => d.find(key, 0),
             .keep => null,
+            .keep_existing => if (d.find(key, 0) != null) return else null,
             .keep_distinct => blk: {
                 var start: usize = 0;
                 while (d.find(key, start)) |index| : (start = index + 1) {
