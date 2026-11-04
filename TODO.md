@@ -2412,6 +2412,47 @@ names, not as an empty framework.
     Done when a named required fixture for each depth, block-size mode and
     metadata block decodes bit-exactly; FATE FLAC cases are reported as
     optional coverage.
+
+    ```text
+    ID / parent: T26b / T26
+    State: G3 (decoding and metadata verified; seeking and the optional
+      FATE report remain)
+    Supported behavior and explicit exclusions: 4 to 32 bits per sample
+      (the 33-bit side channel of 32-bit stereo), variable blocking,
+      headerless input, a STREAMINFO without a rate, mid-stream channel and
+      rate changes in the decoder; VORBIS_COMMENT tags (and the channel
+      mask), SEEKTABLE, CUESHEET and PICTURE blocks as data; MD5
+      verification on request. Excluded: pictures as a stream and chapters
+      in the probe output (no multi-stream model).
+    Needs (verified) / lands with / verified after: T17b, T26a, T52a.
+    Contract and source provenance: port.md "FLAC contract";
+      zig/testing/fixtures/flac/README.md; libavformat/flacdec.c,
+      flac_picture.c, oggparsevorbis.c (ff_vorbis_comment), metadata.c,
+      vorbiscomment.c, libavcodec/flacdec.c, flacdsp.c.
+    Required fixtures / optional corpus: 56 FLAC fixtures (25 new);
+      vectors/flac.txt with tags, chapters and pictures; FATE FLAC samples
+      to come as optional coverage (T19c).
+    Ownership, state transitions and limits: flac.Info owns its tags,
+      pictures, chapters and seek points when read with an allocator.
+    Comparison rule and intentional differences: as T26a's, plus the tags,
+      chapters and pictures exact; conversions that would need a rewritten
+      output header (unknown counts, mid-stream changes) are refused.
+    Implementation files and test entry points: codec/flacdec.zig,
+      codec/bits.zig (64-bit reads), format/flac.zig (readHeaderAlloc,
+      DecodedReader.verify_md5, the tags, chapters and pictures test),
+      format/convert.zig, format/detect.zig.
+    Evidence commit / Linux CI run / reference report: d1da777, b0b1a68 /
+      local Linux runs / compare.py FLAC 56/56.
+    Required cases: passed 56 / failed 0 / missing 0 (decoding and
+      metadata).
+    Optional cases: FATE FLAC, not yet run.
+    Fuzz seeds, budget and result: T26a's entry with the new fixtures as
+      seeds to add with part 2.
+    Remaining work or blocker / next action: part 2, seeking as FFmpeg
+      seeks FLAC (ff_seek_frame_binary over flac_read_timestamp, the
+      seek table with fast seeking), with a seek oracle; the FATE report.
+    ```
+
   - [ ] **T26c — FLAC encoder.** Needs T26b. Lands with T18b.
     FFmpeg's compression levels (LPC with quantized coefficients, Rice
     partitions).
