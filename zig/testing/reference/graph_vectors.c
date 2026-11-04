@@ -644,9 +644,9 @@ static const struct graph_case cases[] = {
     { "text_unknown_with_value", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume2=0.5" },
     { "text_bad_value", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume=precision=half" },
     { "text_unknown_then_bad", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume=gain=2,aformat=f=s17" },
-    { "text_two_chains", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume=0.5;anull", .refused = 1 },
-    { "text_labels", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "[in]volume=0.5[out]", .refused = 1 },
-    { "text_output_label", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume=0.5[x]", .refused = 1 },
+    { "text_two_chains", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume=0.5;anull" },
+    { "text_labels", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "[in]volume=0.5[out]" },
+    { "text_output_label", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume=0.5[x]" },
     { "text_time", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 32), 0, .text = "volume=time(0)", .refused = 1 },
     /* atrim and asetpts (T25b). */
     { "atrim_samples", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(64, 64, 64), 0,

@@ -632,6 +632,22 @@ pub const Remix = struct {
             else => std.math.maxInt(i32),
         };
         try build(in_layout, out, options, maxval, &r.matrix);
+        r.finish(in, &in_layout, &out, out_format, resampling);
+        return true;
+    }
+
+    /// The mix of `matrix`, given rather than built (`swr_set_matrix`, for
+    /// FFmpeg's pan, TODO.md T25c), from `in` to `out_layout` in
+    /// `out_format`, at one rate.
+    pub fn initMatrix(r: *Remix, in: audio.Format, out_layout: Layout, out_format: audio.SampleFormat, matrix: *const Matrix) void {
+        const in_layout = withDefault(in.layout);
+        const out = withDefault(out_layout);
+        r.matrix = matrix.*;
+        r.finish(in, &in_layout, &out, out_format, false);
+    }
+
+    /// `swri_rematrix_init` once the matrix is set.
+    fn finish(r: *Remix, in: audio.Format, in_layout: *const Layout, out: *const Layout, out_format: audio.SampleFormat, resampling: bool) void {
         r.in_channels = in_layout.channelCount();
         r.out_channels = out.channelCount();
         r.mixing = false;
@@ -671,8 +687,7 @@ pub const Remix = struct {
             }
             r.sources[i] = sources;
         }
-        r.special = special(&in_layout, &out, &r.matrix);
-        return true;
+        r.special = special(in_layout, out, &r.matrix);
     }
 
     /// Bytes of scratch `convert` needs for `count` frames.

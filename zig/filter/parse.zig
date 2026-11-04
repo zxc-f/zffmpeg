@@ -37,6 +37,11 @@ pub const Filter = struct {
     instance: ?[]const u8,
     /// The options in order, each shorthand value given its option's name.
     options: []const Option,
+    /// The link labels before and after it.
+    inputs: []const []const u8 = &.{},
+    outputs: []const []const u8 = &.{},
+    /// The chain it is in.
+    chain: usize = 0,
 };
 
 pub const Parsed = struct {
@@ -105,9 +110,9 @@ fn token(arena: std.mem.Allocator, text: []const u8, pos: *usize, term: []const 
     return out.items;
 }
 
-/// `linklabels_parse`: `[label]` after `[label]`; returns how many.
-fn labels(p: *Parser) Error!usize {
-    var count: usize = 0;
+/// `linklabels_parse`: `[label]` after `[label]`.
+fn labels(p: *Parser) Error![]const []const u8 {
+    var list: std.ArrayList([]const u8) = .empty;
     while (p.cur() == '[') {
         const start = p.pos;
         p.pos += 1;
@@ -115,10 +120,10 @@ fn labels(p: *Parser) Error!usize {
         if (name.len == 0) return p.fail("Bad (empty?) label found in the following: \"{s}\".", .{p.text[start..]});
         if (p.cur() != ']') return p.fail("Mismatched '[' found in the following: \"{s}\".", .{p.text[start..]});
         p.pos += 1;
-        count += 1;
+        try list.append(p.arena, name);
         p.skipSpace();
     }
-    return count;
+    return list.items;
 }
 
 /// `is_key_char`.
@@ -169,7 +174,8 @@ fn optionList(p: *Parser, args: []const u8, shorthand: []const []const u8) Error
 
 /// `filter_parse`.
 fn filter(p: *Parser, found_labels: *bool) Error!Filter {
-    if (try labels(p) > 0) found_labels.* = true;
+    const inputs = try labels(p);
+    if (inputs.len > 0) found_labels.* = true;
     const full = try token(p.arena, p.text, &p.pos, "=,;[");
     var name: []const u8 = full;
     var instance: ?[]const u8 = null;
@@ -184,9 +190,10 @@ fn filter(p: *Parser, found_labels: *bool) Error!Filter {
         const shorthand: []const []const u8 = if (filters.find(name)) |d| filters.Filter.shorthand(d.kind) else &.{};
         opts = try optionList(p, args, shorthand);
     }
-    if (try labels(p) > 0) found_labels.* = true;
+    const outputs = try labels(p);
+    if (outputs.len > 0) found_labels.* = true;
     p.skipSpace();
-    return .{ .name = name, .instance = instance, .options = opts };
+    return .{ .name = name, .instance = instance, .options = opts, .inputs = inputs, .outputs = outputs };
 }
 
 /// `avfilter_graph_segment_parse` of `text`, its storage from `arena`.
@@ -207,7 +214,9 @@ pub fn parse(arena: std.mem.Allocator, full_text: []const u8, sink: ?diagnostics
     while (p.pos < text.len) {
         // chain_parse.
         while (p.pos < text.len) {
-            try list.append(arena, try filter(&p, &found_labels));
+            var f = try filter(&p, &found_labels);
+            f.chain = chains;
+            try list.append(arena, f);
             const c = p.cur();
             if (c != 0 and c != ',' and c != ';') return p.fail("Trailing garbage after a filter: {s}", .{p.rest()});
             if (c != 0) {

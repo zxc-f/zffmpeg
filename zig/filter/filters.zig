@@ -30,6 +30,7 @@ const dither = @import("../resample/dither.zig");
 const rematrix = @import("../resample/rematrix.zig");
 const resample = @import("../resample/resample.zig");
 const swr = @import("../resample/swr.zig");
+pub const multi = @import("multi.zig");
 const Layout = channel_layout.Layout;
 const SampleFormat = audio.SampleFormat;
 
@@ -46,7 +47,7 @@ pub const CreateError = options.SetError || error{
     OutOfMemory,
 };
 
-pub const Kind = enum { anull, aformat, volume, aresample, atrim, asetpts };
+pub const Kind = enum { anull, aformat, volume, aresample, atrim, asetpts, asplit, channelsplit, channelmap, pan, amix };
 
 pub const Descriptor = struct {
     name: []const u8,
@@ -62,6 +63,11 @@ pub const descriptors = [_]Descriptor{
     .{ .name = "aresample", .kind = .aresample, .description = "Resample audio data." },
     .{ .name = "atrim", .kind = .atrim, .description = "Pick one continuous section from the input, drop the rest." },
     .{ .name = "asetpts", .kind = .asetpts, .description = "Set PTS for the output audio frame." },
+    .{ .name = "asplit", .kind = .asplit, .description = "Pass on the audio input to N audio outputs." },
+    .{ .name = "channelsplit", .kind = .channelsplit, .description = "Split audio into per-channel streams." },
+    .{ .name = "channelmap", .kind = .channelmap, .description = "Remap audio channels." },
+    .{ .name = "pan", .kind = .pan, .description = "Remix channels with coefficients (panning)." },
+    .{ .name = "amix", .kind = .amix, .description = "Audio mixing." },
 };
 
 comptime {
@@ -88,6 +94,11 @@ pub const Filter = union(Kind) {
     aresample: AResample,
     atrim: ATrim,
     asetpts: ASetPts,
+    asplit: multi.ASplit,
+    channelsplit: multi.ChannelSplit,
+    channelmap: multi.ChannelMap,
+    pan: multi.Pan,
+    amix: multi.AMix,
 
     /// The filter `name` with no options set (`avfilter_graph_alloc_filter`).
     pub fn alloc(name: []const u8) CreateError!Filter {
@@ -99,6 +110,11 @@ pub const Filter = union(Kind) {
             .aresample => .{ .aresample = .{} },
             .atrim => .{ .atrim = .{} },
             .asetpts => .{ .asetpts = .{} },
+            .asplit => .{ .asplit = .{} },
+            .channelsplit => .{ .channelsplit = .{} },
+            .channelmap => .{ .channelmap = .{} },
+            .pan => .{ .pan = .{} },
+            .amix => .{ .amix = .{} },
         };
     }
 
@@ -120,7 +136,22 @@ pub const Filter = union(Kind) {
             .aresample => |*a| try a.set(name, value),
             .atrim => |*a| try options.set(ATrim, a, name, value),
             .asetpts => |*a| try a.set(gpa, name, value),
+            .asplit => |*a| try options.set(multi.ASplit, a, name, value),
+            .channelsplit => |*c| try c.set(gpa, name, value),
+            .channelmap => |*c| try c.set(gpa, name, value),
+            .pan => |*p| try p.set(gpa, name, value),
+            .amix => |*a| try a.set(gpa, name, value),
         }
+    }
+
+    /// The filter's inputs and outputs, once initialized.
+    pub fn pads(f: *const Filter) struct { inputs: u32, outputs: u32 } {
+        return switch (f.*) {
+            .asplit => |a| .{ .inputs = 1, .outputs = @intCast(a.outputs) },
+            .channelsplit => |*c| .{ .inputs = 1, .outputs = @intCast(c.map.items.len) },
+            .amix => |a| .{ .inputs = @intCast(a.scalars.inputs), .outputs = 1 },
+            else => .{ .inputs = 1, .outputs = 1 },
+        };
     }
 
     /// The filter's `init`, once its options are set: volume parses its
@@ -129,6 +160,9 @@ pub const Filter = union(Kind) {
         switch (f.*) {
             .volume => |*v| try v.init(gpa, sink),
             .asetpts => |*a| try a.init(gpa, sink),
+            .channelsplit => |*c| try c.init(gpa, sink),
+            .channelmap => |*c| try c.init(gpa, sink),
+            .pan => |*p| try p.init(gpa, sink),
             else => {},
         }
     }
@@ -143,6 +177,11 @@ pub const Filter = union(Kind) {
             .aresample => &.{"sample_rate"},
             .atrim => &.{ "start", "end", "start_pts", "end_pts", "duration", "start_sample", "end_sample" },
             .asetpts => &.{"expr"},
+            .asplit => &.{"outputs"},
+            .channelsplit => &.{ "channel_layout", "channels" },
+            .channelmap => &.{ "map", "channel_layout" },
+            .pan => &.{"args"},
+            .amix => &.{ "inputs", "duration", "dropout_transition", "weights", "normalize" },
         };
     }
 
@@ -151,6 +190,10 @@ pub const Filter = union(Kind) {
             .aformat => |*a| a.deinit(gpa),
             .volume => |*v| v.deinit(gpa),
             .asetpts => |*a| a.deinit(gpa),
+            .channelsplit => |*c| c.deinit(gpa),
+            .channelmap => |*c| c.deinit(gpa),
+            .pan => |*p| p.deinit(gpa),
+            .amix => |*a| a.deinit(gpa),
             else => {},
         }
         f.* = undefined;

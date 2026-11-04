@@ -2233,14 +2233,23 @@ names, not as an empty framework.
       (every filter's output links in graph order), every sink's frames,
       empty reads, ends and the failing step exact, samples exact where
       FFmpeg's are exact (resampled within T24's tolerance).
-    Implementation files and test entry points: multigraph_vectors.c,
-      vectors/multigraph.txt.
-    Evidence commit / Linux CI run / reference report: pending.
-    Required cases: passed 0 / failed 0 / missing 48
+    Implementation files and test entry points: filter/graph.zig (the
+      scheduler, initGraph, linking; "every graph of several inputs and
+      outputs", the queue limit, allocation failure on a branching graph),
+      filter/negotiate.zig, filter/multi.zig, filter/parse.zig (labels),
+      resample/rematrix.zig (initMatrix); multigraph_vectors.c,
+      vectors/multigraph.txt; graph_vectors.c's three label cases no longer
+      refused.
+    Evidence commit / Linux CI run / reference report: part 1 local Linux
+      runs; the record pending.
+    Required cases: passed 48 / failed 0 / missing 0, and the 178 graphs
+      again, every sample byte for byte.
     Optional cases: none
-    Fuzz seeds, budget and result: none yet.
-    Remaining work or blocker / next action: part 1, the scheduler, several
-      inputs and outputs, and asplit.
+    Fuzz seeds, budget and result: the filtergraph-text entry runs on the
+      scheduler, under zig build test; the local fuzzer fails as T25a
+      records.
+    Remaining work or blocker / next action: the local reference job, then
+      T25c's G5 record.
     ```
 
 ## Milestone 6: audio codecs

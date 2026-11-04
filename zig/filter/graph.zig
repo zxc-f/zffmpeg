@@ -1,29 +1,40 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Original file for this project; not translated from FFmpeg source.
-// libavfilter/avfiltergraph.c (query_formats, reduce_formats,
-// swap_samplerates, swap_channel_layouts, swap_sample_fmts, pick_format,
-// pick_formats, graph_config_links), avfilter.c (avfilter_insert_filter,
-// the default time base), buffersrc.c and buffersink.c (their format
-// lists, the frame checks) and formats.c (ff_default_query_formats, the
-// SET_COMMON_FORMATS rule) at the pinned reference revision describe the
-// behavior, restated here.
-//! An audio filter graph (TODO.md T25a): a linear chain of filters
-//! (filters.zig) between a buffer source and a buffer sink, configured as
-//! `avfilter_graph_config` configures one and run as a send/receive stage.
+// libavfilter/avfilter.c (avfilter_link, avfilter_insert_filter,
+// ff_filter_config_links, ff_filter_frame, ff_filter_activate,
+// filter_activate_default, filter_frame_to_filter, forward_status_change,
+// request_frame_to_filter, ff_request_frame, the inlink and outlink
+// functions), avfiltergraph.c (graph_check_validity, graph_config_links,
+// ff_filter_graph_run_once), filters.h (the FORWARD macros),
+// framequeue.c (the queue limit), buffersrc.c, buffersink.c
+// (get_frame_internal), graphparser.c (avfilter_graph_parse_ptr,
+// avfilter_graph_segment_link) and the activate functions of aresample,
+// trim.c, setpts.c, split.c, af_channelsplit.c and af_amix.c at the pinned
+// reference revision describe the behavior, restated here.
+//! An audio filter graph (TODO.md T25a–T25c): buffer sources, filters
+//! (filters.zig, multi.zig) and buffer sinks, configured as
+//! `avfilter_graph_config` configures them (negotiate.zig) and run by
+//! libavfilter's scheduler.
 //!
-//! `init` creates the filters, in order: the source (`in`), the chain, the
-//! sink (`out`). `configure` negotiates: each filter declares the format
-//! lists it accepts on its links; lists are merged along each link, and
-//! where they cannot merge an `aresample` converter is inserted
-//! (`auto_aresample_<n>`, with the graph's converter options); the lists
-//! are then reduced, the best sample format, rate and layout moved first,
-//! and one of each picked for every link. Equal to FFmpeg on
-//! zig/testing/vectors/graph.txt, converters included.
+//! `init` builds a linear chain of filters given by name; `initText` the
+//! chain of filtergraph text between one source and one sink; `initGraph`
+//! a graph of several sources and sinks whose names label the text's open
+//! pads, as `avfilter_graph_parse_ptr` links them. `configure` checks that
+//! every pad is linked, negotiates the formats (inserting converters) and
+//! configures the links.
 //!
-//! Frames are copied in by `send` and come out of `receive` in FFmpeg's
-//! counts, sizes and timestamps; `finishInput` ends the input, after which
-//! `receive` drains the chain (aresample flushes) and reports `drained`.
-//! A received frame stays valid until the next call on the graph.
+//! Running follows libavfilter: each link has a frame queue, a status as
+//! its source set it and as its destination saw it, and the flags saying a
+//! frame is wanted or the source is blocked; filters are activated by
+//! priority, one at a time (`ff_filter_graph_run_once`). `sendTo` is
+//! `av_buffersrc_add_frame` (the frame is copied and queued), `closeSource`
+//! ends a source, and `receiveFrom` is `av_buffersink_get_frame`: it runs
+//! the graph until the sink has a frame (`output`), every source would
+//! need input (`need_input`), or the sink's input ended (`drained`). The
+//! graph's queue limit, as `avfilter_graph_set_max_buffered_frames`, is the
+//! backpressure: a frame past it fails (`QueueFull`). A received frame
+//! stays valid until the next call on the graph. Equal to FFmpeg on
+//! zig/testing/vectors/graph.txt and multigraph.txt.
 
 const std = @import("std");
 const audio = @import("../core/audio.zig");
@@ -34,30 +45,34 @@ const diagnostics = @import("../core/diagnostics.zig");
 const Frame = @import("../core/frame.zig").Frame;
 const formats = @import("formats.zig");
 const filters = @import("filters.zig");
+const multi = filters.multi;
+const negotiate = @import("negotiate.zig");
 const parse = @import("parse.zig");
 const Layout = channel_layout.Layout;
-const Channel = channel_layout.Channel;
 const SampleFormat = audio.SampleFormat;
-const Pool = formats.Pool;
-const Kind = formats.Kind;
 const Owned = filters.Owned;
 
 pub const Option = filters.Option;
 
-/// The buffer source: the format of every frame sent, and their time base
+/// A buffer source: the format of every frame sent, and their time base
 /// (1 / rate when null).
 pub const SourceSpec = struct {
     format: audio.Format,
     time_base: ?time.TimeBase = null,
 };
 
-/// The buffer sink's lists (abuffersink's `sample_formats`, `samplerates`
+/// A buffer sink's lists (abuffersink's `sample_formats`, `samplerates`
 /// and `channel_layouts`); an empty one takes anything.
 pub const SinkSpec = struct {
     sample_formats: []const SampleFormat = &.{},
     sample_rates: []const u32 = &.{},
     layouts: []const Layout = &.{},
 };
+
+/// A source or sink of `initGraph`, its name the label that links it.
+pub fn Named(comptime Spec: type) type {
+    return struct { name: []const u8, spec: Spec };
+}
 
 /// A filter of the chain: FFmpeg's name, its options, and the instance's
 /// name (the filter's name when null).
@@ -71,6 +86,9 @@ pub const Options = struct {
     /// The options of the converters configuration inserts
     /// (`aresample_swr_opts`).
     converter: []const Option = &.{},
+    /// The most frames the graph's queues may hold together
+    /// (`avfilter_graph_set_max_buffered_frames`); 0 for no limit.
+    max_queued_frames: u32 = 0,
     /// Where FFmpeg's messages go; none by default.
     diagnostics: ?diagnostics.Sink = null,
 };
@@ -78,10 +96,9 @@ pub const Options = struct {
 pub const InitError = filters.CreateError || error{
     /// More than libswresample's 64 channels.
     LimitExceeded,
-    /// Filtergraph text FFmpeg refuses (parse.zig).
+    /// Filtergraph text FFmpeg refuses (parse.zig), or more link labels
+    /// than a filter has pads.
     InvalidSyntax,
-    /// Link labels or several chains (TODO.md T25c).
-    UnsupportedSyntax,
 };
 
 pub const ConfigureError = filters.CreateError || filters.VolumeRun.Error || filters.ResampleRun.Error || formats.CheckError || error{
@@ -90,40 +107,52 @@ pub const ConfigureError = filters.CreateError || filters.VolumeRun.Error || fil
     CannotConvert,
     /// "Cannot select sample rate" or "Cannot select channel layout".
     CannotSelect,
+    /// A pad no link connects ("... not connected to any source" or
+    /// "destination").
+    Unconnected,
+    /// channelmap's input channel is not in its input layout.
+    InvalidChannelMap,
     /// `configure` was called before.
     AlreadyConfigured,
 };
 
-pub const SendError = stage.SendError || error{
+pub const RunError = filters.ResampleRun.Error || filters.VolumeRun.Error || error{
+    /// A frame past the graph's queue limit ("Exhausted frame queue
+    /// capacity").
+    QueueFull,
+};
+
+pub const SendError = stage.SendError || RunError || error{
     NotConfigured,
     /// The frame's format is not the source's ("Changing audio frame
     /// properties on the fly is not supported").
     FormatChange,
     /// A frame of no samples; the port refuses it.
     EmptyFrame,
-    /// The graph's output has ended (atrim's end), as
-    /// `av_buffersrc_add_frame`'s `AVERROR_EOF`.
+    /// The source has ended, closed or closed by the graph (atrim's end),
+    /// as `av_buffersrc_add_frame`'s `AVERROR_EOF`.
     GraphEnded,
-    OutOfMemory,
 };
 
-pub const ReceiveError = filters.ResampleRun.Error || filters.VolumeRun.Error || error{NotConfigured};
+pub const ReceiveError = RunError || error{NotConfigured};
 
-const Node = struct {
+/// A link's status: libavfilter's EOF (errors stop the graph instead).
+pub const Status = enum { none, eof };
+
+pub const Node = struct {
     /// The instance's name, owned.
     label: []u8,
     kind: union(enum) {
-        source,
-        sink,
+        source: struct { index: u32, eof: bool = false, last_pts: ?i64 = null },
+        sink: struct { index: u32 },
         filter: filters.Filter,
     },
-    input: ?u32 = null,
-    output: ?u32 = null,
+    /// The links of the node's input and output pads, owned.
+    inputs: []?u32,
+    outputs: []?u32,
     run: Run = .none,
-    /// aresample: the end of its input was flushed.
-    ended: bool = false,
-    /// The frames the filter has taken (its input's `frame_count_out`).
-    frames_in: u64 = 0,
+    /// `ready`: the activation priority.
+    ready: u32 = 0,
 };
 
 const Run = union(enum) {
@@ -132,105 +161,129 @@ const Run = union(enum) {
     resample: filters.ResampleRun,
     trim: filters.TrimRun,
     setpts: filters.SetPtsRun,
+    pan: multi.PanRun,
+    mix: multi.MixRun,
 };
 
-/// A link between two nodes and, once configured, its format.
+/// A link between two pads: its format once configured, and its queue
+/// and statuses while the graph runs.
 pub const Link = struct {
     src: u32,
+    src_pad: u32,
     dst: u32,
+    dst_pad: u32,
     sample_format: SampleFormat = undefined,
     sample_rate: u32 = 0,
     layout: Layout = undefined,
     time_base: time.TimeBase = undefined,
     picked: bool = false,
+    configured: bool = false,
+    /// The queued frames, from `head`.
+    fifo: std.ArrayList(Owned) = .empty,
+    head: usize = 0,
+    status_in: Status = .none,
+    status_in_pts: ?i64 = null,
+    status_out: Status = .none,
+    frame_wanted_out: bool = false,
+    frame_blocked_in: bool = false,
+    current_pts: ?i64 = null,
+    frame_count_out: u64 = 0,
 
     pub fn format(l: *const Link) audio.Format {
         return .{ .sample_rate = l.sample_rate, .layout = l.layout, .sample_format = l.sample_format };
     }
+
+    fn queued(l: *const Link) usize {
+        return l.fifo.items.len - l.head;
+    }
 };
 
-const Pull = union(enum) {
-    frame: Owned,
-    need_input,
-    eof,
+const Source = struct { spec: SourceSpec, time_base: time.TimeBase, node: u32 };
+
+const Sink = struct {
+    /// Owned.
+    formats: []SampleFormat,
+    rates: []u32,
+    layouts: []Layout,
+    node: u32,
 };
+
+/// What an activation did (`FFERROR_BUFFERSRC_EMPTY` apart).
+const Activation = enum { ok, buffersrc_empty };
 
 pub const Graph = struct {
     gpa: std.mem.Allocator,
     nodes: std.ArrayList(Node) = .empty,
     links: std.ArrayList(Link) = .empty,
-    source: SourceSpec,
-    source_time_base: time.TimeBase,
-    /// The sink's lists, owned.
-    sink_formats: []SampleFormat = &.{},
-    sink_rates: []u32 = &.{},
-    sink_layouts: []Layout = &.{},
+    sources: std.ArrayList(Source) = .empty,
+    sinks: std.ArrayList(Sink) = .empty,
     /// The converter options, owned, in one buffer.
     converter: []Option = &.{},
     converter_text: []u8 = &.{},
     diagnostics: ?diagnostics.Sink,
+    max_queued: usize,
+    queued: usize = 0,
     /// `configure` was called; a failed configuration is not retried.
     configure_called: bool = false,
     configured: bool = false,
-    pending: ?Owned = null,
     last: ?Owned = null,
-    input_ended: bool = false,
-    drained: bool = false,
 
     /// Creates the source, the chain's filters with their options, and
     /// the sink, linked in that order.
     pub fn init(gpa: std.mem.Allocator, source: SourceSpec, chain: []const FilterSpec, sink: SinkSpec, opts: Options) InitError!Graph {
-        var g = try start(gpa, source, sink, opts);
+        var g = try start(gpa, opts);
         errdefer g.deinit();
-        try g.addNode("in", .source);
-        for (chain) |spec| {
-            var f = try filters.Filter.create(gpa, spec.name, spec.options, opts.diagnostics);
-            g.addNode(spec.label orelse spec.name, .{ .filter = f }) catch |err| {
-                f.deinit(gpa);
-                return err;
-            };
+        try g.addSource("in", source);
+        for (chain) |spec| _ = try g.addFilter(spec.label orelse spec.name, try filters.Filter.create(gpa, spec.name, spec.options, opts.diagnostics));
+        try g.addSink("out", sink);
+        // in, the chain, out: each node to the next. A filter of other
+        // pads leaves them unlinked, which `configure` refuses.
+        for (0..g.nodes.items.len - 1) |i| {
+            const src: u32 = @intCast(i);
+            if (g.nodes.items[src].outputs.len == 0 or g.nodes.items[src + 1].inputs.len == 0) continue;
+            _ = try g.addLink(src, 0, src + 1, 0);
         }
-        try g.addNode("out", .sink);
-        for (0..g.nodes.items.len - 1) |i| try g.addLink(@intCast(i), @intCast(i + 1));
         return g;
     }
 
-    /// The chain of filtergraph `text` (parse.zig) between the source and
-    /// the sink, as `avfilter_graph_parse_ptr` builds it with them created
-    /// first: every filter created (`Parsed_<name>_<n>`, or
-    /// `<name>@<instance>`), then every filter's options set, an unknown
-    /// option failing only once all are set, then every filter
-    /// initialized. Link labels and several chains are `UnsupportedSyntax`
-    /// (T25c).
+    /// The chain of filtergraph `text` between one source (`in`) and one
+    /// sink (`out`): `initGraph` with those names.
     pub fn initText(gpa: std.mem.Allocator, source: SourceSpec, text: []const u8, sink: SinkSpec, opts: Options) InitError!Graph {
-        var g = try start(gpa, source, sink, opts);
+        return initGraph(gpa, &.{.{ .name = "in", .spec = source }}, text, &.{.{ .name = "out", .spec = sink }}, opts);
+    }
+
+    /// The graph of filtergraph `text` (parse.zig) between `sources` and
+    /// `sinks`, created first, as `avfilter_graph_parse_ptr` builds it:
+    /// every filter created (`Parsed_<name>_<n>`, or `<name>@<instance>`),
+    /// then every filter's options set (an unknown option failing only
+    /// once all are set), then every filter initialized, then the pads
+    /// linked by label and along each chain, the first filter's input
+    /// labelled `in` and the last one's output `out` when unlabelled, and
+    /// the open pads to the sources and sinks of their labels' names.
+    pub fn initGraph(gpa: std.mem.Allocator, sources: []const Named(SourceSpec), text: []const u8, sinks: []const Named(SinkSpec), opts: Options) InitError!Graph {
+        var g = try start(gpa, opts);
         errdefer g.deinit();
-        try g.addNode("in", .source);
-        try g.addNode("out", .sink);
+        for (sources) |s| try g.addSource(s.name, s.spec);
+        for (sinks) |s| try g.addSink(s.name, s.spec);
         var arena: std.heap.ArenaAllocator = .init(gpa);
         defer arena.deinit();
-        const parsed = parse.parse(arena.allocator(), text, opts.diagnostics) catch |err| return switch (err) {
+        const a = arena.allocator();
+        const parsed = parse.parse(a, text, opts.diagnostics) catch |err| return switch (err) {
             error.InvalidSyntax => error.InvalidSyntax,
             error.OutOfMemory => error.OutOfMemory,
         };
+        const first = g.nodes.items.len;
         for (parsed.filters, 0..) |pf, i| {
-            var f = filters.Filter.alloc(pf.name) catch |err| {
+            const f = filters.Filter.alloc(pf.name) catch |err| {
                 diagnostics.report(opts.diagnostics, .err, "No such filter: '{s}'", .{pf.name});
                 return err;
             };
-            const label = if (pf.instance) |inst|
-                try arena.allocator().print("{s}@{s}", .{ pf.name, inst })
-            else
-                try arena.allocator().print("Parsed_{s}_{d}", .{ pf.name, i });
-            g.addNode(label, .{ .filter = f }) catch |err| {
-                f.deinit(gpa);
-                return err;
-            };
+            const label = if (pf.instance) |inst| try a.print("{s}@{s}", .{ pf.name, inst }) else try a.print("Parsed_{s}_{d}", .{ pf.name, i });
+            try g.addNodeOf(label, .{ .filter = f }, 0, 0);
         }
-        if (parsed.labels or parsed.chains > 1) return error.UnsupportedSyntax;
         // avfilter_graph_segment_apply_opts.
         var unknown: ?Option = null;
-        for (parsed.filters, 2..) |pf, node| {
+        for (parsed.filters, first..) |pf, node| {
             const f = &g.nodes.items[node].kind.filter;
             for (pf.options) |o| {
                 f.set(gpa, o.name, o.value) catch |err| switch (err) {
@@ -245,35 +298,129 @@ pub const Graph = struct {
             diagnostics.report(opts.diagnostics, .err, "Could not set non-existent option '{s}' to value '{s}'", .{ o.name, o.value });
             return error.UnknownOption;
         }
-        for (2..g.nodes.items.len) |node| try g.nodes.items[node].kind.filter.init(gpa, opts.diagnostics);
-        // The source to the first filter, along the chain, the last to the sink.
-        var prev: u32 = 0;
-        for (2..g.nodes.items.len) |node| {
-            try g.addLink(prev, @intCast(node));
-            prev = @intCast(node);
+        for (first..g.nodes.items.len) |node| {
+            const f = &g.nodes.items[node].kind.filter;
+            try f.init(gpa, opts.diagnostics);
+            const pads = f.pads();
+            try g.setPads(@intCast(node), pads.inputs, pads.outputs);
         }
-        try g.addLink(prev, 1);
+        try g.linkSegment(a, parsed, first, sources, sinks);
         return g;
     }
 
-    /// A graph with no nodes yet, the sink's lists and the converter
-    /// options copied.
-    fn start(gpa: std.mem.Allocator, source: SourceSpec, sink: SinkSpec, opts: Options) InitError!Graph {
-        if (source.format.channelCount() > 64) return error.LimitExceeded;
-        // abuffersink's rates are ints.
-        for (sink.sample_rates) |r| {
-            if (r == 0 or r > std.math.maxInt(i32)) return error.OutOfRange;
+    /// `avfilter_graph_segment_link` and `avfilter_graph_parse_ptr`'s
+    /// matching of the open pads to the sources and sinks.
+    fn linkSegment(g: *Graph, a: std.mem.Allocator, parsed: parse.Parsed, first: usize, sources: []const Named(SourceSpec), sinks: []const Named(SinkSpec)) InitError!void {
+        const count = parsed.filters.len;
+        // The labels, the defaults added: [in] before the first filter and
+        // [out] after the last, each with one such pad and none given.
+        const in_labels = try a.alloc([]const []const u8, count);
+        const out_labels = try a.alloc([]const []const u8, count);
+        for (parsed.filters, 0..) |pf, i| {
+            in_labels[i] = pf.inputs;
+            out_labels[i] = pf.outputs;
         }
+        if (count > 0) {
+            if (g.nodes.items[first].inputs.len == 1 and in_labels[0].len == 0) in_labels[0] = &.{"in"};
+            if (g.nodes.items[first + count - 1].outputs.len == 1 and out_labels[count - 1].len == 0) out_labels[count - 1] = &.{"out"};
+        }
+        const Open = struct { node: u32, pad: u32, label: ?[]const u8 };
+        var open_inputs: std.ArrayList(Open) = .empty;
+        var open_outputs: std.ArrayList(Open) = .empty;
+        for (0..count) |fi| {
+            const node: u32 = @intCast(first + fi);
+            // link_inputs.
+            const n_in = g.nodes.items[node].inputs.len;
+            if (n_in < in_labels[fi].len) {
+                diagnostics.report(g.diagnostics, .err, "More input link labels specified for filter '{s}' than it has inputs: {d} > {d}", .{ parsed.filters[fi].name, in_labels[fi].len, n_in });
+                return error.InvalidSyntax;
+            }
+            for (0..n_in) |pad| {
+                if (g.nodes.items[node].inputs[pad] != null) continue;
+                const label: ?[]const u8 = if (pad < in_labels[fi].len) in_labels[fi][pad] else null;
+                if (label) |l| {
+                    if (g.findLabel(out_labels, first, fi, l, true)) |found| {
+                        _ = try g.addLink(found.node, found.pad, node, @intCast(pad));
+                        continue;
+                    }
+                }
+                try open_inputs.append(a, .{ .node = node, .pad = @intCast(pad), .label = label });
+            }
+            // link_outputs.
+            const n_out = g.nodes.items[node].outputs.len;
+            if (n_out < out_labels[fi].len) {
+                diagnostics.report(g.diagnostics, .err, "More output link labels specified for filter '{s}' than it has outputs: {d} > {d}", .{ parsed.filters[fi].name, out_labels[fi].len, n_out });
+                return error.InvalidSyntax;
+            }
+            outputs: for (0..n_out) |pad| {
+                if (g.nodes.items[node].outputs[pad] != null) continue;
+                const label: ?[]const u8 = if (pad < out_labels[fi].len) out_labels[fi][pad] else null;
+                if (label) |l| {
+                    if (g.findLabel(in_labels, first, fi, l, false)) |found| {
+                        _ = try g.addLink(node, @intCast(pad), found.node, found.pad);
+                        continue;
+                    }
+                } else {
+                    // An unlabelled output links to the next filter of its
+                    // chain's first free unlabelled input.
+                    if (fi + 1 < count and parsed.filters[fi + 1].chain == parsed.filters[fi].chain) {
+                        const next: u32 = @intCast(first + fi + 1);
+                        for (g.nodes.items[next].inputs, 0..) |l, in| {
+                            if (l == null and (in >= in_labels[fi + 1].len)) {
+                                _ = try g.addLink(node, @intCast(pad), next, @intCast(in));
+                                continue :outputs;
+                            }
+                        }
+                    }
+                }
+                try open_outputs.append(a, .{ .node = node, .pad = @intCast(pad), .label = label });
+            }
+        }
+        // The open inputs to the sources, the open outputs to the sinks,
+        // by name; the rest stay unlinked.
+        for (open_inputs.items) |o| {
+            const label = o.label orelse continue;
+            for (sources, 0..) |s, i| {
+                const src = g.sources.items[i].node;
+                if (std.mem.eql(u8, s.name, label) and g.nodes.items[src].outputs[0] == null) {
+                    _ = try g.addLink(src, 0, o.node, o.pad);
+                    break;
+                }
+            }
+        }
+        for (open_outputs.items) |o| {
+            const label = o.label orelse continue;
+            for (sinks, 0..) |s, j| {
+                const dst = g.sinks.items[j].node;
+                if (std.mem.eql(u8, s.name, label) and g.nodes.items[dst].inputs[0] == null) {
+                    _ = try g.addLink(o.node, o.pad, dst, 0);
+                    break;
+                }
+            }
+        }
+    }
+
+    /// `find_linklabel`: from filter `from` on, a free pad labelled
+    /// `label` (an output when `want_output`).
+    fn findLabel(g: *const Graph, labels: []const []const []const u8, first: usize, from: usize, label: []const u8, want_output: bool) ?struct { node: u32, pad: u32 } {
+        for (from..labels.len) |fi| {
+            const n = &g.nodes.items[first + fi];
+            const pads = if (want_output) n.outputs else n.inputs;
+            for (0..@min(labels[fi].len, pads.len)) |i| {
+                if (pads[i] == null and std.mem.eql(u8, labels[fi][i], label)) return .{ .node = @intCast(first + fi), .pad = @intCast(i) };
+            }
+        }
+        return null;
+    }
+
+    /// A graph with no nodes yet, the converter options copied.
+    fn start(gpa: std.mem.Allocator, opts: Options) InitError!Graph {
         var g: Graph = .{
             .gpa = gpa,
-            .source = source,
-            .source_time_base = source.time_base orelse time.TimeBase.ofSampleRate(source.format.sample_rate) catch unreachable,
             .diagnostics = opts.diagnostics,
+            .max_queued = if (opts.max_queued_frames == 0) std.math.maxInt(usize) else opts.max_queued_frames,
         };
         errdefer g.deinit();
-        g.sink_formats = try gpa.dupe(SampleFormat, sink.sample_formats);
-        g.sink_rates = try gpa.dupe(u32, sink.sample_rates);
-        g.sink_layouts = try gpa.dupe(Layout, sink.layouts);
         var text_len: usize = 0;
         for (opts.converter) |o| text_len += o.name.len + o.value.len;
         g.converter_text = try gpa.alloc(u8, text_len);
@@ -290,9 +437,86 @@ pub const Graph = struct {
         return g;
     }
 
+    fn addSource(g: *Graph, name: []const u8, spec: SourceSpec) InitError!void {
+        if (spec.format.channelCount() > 64) return error.LimitExceeded;
+        const index: u32 = @intCast(g.sources.items.len);
+        const node: u32 = @intCast(g.nodes.items.len);
+        try g.sources.append(g.gpa, .{
+            .spec = spec,
+            .time_base = spec.time_base orelse time.TimeBase.ofSampleRate(spec.format.sample_rate) catch unreachable,
+            .node = node,
+        });
+        try g.addNodeOf(name, .{ .source = .{ .index = index } }, 0, 1);
+    }
+
+    fn addSink(g: *Graph, name: []const u8, spec: SinkSpec) InitError!void {
+        // abuffersink's rates are ints.
+        for (spec.sample_rates) |r| {
+            if (r == 0 or r > std.math.maxInt(i32)) return error.OutOfRange;
+        }
+        const index: u32 = @intCast(g.sinks.items.len);
+        const node: u32 = @intCast(g.nodes.items.len);
+        const sample_formats = try g.gpa.dupe(SampleFormat, spec.sample_formats);
+        errdefer g.gpa.free(sample_formats);
+        const rates = try g.gpa.dupe(u32, spec.sample_rates);
+        errdefer g.gpa.free(rates);
+        const layouts = try g.gpa.dupe(Layout, spec.layouts);
+        errdefer g.gpa.free(layouts);
+        try g.addNodeOf(name, .{ .sink = .{ .index = index } }, 1, 0);
+        try g.sinks.append(g.gpa, .{ .formats = sample_formats, .rates = rates, .layouts = layouts, .node = node });
+    }
+
+    /// Adds a filter node with its pads; it takes `f` (freed on failure).
+    pub fn addFilter(g: *Graph, label: []const u8, f: filters.Filter) error{OutOfMemory}!u32 {
+        var filter = f;
+        const pads = filter.pads();
+        g.addNodeOf(label, .{ .filter = filter }, pads.inputs, pads.outputs) catch |err| {
+            filter.deinit(g.gpa);
+            return err;
+        };
+        return @intCast(g.nodes.items.len - 1);
+    }
+
+    fn addNodeOf(g: *Graph, label: []const u8, kind: @FieldType(Node, "kind"), inputs: u32, outputs: u32) error{OutOfMemory}!void {
+        const copy = try g.gpa.dupe(u8, label);
+        errdefer g.gpa.free(copy);
+        const in = try g.gpa.alloc(?u32, inputs);
+        errdefer g.gpa.free(in);
+        const out = try g.gpa.alloc(?u32, outputs);
+        errdefer g.gpa.free(out);
+        @memset(in, null);
+        @memset(out, null);
+        try g.nodes.append(g.gpa, .{ .label = copy, .kind = kind, .inputs = in, .outputs = out });
+    }
+
+    /// Gives `node` its pads, all unlinked, once its filter is initialized.
+    fn setPads(g: *Graph, node: u32, inputs: u32, outputs: u32) error{OutOfMemory}!void {
+        const n = &g.nodes.items[node];
+        const in = try g.gpa.alloc(?u32, inputs);
+        errdefer g.gpa.free(in);
+        const out = try g.gpa.alloc(?u32, outputs);
+        @memset(in, null);
+        @memset(out, null);
+        g.gpa.free(n.inputs);
+        g.gpa.free(n.outputs);
+        n.inputs = in;
+        n.outputs = out;
+    }
+
+    /// `avfilter_link`.
+    pub fn addLink(g: *Graph, src: u32, src_pad: u32, dst: u32, dst_pad: u32) error{OutOfMemory}!u32 {
+        try g.links.append(g.gpa, .{ .src = src, .src_pad = src_pad, .dst = dst, .dst_pad = dst_pad });
+        const index: u32 = @intCast(g.links.items.len - 1);
+        g.nodes.items[src].outputs[src_pad] = index;
+        g.nodes.items[dst].inputs[dst_pad] = index;
+        return index;
+    }
+
     pub fn deinit(g: *Graph) void {
         for (g.nodes.items) |*n| {
             g.gpa.free(n.label);
+            g.gpa.free(n.inputs);
+            g.gpa.free(n.outputs);
             switch (n.kind) {
                 .filter => |*f| f.deinit(g.gpa),
                 else => {},
@@ -301,38 +525,34 @@ pub const Graph = struct {
                 .resample => |*r| r.deinit(),
                 .volume => |*v| v.deinit(),
                 .setpts => |*r| r.deinit(),
+                .pan => |*r| r.deinit(g.gpa),
+                .mix => |*r| r.deinit(),
                 .none, .trim => {},
             }
         }
+        for (g.links.items) |*l| {
+            for (l.fifo.items[l.head..]) |*f| f.free(g.gpa);
+            l.fifo.deinit(g.gpa);
+        }
+        for (g.sinks.items) |*s| {
+            g.gpa.free(s.formats);
+            g.gpa.free(s.rates);
+            g.gpa.free(s.layouts);
+        }
         g.nodes.deinit(g.gpa);
         g.links.deinit(g.gpa);
-        g.gpa.free(g.sink_formats);
-        g.gpa.free(g.sink_rates);
-        g.gpa.free(g.sink_layouts);
+        g.sources.deinit(g.gpa);
+        g.sinks.deinit(g.gpa);
         g.gpa.free(g.converter);
         g.gpa.free(g.converter_text);
-        if (g.pending) |*p| p.free(g.gpa);
         if (g.last) |*l| l.free(g.gpa);
         g.* = undefined;
     }
 
-    fn addNode(g: *Graph, label: []const u8, kind: @FieldType(Node, "kind")) error{OutOfMemory}!void {
-        const copy = try g.gpa.dupe(u8, label);
-        errdefer g.gpa.free(copy);
-        try g.nodes.append(g.gpa, .{ .label = copy, .kind = kind });
-    }
-
-    fn addLink(g: *Graph, src: u32, dst: u32) error{OutOfMemory}!void {
-        try g.links.append(g.gpa, .{ .src = src, .dst = dst });
-        const index: u32 = @intCast(g.links.items.len - 1);
-        g.nodes.items[src].output = index;
-        g.nodes.items[dst].input = index;
-    }
-
-    /// The nodes from the source to the sink, as configured: for each, its
-    /// name and the link that leaves it (null for the sink).
+    /// For a single chain: the nodes from the first source to its sink,
+    /// each with the link that leaves it (null for the sink).
     pub fn chainIterator(g: *const Graph) ChainIterator {
-        return .{ .graph = g, .node = 0 };
+        return .{ .graph = g, .node = g.sources.items[0].node };
     }
 
     pub const ChainIterator = struct {
@@ -342,739 +562,677 @@ pub const Graph = struct {
         pub fn next(it: *ChainIterator) ?struct { label: []const u8, link: ?*const Link } {
             const index = it.node orelse return null;
             const n = &it.graph.nodes.items[index];
-            const link: ?*const Link = if (n.output) |o| &it.graph.links.items[o] else null;
+            const link: ?*const Link = if (n.outputs.len > 0) &it.graph.links.items[n.outputs[0].?] else null;
             it.node = if (link) |l| l.dst else null;
             return .{ .label = n.label, .link = link };
         }
     };
 
-    /// The link into the sink: the output's format and time base.
-    pub fn outputLink(g: *const Graph) *const Link {
-        return &g.links.items[g.nodes.items[g.sinkIndex()].input.?];
-    }
-
-    fn sinkIndex(g: *const Graph) u32 {
-        for (g.nodes.items, 0..) |n, i| {
-            if (n.kind == .sink) return @intCast(i);
-        }
-        unreachable; // init adds it
+    /// The link into sink `j`: the output's format and time base.
+    pub fn sinkLink(g: *const Graph, j: usize) *const Link {
+        return &g.links.items[g.nodes.items[g.sinks.items[j].node].inputs[0].?];
     }
 
     // Configuration ---------------------------------------------------------
 
-    /// `avfilter_graph_config`: negotiates every link's format, inserting
-    /// converters, then configures the filters.
+    /// `avfilter_graph_config`: every pad linked, the formats negotiated
+    /// (converters inserted), then the links configured.
     pub fn configure(g: *Graph) ConfigureError!void {
         if (g.configure_called) return error.AlreadyConfigured;
         g.configure_called = true;
-        var arena: std.heap.ArenaAllocator = .init(g.gpa);
-        defer arena.deinit();
-        var pool: Pool = .init(arena.allocator());
-        for (g.links.items) |_| _ = try pool.addLink();
-        try g.queryAll(&pool);
-        try g.reduce(&pool);
-        g.swapSampleFormats(&pool);
-        g.swapRates(&pool);
-        g.swapLayouts(&pool);
-        try g.pickAll(&pool);
-        try g.configLinks();
+        try g.checkValidity();
+        try negotiate.negotiate(g);
+        for (0..g.nodes.items.len) |i| {
+            for (g.nodes.items[i].inputs) |l| try g.configLink(l.?);
+        }
         g.configured = true;
     }
 
-    /// `query_formats`: each filter's lists, then the merges along links,
-    /// converters inserted where they fail.
-    fn queryAll(g: *Graph, pool: *Pool) ConfigureError!void {
-        for (0..g.nodes.items.len) |i| try g.query(pool, @intCast(i));
-        var converters: u32 = 0;
-        retry: while (true) {
-            for (0..g.nodes.items.len) |i| {
-                const input = g.nodes.items[i].input orelse continue;
-                if (try g.mergeLink(pool, input, &converters)) continue :retry;
+    /// `graph_check_validity`.
+    fn checkValidity(g: *Graph) ConfigureError!void {
+        for (g.nodes.items) |n| {
+            for (n.inputs, 0..) |l, pad| {
+                if (l == null) {
+                    diagnostics.report(g.diagnostics, .err, "Input pad {d} of the filter instance \"{s}\" not connected to any source", .{ pad, n.label });
+                    return error.Unconnected;
+                }
             }
-            break;
-        }
-    }
-
-    /// The merges of one link; inserts a converter and returns true when
-    /// they cannot all be made.
-    fn mergeLink(g: *Graph, pool: *Pool, link: u32, converters: *u32) ConfigureError!bool {
-        const kinds = [_]Kind{ .layouts, .samplerates, .formats };
-        var convert = false;
-        for (kinds) |kind| {
-            const a = pool.slot(link, .in, kind).* orelse continue;
-            const b = pool.slot(link, .out, kind).* orelse continue;
-            if (a != b and !try pool.canMerge(kind, a, b)) convert = true;
-        }
-        for (kinds) |kind| {
-            // The check may have merged layouts already.
-            const a = pool.slot(link, .in, kind).* orelse continue;
-            const b = pool.slot(link, .out, kind).* orelse continue;
-            if (a == b or convert) continue;
-            if (!try pool.merge(kind, a, b)) convert = true;
-        }
-        if (!convert) return false;
-        try g.insertConverter(pool, link, converters);
-        return true;
-    }
-
-    /// `avfilter_insert_filter` of `auto_aresample_<n>` on `link`, its
-    /// lists merged with both sides at once.
-    fn insertConverter(g: *Graph, pool: *Pool, link: u32, converters: *u32) ConfigureError!void {
-        var name_buffer: [32]u8 = undefined;
-        const name = std.fmt.bufPrint(&name_buffer, "auto_aresample_{d}", .{converters.*}) catch unreachable;
-        converters.* += 1;
-        {
-            var f = try filters.Filter.create(g.gpa, "aresample", g.converter, g.diagnostics);
-            g.addNode(name, .{ .filter = f }) catch |err| {
-                f.deinit(g.gpa);
-                return err;
-            };
-        }
-        const conv: u32 = @intCast(g.nodes.items.len - 1);
-        const dst = g.links.items[link].dst;
-        try g.links.append(g.gpa, .{ .src = conv, .dst = dst });
-        const after: u32 = @intCast(g.links.items.len - 1);
-        _ = try pool.addLink();
-        g.links.items[link].dst = conv;
-        g.nodes.items[conv].input = link;
-        g.nodes.items[conv].output = after;
-        g.nodes.items[dst].input = after;
-        // The destination's lists move to the new link.
-        pool.cfg(after, .out).* = pool.cfg(link, .out).*;
-        pool.cfg(link, .out).* = .{};
-        try g.query(pool, conv);
-        for ([_]Kind{ .layouts, .samplerates, .formats }) |kind| {
-            const ok = try pool.merge(kind, pool.slot(link, .in, kind).*.?, pool.slot(link, .out, kind).*.?) and
-                try pool.merge(kind, pool.slot(after, .in, kind).*.?, pool.slot(after, .out, kind).*.?);
-            if (!ok) {
-                diagnostics.report(g.diagnostics, .err, "Impossible to convert between the formats supported by the filter '{s}' and the filter '{s}'", .{
-                    g.nodes.items[g.links.items[link].src].label, g.nodes.items[dst].label,
-                });
-                return error.CannotConvert;
+            for (n.outputs, 0..) |l, pad| {
+                if (l == null) {
+                    diagnostics.report(g.diagnostics, .err, "Output pad {d} of the filter instance \"{s}\" not connected to any destination", .{ pad, n.label });
+                    return error.Unconnected;
+                }
             }
         }
     }
 
-    /// `SET_COMMON_FORMATS`: `id` on every side of the node that has no
-    /// list of the kind yet.
-    fn setCommon(g: *Graph, pool: *Pool, node: u32, kind: Kind, id: formats.Id) void {
-        const n = &g.nodes.items[node];
-        if (n.input) |l| {
-            const s = pool.slot(l, .out, kind);
-            if (s.* == null) s.* = id;
-        }
-        if (n.output) |l| {
-            const s = pool.slot(l, .in, kind);
-            if (s.* == null) s.* = id;
-        }
-    }
-
-    fn layoutList(pool: *Pool, items: []const Layout) error{OutOfMemory}!formats.Id {
-        return pool.newLayouts(items, false);
-    }
-
-    fn formatIds(pool: *Pool, list: []const SampleFormat) error{OutOfMemory}!formats.Id {
-        var ids: [12]i32 = undefined;
-        for (list, 0..) |f, i| ids[i] = f.ffmpegId();
-        return pool.newValues(ids[0..list.len]);
-    }
-
-    /// `filter_query_formats`: the node's own lists, checked, then
-    /// `ff_default_query_formats` for the rest: every format, rate and
-    /// channel count, one list shared by the node's sides.
-    fn query(g: *Graph, pool: *Pool, node: u32) ConfigureError!void {
-        const n = &g.nodes.items[node];
-        var checks = true;
-        switch (n.kind) {
-            .source => {
-                const f = g.source.format;
-                g.setCommon(pool, node, .formats, try pool.newValues(&.{f.sample_format.ffmpegId()}));
-                g.setCommon(pool, node, .samplerates, try pool.newValues(&.{@intCast(f.sample_rate)}));
-                g.setCommon(pool, node, .layouts, try layoutList(pool, &.{f.layout}));
-            },
-            .sink => {
-                if (g.sink_formats.len > 0) {
-                    var ids: std.ArrayList(i32) = .empty;
-                    for (g.sink_formats) |f| try ids.append(pool.arena, f.ffmpegId());
-                    g.setCommon(pool, node, .formats, try pool.newValues(ids.items));
-                }
-                if (g.sink_rates.len > 0) {
-                    var rates: std.ArrayList(i32) = .empty;
-                    for (g.sink_rates) |r| try rates.append(pool.arena, @intCast(r));
-                    g.setCommon(pool, node, .samplerates, try pool.newValues(rates.items));
-                }
-                if (g.sink_layouts.len > 0) g.setCommon(pool, node, .layouts, try layoutList(pool, g.sink_layouts));
-            },
-            .filter => |*f| switch (f.*) {
-                // No format query: every format, rate and layout.
-                .anull, .atrim, .asetpts => checks = false,
-                .aformat => |*a| {
-                    if (a.formats.items.len > 0) g.setCommon(pool, node, .formats, try pool.newValues(a.formatList()));
-                    if (a.rates.items.len > 0) g.setCommon(pool, node, .samplerates, try pool.newValues(a.rates.items));
-                    if (a.layouts.items.len > 0) g.setCommon(pool, node, .layouts, try layoutList(pool, a.layouts.items));
-                },
-                .volume => |*v| g.setCommon(pool, node, .formats, try formatIds(pool, filters.VolumeRun.formats(v.rest.precision))),
-                .aresample => |*a| {
-                    const all = formats.allFormats();
-                    const in = n.input.?;
-                    const out = n.output.?;
-                    pool.slot(in, .out, .formats).* = try pool.newValues(&all);
-                    pool.slot(in, .out, .samplerates).* = try pool.newValues(&.{});
-                    pool.slot(in, .out, .layouts).* = try pool.newLayouts(&.{}, true);
-                    const rate = a.outRate();
-                    pool.slot(out, .in, .samplerates).* = try pool.newValues(if (rate > 0) &.{rate} else &.{});
-                    pool.slot(out, .in, .formats).* = if (a.out_sample_format) |sf|
-                        try pool.newValues(&.{sf.ffmpegId()})
-                    else
-                        try pool.newValues(&all);
-                    pool.slot(out, .in, .layouts).* = if (a.out_layout) |l|
-                        try layoutList(pool, &.{l})
-                    else
-                        try pool.newLayouts(&.{}, true);
-                },
-            },
-        }
-        if (checks) try g.checkNode(pool, node);
-        // ff_default_query_formats.
-        const all = formats.allFormats();
-        g.setCommon(pool, node, .formats, try pool.newValues(&all));
-        g.setCommon(pool, node, .layouts, try pool.newLayouts(&.{}, true));
-        g.setCommon(pool, node, .samplerates, try pool.newValues(&.{}));
-    }
-
-    /// `filter_check_formats`: the node's lists of its own.
-    fn checkNode(g: *Graph, pool: *Pool, node: u32) formats.CheckError!void {
-        const n = &g.nodes.items[node];
-        const sides = [_]?struct { link: u32, side: formats.Side }{
-            if (n.input) |l| .{ .link = l, .side = .out } else null,
-            if (n.output) |l| .{ .link = l, .side = .in } else null,
-        };
-        for (sides) |maybe| {
-            const s = maybe orelse continue;
-            const c = pool.cfg(s.link, s.side);
-            if (c.formats) |id| try pool.checkValues(id, false);
-            if (c.samplerates) |id| try pool.checkValues(id, true);
-            if (c.layouts) |id| try pool.checkLayouts(id);
-        }
-    }
-
-    /// `reduce_formats`: a filter whose input has one format gives it to
-    /// its output when the output's list has it, until nothing changes.
-    fn reduce(g: *Graph, pool: *Pool) error{OutOfMemory}!void {
-        while (true) {
-            var reduced = false;
-            for (g.nodes.items) |*n| {
-                const in = n.input orelse continue;
-                const out = n.output orelse continue;
-                for ([_]Kind{ .formats, .samplerates }) |kind| {
-                    const in_list = pool.values(pool.slot(in, .out, kind).* orelse continue);
-                    if (in_list.items.len != 1) continue;
-                    const value = in_list.items[0];
-                    const out_list = pool.values(pool.slot(out, .in, kind).*.?);
-                    if (out_list.items.len == 1) continue;
-                    if (out_list.items.len == 0) {
-                        try out_list.append(pool.arena, value);
-                        reduced = true;
-                        continue;
-                    }
-                    if (std.mem.findScalar(i32, out_list.items, value) != null) {
-                        out_list.items[0] = value;
-                        out_list.shrinkRetainingCapacity(1);
-                        reduced = true;
-                    }
-                }
-                const in_layouts = pool.layouts(pool.slot(in, .out, .layouts).* orelse continue);
-                if (in_layouts.items.items.len != 1) continue;
-                const layout = in_layouts.items.items[0];
-                const out_layouts = pool.layouts(pool.slot(out, .in, .layouts).*.?);
-                if (out_layouts.items.items.len == 1) continue;
-                if (out_layouts.all) {
-                    // Every channel count, so the layout whether known or not.
-                    out_layouts.all = false;
-                    try out_layouts.items.append(pool.arena, layout);
-                    reduced = true;
-                    continue;
-                }
-                for (out_layouts.items.items) |*l| {
-                    if (l.eql(&layout)) {
-                        out_layouts.items.items[0] = layout;
-                        out_layouts.items.shrinkRetainingCapacity(1);
-                        reduced = true;
-                        break;
-                    }
-                }
-            }
-            if (!reduced) return;
-        }
-    }
-
-    /// The node's input format list when it holds one entry.
-    fn singleInput(pool: *Pool, n: *const Node, kind: Kind) ?i32 {
-        const in = n.input orelse return null;
-        const list = pool.values(pool.slot(in, .out, kind).*.?);
-        return if (list.items.len == 1) list.items[0] else null;
-    }
-
-    /// `swap_sample_fmts`: the output format closest to the input's first.
-    fn swapSampleFormats(g: *Graph, pool: *Pool) void {
-        for (g.nodes.items) |*n| {
-            const format_id = singleInput(pool, n, .formats) orelse continue;
-            const format = SampleFormat.fromFfmpegId(format_id).?;
-            const bps: i32 = format.bytesPerSample();
-            const out = n.output orelse continue;
-            const list = pool.values(pool.slot(out, .in, .formats).*.?);
-            if (list.items.len < 2) continue;
-            var best: ?usize = null;
-            var best_score: i32 = std.math.minInt(i32);
-            for (list.items, 0..) |id, j| {
-                const f = SampleFormat.fromFfmpegId(id).?;
-                const out_bps: i32 = f.bytesPerSample();
-                if (f.packedForm() == format or f.planarForm() == format) {
-                    best = j;
-                    break;
-                }
-                // For s32 and float, double keeps everything.
-                if (bps == 4 and out_bps == 8) {
-                    best = j;
-                    break;
-                }
-                // The closest higher or equal size.
-                const distance: i32 = @intCast(@abs(out_bps - bps));
-                var score: i32 = -distance;
-                if (out_bps >= bps) score += std.math.maxInt(i32) / 2;
-                if (score > best_score) {
-                    best_score = score;
-                    best = j;
-                }
-            }
-            std.mem.swap(i32, &list.items[0], &list.items[best.?]);
-        }
-    }
-
-    /// `swap_samplerates`: the output rate closest to the input's first.
-    fn swapRates(g: *Graph, pool: *Pool) void {
-        for (g.nodes.items) |*n| {
-            const rate = singleInput(pool, n, .samplerates) orelse continue;
-            const out = n.output orelse continue;
-            const list = pool.values(pool.slot(out, .in, .samplerates).*.?);
-            if (list.items.len < 2) continue;
-            var best: usize = 0;
-            var best_diff: i64 = std.math.maxInt(i32);
-            for (list.items, 0..) |r, j| {
-                const diff: i64 = @intCast(@abs(@as(i64, rate) - r));
-                if (diff < best_diff) {
-                    best_diff = diff;
-                    best = j;
-                }
-            }
-            std.mem.swap(i32, &list.items[0], &list.items[best]);
-        }
-    }
-
-    /// `swap_channel_layouts`: the output layout that best matches the
-    /// input's, first.
-    fn swapLayouts(g: *Graph, pool: *Pool) void {
-        for (g.nodes.items) |*n| {
-            const in = n.input orelse continue;
-            const in_list = pool.layouts(pool.slot(in, .out, .layouts).*.?);
-            if (in_list.items.items.len != 1) continue;
-            const out = n.output orelse continue;
-            const list = pool.layouts(pool.slot(out, .in, .layouts).*.?);
-            if (list.items.items.len < 2) continue;
-            const in_layout = &in_list.items.items[0];
-            var best: ?usize = null;
-            var best_score: i32 = std.math.minInt(i32);
-            var best_count_diff: i32 = std.math.maxInt(i32);
-            for (list.items.items, 0..) |*out_layout, j| {
-                const s = layoutScore(in_layout, out_layout);
-                if (s.score > best_score or (s.count_diff < best_count_diff and s.score == best_score)) {
-                    best_score = s.score;
-                    best = j;
-                    best_count_diff = s.count_diff;
-                }
-            }
-            std.mem.swap(Layout, &list.items.items[0], &list.items.items[best.?]);
-        }
-    }
-
-    /// `pick_formats`: links with one format first, then the outputs of
-    /// filters whose input is picked, chosen against it, then the rest.
-    fn pickAll(g: *Graph, pool: *Pool) ConfigureError!void {
-        while (true) {
-            var change = false;
-            for (g.nodes.items) |*n| {
-                for ([_]?u32{ n.input, n.output }) |maybe| {
-                    const l = maybe orelse continue;
-                    const id = pool.slot(l, .in, .formats).* orelse continue;
-                    if (pool.values(id).items.len == 1) {
-                        try g.pick(pool, l, null);
-                        change = true;
-                    }
-                }
-                if (n.input) |in| if (n.output) |out| {
-                    if (g.links.items[in].picked and !g.links.items[out].picked) {
-                        try g.pick(pool, out, in);
-                        change = true;
-                    }
-                };
-            }
-            if (!change) break;
-        }
-        for (g.nodes.items) |*n| {
-            if (n.input) |l| try g.pick(pool, l, null);
-            if (n.output) |l| try g.pick(pool, l, null);
-        }
-    }
-
-    /// `pick_format`: the link's format, rate and layout, the first of
-    /// each list (the sample format chosen against `ref`'s, when given);
-    /// the link's lists are then dropped.
-    fn pick(g: *Graph, pool: *Pool, link: u32, ref: ?u32) ConfigureError!void {
-        const id = pool.slot(link, .in, .formats).* orelse return;
-        const list = pool.values(id);
-        if (ref) |r| {
-            const src = g.links.items[r].sample_format.ffmpegId();
-            var best: i32 = -1;
-            for (list.items) |p| best = bestOfTwo(best, p, src);
-            list.items[0] = best;
-        }
-        list.shrinkRetainingCapacity(1);
+    /// `ff_filter_config_links` of one link: its source's links first, then
+    /// the source's output configuration, the default time base, and the
+    /// destination's input configuration.
+    fn configLink(g: *Graph, link: u32) ConfigureError!void {
+        if (g.links.items[link].configured) return;
+        g.links.items[link].configured = true;
+        const src = g.links.items[link].src;
+        for (g.nodes.items[src].inputs) |l| try g.configLink(l.?);
         const l = &g.links.items[link];
-        l.sample_format = SampleFormat.fromFfmpegId(list.items[0]).?;
-        const rates = pool.values(pool.slot(link, .in, .samplerates).*.?);
-        const layouts = pool.layouts(pool.slot(link, .in, .layouts).*.?);
-        if (rates.items.len == 0 or layouts.all) {
-            diagnostics.report(g.diagnostics, .err, "Cannot select {s} for the link between filters {s} and {s}.", .{
-                if (rates.items.len == 0) "sample rate" else "channel layout",
-                g.nodes.items[l.src].label,
-                g.nodes.items[l.dst].label,
-            });
-            return error.CannotSelect;
-        }
-        rates.shrinkRetainingCapacity(1);
-        l.sample_rate = @intCast(rates.items[0]);
-        layouts.items.shrinkRetainingCapacity(1);
-        l.layout = layouts.items.items[0];
-        l.picked = true;
-        pool.cfg(link, .in).* = .{};
-        pool.cfg(link, .out).* = .{};
-    }
-
-    /// `graph_config_links`, from the source down: each link's time base
-    /// and the filter that feeds it.
-    fn configLinks(g: *Graph) ConfigureError!void {
-        var node: u32 = 0;
-        while (g.nodes.items[node].output) |out| : (node = g.links.items[out].dst) {
-            const l = &g.links.items[out];
-            const n = &g.nodes.items[node];
-            switch (n.kind) {
-                .source => {
-                    l.time_base = g.source_time_base;
-                    continue;
-                },
-                .sink => unreachable,
-                .filter => {},
-            }
-            const in = &g.links.items[n.input.?];
-            l.time_base = in.time_base;
-            switch (n.kind.filter) {
+        const n = &g.nodes.items[src];
+        const first_in: ?*Link = if (n.inputs.len > 0) &g.links.items[n.inputs[0].?] else null;
+        var time_base: ?time.TimeBase = null;
+        switch (n.kind) {
+            .source => |s| time_base = g.sources.items[s.index].time_base,
+            .sink => unreachable,
+            .filter => |*f| switch (f.*) {
                 .volume => |*v| {
-                    const run = try filters.VolumeRun.init(v, in.format(), in.time_base, g.diagnostics);
+                    const run = try filters.VolumeRun.init(v, first_in.?.format(), first_in.?.time_base, g.diagnostics);
                     n.run = .{ .volume = run };
                 },
                 .aresample => |a| {
                     // Built first: assigning the union while `init` runs
                     // would leave its tag set on failure.
-                    const run = try filters.ResampleRun.init(g.gpa, a, in.format(), l.format(), in.time_base, g.diagnostics);
+                    const run = try filters.ResampleRun.init(g.gpa, a, first_in.?.format(), l.format(), first_in.?.time_base, g.diagnostics);
                     n.run = .{ .resample = run };
-                    l.time_base = time.TimeBase.ofSampleRate(l.sample_rate) catch unreachable;
+                    time_base = time.TimeBase.ofSampleRate(l.sample_rate) catch unreachable;
                 },
-                .atrim => |a| n.run = .{ .trim = .init(a, in.format(), in.time_base) },
-                .asetpts => |*a| n.run = .{ .setpts = .init(a, in.format(), in.time_base) },
+                .amix => |*a| {
+                    const run = try multi.MixRun.init(g.gpa, a, l.format());
+                    n.run = .{ .mix = run };
+                    time_base = time.TimeBase.ofSampleRate(l.sample_rate) catch unreachable;
+                },
                 else => {},
+            },
+        }
+        l.time_base = time_base orelse if (first_in) |in| in.time_base else time.TimeBase.ofSampleRate(l.sample_rate) catch unreachable;
+        // The destination's input configuration.
+        const d = &g.nodes.items[l.dst];
+        switch (d.kind) {
+            .filter => |*f| switch (f.*) {
+                .atrim => |a| d.run = .{ .trim = .init(a, l.format(), l.time_base) },
+                .asetpts => |*a| d.run = .{ .setpts = .init(a, l.format(), l.time_base) },
+                .channelmap => |*c| try c.configInput(&l.layout, g.diagnostics),
+                .pan => |*p| {
+                    const run = try multi.PanRun.init(g.gpa, p, l.format(), g.links.items[d.outputs[0].?].format());
+                    d.run = .{ .pan = run };
+                },
+                else => {},
+            },
+            else => {},
+        }
+    }
+
+    // The scheduler ---------------------------------------------------------
+
+    fn linkAt(g: *Graph, index: u32) *Link {
+        return &g.links.items[index];
+    }
+
+    /// `ff_filter_set_ready`.
+    fn setReady(g: *Graph, node: u32, priority: u32) void {
+        const n = &g.nodes.items[node];
+        n.ready = @max(n.ready, priority);
+    }
+
+    /// `filter_unblock`: the node's outputs are no longer blocked.
+    fn unblock(g: *Graph, node: u32) void {
+        for (g.nodes.items[node].outputs) |o| g.linkAt(o.?).frame_blocked_in = false;
+    }
+
+    fn updatePts(l: *Link, pts: ?i64) void {
+        if (pts) |p| l.current_pts = p;
+    }
+
+    /// `ff_avfilter_link_set_in_status` (`ff_outlink_set_status`).
+    fn setInStatus(g: *Graph, index: u32, status: Status, pts: ?i64) void {
+        const l = g.linkAt(index);
+        if (l.status_in == status) return;
+        std.debug.assert(l.status_in == .none);
+        l.status_in = status;
+        l.status_in_pts = pts;
+        l.frame_wanted_out = false;
+        l.frame_blocked_in = false;
+        g.unblock(l.dst);
+        g.setReady(l.dst, 200);
+    }
+
+    /// `link_set_out_status`.
+    fn setOutStatus(g: *Graph, index: u32, status: Status, pts: ?i64) void {
+        const l = g.linkAt(index);
+        std.debug.assert(!l.frame_wanted_out and l.status_out == .none);
+        l.status_out = status;
+        updatePts(l, pts);
+        g.unblock(l.dst);
+        g.setReady(l.src, 200);
+    }
+
+    /// `ff_request_frame`: the link's status once acknowledged, or none
+    /// with a frame requested.
+    fn requestFrame(g: *Graph, index: u32) Status {
+        const l = g.linkAt(index);
+        if (l.status_out != .none) return l.status_out;
+        if (l.status_in != .none) {
+            if (l.queued() > 0) return .none;
+            g.setOutStatus(index, l.status_in, l.status_in_pts);
+            return g.linkAt(index).status_out;
+        }
+        l.frame_wanted_out = true;
+        g.setReady(l.src, 100);
+        return .none;
+    }
+
+    /// `request_frame_to_filter`: a request on an output of a filter that
+    /// activates by default, passed to its first input.
+    fn requestFrameToFilter(g: *Graph, index: u32) void {
+        const l = g.linkAt(index);
+        l.frame_blocked_in = true;
+        const src = &g.nodes.items[l.src];
+        const status = g.requestFrame(src.inputs[0].?);
+        if (status != .none and status != g.linkAt(index).status_in) g.setInStatus(index, status, g.linkAt(index).status_in_pts);
+    }
+
+    /// `ff_filter_frame`: queues `frame` on the link; past the graph's
+    /// limit it is dropped and the queue is full.
+    fn filterFrame(g: *Graph, index: u32, frame: Owned) RunError!void {
+        var f = frame;
+        const l = g.linkAt(index);
+        l.frame_blocked_in = false;
+        l.frame_wanted_out = false;
+        g.unblock(l.dst);
+        if (g.queued >= g.max_queued) {
+            f.free(g.gpa);
+            diagnostics.report(g.diagnostics, .err, "Exhausted frame queue capacity ({d} frames)", .{g.max_queued});
+            return error.QueueFull;
+        }
+        l.fifo.append(g.gpa, f) catch |err| {
+            f.free(g.gpa);
+            return err;
+        };
+        g.queued += 1;
+        g.setReady(l.dst, 300);
+    }
+
+    /// `ff_inlink_consume_frame`.
+    fn consumeFrame(g: *Graph, index: u32) ?Owned {
+        const l = g.linkAt(index);
+        if (l.queued() == 0) return null;
+        const frame = l.fifo.items[l.head];
+        l.head += 1;
+        if (l.head == l.fifo.items.len) {
+            l.fifo.clearRetainingCapacity();
+            l.head = 0;
+        }
+        g.queued -= 1;
+        updatePts(l, frame.pts);
+        l.frame_count_out += 1;
+        return frame;
+    }
+
+    const Acknowledged = struct { status: Status, pts: ?i64 };
+
+    /// `ff_inlink_acknowledge_status`: the input's status, once its queue
+    /// is empty.
+    fn acknowledgeStatus(g: *Graph, index: u32) ?Acknowledged {
+        const l = g.linkAt(index);
+        if (l.queued() > 0) return null;
+        if (l.status_out != .none) return .{ .status = l.status_out, .pts = l.current_pts };
+        if (l.status_in == .none) return null;
+        l.status_out = l.status_in;
+        updatePts(l, l.status_in_pts);
+        return .{ .status = l.status_out, .pts = l.current_pts };
+    }
+
+    /// `ff_inlink_request_frame`.
+    fn inlinkRequestFrame(g: *Graph, index: u32) void {
+        const l = g.linkAt(index);
+        l.frame_wanted_out = true;
+        g.setReady(l.src, 100);
+    }
+
+    /// `ff_inlink_set_status`: the input is closed from the destination;
+    /// its queued frames are dropped.
+    fn inlinkSetStatus(g: *Graph, index: u32, status: Status) void {
+        const l = g.linkAt(index);
+        if (l.status_out != .none) return;
+        l.frame_wanted_out = false;
+        l.frame_blocked_in = false;
+        g.setOutStatus(index, status, null);
+        const l2 = g.linkAt(index);
+        for (l2.fifo.items[l2.head..]) |*f| {
+            f.free(g.gpa);
+            g.queued -= 1;
+        }
+        l2.fifo.clearRetainingCapacity();
+        l2.head = 0;
+        if (l2.status_in == .none) l2.status_in = status;
+    }
+
+    /// `ff_outlink_get_status`.
+    fn outlinkStatus(g: *Graph, index: u32) Status {
+        return g.linkAt(index).status_in;
+    }
+
+    /// `ff_filter_graph_run_once`: activates the most ready filter, the
+    /// first in graph order among equals; null when none is ready.
+    fn runOnce(g: *Graph) RunError!?Activation {
+        var best: u32 = 0;
+        for (g.nodes.items, 0..) |n, i| {
+            if (n.ready > g.nodes.items[best].ready) best = @intCast(i);
+        }
+        if (g.nodes.items[best].ready == 0) return null;
+        return try g.activate(best);
+    }
+
+    /// `ff_filter_activate`.
+    fn activate(g: *Graph, node: u32) RunError!Activation {
+        const n = &g.nodes.items[node];
+        n.ready = 0;
+        switch (n.kind) {
+            .source => return g.activateSource(node),
+            // buffersink: the frame waits for get_frame_internal.
+            .sink => return .ok,
+            .filter => |*f| switch (f.*) {
+                .anull, .aformat, .volume, .channelmap, .pan => try g.activateDefault(node),
+                .aresample => try g.activateResample(node),
+                .atrim => try g.activateTrim(node),
+                .asetpts => try g.activateSetPts(node),
+                .asplit => try g.activateSplit(node),
+                .channelsplit => try g.activateChannelSplit(node),
+                .amix => try g.activateMix(node),
+            },
+        }
+        return .ok;
+    }
+
+    /// buffersrc's `activate`.
+    fn activateSource(g: *Graph, node: u32) Activation {
+        const n = &g.nodes.items[node];
+        const s = &n.kind.source;
+        const out = n.outputs[0].?;
+        if (!s.eof and g.outlinkStatus(out) != .none) {
+            s.eof = true;
+            return .ok;
+        }
+        if (s.eof) {
+            g.setInStatus(out, .eof, s.last_pts);
+            return .ok;
+        }
+        return .buffersrc_empty;
+    }
+
+    /// `filter_activate_default`, for the filters with `filter_frame`.
+    fn activateDefault(g: *Graph, node: u32) RunError!void {
+        const n = &g.nodes.items[node];
+        var eofs: usize = 0;
+        for (n.outputs) |o| eofs += @intFromBool(g.outlinkStatus(o.?) == .eof);
+        if (n.outputs.len > 0 and eofs == n.outputs.len) {
+            for (n.inputs) |i| g.inlinkSetStatus(i.?, .eof);
+            return;
+        }
+        for (n.inputs) |i| {
+            if (g.linkAt(i.?).queued() > 0) return g.filterFrameToFilter(i.?);
+        }
+        for (n.inputs) |i| {
+            const l = g.linkAt(i.?);
+            if (l.status_in != .none and l.status_out == .none) return g.forwardStatusChange(node, i.?);
+        }
+        for (n.outputs) |o| {
+            const l = g.linkAt(o.?);
+            if (l.frame_wanted_out and !l.frame_blocked_in) return g.requestFrameToFilter(o.?);
+        }
+        for (n.outputs) |o| {
+            if (g.linkAt(o.?).frame_wanted_out) return g.requestFrameToFilter(o.?);
+        }
+    }
+
+    /// `filter_frame_to_filter`.
+    fn filterFrameToFilter(g: *Graph, index: u32) RunError!void {
+        const frame = g.consumeFrame(index).?;
+        const dst = g.linkAt(index).dst;
+        g.unblock(dst);
+        // filter_frame sees the count before the frame.
+        g.linkAt(index).frame_count_out -= 1;
+        try g.callFilterFrame(dst, index, frame);
+        g.linkAt(index).frame_count_out += 1;
+        g.setReady(dst, 300);
+    }
+
+    /// The `filter_frame` of the filters activated by default.
+    fn callFilterFrame(g: *Graph, node: u32, in: u32, frame: Owned) RunError!void {
+        var f = frame;
+        const n = &g.nodes.items[node];
+        const out = n.outputs[0].?;
+        switch (n.run) {
+            .volume => |*v| v.filterFrame(f.data, f.frameCount(), f.pts, g.linkAt(in).frame_count_out) catch |err| {
+                f.free(g.gpa);
+                return err;
+            },
+            .pan => |*p| {
+                defer f.free(g.gpa);
+                return g.filterFrame(out, try p.filterFrame(g.gpa, &f));
+            },
+            else => if (n.kind.filter == .channelmap) {
+                defer f.free(g.gpa);
+                return g.filterFrame(out, try n.kind.filter.channelmap.output(g.gpa, &f, g.linkAt(out).format()));
+            },
+        }
+        // anull, aformat and volume pass the frame on.
+        try g.filterFrame(out, f);
+    }
+
+    /// `forward_status_change`: requests on the outputs until the input's
+    /// status is acknowledged, or every output is closed.
+    fn forwardStatusChange(g: *Graph, node: u32, in: u32) void {
+        const outputs = g.nodes.items[node].outputs;
+        if (outputs.len == 0) return;
+        var out: usize = 0;
+        var progress: usize = 0;
+        while (g.linkAt(in).status_out == .none) {
+            const o = outputs[out].?;
+            if (g.linkAt(o).status_in == .none) {
+                progress += 1;
+                g.requestFrameToFilter(o);
+            }
+            out += 1;
+            if (out == outputs.len) {
+                if (progress == 0) {
+                    g.setOutStatus(in, g.linkAt(in).status_in, g.linkAt(in).status_in_pts);
+                    return;
+                }
+                progress = 0;
+                out = 0;
             }
         }
+        g.setReady(node, 200);
+    }
+
+    /// `FF_FILTER_FORWARD_STATUS_BACK`: true when the output is closed,
+    /// which closes the input.
+    fn forwardStatusBack(g: *Graph, out: u32, in: u32) bool {
+        const status = g.outlinkStatus(out);
+        if (status == .none) return false;
+        g.inlinkSetStatus(in, status);
+        return true;
+    }
+
+    /// `FF_FILTER_FORWARD_WANTED`.
+    fn forwardWanted(g: *Graph, out: u32, in: u32) void {
+        if (g.linkAt(out).frame_wanted_out) g.inlinkRequestFrame(in);
+    }
+
+    /// aresample's `activate`.
+    fn activateResample(g: *Graph, node: u32) RunError!void {
+        const n = &g.nodes.items[node];
+        const in = n.inputs[0].?;
+        const out = n.outputs[0].?;
+        const r = &n.run.resample;
+        if (g.forwardStatusBack(out, in)) return;
+        if (r.more()) {
+            if (try r.flush(false)) |o| return g.filterFrame(out, o);
+        }
+        r.clearMore();
+        while (g.consumeFrame(in)) |frame| {
+            var f = frame;
+            defer f.free(g.gpa);
+            if (try r.filterFrame(&f)) |o| return g.filterFrame(out, o);
+        }
+        if (g.acknowledgeStatus(in)) |st| {
+            if (try r.flush(true)) |o| return g.filterFrame(out, o);
+            g.setInStatus(out, st.status, null);
+            return;
+        }
+        g.forwardWanted(out, in);
+    }
+
+    /// atrim's `activate`.
+    fn activateTrim(g: *Graph, node: u32) RunError!void {
+        const n = &g.nodes.items[node];
+        const in = n.inputs[0].?;
+        const out = n.outputs[0].?;
+        const t = &n.run.trim;
+        if (g.forwardStatusBack(out, in)) return;
+        while (g.consumeFrame(in)) |frame| {
+            var f = frame;
+            defer f.free(g.gpa);
+            const was_eof = t.eof;
+            const result = try t.filterFrame(g.gpa, &f);
+            if (t.eof and !was_eof) {
+                // The end: both sides closed.
+                g.inlinkSetStatus(in, .eof);
+                g.setInStatus(out, .eof, f.pts);
+            }
+            if (result) |o| return g.filterFrame(out, o);
+        }
+        if (g.acknowledgeStatus(in)) |st| return g.setInStatus(out, st.status, st.pts);
+        g.forwardWanted(out, in);
+    }
+
+    /// asetpts's `activate`.
+    fn activateSetPts(g: *Graph, node: u32) RunError!void {
+        const n = &g.nodes.items[node];
+        const in = n.inputs[0].?;
+        const out = n.outputs[0].?;
+        if (g.forwardStatusBack(out, in)) return;
+        if (g.consumeFrame(in)) |frame| {
+            var f = frame;
+            f.pts = n.run.setpts.filterFrame(f.pts, f.frameCount());
+            return g.filterFrame(out, f);
+        }
+        if (g.acknowledgeStatus(in)) |st| return g.setInStatus(out, st.status, null);
+        g.forwardWanted(out, in);
+    }
+
+    /// asplit's `activate`: a copy of each frame to every open output.
+    fn activateSplit(g: *Graph, node: u32) RunError!void {
+        const n = &g.nodes.items[node];
+        const in = n.inputs[0].?;
+        var eofs: usize = 0;
+        for (n.outputs) |o| eofs += @intFromBool(g.outlinkStatus(o.?) == .eof);
+        if (eofs == n.outputs.len) return g.inlinkSetStatus(in, .eof);
+        if (g.consumeFrame(in)) |frame| {
+            var f = frame;
+            defer f.free(g.gpa);
+            for (n.outputs) |o| {
+                if (g.outlinkStatus(o.?) != .none) continue;
+                const copy = try cloneOwned(g.gpa, &f);
+                try g.filterFrame(o.?, copy);
+            }
+            return;
+        }
+        if (g.acknowledgeStatus(in)) |st| {
+            for (n.outputs) |o| {
+                if (g.outlinkStatus(o.?) == .none) g.setInStatus(o.?, st.status, st.pts);
+            }
+            return;
+        }
+        for (n.outputs) |o| {
+            if (g.linkAt(o.?).frame_wanted_out) return g.inlinkRequestFrame(in);
+        }
+    }
+
+    /// channelsplit's `activate`: each output its channel's plane.
+    fn activateChannelSplit(g: *Graph, node: u32) RunError!void {
+        const n = &g.nodes.items[node];
+        const in = n.inputs[0].?;
+        for (n.outputs) |o| {
+            const status = g.outlinkStatus(o.?);
+            if (status != .none) {
+                for (n.inputs) |i| g.inlinkSetStatus(i.?, status);
+                return;
+            }
+        }
+        if (g.consumeFrame(in)) |frame| {
+            var f = frame;
+            defer f.free(g.gpa);
+            for (n.outputs, 0..) |o, i| {
+                if (g.outlinkStatus(o.?) != .none) continue;
+                const part = try n.kind.filter.channelsplit.output(g.gpa, &f, i, g.linkAt(o.?).format());
+                try g.filterFrame(o.?, part);
+            }
+        }
+        if (g.acknowledgeStatus(in)) |st| {
+            for (n.outputs) |o| {
+                if (g.outlinkStatus(o.?) == .none) g.setInStatus(o.?, st.status, st.pts);
+            }
+            return;
+        }
+        for (n.outputs) |o| {
+            if (g.linkAt(o.?).frame_wanted_out) return g.inlinkRequestFrame(in);
+        }
+    }
+
+    /// amix's `activate`.
+    fn activateMix(g: *Graph, node: u32) RunError!void {
+        const n = &g.nodes.items[node];
+        const out = n.outputs[0].?;
+        const r = &n.run.mix;
+        const out_status = g.outlinkStatus(out);
+        if (out_status != .none) {
+            for (n.inputs) |i| g.inlinkSetStatus(i.?, out_status);
+            return;
+        }
+        for (n.inputs, 0..) |in, i| {
+            const frame = g.consumeFrame(in.?) orelse continue;
+            var f = frame;
+            defer f.free(g.gpa);
+            var pts: ?i64 = null;
+            if (i == 0) {
+                // av_rescale_q of AV_NOPTS_VALUE is -INT64_MAX's.
+                const value = f.pts orelse -std.math.maxInt(i64);
+                pts = time.rescale(value, g.linkAt(in.?).time_base, g.linkAt(out).time_base, .nearest) catch value;
+            }
+            try r.write(i, &f, pts);
+            try g.mixOutput(node);
+        }
+        for (n.inputs, 0..) |in, i| {
+            const st = g.acknowledgeStatus(in.?) orelse continue;
+            if (st.status == .eof) {
+                r.endInput(i);
+                if (!r.isOn(i) and r.inputs == 1) return g.setInStatus(out, st.status, st.pts);
+            }
+        }
+        if (r.ended()) return g.setInStatus(out, .eof, r.next_pts);
+        if (g.linkAt(out).frame_wanted_out) {
+            if (!r.isOn(0)) return g.mixRequest(node, 1);
+            if (r.frameCount() == 0) return g.inlinkRequestFrame(n.inputs[0].?);
+            return g.mixRequest(node, r.nextFrameSize());
+        }
+    }
+
+    /// amix's `output_frame`, its result sent on.
+    fn mixOutput(g: *Graph, node: u32) RunError!void {
+        const n = &g.nodes.items[node];
+        const out = n.outputs[0].?;
+        switch (try n.run.mix.output()) {
+            .none => {},
+            .frame => |f| try g.filterFrame(out, f),
+            .end => g.setInStatus(out, .eof, n.run.mix.next_pts),
+        }
+    }
+
+    /// amix's `request_samples`: a frame wanted from the first open input
+    /// short of `min` samples, else the output.
+    fn mixRequest(g: *Graph, node: u32, min_in: u32) RunError!void {
+        const n = &g.nodes.items[node];
+        const r = &n.run.mix;
+        // FFmpeg asserts several inputs here.
+        if (r.inputs < 2) return g.mixOutput(node);
+        var min = min_in;
+        if (min == 1 and r.duration == .first) min = r.fifoSize(0);
+        for (1..r.inputs) |i| {
+            if (!r.isOn(i) or r.isEof(i)) continue;
+            if (r.fifoSize(i) >= min) continue;
+            return g.inlinkRequestFrame(n.inputs[i].?);
+        }
+        return g.mixOutput(node);
     }
 
     // Frames ----------------------------------------------------------------
 
-    /// The source's layout once configured: an unspecified one takes its
-    /// link's (`config_props`).
-    fn sourceLayout(g: *const Graph) Layout {
-        return g.links.items[g.nodes.items[0].output.?].layout;
-    }
-
-    /// Copies `frame` into the graph; `.full` when the previous frame has
-    /// not gone in yet, and `receive` must come first.
-    pub fn send(g: *Graph, frame: Frame) SendError!stage.Send {
+    /// `av_buffersrc_add_frame` on source `i`: the frame is copied and
+    /// queued on its link.
+    pub fn sendTo(g: *Graph, i: usize, frame: Frame) SendError!void {
         if (!g.configured) return error.NotConfigured;
-        if (g.input_ended) return error.InputAfterEnd;
-        if (g.drained) return error.GraphEnded;
-        if (g.pending != null) return .full;
+        const source = g.sources.items[i];
+        const n = &g.nodes.items[source.node];
+        if (n.kind.source.eof) return error.GraphEnded;
         g.freeLast();
-        const want = g.source.format;
-        const layout = g.sourceLayout();
+        const out = n.outputs[0].?;
+        const want = source.spec.format;
+        // An unspecified layout takes the link's (config_props), and so
+        // does a frame's of the same count.
+        const layout = g.linkAt(out).layout;
         var frame_layout = frame.format.layout;
-        // An unspecified layout of the count takes the source's.
         if (frame_layout == .unspecified and frame_layout.channelCount() == layout.channelCount()) frame_layout = layout;
         if (frame.format.sample_rate != want.sample_rate or frame.format.sample_format != want.sample_format or !frame_layout.eql(&layout))
             return error.FormatChange;
         const count = std.math.cast(u32, frame.frameCount()) orelse return error.OutOfMemory;
         if (count == 0) return error.EmptyFrame;
+        n.kind.source.last_pts = frame.pts;
         var format = frame.format;
         format.layout = layout;
         const owned = try Owned.alloc(g.gpa, format, count, frame.pts);
         @memcpy(owned.data, frame.data);
-        g.pending = owned;
+        try g.filterFrame(out, owned);
+    }
+
+    /// Ends source `i` (`av_buffersrc_add_frame(NULL)`). Idempotent.
+    pub fn closeSource(g: *Graph, i: usize) void {
+        const n = &g.nodes.items[g.sources.items[i].node];
+        n.kind.source.eof = true;
+        if (g.configured) g.setInStatus(n.outputs[0].?, .eof, n.kind.source.last_pts);
+    }
+
+    /// `av_buffersink_get_frame` on sink `j` (`get_frame_internal`).
+    pub fn receiveFrom(g: *Graph, j: usize) ReceiveError!stage.Receive(Frame) {
+        if (!g.configured) return error.NotConfigured;
+        g.freeLast();
+        const in = g.nodes.items[g.sinks.items[j].node].inputs[0].?;
+        var sources_empty = false;
+        while (true) {
+            if (g.consumeFrame(in)) |o| {
+                g.last = o;
+                return .{ .output = .{ .format = o.format, .data = o.data, .pts = o.pts } };
+            }
+            if (g.acknowledgeStatus(in) != null) return .drained;
+            if (g.linkAt(in).frame_wanted_out) {
+                if (try g.runOnce()) |result| {
+                    if (result == .buffersrc_empty) sources_empty = true;
+                } else {
+                    if (sources_empty) return .need_input;
+                    g.inlinkRequestFrame(in);
+                }
+            } else {
+                g.inlinkRequestFrame(in);
+            }
+        }
+    }
+
+    /// `sendTo` the first source, as a stage: always `accepted`, as
+    /// libavfilter queues every frame.
+    pub fn send(g: *Graph, frame: Frame) SendError!stage.Send {
+        try g.sendTo(0, frame);
         return .accepted;
     }
 
-    /// Ends the input (`av_buffersrc_add_frame(NULL)`). Idempotent.
+    /// `closeSource` of the first source.
     pub fn finishInput(g: *Graph) void {
-        g.input_ended = true;
+        g.closeSource(0);
     }
 
-    /// The next output frame, `need_input` when the chain needs a frame
-    /// sent, or `drained` once the input has ended and everything came out.
+    /// `receiveFrom` the first sink.
     pub fn receive(g: *Graph) ReceiveError!stage.Receive(Frame) {
-        if (!g.configured) return error.NotConfigured;
-        g.freeLast();
-        if (g.drained) return .drained;
-        const sink = &g.nodes.items[g.sinkIndex()];
-        switch (try g.pull(g.links.items[sink.input.?].src)) {
-            .frame => |o| {
-                g.last = o;
-                return .{ .output = .{ .format = o.format, .data = o.data, .pts = o.pts } };
-            },
-            .need_input => return .need_input,
-            .eof => {
-                g.drained = true;
-                return .drained;
-            },
-        }
+        return g.receiveFrom(0);
     }
 
     fn freeLast(g: *Graph) void {
         if (g.last) |*l| l.free(g.gpa);
         g.last = null;
     }
-
-    /// The next frame out of `node`, pulled through its upstream.
-    fn pull(g: *Graph, node: u32) ReceiveError!Pull {
-        const n = &g.nodes.items[node];
-        switch (n.kind) {
-            .source => {
-                if (g.pending) |p| {
-                    g.pending = null;
-                    return .{ .frame = p };
-                }
-                return if (g.input_ended) .eof else .need_input;
-            },
-            .sink => unreachable,
-            .filter => {},
-        }
-        const upstream = g.links.items[n.input.?].src;
-        switch (n.run) {
-            .none => return g.pull(upstream),
-            .volume => |*v| {
-                const r = try g.pull(upstream);
-                if (r == .frame) {
-                    var frame = r.frame;
-                    v.filterFrame(frame.data, frame.frameCount(), frame.pts, n.frames_in) catch |err| {
-                        frame.free(g.gpa);
-                        return err;
-                    };
-                    n.frames_in += 1;
-                }
-                return r;
-            },
-            .trim => |*t| {
-                while (true) {
-                    if (t.eof) return .eof;
-                    switch (try g.pull(upstream)) {
-                        .frame => |in| {
-                            var frame = in;
-                            defer frame.free(g.gpa);
-                            if (try t.filterFrame(g.gpa, &frame)) |o| return .{ .frame = o };
-                        },
-                        .need_input => return .need_input,
-                        .eof => return .eof,
-                    }
-                }
-            },
-            .setpts => |*r| {
-                var result = try g.pull(upstream);
-                if (result == .frame) result.frame.pts = r.filterFrame(result.frame.pts, result.frame.frameCount());
-                return result;
-            },
-            .resample => |*r| {
-                // aresample's activate: buffered output, then input, then
-                // the flush at the end.
-                if (r.more()) {
-                    if (try r.flush(false)) |o| return .{ .frame = o };
-                    r.clearMore();
-                }
-                while (true) {
-                    switch (try g.pull(upstream)) {
-                        .frame => |in| {
-                            var frame = in;
-                            defer frame.free(g.gpa);
-                            if (try r.filterFrame(&frame)) |o| return .{ .frame = o };
-                        },
-                        .need_input => return .need_input,
-                        .eof => {
-                            if (!n.ended) {
-                                if (try r.flush(true)) |o| return .{ .frame = o };
-                                n.ended = true;
-                            }
-                            return .eof;
-                        },
-                    }
-                }
-            },
-        }
-    }
 };
 
-/// `find_best_sample_fmt_of_2`: the lower `get_fmt_score`, the second on a
-/// tie; -1 is no format.
-fn bestOfTwo(dst1: i32, dst2: i32, src: i32) i32 {
-    return if (formatScore(dst1, src) < formatScore(dst2, src)) dst1 else dst2;
-}
-
-/// `get_fmt_score`; FFmpeg's helpers give an invalid format 0 bytes, not
-/// planar, and no packed form.
-fn formatScore(dst_id: i32, src_id: i32) i32 {
-    const dst = SampleFormat.fromFfmpegId(dst_id);
-    const src = SampleFormat.fromFfmpegId(src_id).?;
-    const dst_planar = if (dst) |d| d.isPlanar() else false;
-    const dst_bps: i32 = if (dst) |d| d.bytesPerSample() else 0;
-    const src_bps: i32 = src.bytesPerSample();
-    var score: i32 = 0;
-    if (dst_planar != src.isPlanar()) score += 1;
-    if (dst_bps < src_bps) score += 100 * (src_bps - dst_bps) else score += 10 * (dst_bps - src_bps);
-    const dst_packed: ?SampleFormat = if (dst) |d| d.packedForm() else null;
-    if (dst_packed == .s32 and src.packedForm() == .flt) score += 20;
-    if (dst_packed == .flt and src.packedForm() == .s32) score += 2;
-    return score;
-}
-
-fn chBit(c: Channel) u64 {
-    const one: u64 = 1;
-    return one << @intCast(c.id());
-}
-
-const center_pair = chBit(.front_left_of_center) | chBit(.front_right_of_center);
-const front_pair = chBit(.front_left) | chBit(.front_right);
-const wide_pair = chBit(.wide_left) | chBit(.wide_right);
-const side_pair = chBit(.side_left) | chBit(.side_right);
-const direct_pair = chBit(.surround_direct_left) | chBit(.surround_direct_right);
-const back_pair = chBit(.back_left) | chBit(.back_right);
-const front_center = chBit(.front_center);
-const back_center = chBit(.back_center);
-const lfe = chBit(.low_frequency);
-
-/// `ch_subst`: pairs a layout may stand in for, by priority.
-const substitutions = [_][2]u64{
-    .{ front_pair, center_pair },  .{ front_pair, wide_pair },     .{ front_pair, front_center },
-    .{ center_pair, front_pair },  .{ center_pair, wide_pair },    .{ center_pair, front_center },
-    .{ wide_pair, front_pair },    .{ wide_pair, center_pair },    .{ wide_pair, front_center },
-    .{ front_center, front_pair }, .{ front_center, center_pair }, .{ front_center, wide_pair },
-    .{ side_pair, direct_pair },   .{ side_pair, back_pair },      .{ side_pair, back_center },
-    .{ back_pair, direct_pair },   .{ back_pair, side_pair },      .{ back_pair, back_center },
-    .{ back_center, back_pair },   .{ back_center, direct_pair },  .{ back_center, side_pair },
-};
-
-/// A layout as `swap_channel_layouts_on_filter` rewrites it: replaced by a
-/// mask when a subset of it is taken (`av_channel_layout_from_mask`, which
-/// leaves it unchanged for an empty mask).
-const Working = union(enum) {
-    /// An unspecified layout, or FFmpeg's zeroed one: no channels.
-    none,
-    native: u64,
-    custom: *const Layout,
-
-    fn of(l: *const Layout) Working {
-        return switch (l.*) {
-            .unspecified => .none,
-            .native => |m| .{ .native = m },
-            .custom => .{ .custom = l },
-        };
-    }
-
-    /// `av_channel_layout_subset`.
-    fn subset(w: Working, bits: u64) u64 {
-        return switch (w) {
-            .none => 0,
-            .native => |m| m & bits,
-            .custom => |l| bits: {
-                var result: u64 = 0;
-                for (0..l.channelCount()) |i| {
-                    const id = l.channel(@intCast(i)).id();
-                    if (id >= 0 and id < 64 and bits & (@as(u64, 1) << @intCast(id)) != 0) result |= @as(u64, 1) << @intCast(id);
-                }
-                break :bits result;
-            },
-        };
-    }
-
-    fn hasLfe(w: Working) bool {
-        return switch (w) {
-            .none => false,
-            .native => |m| m & lfe != 0,
-            .custom => |l| for (0..l.channelCount()) |i| {
-                if (l.channel(@intCast(i)) == .low_frequency) break true;
-            } else false,
-        };
-    }
-
-    fn keep(w: *Working, bits: u64) void {
-        const m = w.subset(bits);
-        if (m != 0) w.* = .{ .native = m };
-    }
-
-    /// `u.mask`. FFmpeg reads a custom layout's map pointer here when no
-    /// channel but LFE is in the mask; the port counts no channels.
-    fn mask(w: Working) u64 {
-        return switch (w) {
-            .native => |m| m,
-            else => 0,
-        };
-    }
-};
-
-/// The score of `out` for an input of `in`, and the channel count change.
-fn layoutScore(in_layout: *const Layout, out_layout: *const Layout) struct { score: i32, count_diff: i32 } {
-    const in_count: i32 = @intCast(in_layout.channelCount());
-    const out_count: i32 = @intCast(out_layout.channelCount());
-    const count_diff = out_count - in_count;
-    var score: i32 = 100000;
-    var in = Working.of(in_layout);
-    var out = Working.of(out_layout);
-    if (!formats.known(in_layout) or !formats.known(out_layout)) {
-        const change: i32 = @intCast(@abs(out_count - in_count));
-        const fewer: i32 = if (in_count > out_count) 10000 else 0;
-        score -= 10000 + change + fewer;
-        in = .none;
-        out = .none;
-    }
-    for (substitutions) |pair| {
-        const cmp0 = pair[0];
-        const cmp1 = pair[1];
-        if (in.subset(cmp0) != 0 and out.subset(cmp0) == 0 and out.subset(cmp1) != 0 and in.subset(cmp1) == 0) {
-            in.keep(~cmp0);
-            out.keep(~cmp1);
-            score += 10 * @as(i32, @popCount(cmp1)) - 2;
-        }
-    }
-    // No penalty for a missing LFE.
-    if (in.hasLfe() and out.hasLfe()) score += 10;
-    in.keep(~lfe);
-    out.keep(~lfe);
-    const matched: i32 = @popCount(in.mask() & out.mask());
-    const extra: i32 = @popCount(out.mask() & ~in.mask());
-    score += 10 * matched - 5 * extra;
-    return .{ .score = score, .count_diff = count_diff };
+/// `av_frame_clone`, as an owned copy.
+fn cloneOwned(gpa: std.mem.Allocator, f: *const Owned) error{OutOfMemory}!Owned {
+    const copy = try Owned.alloc(gpa, f.format, f.frameCount(), f.pts);
+    @memcpy(copy.data, f.data);
+    return copy;
 }
 
 const testing = std.testing;
@@ -1104,14 +1262,13 @@ test "frames go through the chain and the end drains it" {
     try g.configure();
     const values = [_]i16{ 1, -2, 30000 };
     try testing.expectEqual(stage.Send.accepted, try g.send(try Frame.fromS16(format, &values, 5)));
-    try testing.expectEqual(stage.Send.full, try g.send(try Frame.fromS16(format, &values, 8)));
     const r = try g.receive();
     try testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&[_]i16{ 2, -4, 32767 }), r.output.data);
     try testing.expectEqual(5, r.output.pts);
     try testing.expectEqual(.need_input, try g.receive());
     g.finishInput();
     try testing.expectEqual(.drained, try g.receive());
-    try testing.expectError(error.InputAfterEnd, g.send(try Frame.fromS16(format, &values, 8)));
+    try testing.expectError(error.GraphEnded, g.send(try Frame.fromS16(format, &values, 8)));
     const other = try audio.Format.init(8000, 2, .s16);
     var g2 = try Graph.init(gpa, .{ .format = format }, &.{}, .{}, .{});
     defer g2.deinit();
@@ -1221,6 +1378,43 @@ fn textChain(gpa: std.mem.Allocator) !void {
 
 test "a graph from text leaks nothing when an allocation fails" {
     try testing.checkAllAllocationFailures(testing.allocator, textChain, .{});
+}
+
+fn branchingGraph(gpa: std.mem.Allocator) !void {
+    const stereo = try audio.Format.init(8000, 2, .s16);
+    const mono = try audio.Format.init(8000, 1, .flt);
+    var g = try Graph.initGraph(gpa, &.{ .{ .name = "a", .spec = .{ .format = stereo } }, .{ .name = "b", .spec = .{ .format = mono } } }, "[a]asplit[x][y];[x]channelsplit[l][r];[l]pan=mono|c0=0.5*c0[l2];[l2][b]amix[out0];[y]channelmap=1|0[out1];[r]anull[out2]", &.{ .{ .name = "out0", .spec = .{} }, .{ .name = "out1", .spec = .{} }, .{ .name = "out2", .spec = .{} } }, .{ .max_queued_frames = 64 });
+    defer g.deinit();
+    try g.configure();
+    var values: [200]i16 = @splat(1000);
+    const floats: [100]f32 = @splat(0.25);
+    for (0..2) |_| {
+        try g.sendTo(0, try Frame.fromS16(stereo, &values, null));
+        try g.sendTo(1, try Frame.init(mono, std.mem.sliceAsBytes(&floats), null));
+        for (0..3) |j| while (try g.receiveFrom(j) == .output) {};
+    }
+    g.closeSource(0);
+    g.closeSource(1);
+    for (0..3) |j| while (try g.receiveFrom(j) == .output) {};
+}
+
+test "a branching graph leaks nothing when an allocation fails" {
+    try testing.checkAllAllocationFailures(testing.allocator, branchingGraph, .{});
+}
+
+test "the queue limit stops an unread branch" {
+    const gpa = testing.allocator;
+    const format = try audio.Format.init(8000, 1, .s16);
+    var g = try Graph.initGraph(gpa, &.{.{ .name = "in", .spec = .{ .format = format } }}, "[in]asplit[out0][out1]", &.{ .{ .name = "out0", .spec = .{} }, .{ .name = "out1", .spec = .{} } }, .{ .max_queued_frames = 2 });
+    defer g.deinit();
+    try g.configure();
+    const values = [_]i16{ 1, 2, 3, 4 };
+    try g.sendTo(0, try Frame.fromS16(format, &values, 0));
+    // Read on one branch: the other keeps every frame.
+    try testing.expect(try g.receiveFrom(0) == .output);
+    try testing.expectEqual(1, g.queued);
+    try g.sendTo(0, try Frame.fromS16(format, &values, 4));
+    try testing.expectError(error.QueueFull, g.receiveFrom(0));
 }
 
 // zig/testing/vectors/graph.txt comes from the pinned FFmpeg's libavfilter
@@ -1494,4 +1688,221 @@ test "every graph equals FFmpeg's: its chain, converters and output" {
         start = end;
     }
     try testing.expectEqual(case_count, count);
+}
+
+// zig/testing/vectors/multigraph.txt comes from the pinned FFmpeg's
+// libavfilter through zig/testing/reference/multigraph_vectors.c, which
+// documents its lines.
+const multi_vectors = @embedFile("../testing/vectors/multigraph.txt");
+const multi_case_count = 48;
+
+const MultiCase = struct {
+    lines: []const []const u8,
+    at: usize = 0,
+
+    fn next(c: *MultiCase) []const u8 {
+        if (c.at >= c.lines.len) return "";
+        defer c.at += 1;
+        return c.lines[c.at];
+    }
+
+    fn peek(c: *const MultiCase) []const u8 {
+        return if (c.at < c.lines.len) c.lines[c.at] else "";
+    }
+};
+
+/// A sink's frame against the next line, `O <sink> ...`.
+fn expectFrame(arena: std.mem.Allocator, c: *MultiCase, sink: usize, frame: Frame, resampling: bool) !void {
+    const line = c.next();
+    var fields = std.mem.tokenizeScalar(u8, line, ' ');
+    if (!std.mem.eql(u8, fields.next() orelse "", "O")) {
+        std.debug.print("an extra frame of {d} on sink {d}, wanted '{s}'\n", .{ frame.frameCount(), sink, line });
+        return error.TestUnexpectedResult;
+    }
+    try testing.expectEqual(sink, try std.fmt.parseInt(usize, fields.next().?, 10));
+    try checkOutput(try arena.print("O {s}", .{fields.rest()}), frame, resampling);
+}
+
+fn expectEvent(c: *MultiCase, kind: []const u8, sink: usize) !void {
+    const line = c.next();
+    const want = try std.fmt.allocPrint(testing.allocator, "{s} {d}", .{ kind, sink });
+    defer testing.allocator.free(want);
+    if (!std.mem.eql(u8, line, want)) {
+        std.debug.print("wanted '{s}', got '{s}'\n", .{ line, want });
+        return error.TestUnexpectedResult;
+    }
+}
+
+/// Reads sink `j` until it has no frame or ends; returns whether it ended.
+fn readSink(arena: std.mem.Allocator, c: *MultiCase, g: *Graph, j: usize, resampling: bool) !bool {
+    while (true) {
+        switch (try g.receiveFrom(j)) {
+            .output => |frame| try expectFrame(arena, c, j, frame, resampling),
+            .need_input => {
+                try expectEvent(c, "W", j);
+                return false;
+            },
+            .drained => {
+                try expectEvent(c, "D", j);
+                return true;
+            },
+        }
+    }
+}
+
+fn runMultiCase(gpa: std.mem.Allocator, lines: []const []const u8) !void {
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var c: MultiCase = .{ .lines = lines, .at = 1 };
+    var buffer: [512]u8 = undefined;
+    var sources: std.ArrayList(Named(SourceSpec)) = .empty;
+    var first_pts: std.ArrayList(?i64) = .empty;
+    while (std.mem.startsWith(u8, c.peek(), "I ")) {
+        var fields = std.mem.tokenizeScalar(u8, c.next(), ' ');
+        _ = fields.next();
+        const i = try std.fmt.parseInt(usize, fields.next().?, 10);
+        const sample_format = SampleFormat.fromName(fields.next().?).?;
+        const rate = try std.fmt.parseInt(u32, fields.next().?, 10);
+        const layout = try Layout.parse(try hexText(&buffer, fields.next().?));
+        const tb = try time.TimeBase.init(try std.fmt.parseInt(u32, fields.next().?, 10), try std.fmt.parseInt(u32, fields.next().?, 10));
+        const pts_text = fields.next().?;
+        try first_pts.append(arena, if (std.mem.eql(u8, pts_text, "-")) null else try std.fmt.parseInt(i64, pts_text, 10));
+        try sources.append(arena, .{ .name = try arena.print("in{d}", .{i}), .spec = .{ .format = try audio.Format.initLayout(rate, layout, sample_format), .time_base = tb } });
+    }
+    var sinks: std.ArrayList(Named(SinkSpec)) = .empty;
+    while (std.mem.startsWith(u8, c.peek(), "K ")) {
+        var fields = std.mem.tokenizeScalar(u8, c.next(), ' ');
+        _ = fields.next();
+        const j = try std.fmt.parseInt(usize, fields.next().?, 10);
+        var sink_formats: std.ArrayList(SampleFormat) = .empty;
+        var sink_rates: std.ArrayList(u32) = .empty;
+        var sink_layouts: std.ArrayList(Layout) = .empty;
+        for (0..3) |k| {
+            const text = try arena.dupe(u8, try hexText(&buffer, fields.next().?));
+            var items = std.mem.tokenizeScalar(u8, text, ',');
+            while (items.next()) |item| switch (k) {
+                0 => try sink_formats.append(arena, SampleFormat.fromName(item).?),
+                1 => try sink_rates.append(arena, try std.fmt.parseInt(u32, item, 10)),
+                else => try sink_layouts.append(arena, try Layout.parse(item)),
+            };
+        }
+        try sinks.append(arena, .{ .name = try arena.print("out{d}", .{j}), .spec = .{ .sample_formats = sink_formats.items, .sample_rates = sink_rates.items, .layouts = sink_layouts.items } });
+    }
+    const limit = try std.fmt.parseInt(u32, c.next()[2..], 10);
+    const text = try arena.dupe(u8, try hexText(&buffer, c.next()[2..]));
+    const script = c.next()[2..];
+    const outcome = c.peek();
+    var recorder: diagnostics.Recorder = .{};
+    var g = Graph.initGraph(gpa, sources.items, text, sinks.items, .{ .max_queued_frames = limit, .diagnostics = recorder.sink(.err) }) catch |err| {
+        if (std.mem.eql(u8, outcome, "X")) return;
+        if (std.mem.eql(u8, outcome, "E parse")) {
+            const want = try hexText(&buffer, lines[c.at + 1][2..]);
+            if (recorder.count > 0) try testing.expectEqualStrings(want, recorder.firstMessage());
+            return;
+        }
+        return err;
+    };
+    defer g.deinit();
+    if (std.mem.eql(u8, outcome, "E parse") or std.mem.eql(u8, outcome, "X")) return error.TestUnexpectedResult;
+    g.configure() catch |err| {
+        if (std.mem.eql(u8, outcome, "E config")) return;
+        return err;
+    };
+    // L: every filter's outputs, in graph order.
+    var resampling = false;
+    for (g.nodes.items) |n| {
+        if (n.run == .resample and n.run.resample.mode == .resample) resampling = true;
+        for (n.outputs, 0..) |o, pad| {
+            const l = &g.links.items[o.?];
+            var describe: [256]u8 = undefined;
+            var w: std.Io.Writer = .fixed(&describe);
+            try l.layout.describe(&w);
+            var hex_layout: [512]u8 = undefined;
+            var hw: std.Io.Writer = .fixed(&hex_layout);
+            for (w.buffered()) |b| try hw.print("{x:0>2}", .{b});
+            const want = try arena.print("L {s} {d} {s} {d} {s} {d} {s} {d} {d}", .{
+                n.label,       pad,             g.nodes.items[l.dst].label, l.dst_pad, l.sample_format.name(), l.sample_rate,
+                hw.buffered(), l.time_base.num, l.time_base.den,
+            });
+            try testing.expectEqualStrings(c.next(), want);
+        }
+    }
+    // The script.
+    var signals: std.ArrayList(resample.Signal) = .empty;
+    var sent: std.ArrayList(u64) = .empty;
+    for (sources.items, 0..) |_, i| {
+        try signals.append(arena, .{ .state = 1 + i });
+        try sent.append(arena, 0);
+    }
+    const ended = try arena.alloc(bool, sinks.items.len);
+    @memset(ended, false);
+    var steps = std.mem.tokenizeScalar(u8, script, ',');
+    var step: usize = 0;
+    while (steps.next()) |tok| : (step += 1) {
+        const index = try std.fmt.parseInt(usize, std.mem.sliceTo(tok[1..], ':'), 10);
+        const result: anyerror!void = switch (tok[0]) {
+            's' => send: {
+                const s = sources.items[index].spec;
+                const n = try std.fmt.parseInt(u32, tok[std.mem.findScalar(u8, tok, ':').? + 1 ..], 10);
+                const sample_format = s.format.sample_format;
+                const channels = s.format.channelCount();
+                const width = sample_format.bytesPerSample();
+                const data = try arena.alloc(u8, n * s.format.bytesPerFrame());
+                for (0..n) |k| {
+                    for (0..channels) |ch| {
+                        const offset = if (sample_format.isPlanar()) (ch * n + k) * width else (k * channels + ch) * width;
+                        storeGenerated(data[offset..], sample_format, signals.items[index].next(ch));
+                    }
+                }
+                const pts: ?i64 = if (first_pts.items[index]) |p| p + try time.rescale(@intCast(sent.items[index]), try time.TimeBase.ofSampleRate(s.format.sample_rate), s.time_base.?, .nearest) else null;
+                sent.items[index] += n;
+                break :send g.sendTo(index, try Frame.init(s.format, data, pts));
+            },
+            'c' => g.closeSource(index),
+            'r' => read: {
+                if (ended[index]) break :read;
+                ended[index] = readSink(arena, &c, &g, index, resampling) catch |err| {
+                    if (err == error.QueueFull) break :read err;
+                    return err;
+                };
+            },
+            else => return error.MalformedVector,
+        };
+        result catch |err| {
+            if (err != error.QueueFull and err != error.GraphEnded) return err;
+            try testing.expectEqualStrings(try arena.print("F {d}", .{step}), c.next());
+            return;
+        };
+    }
+    for (0..sinks.items.len) |j| {
+        if (ended[j]) continue;
+        ended[j] = readSink(arena, &c, &g, j, resampling) catch |err| {
+            if (err != error.QueueFull) return err;
+            try testing.expectEqualStrings(try arena.print("F {d}", .{step + j}), c.next());
+            return;
+        };
+    }
+    try testing.expectEqualStrings("Z", c.next());
+    try testing.expectEqual(lines.len, c.at);
+}
+
+test "every graph of several inputs and outputs equals FFmpeg's" {
+    const gpa = testing.allocator;
+    var lines: std.ArrayList([]const u8) = .empty;
+    defer lines.deinit(gpa);
+    var it = std.mem.tokenizeScalar(u8, multi_vectors, '\n');
+    while (it.next()) |line| try lines.append(gpa, line);
+    var count: usize = 0;
+    var start: usize = 0;
+    while (start < lines.items.len) : (count += 1) {
+        var end = start + 1;
+        while (end < lines.items.len and !std.mem.startsWith(u8, lines.items[end], "G ")) end += 1;
+        runMultiCase(gpa, lines.items[start..end]) catch |err| {
+            std.debug.print("multigraph vector {s}: {t}\n", .{ lines.items[start], err });
+            return err;
+        };
+        start = end;
+    }
+    try testing.expectEqual(multi_case_count, count);
 }

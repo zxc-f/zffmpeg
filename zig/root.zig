@@ -114,6 +114,8 @@ test {
     _ = @import("filter/formats.zig");
     _ = @import("filter/filters.zig");
     _ = @import("filter/parse.zig");
+    _ = @import("filter/negotiate.zig");
+    _ = @import("filter/multi.zig");
     _ = @import("filter/graph.zig");
     _ = @import("format/registry.zig");
     _ = @import("format/detect.zig");
