@@ -1047,6 +1047,7 @@ summary:
 | MD5 | FFmpeg never checks STREAMINFO's MD5. `flac.DecodedReader`'s `verify_md5` checks it, when set, against the decoded samples as the FLAC format defines the input (each sample signed little-endian in the fewest bytes holding its size), `Md5Mismatch` at `finish`. |
 | Probe output | `format=flac`, `codec=flac`, `sample_fmt` `s16` or `s32`, the channels, FFmpeg's layout and the rate from STREAMINFO (or the first frame header), STREAMINFO's sample count (`N/A` when it has none or no rate), and the VORBIS_COMMENT tags. The frames are not read, as ffprobe does not decode them; pictures and chapters, which FFmpeg reports as a stream and chapters, are not printed. |
 | Conversion | A FLAC input decodes in `av.convert` (and `zffmpeg`), which needs `Request.gpa` (`UnsupportedOperation` without it), as pcm_s16le or pcm_s32le, into every output a PCM input reaches: any encoder, layout and rate; its tags carry into a WAV output as FFmpeg's command carries them. Copy is `UnsupportedOperation` until a FLAC muxer exists (T26c). A packet the decoder refuses is reported to the diagnostic sink and skipped, as the ffmpeg program skips it. Because the output header holds STREAMINFO's sample count, rate and channels before the samples, decoding to another count fails with `FrameCountMismatch`, a mid-stream change with `UnsupportedFormat`, and a stream without a count writes only raw output (intentional differences: FFmpeg rewrites a seekable output's header and reconfigures its filters). Dither and resampler calls follow FFmpeg's frames, STREAMINFO's maximum block size each. |
+| Seeking | `flac.Demuxer.initSeekable`, `seekFrame` and `seekFile` (T26b) seek as FFmpeg does without `-fflags fastseek`, which ignores SEEKTABLE: `ff_seek_frame_binary`, bounded by the packets returned so far (libavformat's generic index), runs `ff_gen_search`'s interpolation, bisection and linear steps over `flac_read_timestamp`, a fresh parser fed the raw reads from each probed position; the packets then come from the landing position with its timestamp. Byte seeks clamp to the frames' start and the last byte. Packets carry their byte positions (av_parser_parse2's offsets). An intentional difference: FFmpeg fails every seek in a file with a PICTURE, which it makes a second stream. |
 | Writing | None until T26c. |
 
 FFmpeg's probe scores `fLaC` with a plausible STREAMINFO 100, other `fLaC`
@@ -1074,7 +1075,8 @@ summary:
 T52a's [seek API](zig/format/seek.zig) restates FFmpeg's `av_seek_frame`
 and `avformat_seek_file` for a seekable source; WAV and Wave64 (RIFF,
 RF64/BW64, Wave64) are its first containers (`wav.Parser.enableSeeking`,
-`seekFrame`, `seekFile`). [seek.txt](zig/testing/vectors/seek.txt), printed by
+`seekFrame`, `seekFile`), and FLAC (T26b) its second (see the
+[FLAC contract](#flac-contract)). [seek.txt](zig/testing/vectors/seek.txt), printed by
 [seek_vectors.c](zig/testing/reference/seek_vectors.c), is FFmpeg's result for
 every case on every WAV fixture. In summary:
 

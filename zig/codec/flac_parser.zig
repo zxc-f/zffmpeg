@@ -51,6 +51,10 @@ const Header = struct {
 pub const Output = struct {
     /// Input bytes consumed.
     consumed: usize,
+    /// flac_parse's own return value, negative when a frame ends before
+    /// the buffered bytes do: av_parser_parse2's next frame offset counts
+    /// from it.
+    index: i64 = 0,
     /// A frame or junk, borrowed until the next call; null for none.
     frame: ?[]const u8 = null,
     /// The frame's timestamp in samples, when the parser knows it.
@@ -311,6 +315,7 @@ pub const Parser = struct {
     pub fn parse(p: *Parser, input: []const u8) error{OutOfMemory}!Output {
         var out: Output = .{ .consumed = 0 };
         const index = try p.parseFrame(input, &out);
+        out.index = index;
         out.consumed = @intCast(@max(index, 0));
         if (out.frame) |frame| {
             if (frame.len == 0) out.frame = null;

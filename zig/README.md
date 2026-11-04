@@ -141,7 +141,7 @@ slowdowns of the default build.
 | `zig/format/caf.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. FFmpeg's `cafdec.c`, `caf.c` and `isom.h` were read for behavior only; no code is copied. |
 | `zig/format/seek.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. The API follows `libavformat/seek.c` and `avformat.h`; WAV's seek in `wav.zig` follows `wavdec.c` and `pcm.c` (`ff_pcm_read_seek`); no code is copied. |
 | `zig/testing/reference/seek_vectors.c` | `LGPL-2.1-or-later` (SPDX header) | Original reference tool: it seeks WAV fixtures with the pinned FFmpeg's public `libavformat` API to print the T52a oracle; not part of the port. |
-| `zig/testing/vectors/seek.txt` | Generated data | Printed by `seek_vectors.c` from the pinned `libavformat` and `libavcodec`; see the [reference README](testing/reference/README.md). |
+| `zig/testing/vectors/seek.txt`, `seek_flac.txt` | Generated data | Printed by `seek_vectors.c` from the pinned `libavformat` and `libavcodec`; see the [reference README](testing/reference/README.md). |
 | `zig/core/rational.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. The arithmetic follows `libavutil/rational.c`, `mathematics.c` and `common.h` at the pinned revision, its wrap-around included; no code is copied. |
 | `zig/testing/reference/rational_vectors.c` | `LGPL-2.1-or-later` (SPDX header) | Original reference tool: it calls the pinned FFmpeg's public `libavutil` rational and timestamp functions to print the T15 oracle; not part of the port. |
 | `zig/testing/vectors/rational.txt` | Generated data | Printed by `rational_vectors.c` from the pinned `libavutil`; see the [reference README](testing/reference/README.md). |

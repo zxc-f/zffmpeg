@@ -36,6 +36,8 @@ const pcm = @import("../codec/pcm.zig");
 const diagnostics = @import("../core/diagnostics.zig");
 const metadata = @import("../core/metadata.zig");
 const bits = @import("../codec/bits.zig");
+const seek = @import("seek.zig");
+const rational = @import("../core/rational.zig");
 
 /// Contract errors (see the FLAC fixture README), plus `IoFailure` for a
 /// failing reader and `OutOfMemory`.
@@ -617,7 +619,65 @@ const Queued = struct {
     pts: i64,
     dts: i64,
     duration: i64,
+    /// The packet's byte position (the parser's frame offset).
+    pos: i64,
 };
+
+/// An index entry (`AVIndexEntry`): a packet the caller has read.
+const IndexEntry = struct {
+    pos: i64,
+    timestamp: i64,
+    min_distance: i64 = 0,
+};
+
+/// av_parser_parse2's byte offsets, from the first read's position.
+const ParserOffsets = struct {
+    fetched: bool = false,
+    cur_offset: i64 = 0,
+    next_frame_offset: i64 = 0,
+    frame_offset: i64 = 0,
+
+    /// Before a parse call with the read at `pos`.
+    fn begin(o: *ParserOffsets, pos: i64) void {
+        if (o.fetched) return;
+        o.cur_offset = pos;
+        o.next_frame_offset = pos;
+        o.fetched = true;
+    }
+
+    /// After it: a frame's offset is where the last one ended.
+    fn end(o: *ParserOffsets, out: flac_parser.Output) void {
+        if (out.frame != null) {
+            o.frame_offset = o.next_frame_offset;
+            o.next_frame_offset = o.cur_offset + out.index;
+        }
+        o.cur_offset += @max(out.index, 0);
+    }
+};
+
+/// What a FLAC seek can fail with.
+pub const SeekError = Error || seek.Error || error{
+    /// FFmpeg's search finds no frame (`-1`).
+    SeekFailed,
+};
+
+/// ff_index_search_timestamp: the last entry at or before `wanted` with
+/// `backward`, else the first at or after it; null for none.
+fn searchIndex(entries: []const IndexEntry, wanted: i64, flags: seek.Flags) ?usize {
+    var a: isize = -1;
+    var b: isize = @intCast(entries.len);
+    if (b > 0 and entries[entries.len - 1].timestamp < wanted) a = b - 1;
+    while (b - a > 1) {
+        const m = @divTrunc(a + b, 2);
+        const timestamp = entries[@intCast(m)].timestamp;
+        if (timestamp >= wanted) b = m;
+        if (timestamp <= wanted) a = m;
+    }
+    // Every entry is a keyframe.
+    const m = if (flags.backward) a else b;
+    if (m < 0 or m >= entries.len) return null;
+    return @intCast(m);
+}
 
 /// avformat_find_stream_info reads at most this many packets ahead
 /// (`max_ts_probe`) while the first timestamp is unknown, and at most
@@ -643,6 +703,17 @@ pub const Demuxer = struct {
     start_time: ?i64 = null,
     probing: bool = true,
     eof: bool = false,
+    /// Set by `initSeekable`: the source, and the frames' absolute start
+    /// (libavformat's `data_offset`).
+    seeker: ?seek.Seeker = null,
+    data_offset: u64 = 0,
+    /// The offset of the next raw read.
+    raw_pos: u64 = 0,
+    offsets: ParserOffsets = .{},
+    /// The packets returned so far, which the seek search starts from.
+    index: std.ArrayList(IndexEntry) = .empty,
+    /// The error behind a failed `seekFile` step.
+    range_error: ?SeekError = null,
 
     /// Reads the header, keeping its tags, pictures, chapters and seek
     /// table; packets follow with `next`.
@@ -651,7 +722,19 @@ pub const Demuxer = struct {
         return .{ .gpa = gpa, .reader = reader, .info = info, .parser = .init(gpa) };
     }
 
+    /// `init` over a seekable source read from its start: packets carry
+    /// their byte positions, and `seekFrame` and `seekFile` work (T26b).
+    pub fn initSeekable(gpa: std.mem.Allocator, reader: *std.Io.Reader, seeker: seek.Seeker) Error!Demuxer {
+        var d = try init(gpa, reader);
+        d.seeker = seeker;
+        // The frames start where the bytes the header peeked do.
+        d.data_offset = seeker.position() - d.info.prefix_len;
+        d.raw_pos = d.data_offset;
+        return d;
+    }
+
     pub fn deinit(d: *Demuxer) void {
+        d.index.deinit(d.gpa);
         d.info.deinit(d.gpa);
         for (d.packet_buffer.items) |q| d.gpa.free(q.data);
         for (d.parse_queue.items) |q| d.gpa.free(q.data);
@@ -689,6 +772,8 @@ pub const Demuxer = struct {
         d.current = q.data;
         var pts = q.pts;
         var dts = q.dts;
+        // AVFMT_GENERIC_INDEX: every returned keyframe is indexed.
+        if (d.seeker != null) try d.addIndexEntry(q.pos, dts);
         if (isRelative(dts)) dts -= relative_ts_base;
         if (isRelative(pts)) pts -= relative_ts_base;
         return .{
@@ -698,6 +783,7 @@ pub const Demuxer = struct {
             .dts = if (dts == nopts) null else dts,
             .duration = if (q.duration == 0) null else q.duration,
             .flags = .{ .key = true },
+            .pos = if (d.seeker != null) @intCast(q.pos) else null,
         };
     }
 
@@ -722,7 +808,9 @@ pub const Demuxer = struct {
                 try d.parsePacket(&.{}, true);
                 break;
             }
-            try d.parsePacket(chunk[0..n], false);
+            const pos = d.raw_pos;
+            d.raw_pos += n;
+            try d.parsePacketAt(chunk[0..n], false, pos);
         }
         if (d.parse_queue.items.len == 0) return null;
         return d.parse_queue.orderedRemove(0);
@@ -731,10 +819,16 @@ pub const Demuxer = struct {
     /// parse_packet: everything the parser makes of `input`, into the
     /// parse queue with its timestamps.
     fn parsePacket(d: *Demuxer, input: []const u8, flush: bool) Error!void {
+        return d.parsePacketAt(input, flush, d.raw_pos);
+    }
+
+    fn parsePacketAt(d: *Demuxer, input: []const u8, flush: bool, pos: u64) Error!void {
         var rest = input;
         var got_output = flush;
         while (rest.len > 0 or (flush and got_output)) {
+            d.offsets.begin(@intCast(pos));
             const out = try d.parser.parse(rest);
+            d.offsets.end(out);
             rest = rest[out.consumed..];
             const frame = out.frame orelse {
                 got_output = false;
@@ -749,10 +843,242 @@ pub const Demuxer = struct {
             }
             const data = try d.gpa.dupe(u8, frame);
             errdefer d.gpa.free(data);
-            var q: Queued = .{ .data = data, .pts = out.pts orelse nopts, .dts = nopts, .duration = duration };
+            var q: Queued = .{ .data = data, .pts = out.pts orelse nopts, .dts = nopts, .duration = duration, .pos = d.offsets.frame_offset };
             d.computePktFields(&q);
             try d.parse_queue.append(d.gpa, q);
         }
+    }
+
+    /// ff_add_index_entry for a returned keyframe: sorted by timestamp, a
+    /// timestamp already there updated, a relative one made absolute.
+    fn addIndexEntry(d: *Demuxer, pos: i64, timestamp_in: i64) Error!void {
+        if (timestamp_in == nopts) return;
+        var timestamp = timestamp_in;
+        if (isRelative(timestamp)) timestamp -= relative_ts_base;
+        const entries = d.index.items;
+        const found = searchIndex(entries, timestamp, .{ .any = true });
+        if (found) |i| {
+            if (entries[i].timestamp != timestamp) {
+                if (entries[i].timestamp <= timestamp) return;
+                try d.index.insert(d.gpa, i, .{ .pos = pos, .timestamp = timestamp });
+                return;
+            }
+            entries[i].pos = pos;
+            entries[i].min_distance = 0;
+            return;
+        }
+        try d.index.append(d.gpa, .{ .pos = pos, .timestamp = timestamp });
+    }
+
+    /// ff_read_frame_flush: the queued packets and the parser dropped, the
+    /// running timestamp unknown (or relative before any was known).
+    fn readFrameFlush(d: *Demuxer) void {
+        for (d.packet_buffer.items) |q| d.gpa.free(q.data);
+        for (d.parse_queue.items) |q| d.gpa.free(q.data);
+        d.packet_buffer.clearRetainingCapacity();
+        d.parse_queue.clearRetainingCapacity();
+        d.parser.deinit();
+        d.parser = .init(d.gpa);
+        d.offsets = .{};
+        d.cur_dts = if (d.first_dts == nopts) relative_ts_base else nopts;
+        d.probing = false;
+        d.eof = false;
+    }
+
+    fn sourceSize(d: *const Demuxer) i64 {
+        const size = d.seeker.?.size() orelse return std.math.maxInt(i64);
+        return std.math.cast(i64, size) orelse std.math.maxInt(i64);
+    }
+
+    /// flac_read_timestamp: a fresh parser fed the raw reads from `pos.*`
+    /// until a frame with a timestamp; `pos.*` becomes that frame's start.
+    /// Each read goes to the parser once, as FFmpeg's loop feeds it.
+    fn readTimestamp(d: *Demuxer, pos: *i64) Error!i64 {
+        const seeker = d.seeker.?;
+        seeker.seekTo(@intCast(pos.*)) catch return error.IoFailure;
+        var parser: flac_parser.Parser = .init(d.gpa);
+        defer parser.deinit();
+        var offsets: ParserOffsets = .{};
+        var eof = false;
+        while (true) {
+            var chunk: [raw_packet_size]u8 = undefined;
+            var input: []const u8 = &.{};
+            if (!eof) {
+                const n = d.reader.readSliceShort(&chunk) catch return error.IoFailure;
+                if (n == 0) eof = true else input = chunk[0..n];
+            }
+            offsets.begin(pos.*);
+            const out = try parser.parse(input);
+            offsets.end(out);
+            if (out.frame) |frame| {
+                if (out.pts) |pts| {
+                    pos.* = offsets.next_frame_offset - @as(i64, @intCast(frame.len));
+                    return pts;
+                }
+            } else if (eof) return nopts;
+        }
+    }
+
+    /// ff_find_last_ts: the last frame's timestamp and position, searched
+    /// back from the end in doubling steps, then forward.
+    fn findLastTs(d: *Demuxer, ts: *i64, pos: *i64) Error!bool {
+        var step: i64 = 1024;
+        const filesize = d.sourceSize();
+        var pos_max = filesize - 1;
+        var limit: i64 = undefined;
+        var ts_max: i64 = undefined;
+        while (true) {
+            limit = pos_max;
+            pos_max = @max(0, pos_max - step);
+            ts_max = try d.readTimestamp(&pos_max);
+            step += step;
+            if (!(ts_max == nopts and 2 * limit > step)) break;
+        }
+        if (ts_max == nopts) return false;
+        while (true) {
+            var tmp_pos = pos_max + 1;
+            const tmp_ts = try d.readTimestamp(&tmp_pos);
+            if (tmp_ts == nopts) break;
+            ts_max = tmp_ts;
+            pos_max = tmp_pos;
+            if (tmp_pos >= filesize) break;
+        }
+        ts.* = ts_max;
+        pos.* = pos_max;
+        return true;
+    }
+
+    /// ff_gen_search: interpolation, then bisection, then a linear scan
+    /// between the bounds, over `readTimestamp`.
+    fn genSearch(d: *Demuxer, target_ts: i64, bounds: Bounds, backward: bool) Error!?struct { pos: i64, ts: i64 } {
+        var pos_min = bounds.pos_min;
+        var pos_max = bounds.pos_max;
+        var pos_limit = bounds.pos_limit;
+        var ts_min = bounds.ts_min;
+        var ts_max = bounds.ts_max;
+        if (ts_min == nopts) {
+            pos_min = @intCast(d.data_offset);
+            ts_min = try d.readTimestamp(&pos_min);
+            if (ts_min == nopts) return null;
+        }
+        if (ts_min >= target_ts) return .{ .pos = pos_min, .ts = ts_min };
+        if (ts_max == nopts) {
+            if (!try d.findLastTs(&ts_max, &pos_max)) return null;
+            pos_limit = pos_max;
+        }
+        if (ts_max <= target_ts) return .{ .pos = pos_max, .ts = ts_max };
+        var no_change: u32 = 0;
+        while (pos_min < pos_limit) {
+            var pos: i64 = switch (no_change) {
+                0 => rational.rescale(target_ts - ts_min, pos_max - pos_min, ts_max - ts_min) + pos_min - (pos_max - pos_limit),
+                1 => (pos_min + pos_limit) >> 1,
+                else => pos_min,
+            };
+            if (pos <= pos_min) {
+                pos = pos_min + 1;
+            } else if (pos > pos_limit) {
+                pos = pos_limit;
+            }
+            const start_pos = pos;
+            const ts = try d.readTimestamp(&pos);
+            no_change = if (pos == pos_max) no_change + 1 else 0;
+            if (ts == nopts) return null;
+            if (target_ts <= ts) {
+                pos_limit = start_pos - 1;
+                pos_max = pos;
+                ts_max = ts;
+            }
+            if (target_ts >= ts) {
+                pos_min = pos;
+                ts_min = ts;
+            }
+        }
+        return if (backward) .{ .pos = pos_min, .ts = ts_min } else .{ .pos = pos_max, .ts = ts_max };
+    }
+
+    const Bounds = struct {
+        pos_min: i64 = 0,
+        pos_max: i64 = 0,
+        pos_limit: i64 = -1,
+        ts_min: i64 = nopts,
+        ts_max: i64 = nopts,
+    };
+
+    /// `av_seek_frame` on FLAC: by byte position (`seek_frame_byte`), or
+    /// as FFmpeg seeks without fast seeking, ff_seek_frame_binary over
+    /// flac_read_timestamp from the packets read so far. The seek table
+    /// plays no part, as in FFmpeg without `-fflags fastseek`. Needs
+    /// `initSeekable`. A search that fails leaves the demuxer flushed, as
+    /// FFmpeg's does (`SeekFailed`).
+    pub fn seekFrame(d: *Demuxer, stream: i32, timestamp: i64, flags: seek.Flags) SeekError!seek.Position {
+        const seeker = d.seeker.?; // `initSeekable` is the precondition
+        if (flags.byte) {
+            var pos: i64 = timestamp;
+            const pos_min: i64 = @intCast(d.data_offset);
+            const pos_max = d.sourceSize() - 1;
+            if (pos < pos_min) {
+                pos = pos_min;
+            } else if (pos > pos_max) {
+                pos = pos_max;
+            }
+            d.readFrameFlush();
+            try d.repositionAt(seeker, pos);
+            return .{ .offset = @intCast(pos), .timestamp = null, .at_end = false };
+        }
+        if (stream != 0 and stream != -1) return error.InvalidStream;
+        var ts = timestamp;
+        const tb = d.info.time_base;
+        if (stream == -1) ts = seek.defaultStreamTimestamp(ts, .{ .num = @intCast(tb.num), .den = @intCast(tb.den) });
+        d.readFrameFlush();
+        // ff_seek_frame_binary: the bounds from the index.
+        var bounds: Bounds = .{};
+        if (d.index.items.len > 0) {
+            const entries = d.index.items;
+            const below = searchIndex(entries, ts, .{ .backward = true, .any = flags.any }) orelse 0;
+            const e = entries[below];
+            if (e.timestamp <= ts or e.pos == e.min_distance) {
+                bounds.pos_min = e.pos;
+                bounds.ts_min = e.timestamp;
+            }
+            if (searchIndex(entries, ts, .{ .any = flags.any })) |above| {
+                const f = entries[above];
+                bounds.pos_max = f.pos;
+                bounds.ts_max = f.timestamp;
+                bounds.pos_limit = f.pos - f.min_distance;
+            }
+        }
+        const found = try d.genSearch(ts, bounds, flags.backward) orelse return error.SeekFailed;
+        try d.repositionAt(seeker, found.pos);
+        d.readFrameFlush();
+        // avpriv_update_cur_dts.
+        d.cur_dts = found.ts;
+        return .{ .offset = @intCast(found.pos), .timestamp = found.ts, .at_end = false };
+    }
+
+    /// `avformat_seek_file` on FLAC: `seekFrame` within the bounds, as
+    /// libavformat's fallback runs it.
+    pub fn seekFile(d: *Demuxer, stream: i32, min_ts: i64, ts: i64, max_ts: i64, flags: seek.Flags) SeekError!seek.Position {
+        return seek.seekFile(d, seekFrameForRange, stream, min_ts, ts, max_ts, flags) catch |err| switch (err) {
+            error.InvalidStream => error.InvalidStream,
+            error.InvalidRange => error.InvalidRange,
+            error.IoFailure => d.range_error orelse error.IoFailure,
+        };
+    }
+
+    fn seekFrameForRange(d: *Demuxer, stream: i32, ts: i64, flags: seek.Flags) seek.Error!seek.Position {
+        return d.seekFrame(stream, ts, flags) catch |err| switch (err) {
+            error.InvalidStream => error.InvalidStream,
+            error.InvalidRange => error.InvalidRange,
+            else => |e| {
+                d.range_error = e;
+                return error.IoFailure;
+            },
+        };
+    }
+
+    fn repositionAt(d: *Demuxer, seeker: seek.Seeker, pos: i64) Error!void {
+        seeker.seekTo(@intCast(pos)) catch return error.IoFailure;
+        d.raw_pos = @intCast(pos);
     }
 
     fn queued(d: *Demuxer) bool {
@@ -1329,4 +1655,115 @@ test "headers read without an allocator keep nothing and agree" {
             try testing.expectEqual(0, a.tags.count());
         }
     }
+}
+
+const seek_vectors = @embedFile("../testing/vectors/seek_flac.txt");
+
+fn seekBlock(name: []const u8) ?[]const u8 {
+    var start: ?usize = null;
+    var lines = std.mem.splitScalar(u8, seek_vectors, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "F ")) continue;
+        const at = @intFromPtr(line.ptr) - @intFromPtr(seek_vectors.ptr);
+        if (start) |s| return seek_vectors[s..at];
+        if (std.mem.eql(u8, line[2..], name)) start = at + line.len + 1;
+    }
+    return if (start) |s| seek_vectors[s..] else null;
+}
+
+/// The next packet's line and its first 16 decoded sample frames, as
+/// seek_vectors.c prints them.
+fn nextAfterSeek(gpa: std.mem.Allocator, d: *Demuxer, out: *std.ArrayList(u8)) !void {
+    const p = try d.next() orelse return out.appendSlice(gpa, "P EOF\n");
+    var a: [24]u8 = undefined;
+    const line = try std.fmt.allocPrint(gpa, "P {s} {d} {d}\n", .{ formatTs(&a, p.pts), p.pos.?, p.data.len });
+    defer gpa.free(line);
+    try out.appendSlice(gpa, line);
+    var dec = try flacdec.Decoder.init(gpa, d.info.stream_info);
+    defer dec.deinit();
+    dec.send(p.data, p.pts);
+    const frame = (dec.receive() catch null) orelse return out.appendSlice(gpa, "D none\n");
+    const header = try std.fmt.allocPrint(gpa, "D {d} ", .{frame.nb_samples});
+    defer gpa.free(header);
+    try out.appendSlice(gpa, header);
+    const frames = @min(frame.nb_samples, 16);
+    switch (frame.samples) {
+        inline else => |samples| for (samples[0 .. frames * frame.channels]) |s| {
+            var le: [@sizeOf(@TypeOf(s))]u8 = undefined;
+            std.mem.writeInt(@TypeOf(s), &le, s, .little);
+            const hex = std.fmt.bytesToHex(le, .lower);
+            try out.appendSlice(gpa, &hex);
+        },
+    }
+    try out.append(gpa, '\n');
+}
+
+test "every FLAC fixture seeks as FFmpeg seeks it (vectors/seek_flac.txt)" {
+    const gpa = testing.allocator;
+    var compared: usize = 0;
+    inline for (fixtures.flac.all) |fixture| {
+        if (fixture.expected != .reject) {
+            const block = seekBlock(fixture.name) orelse return error.MissingVector;
+            var lines = std.mem.splitScalar(u8, block, '\n');
+            // FFmpeg fails every seek in a file whose PICTURE it made a
+            // second stream, which the port does not (port.md "FLAC
+            // contract"): an understood difference.
+            const picture = comptime std.mem.eql(u8, fixture.name, "flac_picture");
+            if (!picture and std.mem.eql(u8, lines.next().?, "O ok")) {
+                _ = lines.next(); // I
+                var pending = lines.next();
+                while (pending) |k_line| {
+                    pending = lines.next();
+                    if (k_line.len == 0) continue;
+                    var expected: std.ArrayList(u8) = .empty;
+                    defer expected.deinit(gpa);
+                    var f = std.mem.tokenizeScalar(u8, k_line, ' ');
+                    _ = f.next();
+                    const api = f.next().?[0];
+                    const stream = try std.fmt.parseInt(i32, f.next().?, 10);
+                    const ts = try std.fmt.parseInt(i64, f.next().?, 10);
+                    var min_ts: i64 = 0;
+                    var max_ts: i64 = 0;
+                    if (api == 's') {
+                        min_ts = try std.fmt.parseInt(i64, f.next().?, 10);
+                        max_ts = try std.fmt.parseInt(i64, f.next().?, 10);
+                    }
+                    const bits_text = f.next().?;
+                    const flag_bits = try std.fmt.parseInt(u8, bits_text, 16);
+                    const flags: seek.Flags = .{ .backward = flag_bits & 1 != 0, .byte = flag_bits & 2 != 0, .any = flag_bits & 4 != 0 };
+                    const ret = f.next().?;
+                    if (std.mem.eql(u8, ret, "0")) {
+                        while (pending) |next_line| {
+                            if (next_line.len == 0 or next_line[0] == 'K') break;
+                            try expected.appendSlice(gpa, next_line);
+                            try expected.append(gpa, '\n');
+                            pending = lines.next();
+                        }
+                    }
+                    var reader: std.Io.Reader = .fixed(fixtures.flac.bytes(fixture.name));
+                    var d = try Demuxer.initSeekable(gpa, &reader, .fixed(&reader));
+                    defer d.deinit();
+                    _ = try d.next();
+                    const result = if (api == 'f') d.seekFrame(stream, ts, flags) else d.seekFile(stream, min_ts, ts, max_ts, flags);
+                    var actual: std.ArrayList(u8) = .empty;
+                    defer actual.deinit(gpa);
+                    if (result) |_| {
+                        try nextAfterSeek(gpa, &d, &actual);
+                    } else |err| switch (err) {
+                        error.InvalidStream => try actual.appendSlice(gpa, "EINVAL"),
+                        error.SeekFailed => try actual.appendSlice(gpa, "-1"),
+                        else => return err,
+                    }
+                    const want = if (std.mem.eql(u8, ret, "0")) expected.items else ret;
+                    testing.expectEqualStrings(want, actual.items) catch |err| {
+                        std.debug.print("fixture {s}: {s}\n", .{ fixture.name, k_line });
+                        return err;
+                    };
+                    compared += 1;
+                }
+            }
+        }
+    }
+    // Every seek of the 50 fixtures FFmpeg opens, flac_picture aside.
+    try testing.expectEqual(2692, compared);
 }

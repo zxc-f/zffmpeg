@@ -25,6 +25,9 @@ pub const Packet = struct {
     duration: ?i64 = null,
     stream_index: u32 = 0,
     flags: Flags = .{},
+    /// The packet's byte position in its input (`AVPacket.pos`), when the
+    /// demuxer knows it.
+    pos: ?u64 = null,
 
     pub const Flags = struct {
         /// Decodable on its own (every PCM packet is).
