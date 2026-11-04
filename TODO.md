@@ -3073,7 +3073,7 @@ names, not as an empty framework.
   `libavcodec/mpegaudiodec_template.c`, `mpegaudiodecheader.c`,
   `mpegaudio_parser.c`, `mpegaudiodsp*.c`, `mpegaudioenc*.c`;
   `tests/fate/mp3.mak`. There is no MP3 encoder: FFmpeg relies on external LAME.
-  - [ ] **T29a — Demux and parser.** Needs T16 and T17b. Frame sync with
+  - [x] **T29a — Demux and parser.** Needs T16 and T17b. Frame sync with
     resynchronization, ID3v1 and ID3v2 tags into metadata, and Xing, Info,
     LAME and VBRI headers for duration and gapless delay and padding.
     Done when packets, duration and gapless parameters equal the reference's,
@@ -3081,7 +3081,7 @@ names, not as an empty framework.
 
     ```text
     ID / parent: T29a / T29
-    State: G2 (in progress)
+    State: G5 (verified)
     Scope: FFmpeg's mp3 demuxer (mp3dec.c) on libavformat's generic layer
       (demux.zig), as the ffmpeg program opens an input: the ID3v2 tag
       read before the demuxer (FF_INFMT_FLAG_ID3V2_AUTO, id3v2.c: versions
@@ -3142,7 +3142,28 @@ names, not as an empty framework.
       format/mp3.zig (mp3_read_header with the Xing, Info, LAME, VBRI and
       iTunSMPB tags, ReplayGain, the resync, the packets): every opened
       fixture's streams, tags, timing and packets equal mp3.txt's, 40/40,
-      the picture stream and chapters filtered (notes.md "MP3").
+      the picture stream and chapters filtered (notes.md "MP3")
+      (7d1b0ef). Part 3 and part 4: detect.zig's probe rounds and ID3v2
+      skip with mp3_read_probe, generate.py's detection model likewise
+      (the four tiny fixtures now MP3 in the manifests, as to FFmpeg),
+      the registry's mp3 demuxer and mp1, mp2 and mp3 descriptors,
+      zffprobe's MP3 report, zffmpeg refusing MP3 after opening it,
+      compute_frame_duration's MPEG audio frames, the hash driver's MP3
+      copy, compare.py's MP3 section and seek_vectors.c on the MP3
+      fixtures (92a2ee8). G5 on local Linux runs at 92a2ee8 with the
+      docs change: zig fmt, the fixture check (42 MP3 fixtures), zig
+      build test 363/363 in Debug, ReleaseSafe and ReleaseFast (224
+      steps), the cross builds, and .references/local-ci.sh: every
+      vector check passes (mp3.txt and seek_mp3.txt new), all 2106 MP3
+      seeks equal FFmpeg's, content detection 310/310 against FFmpeg's
+      probe, the MP3 fixtures 42/42 against ffprobe and
+      `ffmpeg -c copy -f framecrc` (8 copies understood: 7 shifted by the
+      program's start time, T53, and the picture stream), the comparison
+      6116 passed with only the 176 known clang 23 inf/NaN failures, and
+      the optional cases 61/61.
+    Limitations: no decoding (T29b, T29c): zffmpeg refuses MP3 input;
+      APIC pictures and CHAP chapters not modeled; ID3v2 tags above
+      64 MiB refused; MP3ADU, `usetoc` and fast seeking not ported.
   - [ ] **T29b — Layer III decoder.** Needs T18c and T29a. Huffman decoding,
     requantization, stereo modes, IMDCT, alias reduction and polyphase
     synthesis.
