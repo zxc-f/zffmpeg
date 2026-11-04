@@ -2127,6 +2127,44 @@ names, not as an empty framework.
     asetpts.
     Done when parsed graphs and their output match the reference, and syntax
     errors match documented messages.
+
+    ```text
+    ID / parent: T25b / T25
+    State: implementing
+    Supported behavior and explicit exclusions: part 1, FFmpeg's expression
+      evaluator (av_expr_parse, av_expr_eval) as core/eval.zig: the whole
+      grammar, constants, every function but time() (the clock) and
+      caller-supplied functions (no filter here uses them), variables and
+      random generators. Part 2, the filtergraph text of a linear chain
+      (av_get_token's quoting and escaping, filter=options with FFmpeg's
+      shorthand order, ',' between filters, instance names), and volume
+      with expressions and its per-frame variables. Part 3, atrim and
+      asetpts. Excluded: link labels and several chains (T25c), commands.
+    Needs (verified) / lands with / verified after: T25a.
+    Contract and source provenance: libavutil/eval.c, sfc64.h, reverse.c;
+      libavfilter/graphparser.c, avfilter.c (ff_filter_opt_parse),
+      libavutil/avstring.c (av_get_token), af_volume.c, trim.c, setpts.c.
+    Required fixtures / optional corpus: eval_vectors.c's 200 expressions
+      (zig/testing/vectors/eval.txt); the graph texts of part 2 and the
+      filters of part 3 to come; no optional corpus.
+    Ownership, state transitions and limits: an expression owns its nodes
+      and keeps ten variables and random generators across evaluations;
+      FFmpeg's limits: 100 nested expressions, depth 100.
+    Comparison rule and intentional differences: exact, except the C
+      library's functions (sin, exp, pow, hypot, ...), computed with Zig's,
+      within 2^-50 relative, T24's tolerance (on the vectors, exact);
+      results C leaves undefined (NaN or out-of-range doubles converted to
+      integers) follow x86 and are not compared; time() is refused.
+    Implementation files and test entry points: core/eval.zig;
+      eval_vectors.c, vectors/eval.txt.
+    Evidence commit / Linux CI run / reference report: pending.
+    Required cases: part 1 passes (200/200, bit-exact); parts 2 and 3 to
+      come.
+    Optional cases: none
+    Fuzz seeds, budget and result: none yet.
+    Remaining work or blocker / next action: part 2, the graph text and
+      volume's expressions.
+    ```
   - [ ] **T25c — Several inputs and outputs.** Needs T25b. Scheduling with
     several inputs and outputs; amix, pan, channelmap, channelsplit and asplit.
     Done when outputs match the reference and backpressure between branches is

@@ -22,6 +22,7 @@
 //!   `pcm.Decoder` and `pcm.Encoder` follow (`core/stage.zig`).
 //! - `metadata`: the tag dictionary, ordered with owned storage and FFmpeg's
 //!   duplicate-key policies (`core/metadata.zig`).
+//! - `eval`: FFmpeg's expression evaluator (`core/eval.zig`).
 //! - `wav`: bounded RIFF/WAVE, RF64/BW64 and Sony Wave64 parsing and
 //!   known-length writing for the WAV PCM encodings (`format/wav.zig`).
 //! - `au`: bounded Sun AU parsing and known-length writing for s16 big-endian
@@ -67,6 +68,7 @@ pub const metadata = @import("core/metadata.zig");
 pub const number = @import("core/number.zig");
 pub const options = @import("core/options.zig");
 pub const diagnostics = @import("core/diagnostics.zig");
+pub const eval = @import("core/eval.zig");
 pub const wav = @import("format/wav.zig");
 pub const au = @import("format/au.zig");
 pub const aiff = @import("format/aiff.zig");
@@ -96,6 +98,7 @@ test {
     _ = @import("core/number.zig");
     _ = @import("core/options.zig");
     _ = @import("core/diagnostics.zig");
+    _ = @import("core/eval.zig");
     _ = @import("format/wav.zig");
     _ = @import("format/au.zig");
     _ = @import("format/aiff.zig");

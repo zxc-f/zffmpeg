@@ -179,6 +179,13 @@ jobs:
             -lm -pthread -o resample-vectors
           ./resample-vectors | diff -u zig/testing/vectors/resample.txt -
 
+      # The committed T25b oracle must be what this build's libavutil gives.
+      - name: Check the expression vectors (T25b)
+        run: |
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/eval_vectors.c \
+            .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o eval-vectors
+          ./eval-vectors | diff -u zig/testing/vectors/eval.txt -
+
       # The committed T25a oracle must be what this build's libavfilter gives.
       - name: Check the filter graph vectors (T25a)
         run: |

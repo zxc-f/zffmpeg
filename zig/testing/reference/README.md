@@ -105,6 +105,14 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/resample_ve
 ./resample-vectors | diff -u zig/testing/vectors/resample.txt -
 ```
 
+The T25b expression vectors come from the reference's `libavutil`
+(`av_expr_parse` and `av_expr_eval`, three evaluations of each expression):
+
+```bash
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/eval_vectors.c .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o eval-vectors
+./eval-vectors | diff -u zig/testing/vectors/eval.txt -
+```
+
 The T25a filter graph vectors come from the reference's `libavfilter`:
 `graph_vectors.c` builds linear chains of `anull`, `aformat`, `volume` and
 `aresample` between a buffer source and a buffer sink through the public
