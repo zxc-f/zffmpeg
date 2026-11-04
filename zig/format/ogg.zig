@@ -1741,41 +1741,8 @@ test "FFmpeg's Vorbis decoder opens the encoded fixtures and refuses the synthet
 
 const vorbis_vectors = @embedFile("../testing/vectors/vorbis.txt");
 
-/// libavcodec's decode.c around a decoder (discard_samples): the samples
-/// still to skip, from the decoder's first frame or a packet's
-/// skip-samples side data, and the end padding a packet asks to drop.
-const Discard = struct {
-    skip: i64 = 0,
-
-    /// The kept part of a decoded frame of `n` samples, as [start, end);
-    /// null when the whole frame is dropped.
-    fn apply(x: *Discard, n: u32, side: ?[2]u32) ?[2]u32 {
-        var padding: u32 = 0;
-        if (side) |s| {
-            const skip: i32 = @bitCast(s[0]);
-            if (skip != 0) x.skip = skip;
-            x.skip = @max(0, x.skip);
-            padding = s[1];
-        }
-        var start: u32 = 0;
-        var count = n;
-        if (x.skip > 0) {
-            if (count <= x.skip) {
-                x.skip -= count;
-                return null;
-            }
-            start = @intCast(x.skip);
-            count -= start;
-            x.skip = 0;
-        }
-        if (padding > 0 and padding <= n) {
-            const drop = @min(padding, count);
-            if (drop == count) return null;
-            count -= drop;
-        }
-        return .{ start, start + count };
-    }
-};
+/// libavcodec's discarding, shared with the decoded reader.
+const Discard = @import("oggdecode.zig").Discard;
 
 fn vorbisBlock(name: []const u8) ?[]const u8 {
     const marker = "F ";

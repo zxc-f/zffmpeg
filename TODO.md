@@ -2821,10 +2821,17 @@ names, not as an empty framework.
       refuses a stream FFmpeg's decoder refuses (InvalidVorbis, status 2);
       the registry has the Vorbis decoder, and compare.py records FFmpeg's
       encoder as a known registry difference; the registry and Ogg
-      sections pass (24/24). Remaining, part 3b: av.convert and zffmpeg
-      decoding Ogg (Vorbis, and FLAC in Ogg) to every PCM output and to
-      FLAC as the ffmpeg program does, compared by compare.py, with the
-      FATE Vorbis tests as optional coverage.
+      sections pass (24/24) (2031b2a). Part 3b: format/oggdecode.zig, an
+      Ogg stream decoded as the ffmpeg program decodes it (one Vorbis or
+      FLAC stream, decode.c's discarding, a counting pass ahead on a
+      seekable input for header-first outputs, -max_error_rate), in
+      av.convert and zffmpeg (positional reads of a regular input file);
+      stream tags carried into Ogg after the encoder tag less the keys the
+      program drops on re-encoding; compare.py's Ogg decoding section:
+      72/72 conversions of the decodable fixtures into WAV, AU, AIFF,
+      FLAC, Ogg, raw s16le and f32le, resampled and downmixed, byte for
+      byte the ffmpeg program's with -bitexact, and FATE's 20 Vorbis decode
+      tests (optional) 20/20; 6 zffmpeg process runs. G5 remains.
     ```
 
 - [ ] **T28 — Opus decoder.** Checked when T28a–T28c are. Reference:

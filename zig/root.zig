@@ -161,6 +161,7 @@ test {
     _ = @import("format/ogg.zig");
     _ = @import("format/demux.zig");
     _ = @import("format/oggmux.zig");
+    _ = @import("format/oggdecode.zig");
     _ = @import("codec/tx.zig");
     _ = @import("codec/vlc.zig");
     _ = @import("codec/xiph.zig");

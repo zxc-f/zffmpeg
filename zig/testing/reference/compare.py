@@ -2108,6 +2108,96 @@ def compare_ogg_output(args, lines, failures):
     ] + rows
 
 
+OGG_DECODE_OUTPUTS = [(["-f", "wav"], "wav"), (["-f", "au"], "au"), (["-f", "aiff"], "aiff"),
+                      (["-f", "flac"], "flac"), (["-f", "ogg"], "ogg"), (["-f", "s16le"], "raw"),
+                      (["-f", "f32le"], "raw"), (["-ar", "22050", "-f", "wav"], "wav"),
+                      (["-ac", "1", "-f", "wav"], "wav")]
+FATE_VORBIS = ["1.0.1-test_small", "1.0-test_small", "beta3-test_small", "beta4-test_small", "chain-test1_small",
+               "chain-test2_small", "highrate-test_small", "lsp-test2_small", "lsp-test3_small", "lsp-test4_small",
+               "lsp-test_small", "mono_small", "moog_small", "rc1-test_small", "rc2-test2_small", "rc2-test_small",
+               "rc3-test_small", "sleepzor_small", "test-short2_small", "6"]
+
+
+def compare_ogg_decode(args, lines, failures):
+    """Ogg decoded (T27d): every Ogg fixture FFmpeg decodes (Vorbis, FLAC in
+    Ogg) converted by zffmpeg and by the ffmpeg program with `-bitexact`
+    into each output, byte for byte; then FATE's Vorbis decode tests
+    (optional), as `tests/fate/vorbis.mak` runs them (s16le), byte for
+    byte against the ffmpeg program's."""
+    rows = []
+    same = total = 0
+    with tempfile.TemporaryDirectory() as work:
+        work = pathlib.Path(work)
+        for path in sorted((FIXTURES / "ogg").glob("*.ogg")):
+            probe = run(args.ffprobe, "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name",
+                        "-of", "default=nw=1:nk=1", path)
+            codec = text(probe.stdout).strip()
+            if probe.returncode != 0 or codec not in ("vorbis", "flac") or path.stem == "ogg_multiplexed":
+                continue
+            problems = []
+            for opts, ext in OGG_DECODE_OUTPUTS:
+                total += 1
+                theirs, ours = work / f"theirs.{ext}", work / f"ours.{ext}"
+                for f in (theirs, ours):
+                    f.unlink(missing_ok=True)
+                tp = run(args.ffmpeg, "-nostdin", "-v", "error", "-y", "-i", path, "-bitexact", *opts, theirs)
+                zp = run(args.zffmpeg, "-y", "-i", path, *opts, ours)
+                label = " ".join(opts)
+                if tp.returncode != 0 and zp.returncode != 0 and not ours.exists():
+                    # Both refuse (a decode error rate past -max_error_rate),
+                    # zffmpeg before any output.
+                    same += 1
+                elif tp.returncode != 0 or zp.returncode != 0:
+                    problems.append(f"{label}: FFmpeg {tp.returncode}, zffmpeg {zp.returncode} "
+                                    f"({first_line(text(zp.stderr))})")
+                elif theirs.read_bytes() != ours.read_bytes():
+                    problems.append(f"{label}: the outputs differ")
+                else:
+                    same += 1
+            result = "pass" if not problems else "**FAIL**: " + "; ".join(problems)
+            rows.append(f"| `{path.stem}` | {codec} | {result} |")
+            failures.extend(f"Ogg decode {path.stem}: {p}" for p in problems)
+    record("Ogg decoding (T27d)", same, total)
+    suite = pathlib.Path(args.fate_suite)
+    fate_rows = []
+    passed = failed = skipped = 0
+    for name in FATE_VORBIS:
+        sample = suite / "vorbis" / f"{name}.ogg"
+        if not sample.exists():
+            skipped += 1
+            fate_rows.append(f"| {name} | skipped: `vorbis/{name}.ogg` missing |")
+            continue
+        theirs = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", sample, "-vn", "-f", "s16le", "-")
+        ours = run(args.zffmpeg, "-i", sample, "-f", "s16le", "-")
+        if ours.returncode == 0 and ours.stdout == theirs.stdout:
+            passed += 1
+            fate_rows.append(f"| {name} | pass |")
+        else:
+            failed += 1
+            why = "the samples differ" if ours.returncode == 0 else first_line(text(ours.stderr))
+            fate_rows.append(f"| {name} | **FAIL**: {why} |")
+            failures.append(f"FATE vorbis {name}: {why}")
+    record("FATE Vorbis (T27d)", passed, len(FATE_VORBIS), optional=True, skipped=skipped,
+           reasons=["FATE samples missing"] if skipped else ())
+    lines += [
+        "",
+        "## Ogg decoding (T27d)",
+        "",
+        f"Ogg fixtures decoded by zffmpeg into WAV, AU, AIFF, FLAC, Ogg and raw PCM (and resampled, and downmixed) "
+        f"equal to the ffmpeg program's with `-bitexact`: {same}/{total}.",
+        "",
+        "| Fixture | Codec | Result |",
+        "| --- | --- | --- |",
+    ] + rows + [
+        "",
+        f"FATE's Vorbis decode tests (optional), zffmpeg's s16le equal to the ffmpeg program's: {passed} passed, "
+        f"{failed} failed, {skipped} skipped.",
+        "",
+        "| Test | Result |",
+        "| --- | --- |",
+    ] + fate_rows
+
+
 # Ogg fixtures whose copy the ffmpeg program changes past libavformat
 # (T27a): ogg.txt holds what av_read_frame gives for every one.
 KNOWN_OGG_COPY_DIFFERENCES = {
@@ -2536,6 +2626,7 @@ def main():
     compare_flac_output(args, lines, failures)
     compare_ogg_output(args, lines, failures)
     compare_ogg(args, lines, failures)
+    compare_ogg_decode(args, lines, failures)
     compare_hashes(args, lines, failures)
     compare_fate(args, lines, failures)
     coverage_summary(lines, failures)

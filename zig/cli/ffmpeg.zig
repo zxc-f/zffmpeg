@@ -56,8 +56,9 @@ const printError = status.printError;
 const usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout <layout>] -i <input | -> [-c copy|<encoder>] [-ar <rate>] [-ac <channels> | -ch_layout <layout>] [-dither_method <method>] [-dither_scale <scale>] [FLAC encoder options] [-f <format>] <output | ->\n";
 const help = usage ++
     \\
-    \\Converts one WAV, Wave64, AU, AIFF, CAF (input only), FLAC, Ogg (output
-    \\only) or raw PCM stream (standard input or output with -). The input container is detected
+    \\Converts one WAV, Wave64, AU, AIFF, CAF (input only), FLAC, Ogg (Vorbis
+    \\and FLAC input, FLAC output) or raw PCM stream (standard input or output
+    \\with -). The input container is detected
     \\from content, or for raw PCM from the name (.sb, .ub, .al, .ul, .sw), or
     \\forced with -f before -i.
     \\Before -i, -sample_rate (or -ar) and -ch_layout (or -ac) describe raw
@@ -383,14 +384,18 @@ fn convert(io: std.Io, command: Command, request: av.convert.Request) ExitStatus
     defer if (!isStdio(command.input)) input_file.close(io);
 
     var input_buffer: [av.file.default_buffer_len]u8 = undefined;
-    var reader = input_file.readerStreaming(io, &input_buffer);
+    // A regular file is read positionally, which can seek back for Ogg's
+    // duration scans (T27d), as zffprobe reads one; a pipe streams.
+    const length = av.file.regularLength(io, input_file);
+    var reader = if (length != null) input_file.reader(io, &input_buffer) else input_file.readerStreaming(io, &input_buffer);
     // `source` borrows `reader.interface` and `conversion` borrows `source`;
     // all three stay in this frame.
     var source: av.detect.Input = undefined;
     var input = request.input;
     // FFmpeg's extension hints need the name; raw PCM's frame count, a size.
     if (!isStdio(command.input)) input.file_name = command.input;
-    input.length = av.file.regularLength(io, input_file);
+    input.length = length;
+    if (length != null) input.seeker = .file(&reader);
     source.open(&reader.interface, input) catch |err| {
         if (err == error.UnusedOption) {
             printError(io, "zffmpeg: {s}: -sample_rate and -ch_layout apply only to raw PCM input\n", .{command.input});

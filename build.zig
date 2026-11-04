@@ -676,6 +676,13 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "FLAC copy into FLAC is unsupported", .set = .flac, .args = &.{"-i"}, .input = "flac_ffmpeg_level5_stereo", .tail = &.{ "-c", "copy", "-f", "flac", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
     .{ .name = "a FLAC first frame under 16 samples", .args = &.{"-i"}, .input = "mono_8k", .tail = &.{ "-f", "flac", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedFormat\n" },
     .{ .name = "an invalid FLAC encoder option value", .args = &.{ "-i", "a.wav", "-lpc_type", "burg", "b.flac" }, .exit_code = 1, .stderr_contains = "invalid value for: -lpc_type\n" },
+    // T27d: Ogg decoded; compare.py checks the bytes against FFmpeg's.
+    .{ .name = "Ogg Vorbis to WAV", .set = .ogg, .args = &.{"-i"}, .input = "ogg_vorbis_ffmpeg_22k_short", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt ", .stderr = "" },
+    .{ .name = "Ogg Vorbis from a pipe to raw PCM", .set = .ogg, .args = &.{ "-i", "-" }, .stdin_input = "ogg_vorbis_ffmpeg_22k_short", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout_contains = "", .stderr = "" },
+    .{ .name = "Ogg Vorbis from a pipe has no count for WAV", .set = .ogg, .args = &.{ "-i", "-" }, .stdin_input = "ogg_vorbis_ffmpeg_22k_short", .tail = &.{ "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedStreamingSize\n" },
+    .{ .name = "Ogg Vorbis copy is unsupported", .set = .ogg, .args = &.{"-i"}, .input = "ogg_vorbis_ffmpeg_22k_short", .tail = &.{ "-c", "copy", "-f", "ogg", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
+    .{ .name = "Ogg Opus has no decoder", .set = .ogg, .args = &.{"-i"}, .input = "ogg_opus_stereo", .tail = &.{ "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
+    .{ .name = "Ogg FLAC whose frames all fail to decode", .set = .ogg, .args = &.{"-i"}, .input = "ogg_lost_continued_page", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stdout = "", .stderr_contains = ": DecodeErrorRate\n" },
     // T27b: FLAC encoded into Ogg; compare.py checks the bytes against FFmpeg's.
     .{ .name = "FLAC into Ogg on standard output", .set = .flac, .args = &.{"-i"}, .input = "flac_ffmpeg_level5_stereo", .tail = &.{ "-f", "ogg", "-" }, .exit_code = 0, .stdout_contains = "OggS\x00\x02", .stderr = "" },
     .{ .name = "FLAC into Ogg Audio carries the encoder tag", .set = .flac, .args = &.{"-i"}, .input = "flac_ffmpeg_level5_stereo", .tail = &.{ "-f", "oga", "-" }, .exit_code = 0, .stdout_contains = "\x11\x00\x00\x00encoder=Lavc flac", .stderr = "" },

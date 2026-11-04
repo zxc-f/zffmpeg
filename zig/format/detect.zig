@@ -61,6 +61,9 @@ pub const Error = wav.Error || au.Error || aiff.Error || raw.Error || caf.Error 
     /// FFmpeg's Vorbis decoder refuses the stream's headers, so ffprobe
     /// cannot open it ("Could not open codec", T27d).
     InvalidVorbis,
+    /// More than two thirds of an Ogg stream's decodes failed, which the
+    /// ffmpeg program's `-max_error_rate` fails (T27d).
+    DecodeErrorRate,
     /// Raw PCM parameters were given for an input whose format has its own.
     UnusedOption,
 };
