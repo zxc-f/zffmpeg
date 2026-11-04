@@ -739,10 +739,8 @@ fn expectEveryCell(input: Container, detected: bool, source: detect.Source, byte
             try std.testing.expectEqual(0, out.buffered().len);
             continue;
         }
-        // The AU and AIFF writers take mono and stereo only, until their T23b
-        // parts.
-        const family = request.output.family();
-        if (stream.channels > 2 and (family == .au or family == .aiff)) {
+        // The AIFF writer takes mono and stereo only, until its T23b part.
+        if (stream.channels > 2 and request.output.family() == .aiff) {
             try std.testing.expectError(error.UnsupportedFormat, result);
             try std.testing.expectEqual(0, out.buffered().len);
             continue;

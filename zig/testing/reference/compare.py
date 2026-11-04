@@ -216,7 +216,7 @@ def guessed_layout(layout, channels):
 def written_layout(container, codec, rate, layout, channels):
     """What ffprobe reads back from a file a muxer wrote with `layout`: WAV
     and Wave64 keep a native layout's mask in an extensible header (riffenc.c,
-    `generate.canonical_wav`), AU and AIFF (in stereo at most) keep none, and
+    `generate.canonical_wav`), AU and AIFF keep none, and
     raw PCM is read with the layout of its channel count."""
     if container in generate.RAW_FORMATS:
         return LAYOUT.get(channels, "unknown")
@@ -937,9 +937,9 @@ def compare_zffmpeg(args, lines, failures):
                 output_codec = stream.codec if copy else S16_CODEC[output]
                 # Since T23a any storage transcodes to the output's default codec.
                 supported = stream.codec in carried[output] if copy else True
-                # The AU and AIFF writers take mono and stereo only, until their
-                # T23b parts.
-                over_channels = supported and channels > 2 and output in ("au", "aiff")
+                # The AIFF writer takes mono and stereo only, until its T23b
+                # part.
+                over_channels = supported and channels > 2 and output == "aiff"
                 if not supported or over_channels:
                     rejected_total += 1
                     error = b"UnsupportedFormat" if over_channels else b"UnsupportedOperation"

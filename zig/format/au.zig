@@ -4,7 +4,9 @@
 // FFmpeg's more permissive behavior; see zig/testing/fixtures/au/README.md.
 //! Bounded Sun AU reading and known-length writing for the PCM encodings of
 //! FFmpeg's AU table (TODO.md T12, T22a): µ-law (1), s8 (2), s16, s24 and s32
-//! big-endian (3 to 5), 32- and 64-bit big-endian float (6, 7) and A-law (27).
+//! big-endian (3 to 5), 32- and 64-bit big-endian float (6, 7) and A-law (27),
+//! with 1 to `max_channels` channels (T23b) in an unspecified layout, as
+//! FFmpeg reads them: the header holds only a count.
 //!
 //! The parser is sequential and never seeks, so it works on pipes. It reads the
 //! 24-byte header exactly into a local array, skips the annotation without
@@ -40,6 +42,8 @@ pub const Error = error{
 /// `error.LimitExceeded`, and the unknown-length opt-in.
 pub const Limits = struct {
     max_sample_rate: u32 = 192_000,
+    /// libswresample's `SWR_CH_MAX`: more channels than FFmpeg converts.
+    max_channels: u16 = max_channels,
     /// Bytes between the 24-byte header and the data.
     max_annotation_bytes: u32 = 1 << 20,
     /// Read a data size of 0xFFFFFFFF, which FFmpeg's muxer leaves on a pipe,
@@ -68,6 +72,9 @@ pub const canonical_header_len = 32;
 /// The largest data size read or written. FFmpeg reads the field as signed and
 /// rejects larger values, so this bound keeps files readable by it.
 pub const max_data_bytes: u32 = std.math.maxInt(i32);
+
+/// The default channel limit of the parser and the writer.
+pub const max_channels = 64;
 
 /// The data size that means "unknown length".
 const unknown_size: u32 = std.math.maxInt(u32);
@@ -174,13 +181,13 @@ pub const Parser = struct {
         const codec = codecFor(encoding) orelse return error.UnsupportedFormat;
         if (rate == 0) return error.InvalidFormat;
         if (rate > p.limits.max_sample_rate) return error.LimitExceeded;
-        // A count that does not fit in u16 is far above the two supported channels.
-        const channel_count = std.math.cast(u16, channels) orelse return error.UnsupportedFormat;
-        if (channel_count == 0) return error.InvalidFormat;
-        if (channel_count > 2) return error.UnsupportedFormat;
+        if (channels == 0) return error.InvalidFormat;
+        if (channels > p.limits.max_channels) return error.LimitExceeded;
+        // max_channels is a u16.
+        const channel_count: u16 = @intCast(channels);
         // An AU header has no layout: FFmpeg leaves it unspecified.
         const format: audio.Format = .{ .sample_rate = rate, .layout = .{ .unspecified = channel_count }, .sample_format = codec.storage() };
-        // At most 8 bytes times 2 channels.
+        // At most 8 bytes times 65535 channels: no overflow.
         const sample_bytes: u32 = codec.bytesPerSample();
         const frame_bytes = sample_bytes * channel_count;
         if (known_size) |size| {
@@ -286,9 +293,14 @@ pub const DecodeError = Error || std.Io.Writer.Error;
 /// Decodes an AU stream and writes its samples to `out` as raw little-endian
 /// samples of the stream's storage format (`Info.format.sample_format`), using
 /// fixed working storage. The caller flushes `out`.
+/// A frame wider than that storage (4 KiB, possible only with a channel
+/// limit above the default) is `LimitExceeded`.
 pub fn decodeToRaw(reader: *std.Io.Reader, out: *std.Io.Writer, limits: Limits) DecodeError!Info {
     var parser: Parser = .init(reader, limits);
     const info = try parser.readHeader();
+    // readData delivers nothing when a frame does not fit, which would end
+    // the loop below early; only a channel limit above the default allows it.
+    if (parser.frame_bytes > scratch_len) return error.LimitExceeded;
     var encoded: [scratch_len]u8 = undefined;
     // Storage is at most twice the encoded size (µ-law and A-law to s16).
     var stored: [2 * scratch_len]u8 = undefined;
@@ -313,7 +325,8 @@ pub const HeaderError = error{
     UnsupportedFormat,
     /// A zero sample rate.
     InvalidFormat,
-    /// The sample rate is above `Limits.max_sample_rate`.
+    /// The sample rate is above `Limits.max_sample_rate`, or the channels
+    /// above `Limits.max_channels`.
     LimitExceeded,
     /// The data would exceed `max_data_bytes`.
     SizeOverflow,
@@ -359,8 +372,7 @@ pub const Writer = struct {
         if (format.sample_format != codec.storage()) return error.UnsupportedFormat;
         if (format.sample_rate == 0) return error.InvalidFormat;
         if (format.sample_rate > limits.max_sample_rate) return error.LimitExceeded;
-        // Mono and stereo only, until this container's T23b part.
-        if (format.channelCount() > 2) return error.UnsupportedFormat;
+        if (format.channelCount() > limits.max_channels) return error.LimitExceeded;
         const sample_bytes: u32 = codec.bytesPerSample();
         const frame_bytes = sample_bytes * format.channelCount();
         const data_bytes = std.math.mul(u64, frame_count, frame_bytes) catch return error.SizeOverflow;
@@ -388,12 +400,15 @@ pub const Writer = struct {
         var bytes: [scratch_len]u8 = undefined;
         var rest = samples;
         while (rest.len > 0) {
-            // scratch_len / 2 samples are whole mono and stereo frames and
-            // encode into at most scratch_len bytes.
+            // The frames were checked above, so a chunk need not end on a
+            // frame, which may be wider than the scratch. scratch_len / 2
+            // samples encode into at most scratch_len bytes.
             const take = @min(rest.len, scratch_len / 2);
-            try w.writeData(pcm.encodeFromS16(w.codec, rest[0..take], &bytes) catch unreachable);
+            try w.out.writeAll(pcm.encodeFromS16(w.codec, rest[0..take], &bytes) catch unreachable);
             rest = rest[take..];
         }
+        // The count was checked against frames_expected, a u32.
+        w.frames_written += @intCast(samples.len / channels);
     }
 
     /// Writes whole frames already encoded as the writer's codec, unchanged:
@@ -559,6 +574,14 @@ test "limits are configurable" {
     try std.testing.expectError(error.LimitExceeded, decodeAll(&short_limit, .{ .max_annotation_bytes = 15 }, &storage));
     var exact_limit: std.Io.Reader = .fixed(fixtures.au.bytes("au_annotation_text"));
     _ = try decodeAll(&exact_limit, .{ .max_annotation_bytes = 16 }, &storage);
+
+    // au_channels3 has three channels; au_channels65 one above the default.
+    var narrow: std.Io.Reader = .fixed(fixtures.au.bytes("au_channels3"));
+    try std.testing.expectError(error.LimitExceeded, decodeAll(&narrow, .{ .max_channels = 2 }, &storage));
+    var wide: std.Io.Reader = .fixed(fixtures.au.bytes("au_channels65"));
+    var wide_storage: [2 * 65]u8 = undefined;
+    const widest = try decodeAll(&wide, .{ .max_channels = 65 }, &wide_storage);
+    try std.testing.expectEqual(65, widest.info.format.channelCount());
 }
 
 test "an annotation of exactly the default limit is skipped" {
@@ -715,6 +738,8 @@ test "the writer checks every size and the codec before writing the header" {
     try std.testing.expectError(error.LimitExceeded, Writer.begin(&out, .s16be, fast, 0, .{}));
     const zero_rate: audio.Format = .{ .sample_rate = 0, .layout = .mono, .sample_format = .s16 };
     try std.testing.expectError(error.InvalidFormat, Writer.begin(&out, .s16be, zero_rate, 0, .{}));
+    const too_wide = try audio.Format.init(8000, max_channels + 1, .s16);
+    try std.testing.expectError(error.LimitExceeded, Writer.begin(&out, .s16be, too_wide, 0, .{}));
     const planar = try audio.Format.init(8000, 1, .s16p);
     try std.testing.expectError(error.UnsupportedFormat, Writer.begin(&out, .s16be, planar, 0, .{}));
     // AU does not carry little-endian encodings, and the storage must match.
@@ -726,6 +751,29 @@ test "the writer checks every size and the codec before writing the header" {
     _ = try Writer.begin(&out, .s16be, mono, max_frames, .{});
     const header = out.buffered();
     try std.testing.expectEqual(max_frames * 2, std.mem.readInt(u32, header[8..12], .big));
+}
+
+test "writeFrames takes frames wider than its encoding chunk allows evenly" {
+    // 2048 samples, the writer's chunk, is not a whole number of
+    // six-channel frames.
+    const six = try audio.Format.init(8000, 6, .s16);
+    const frame_count = 1000;
+    var samples: [frame_count * 6]i16 = undefined;
+    for (&samples, 0..) |*sample, i| sample.* = @intCast(i % 30000);
+    var buffer: [canonical_header_len + samples.len * 2]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&buffer);
+    var writer = try Writer.begin(&out, .s16be, six, frame_count, .{});
+    try writer.writeFrames(&samples);
+    try writer.finish();
+
+    var reader: std.Io.Reader = .fixed(out.buffered());
+    var storage: [samples.len * 2]u8 = undefined;
+    const decoded = try decodeAll(&reader, .{}, &storage);
+    try std.testing.expectEqual(6, decoded.info.format.channelCount());
+    try std.testing.expectEqual(storage.len, decoded.raw.len);
+    for (samples, 0..) |sample, i| {
+        try std.testing.expectEqual(sample, std.mem.readInt(i16, decoded.raw[2 * i ..][0..2], .little));
+    }
 }
 
 test "the writer reports write and flush failures" {

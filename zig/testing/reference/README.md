@@ -222,8 +222,9 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   `ffmpeg -bitexact` conversion byte for byte. Since T23b each output's
   `channel_layout` must be the input's after FFmpeg's command-line guess (an
   unspecified layout takes the default for its channel count), as far as the
-  output container records it (a WAV mask, else `unknown`); AU and AIFF
-  refuse more than two channels until their parts.
+  output container records it (a WAV mask, else `unknown`); AIFF refuses
+  more than two channels until its part (AU takes up to 64 since T23b
+  part 3).
 - **Dither (T23a).** Eight generated inputs of 200000 frames (f32 WAV, s24
   AIFF, s32 AU, f64 Wave64, raw f32be, s32 CAF written by hand, s16 WAV, and
   since T23b a six-channel f32 WAV, which FFmpeg writes as 5.1), so
@@ -293,6 +294,27 @@ build include the WAV muxer. Its first run, locally on Windows at commit
   unsupported cells (copy across containers, transcoding samples not stored as
   s16) rejected before any output: **54/54**.
 - Fixtures whose pipe result equals the file result: **105/105**.
+
+T23b part 3 widened AU to 64 channels, with no reference configuration
+change. The run, locally on Linux x86-64 (Arch Linux, clang 23.1.4 for the
+reference build, ReleaseSafe tools), failed only the 90 transcodes of the 15
+float fixtures that hold inf or NaN: this compiler's FFmpeg build converts
+those samples to 0 where the CI's clang 18 build, the committed vectors and
+`zffmpeg` give -32768 (`av_clip_int16(lrintf(x))` is undefined for them in
+C). It also corrected the pipe expectation for raw PCM input (a refusal,
+`UnsupportedStreamingSize`, for a container with a header), which the
+Windows runs had not exercised. Otherwise:
+
+- AU **19/19** and **22/22** (`au_channels3`, `au_channels6` and
+  `au_channels64` accepted with `channel_layout` `unknown`, as ffprobe;
+  `au_channels65` `LimitExceeded`), AU writer outputs FFmpeg copies to
+  identical bytes **12/12**; WAV, AIFF, CAF and raw as for part 2.
+- Detection and pipes: **281/281**; Zig-written files: **64/64**.
+- zffmpeg outputs FFmpeg reads as expected, equal through pipes:
+  **1216/1306**, the 90 above the only failures (a six-channel AU becomes
+  extensible 5.1 in WAV, byte for byte as FFmpeg writes it); unsupported
+  cells: **556/556**.
+- Dithered conversions equal to FFmpeg's: **416/416**.
 
 T23b part 2 carried channel layouts into the streams, widened WAV to 64
 channels and made both sides report FFmpeg's layout, with no reference

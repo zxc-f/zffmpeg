@@ -1028,9 +1028,14 @@ pub const DecodeError = Error || std.Io.Writer.Error;
 /// Decodes a WAV stream and writes its samples to `out` as raw little-endian
 /// samples of the stream's storage format (`Info.format.sample_format`; s16
 /// for 16-bit PCM), using fixed working storage. The caller flushes `out`.
+/// A frame wider than that storage (4 KiB, possible only with a channel
+/// limit above the default) is `LimitExceeded`.
 pub fn decodeToRaw(reader: *std.Io.Reader, out: *std.Io.Writer, limits: Limits) DecodeError!Info {
     var parser: Parser = .init(reader, limits);
     const info = try parser.readHeader();
+    // readData delivers nothing when a frame does not fit, which would end
+    // the loop below early; only a channel limit above the default allows it.
+    if (parser.frame_bytes > scratch_len) return error.LimitExceeded;
     var encoded: [scratch_len]u8 = undefined;
     // Storage is at most twice the encoded size (A-law and mu-law to s16).
     var stored: [2 * scratch_len]u8 = undefined;
@@ -1327,12 +1332,14 @@ pub const Writer = struct {
         var bytes: [scratch_len]u8 = undefined;
         var rest = samples;
         while (rest.len > 0) {
-            // scratch_len / 2 samples are whole mono and stereo frames and
-            // encode into at most scratch_len bytes.
+            // The frames were checked above, so a chunk need not end on a
+            // frame, which may be wider than the scratch. scratch_len / 2
+            // samples encode into at most scratch_len bytes.
             const take = @min(rest.len, scratch_len / 2);
-            try w.writeData(pcm.encodeFromS16(w.codec, rest[0..take], &bytes) catch unreachable);
+            try w.out.writeAll(pcm.encodeFromS16(w.codec, rest[0..take], &bytes) catch unreachable);
             rest = rest[take..];
         }
+        w.frames_written += samples.len / channels;
     }
 
     /// Writes whole frames already encoded as the writer's codec, unchanged:
@@ -1808,6 +1815,29 @@ test "writeFrames encodes s16 samples as the writer's codec" {
         try writer.writeFrames(stream.samples.s16);
         try writer.finish();
         try std.testing.expectEqualSlices(u8, fixtures.bytes(name), out.buffered());
+    }
+}
+
+test "writeFrames takes frames wider than its encoding chunk allows evenly" {
+    // 2048 samples, the writer's chunk, is not a whole number of
+    // six-channel frames.
+    const six = try audio.Format.init(8000, 6, .s16);
+    const frame_count = 1000;
+    var samples: [frame_count * 6]i16 = undefined;
+    for (&samples, 0..) |*sample, i| sample.* = @intCast(i % 30000);
+    // The 5.1 default takes the 68-byte extensible header.
+    var buffer: [68 + samples.len * 2]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&buffer);
+    var writer = try Writer.begin(&out, .s16le, six, frame_count, .{});
+    try writer.writeFrames(&samples);
+    try writer.finish();
+
+    var reader: std.Io.Reader = .fixed(out.buffered());
+    var storage: [samples.len * 2]u8 = undefined;
+    const decoded = try decodeAll(&reader, .{}, &storage);
+    try std.testing.expectEqual(storage.len, decoded.raw.len);
+    for (samples, 0..) |sample, i| {
+        try std.testing.expectEqual(sample, std.mem.readInt(i16, decoded.raw[2 * i ..][0..2], .little));
     }
 }
 

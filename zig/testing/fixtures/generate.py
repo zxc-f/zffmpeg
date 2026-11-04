@@ -1260,8 +1260,21 @@ def build_au_fixtures():
     bad("au_rate_over_limit", "limits", f"Sample rate {MAX_RATE + 1}, one above the limit.",
         au(pcm_be(MONO[:4]), rate=MAX_RATE + 1), "LimitExceeded")
     bad("au_channels_zero", "format", "Zero channels.", au(pcm_be(MONO[:4]), channels=0), "InvalidFormat")
-    bad("au_channels3", "format", "Three channels: only mono and stereo are supported.",
-        au(pcm_be(MONO[:6]), channels=3), "UnsupportedFormat")
+    # Channels (T23b): any count up to the limit, in an unspecified layout,
+    # since the header holds only the count.
+    ok("au_channels3", "channels",
+       "Three channels: the layout is unspecified, as for every AU stream (rejected before T23b).",
+       au(pcm_be(MONO[:6]), channels=3), 3, 8000, MONO[:6])
+    six = MONO + MONO[:4]
+    ok("au_channels6", "channels",
+       "Six channels, written back the same way; FFmpeg's command line guesses 5.1 for them.",
+       au(pcm_be(six), channels=6), 6, 8000, six, writer_output=True)
+    wide = [i - 32 for i in range(MAX_CHANNELS)]
+    ok("au_channels64", "channels", f"{MAX_CHANNELS} channels, the default limit: one frame.",
+       au(pcm_be(wide), channels=MAX_CHANNELS), MAX_CHANNELS, 8000, wide)
+    bad("au_channels65", "channels",
+        f"{MAX_CHANNELS + 1} channels, above the default limit (FFmpeg reads them).",
+        au(bytes(2 * (MAX_CHANNELS + 1)), channels=MAX_CHANNELS + 1), "LimitExceeded")
 
     # Precedence: the first violated field in header order wins.
     bad("au_limit_before_unsupported", "precedence",
