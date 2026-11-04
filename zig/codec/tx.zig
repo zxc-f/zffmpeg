@@ -24,6 +24,7 @@
 //! unless asked, which keeps the rounding of each step.
 
 const std = @import("std");
+const libm = @import("../core/libm.zig");
 
 pub const Complex = struct {
     re: f32,
@@ -46,7 +47,7 @@ const Tables = struct {
         while (n <= len) : (n *= 2) {
             const tab = try gpa.alloc(f32, n / 4 + 1);
             const freq = 2.0 * std.math.pi / @as(f64, @floatFromInt(n));
-            for (tab[0 .. n / 4], 0..) |*v, i| v.* = @floatCast(@cos(@as(f64, @floatFromInt(i)) * freq));
+            for (tab[0 .. n / 4], 0..) |*v, i| v.* = @floatCast(libm.cos(@as(f64, @floatFromInt(i)) * freq));
             tab[n / 4] = 0;
             t.by_log2[std.math.log2_int(usize, n)] = tab;
         }
@@ -228,7 +229,7 @@ fn genExp(gpa: std.mem.Allocator, len2: usize, scale: f32, pre_tab: ?[]const u32
     const off: usize = if (pre_tab != null) len2 else 0;
     for (0..len2) |i| {
         const alpha = std.math.pi / 2.0 * (@as(f64, @floatFromInt(i)) + theta) / @as(f64, @floatFromInt(len2));
-        exp[off + i] = .{ .re = @floatCast(@cos(alpha) * magnitude), .im = @floatCast(@sin(alpha) * magnitude) };
+        exp[off + i] = .{ .re = @floatCast(libm.cos(alpha) * magnitude), .im = @floatCast(libm.sin(alpha) * magnitude) };
     }
     if (pre_tab) |map| {
         for (0..len2) |i| exp[i] = exp[len2 + map[i]];
@@ -247,13 +248,14 @@ fn mulinv(n_in: usize, m: usize) usize {
 
 /// ff_tx_tab_53: the 5- and 3-point transforms' constants.
 fn tab53() [12]f32 {
-    const pi = std.math.pi;
-    const c5: f32 = @floatCast(@cos(2.0 * pi / 5.0));
-    const c10: f32 = @floatCast(@cos(2.0 * pi / 10.0));
-    const s5: f32 = @floatCast(@sin(2.0 * pi / 5.0));
-    const s10: f32 = @floatCast(@sin(2.0 * pi / 10.0));
-    const c12: f32 = @floatCast(@cos(2.0 * pi / 12.0));
-    return .{ c5, c5, c10, c10, s5, s5, s10, s10, c12, c12, @floatCast(@cos(2.0 * pi / 6.0)), @floatCast(@cos(8.0 * pi / 6.0)) };
+    // M_PI as a double, so the arguments round as C's do.
+    const pi: f64 = std.math.pi;
+    const c5: f32 = @floatCast(libm.cos(2.0 * pi / 5.0));
+    const c10: f32 = @floatCast(libm.cos(2.0 * pi / 10.0));
+    const s5: f32 = @floatCast(libm.sin(2.0 * pi / 5.0));
+    const s10: f32 = @floatCast(libm.sin(2.0 * pi / 10.0));
+    const c12: f32 = @floatCast(libm.cos(2.0 * pi / 12.0));
+    return .{ c5, c5, c10, c10, s5, s5, s10, s10, c12, c12, @floatCast(libm.cos(2.0 * pi / 6.0)), @floatCast(libm.cos(8.0 * pi / 6.0)) };
 }
 
 /// fft3: three points `in` to `out[o + k * stride]`.

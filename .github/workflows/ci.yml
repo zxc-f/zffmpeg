@@ -127,7 +127,8 @@ jobs:
       - name: Check the PCM codec vectors (T20b)
         run: |
           clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/pcm_vectors.c \
-            .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libavutil.a \
+            .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a \
+            .references/ffmpeg-install/lib/libavutil.a \
             -lm -pthread -o pcm-vectors
           ./pcm-vectors | diff -u zig/testing/vectors/pcm.txt -
 
@@ -222,7 +223,8 @@ jobs:
       - name: Check the FLAC encoder vectors (T26c)
         run: |
           clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/flacenc_vectors.c \
-            .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libavutil.a \
+            .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a \
+            .references/ffmpeg-install/lib/libavutil.a \
             -lm -pthread -o flacenc-vectors
           ./flacenc-vectors | diff -u zig/testing/vectors/flacenc.txt -
 
@@ -231,11 +233,13 @@ jobs:
       - name: Check the Opus range decoder and packet vectors (T28a)
         run: |
           clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/opus_rc_vectors.c \
-            .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libavutil.a \
+            .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a \
+            .references/ffmpeg-install/lib/libavutil.a \
             -lm -pthread -o opus-rc-vectors
           ./opus-rc-vectors | diff -u zig/testing/vectors/opus_rc.txt -
           clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/opus_parse_vectors.c \
-            .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libavutil.a \
+            .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a \
+            .references/ffmpeg-install/lib/libavutil.a \
             -lm -pthread -o opus-parse-vectors
           ./opus-parse-vectors | diff -u zig/testing/vectors/opus_parse.txt -
 
@@ -250,7 +254,17 @@ jobs:
           ./celt-vectors | diff -u zig/testing/vectors/celt.txt -
           clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/libm_vectors.c \
             .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o libm-vectors
-          ./libm-vectors | diff -u zig/testing/vectors/libm.txt -
+          # glibc before 2.44 computes sinh, cosh and tanh differently (not
+          # correctly rounded) and reduces sin, cos and tan's arguments above
+          # 1e8 differently: there those lines are not compared.
+          libc=$(getconf GNU_LIBC_VERSION | cut -d' ' -f2)
+          if [ "$(printf '%s\n' 2.44 "$libc" | sort -V | head -n 1)" != 2.44 ]; then
+            echo "::notice::glibc $libc predates 2.44: libm.txt's C lines and sin, cos and tan's large lines are not compared"
+            older='^C |^D (sin|cos|tan) [0-9] large '
+            ./libm-vectors | grep -Ev "$older" | diff -u <(grep -Ev "$older" zig/testing/vectors/libm.txt) -
+          else
+            ./libm-vectors | diff -u zig/testing/vectors/libm.txt -
+          fi
 
       # The committed T27d oracle must be what this build's Vorbis decoder
       # makes of the Ogg Vorbis fixtures.
@@ -266,7 +280,8 @@ jobs:
       - name: Check the VLC vectors (T18c)
         run: |
           clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/vlc_vectors.c \
-            .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libavutil.a \
+            .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a \
+            .references/ffmpeg-install/lib/libavutil.a \
             -lm -pthread -o vlc-vectors
           ./vlc-vectors | diff -u zig/testing/vectors/vlc.txt -
 
@@ -282,7 +297,7 @@ jobs:
       - name: Check the Ogg muxer vectors (T27b)
         run: |
           clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/oggmux_vectors.c \
-            .references/ffmpeg-install/lib/libavformat.a .references/ffmpeg-install/lib/libavcodec.a \
+            .references/ffmpeg-install/lib/libavformat.a .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a \
             .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o oggmux-vectors
           ./oggmux-vectors | diff -u zig/testing/vectors/oggmux.txt -
 

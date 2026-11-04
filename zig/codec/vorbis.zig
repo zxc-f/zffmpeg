@@ -28,6 +28,7 @@ const bits = @import("bits.zig");
 const vlc = @import("vlc.zig");
 const tx = @import("tx.zig");
 const float_dsp = @import("float_dsp.zig");
+const libm = @import("../core/libm.zig");
 const xiph = @import("xiph.zig");
 const data = @import("vorbis_data.zig");
 const channel_layout = @import("../core/channel_layout.zig");
@@ -850,14 +851,14 @@ pub const Decoder = struct {
         }
         const order: usize = f.order;
         const wstep: f32 = @floatCast(std.math.pi / @as(f64, @floatFromInt(f.bark_map_size)));
-        for (lsp[0..order]) |*v| v.* = @floatCast(2.0 * @cos(@as(f64, v.*)));
+        for (lsp[0..order]) |*v| v.* = @floatCast(2.0 * libm.cos(v.*));
         const map = f.map[blockflag];
         var i: usize = 0;
         while (i < f.map_size[blockflag]) {
             const iter_cond = map[i];
             var p: f32 = 0.5;
             var q: f32 = 0.5;
-            const two_cos_w: f32 = @floatCast(2.0 * @cos(@as(f64, wstep * @as(f32, @floatFromInt(iter_cond)))));
+            const two_cos_w: f32 = @floatCast(2.0 * libm.cos(wstep * @as(f32, @floatFromInt(iter_cond))));
             var j: usize = 0;
             while (j + 1 < order) : (j += 2) {
                 q *= lsp[j] - two_cos_w;
@@ -875,7 +876,7 @@ pub const Decoder = struct {
             const numerator: f64 = @floatFromInt(amplitude *% f.amplitude_offset);
             const scale: f64 = @floatFromInt((@as(u64, 1) << @intCast(f.amplitude_bits)) - 1);
             const exponent = (numerator / (scale * @sqrt(@as(f64, p + q))) - @as(f64, @floatFromInt(f.amplitude_offset))) * @as(f64, @as(f32, 0.11512925));
-            const value: f32 = @floatCast(@exp(exponent));
+            const value: f32 = @floatCast(libm.exp(exponent));
             while (true) {
                 if (i >= vec.len) return error.InvalidData;
                 vec[i] = value;
@@ -1059,7 +1060,7 @@ fn bark(x: f32) f64 {
     const a: f64 = @as(f32, 0.00074) * x;
     const b: f64 = @as(f32, 1.85e-8) * x * x;
     const c: f32 = @as(f32, 1e-4) * x;
-    return @as(f64, @as(f32, 13.1)) * std.math.atan(a) + @as(f64, @as(f32, 2.24)) * std.math.atan(b) + @as(f64, c);
+    return @as(f64, @as(f32, 13.1)) * libm.atan(a) + @as(f64, @as(f32, 2.24)) * libm.atan(b) + @as(f64, c);
 }
 
 fn clipU16(v: i32) u16 {

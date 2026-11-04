@@ -41,7 +41,7 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/samplefmt_v
 The T20b PCM codec vectors come from the reference's `libavcodec` the same way:
 
 ```bash
-clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/pcm_vectors.c .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o pcm-vectors
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/pcm_vectors.c .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o pcm-vectors
 ./pcm-vectors | diff -u zig/testing/vectors/pcm.txt -
 ```
 
@@ -202,9 +202,9 @@ generated packets of every code, plain and self-delimited. The RFC 8251
 test vectors are optional coverage, fetched by `opus_vectors_sync.sh`:
 
 ```bash
-clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/opus_rc_vectors.c .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o opus-rc-vectors
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/opus_rc_vectors.c .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o opus-rc-vectors
 ./opus-rc-vectors | diff -u zig/testing/vectors/opus_rc.txt -
-clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/opus_parse_vectors.c .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o opus-parse-vectors
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/opus_parse_vectors.c .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o opus-parse-vectors
 ./opus-parse-vectors | diff -u zig/testing/vectors/opus_parse.txt -
 ```
 
@@ -215,7 +215,11 @@ downmixing, the hybrid start band and phase inversion on and off, and
 prints each frame's final range and the MD5 of its samples.
 `libm_vectors.c` needs only the C library: it prints digests of what
 glibc's `exp2f`, `sinf` and `cosf` return on sampled floats and on every
-angle CELT's spreading rotation can take, which `core/libm.zig` ports:
+angle CELT's spreading rotation can take, and of the fifteen double
+functions `core/libm.zig` ports over eight input distributions, inputs
+from 1e8 up on lines of their own (glibc 2.39 reduces sin, cos and tan's
+there differently) and sinh, cosh and tanh on `C` lines (correctly rounded
+since 2.44); with an older glibc CI leaves those lines out:
 
 ```bash
 clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/celt_vectors.c .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o celt-vectors
@@ -232,7 +236,7 @@ generated prefix codes, complete and incomplete, MSB-first and
 prints the builder's result and the MD5 of every table entry:
 
 ```bash
-clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/vlc_vectors.c .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o vlc-vectors
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/vlc_vectors.c .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o vlc-vectors
 ./vlc-vectors | diff -u zig/testing/vectors/vlc.txt -
 ```
 
@@ -255,7 +259,7 @@ packets larger than a page, empty packets, refused headers) and prints
 every page of each output and its MD5:
 
 ```bash
-clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/oggmux_vectors.c .references/ffmpeg-install/lib/libavformat.a .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o oggmux-vectors
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/oggmux_vectors.c .references/ffmpeg-install/lib/libavformat.a .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o oggmux-vectors
 ./oggmux-vectors | diff -u zig/testing/vectors/oggmux.txt -
 ```
 
@@ -267,7 +271,7 @@ STREAMINFO after opening, each packet's size and MD5, and the final
 STREAMINFO the flush gives:
 
 ```bash
-clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/flacenc_vectors.c .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o flacenc-vectors
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/flacenc_vectors.c .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o flacenc-vectors
 ./flacenc-vectors | diff -u zig/testing/vectors/flacenc.txt -
 ```
 
@@ -625,8 +629,9 @@ dither section's 200000-frame inputs (one per input container, 8 of them)
 with seven option sets (to 48, 8, 44.1 with a downmix, 96 to `pcm_f32le`,
 22.05 to `pcm_f64le`, 48 dithered, 32 kHz into 5.1) by FFmpeg and zffmpeg.
 The run, locally on Linux x86-64 as for T23b part 3: 56 of 56 outputs equal
-FFmpeg's byte for byte, frame counts included, though the declared
-tolerance would allow more; every other section as for T23c.
+FFmpeg's byte for byte, frame counts included (since T28a the comparison
+requires equal bytes: notes.md "Floating-point library"); every other
+section as for T23c.
 
 T23c added rematrixing: the matrix (4833 vectors), the kernels (1792
 `swr_convert` vectors) and zffmpeg's output `-ac`/`-ch_layout`, with a new

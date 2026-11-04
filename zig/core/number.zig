@@ -17,6 +17,7 @@
 //! may differ from the C library's in the last bit.
 
 const std = @import("std");
+const libm = @import("libm.zig");
 
 pub const Number = struct {
     value: f64,
@@ -155,7 +156,7 @@ pub fn avStrtod(text: []const u8) Number {
     var next = n.end;
     if (at(text, next) == 'd' and at(text, next + 1) == 'B') {
         // ff_exp10: exp2(M_LOG2_10 * x).
-        n.value = @exp2(log2_10 * (n.value / 20));
+        n.value = libm.exp2(log2_10 * (n.value / 20));
         next += 2;
     } else if (prefix(at(text, next))) |p| {
         if (at(text, next + 1) == 'i') {

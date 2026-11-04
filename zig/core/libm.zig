@@ -8,19 +8,45 @@
 // either version 2.1 of the License, or (at your option) any later version.
 // The constants are those of the reference platform's libm.so.6, read from
 // its __exp2f_data and __sincosf_table.
-//! The reference platform's single-precision `exp2f`, `sinf` and `cosf`,
-//! where FFmpeg's C code calls them and Zig's own functions round
-//! differently (notes.md, "glibc's float functions"): Zig's `@exp2` and
-//! `@sin` follow musl's older code and differ from glibc in the last bit
-//! for about one float in 12,000 and for 1579 of CELT's rotation angles.
+//! The reference platform's C library math where FFmpeg's C code calls it
+//! and Zig's own functions round differently (notes.md "Floating-point
+//! library"): single-precision `exp2f`, `sinf` and `cosf` here, and in
+//! libm/ the double functions FFmpeg's code paths here call: `sin`, `cos`,
+//! `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `exp2`, `log`, `pow`,
+//! `hypot`, `sinh`, `cosh` and `tanh`. Zig's `@exp2` and `@sin`
+//! follow musl's older code and differ from glibc in the last bit for about
+//! one float in 12,000 and for 1579 of CELT's rotation angles.
 //!
-//! glibc picks a variant by CPU at load time; on x86-64 with FMA (every
-//! machine the project verifies on) it runs these with fused multiply-adds,
-//! which `@mulAdd` reproduces on any target. Checked against the installed
-//! glibc for every float (exp2f) and every CELT angle (sinf, cosf), and by
-//! vectors/libm.txt.
+//! glibc picks a variant by CPU at load time; on x86-64 with FMA and AVX2
+//! (every machine the project verifies on, AVX-512 ones included) it runs
+//! the variants built with fused multiply-adds, which `@mulAdd` reproduces
+//! on any target. The float functions are checked against the installed
+//! glibc for every float (exp2f) and every float in [0, pi/4) (sinf,
+//! cosf), and all of them by vectors/libm.txt.
 
 const std = @import("std");
+const sin_mod = @import("libm/sin.zig");
+const exp_mod = @import("libm/exp.zig");
+
+/// glibc's double functions (libm/*.zig), each checked against the
+/// installed glibc on 32 million samples across the exponent range and by
+/// vectors/libm.txt.
+pub const sin = sin_mod.sin;
+pub const cos = sin_mod.cos;
+pub const exp = exp_mod.exp;
+pub const exp2 = exp_mod.exp2;
+pub const atan = @import("libm/atan.zig").atan;
+pub const tan = @import("libm/tan.zig").tan;
+pub const asin = @import("libm/asin.zig").asin;
+pub const acos = @import("libm/asin.zig").acos;
+pub const atan2 = @import("libm/atan2.zig").atan2;
+pub const log = @import("libm/log.zig").log;
+pub const pow = @import("libm/pow.zig").pow;
+pub const hypot = @import("libm/hypot.zig").hypot;
+/// Correctly rounded since glibc 2.44 (CORE-MATH); earlier releases differ.
+pub const sinh = @import("libm/hyperbolic.zig").sinh;
+pub const cosh = @import("libm/hyperbolic.zig").cosh;
+pub const tanh = @import("libm/hyperbolic.zig").tanh;
 
 /// __exp2f_data.tab: 2^(i/32) with i/32 taken out of the exponent.
 const exp2f_tab = [32]u64{
@@ -157,6 +183,97 @@ test "exp2f, sinf and cosf return glibc's results (vectors/libm.txt)" {
         count += 1;
     }
     try expectLine(lines.next().?, try std.fmt.bufPrint(&head, "Q 4099 {d}", .{count}), &md5);
+}
+
+/// libm_vectors.c's xorshift generator and input distributions.
+const Sampler = struct {
+    state: u64,
+
+    fn next(g: *Sampler) u64 {
+        g.state ^= g.state << 13;
+        g.state ^= g.state >> 7;
+        g.state ^= g.state << 17;
+        return g.state;
+    }
+
+    fn unit(g: *Sampler) f64 {
+        return @as(f64, @floatFromInt(g.next() >> 11)) * 0x1p-53;
+    }
+
+    fn sample(g: *Sampler, dist: u32) f64 {
+        return switch (dist) {
+            0 => @bitCast(g.next()),
+            1 => (g.unit() * 2 - 1) * 10,
+            2 => (g.unit() * 2 - 1) * 1000,
+            3 => g.unit() * 2 - 1,
+            4 => blk: {
+                const k: f64 = @floatFromInt(@as(i64, @intCast(g.next() % 2001)) - 1000);
+                break :blk k * (std.math.pi / 2.0) + (g.unit() - 0.5) * 1e-6;
+            },
+            5 => (g.unit() * 2 - 1) * 1e9,
+            6 => (g.unit() * 2 - 1) * 800,
+            else => blk: {
+                const m = g.unit() + 0.5;
+                const e: i32 = @as(i32, @intCast(g.next() % 120)) - 60;
+                const sign: f64 = if (g.next() & 1 != 0) -1.0 else 1.0;
+                break :blk std.math.ldexp(m, e) * sign;
+            },
+        };
+    }
+};
+
+fn putDouble(md5: *Md5, v: f64) void {
+    var b: [8]u8 = undefined;
+    std.mem.writeInt(u64, &b, @bitCast(v), .little);
+    md5.update(&b);
+}
+
+test "the double functions return glibc's results (vectors/libm.txt)" {
+    const Func = struct { name: []const u8, kind: u8, one: ?*const fn (f64) f64 = null, two: ?*const fn (f64, f64) f64 = null };
+    const funcs = [_]Func{
+        .{ .name = "sin", .kind = 'D', .one = sin },     .{ .name = "cos", .kind = 'D', .one = cos },
+        .{ .name = "exp", .kind = 'D', .one = exp },     .{ .name = "exp2", .kind = 'D', .one = exp2 },
+        .{ .name = "atan", .kind = 'D', .one = atan },   .{ .name = "tan", .kind = 'D', .one = tan },
+        .{ .name = "asin", .kind = 'D', .one = asin },   .{ .name = "acos", .kind = 'D', .one = acos },
+        .{ .name = "log", .kind = 'D', .one = log },     .{ .name = "pow", .kind = 'D', .two = pow },
+        .{ .name = "atan2", .kind = 'D', .two = atan2 }, .{ .name = "hypot", .kind = 'D', .two = hypot },
+        .{ .name = "sinh", .kind = 'C', .one = sinh },   .{ .name = "cosh", .kind = 'C', .one = cosh },
+        .{ .name = "tanh", .kind = 'C', .one = tanh },
+    };
+    var lines = std.mem.splitScalar(u8, @embedFile("../testing/vectors/libm.txt"), '\n');
+    for (0..3) |_| _ = lines.next();
+    var text: [256]u8 = undefined;
+    for (funcs, 0..) |func, fi| {
+        for (0..8) |dist| {
+            var g: Sampler = .{ .state = 0x9E3779B97F4A7C15 +% 1000003 * @as(u64, fi * 8 + dist) };
+            var small: Md5 = .init(.{});
+            var large: Md5 = .init(.{});
+            var n_small: u32 = 0;
+            var n_large: u32 = 0;
+            for (0..20000) |_| {
+                const x = g.sample(@intCast(dist));
+                const y = if (func.two) |two| blk: {
+                    const x2 = g.sample(@intCast((dist + 3) % 8));
+                    break :blk two(if (two == pow) @abs(x) else x, x2);
+                } else func.one.?(x);
+                if (@abs(x) >= 1e8) {
+                    putDouble(&large, y);
+                    n_large += 1;
+                } else {
+                    putDouble(&small, y);
+                    n_small += 1;
+                }
+            }
+            var ds: [16]u8 = undefined;
+            var dl: [16]u8 = undefined;
+            small.final(&ds);
+            large.final(&dl);
+            var got = try std.fmt.bufPrint(&text, "{c} {s} {d} small {d} {x}", .{ func.kind, func.name, dist, n_small, ds });
+            try testing.expectEqualStrings(lines.next().?, got);
+            got = try std.fmt.bufPrint(&text, "{c} {s} {d} large {d} {x}", .{ func.kind, func.name, dist, n_large, dl });
+            try testing.expectEqualStrings(lines.next().?, got);
+        }
+    }
 }
 
 /// pvq.c's celt_exp_rotation angle, as the vectors compute it.

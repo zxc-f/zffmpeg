@@ -27,8 +27,8 @@ carries 1 to 64 channels with FFmpeg's channel layouts, Apple's layout chunk
 in AIFF and CAF included, and `zffmpeg` names an unspecified layout as
 FFmpeg's command line does (T23b); its output `-ac` and `-ch_layout`
 rematrix as libswresample does, bit-exact (T23c), and its `-ar` resamples as
-FFmpeg's `aresample` does, within a declared tolerance that the comparisons
-have not needed (T24); options take FFmpeg's number syntax (`44.1k`, T17a).
+FFmpeg's `aresample` does, byte for byte (T24, with glibc's `sin`, `cos` and
+`exp` ported since T28a); options take FFmpeg's number syntax (`44.1k`, T17a).
 The library's audio filter graph negotiates and runs chains of `anull`,
 `aformat`, `volume`, `aresample`, `atrim` and `asetpts` as libavfilter does
 (T25a), from filtergraph text with FFmpeg's expressions too (T25b), and

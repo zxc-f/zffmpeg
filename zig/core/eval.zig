@@ -21,6 +21,7 @@
 //! component uses.
 
 const std = @import("std");
+const libm = @import("libm.zig");
 const number = @import("number.zig");
 const diagnostics = @import("diagnostics.zig");
 
@@ -244,12 +245,12 @@ pub const Expr = struct {
             .value => return v,
             .constant => return v * values[n.index],
             .func0 => return v * func0(n.func, e.param(n, 0, values)),
-            .squish => return v / (1 + @exp(4 * e.param(n, 0, values))),
+            .squish => return v / (1 + libm.exp(4 * e.param(n, 0, values))),
             .gauss => {
                 const d = e.param(n, 0, values);
                 // C's sqrt(2 * M_PI): of the double, not of the exact 2π.
                 const two_pi: f64 = 2 * std.math.pi;
-                return v * @exp(-d * d / 2) / @sqrt(two_pi);
+                return v * libm.exp(-d * d / 2) / @sqrt(two_pi);
             },
             .ld => return v * e.vars[varIndex(e.param(n, 0, values))],
             .isnan => return v * boolValue(std.math.isNan(e.param(n, 0, values))),
@@ -346,7 +347,7 @@ pub const Expr = struct {
                     .gte => v * boolValue(d >= d2),
                     .lt => v * boolValue(d < d2),
                     .lte => v * boolValue(d <= d2),
-                    .pow => v * std.math.pow(f64, d, d2),
+                    .pow => v * libm.pow(d, d2),
                     .mul => v * (d * d2),
                     .div => v * (if (d2 != 0) d / d2 else d * std.math.inf(f64)),
                     .add => v * (d + d2),
@@ -357,8 +358,8 @@ pub const Expr = struct {
                         e.vars[i] = d2;
                         break :st v * d2;
                     },
-                    .hypot => v * std.math.hypot(d, d2),
-                    .atan2 => v * std.math.atan2(d, d2),
+                    .hypot => v * libm.hypot(d, d2),
+                    .atan2 => v * libm.atan2(d, d2),
                     .bitand => if (std.math.isNan(d) or std.math.isNan(d2)) std.math.nan(f64) else v * intValue(cLong(d) & cLong(d2)),
                     .bitor => if (std.math.isNan(d) or std.math.isNan(d2)) std.math.nan(f64) else v * intValue(cLong(d) | cLong(d2)),
                     else => unreachable, // every other kind is handled above
@@ -397,7 +398,7 @@ pub const Expr = struct {
                 e.vars[0] = reversed * x_max / 255;
             } else {
                 const power: f64 = @floatFromInt(i - 255);
-                e.vars[0] = x_max * std.math.pow(f64, 0.9, power);
+                e.vars[0] = x_max * libm.pow(0.9, power);
                 if (i & 1 != 0) e.vars[0] *= -1;
                 if (i & 2 != 0) e.vars[0] += low else e.vars[0] += high;
             }
@@ -433,17 +434,17 @@ pub const Expr = struct {
 
 fn func0(f: Func0, x: f64) f64 {
     return switch (f) {
-        .sinh => std.math.sinh(x),
-        .cosh => std.math.cosh(x),
-        .tanh => std.math.tanh(x),
-        .sin => @sin(x),
-        .cos => @cos(x),
-        .tan => @tan(x),
-        .atan => std.math.atan(x),
-        .asin => std.math.asin(x),
-        .acos => std.math.acos(x),
-        .exp => @exp(x),
-        .log => @log(x),
+        .sinh => libm.sinh(x),
+        .cosh => libm.cosh(x),
+        .tanh => libm.tanh(x),
+        .sin => libm.sin(x),
+        .cos => libm.cos(x),
+        .tan => libm.tan(x),
+        .atan => libm.atan(x),
+        .asin => libm.asin(x),
+        .acos => libm.acos(x),
+        .exp => libm.exp(x),
+        .log => libm.log(x),
         .abs => @abs(x),
     };
 }
@@ -710,8 +711,6 @@ const testing = std.testing;
 // through zig/testing/reference/eval_vectors.c, which documents its lines.
 const vectors = @embedFile("../testing/vectors/eval.txt");
 const vector_count = 200;
-const libm_names = [_][]const u8{ "sin", "cos", "tan", "exp", "log", "pow", "hypot", "atan", "squish", "gauss", "root", "dB", "^" };
-
 fn expected(text: []const u8) !f64 {
     if (std.mem.eql(u8, text, "nan")) return std.math.nan(f64);
     if (std.mem.eql(u8, text, "inf")) return std.math.inf(f64);
@@ -723,7 +722,6 @@ test "expressions equal FFmpeg's on every vector" {
     const gpa = testing.allocator;
     var lines = std.mem.tokenizeScalar(u8, vectors, '\n');
     var count: usize = 0;
-    var tolerated: usize = 0;
     while (lines.next()) |line| : (count += 1) {
         var fields = std.mem.tokenizeScalar(u8, line, ' ');
         const kind = fields.next().?;
@@ -753,16 +751,8 @@ test "expressions equal FFmpeg's on every vector" {
             want_text = fields.next();
             if (std.math.isNan(want)) {
                 try testing.expect(std.math.isNan(got));
-            } else if (@as(u64, @bitCast(want)) != @as(u64, @bitCast(got))) {
-                // The C library's functions: within 4 units in the last place.
-                const libm = for (libm_names) |name| {
-                    if (std.mem.find(u8, text, name) != null) break true;
-                } else false;
-                if (!libm or !std.math.approxEqRel(f64, want, got, std.math.ldexp(@as(f64, 1), -50))) {
-                    std.debug.print("want {e}, got {e}\n", .{ want, got });
-                    return error.TestExpectedEqual;
-                }
-                tolerated += 1;
+            } else {
+                try testing.expectEqual(@as(u64, @bitCast(want)), @as(u64, @bitCast(got)));
             }
         }
     }

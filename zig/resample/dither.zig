@@ -30,6 +30,7 @@
 //! noise is generated as it is used: nothing allocates.
 
 const std = @import("std");
+const libm = @import("../core/libm.zig");
 const audio = @import("../core/audio.zig");
 const samples = @import("../core/samples.zig");
 const audioconvert = @import("audioconvert.zig");
@@ -390,7 +391,7 @@ pub const Dither = struct {
                 const one: i32 = 1;
                 const levels: f64 = @floatFromInt(one << shift);
                 const gain: f64 = @floatFromInt(f.gain_cb);
-                const factor = 1 - @exp(gain * std.math.ln10 * 0.005) * 2 / levels;
+                const factor = 1 - libm.exp(gain * std.math.ln10 * 0.005) * 2 / levels;
                 const scale_1: f64 = dither.ns_scale_1;
                 dither.ns_scale_1 = @floatCast(scale_1 * factor);
                 // Shaping noise is float and unscaled.

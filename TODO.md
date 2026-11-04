@@ -2926,7 +2926,14 @@ names, not as an empty framework.
       final range, decoder state and the MD5 of every sample, in Debug,
       ReleaseSafe and ReleaseFast. The port refuses start_band ==
       end_band, which FFmpeg's band skipping divides by zero on and its
-      callers never pass.
+      callers never pass (9f151a3). Then, at the project owner's request,
+      core/libm ports the rest of the C library math the earlier tasks
+      call (double sin, cos, tan, asin, acos, atan, atan2, exp, exp2, log,
+      pow, hypot, sinh, cosh, tanh), each checked against the installed
+      glibc on 32 to 64 million samples and by libm_vectors.c, so T24's
+      resampling and T25b's expressions need no tolerance: their tests,
+      compare.py's resampling section and graph.zig's outputs now require
+      equal bytes, and pass.
     ```
   - [ ] **T28b — SILK.** Needs T28a.
     Done when the SILK-only test vectors meet `opus_compare`.

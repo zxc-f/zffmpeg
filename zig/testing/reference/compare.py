@@ -1455,18 +1455,13 @@ RESAMPLE_OPTIONS = [
     (["-ar", "48000", "-dither_method", "triangular"], "s16le"),
     (["-ar", "32000", "-ch_layout", "5.1"], "s16le"),
 ]
-# The declared tolerance (port.md "Resampling"): integers by 1 unit, float by
-# 2^-23, double by 2^-50.
-RESAMPLE_TOLERANCE = {"s16le": ("<h", 1), "f32le": ("<f", 2.0 ** -23), "f64le": ("<d", 2.0 ** -50)}
 
 
 def compare_resample(args, lines, failures):
     """zffmpeg's output -ar against FFmpeg's (T24): the long generated inputs
     of the dither section, one per input container, resampled to each rate of
     RESAMPLE_OPTIONS (with a layout change, float and double output, and
-    dither among them) and written as raw PCM by both. The frame counts must
-    be equal and every sample within the declared tolerance; equal bytes are
-    counted apart."""
+    dither among them) and written as raw PCM by both: equal bytes."""
     lines += [
         "",
         "## zffmpeg resampling against FFmpeg",
@@ -1474,7 +1469,7 @@ def compare_resample(args, lines, failures):
         "| Input | Options | Result |",
         "| --- | --- | --- |",
     ]
-    exact = within = total = 0
+    exact = total = 0
     with tempfile.TemporaryDirectory() as tmp:
         work = pathlib.Path(tmp)
         for name, container, codec, rate, channels in DITHER_INPUTS:
@@ -1497,28 +1492,19 @@ def compare_resample(args, lines, failures):
                     failures.append(f"resample {name} {label}: {result}")
                 else:
                     a, b = theirs.read_bytes(), ours.read_bytes()
-                    fmt, tolerance = RESAMPLE_TOLERANCE[raw_format]
-                    size = struct.calcsize(fmt)
                     if a == b:
                         exact += 1
                         result = "pass (equal bytes)"
-                    elif len(a) != len(b):
-                        result = f"**FAIL**: {len(b) // size} samples, FFmpeg {len(a) // size}"
-                        failures.append(f"resample {name} {label}: {result}")
                     else:
-                        count = len(a) // size
-                        x = struct.unpack(f"<{count}{fmt[1]}", a)
-                        y = struct.unpack(f"<{count}{fmt[1]}", b)
-                        worst = max(abs(p - q) for p, q in zip(x, y))
-                        if worst <= tolerance:
-                            within += 1
-                            result = f"pass (within the tolerance: {worst:g})"
+                        if len(a) != len(b):
+                            result = f"**FAIL**: {len(b)} bytes, FFmpeg {len(a)}"
                         else:
-                            result = f"**FAIL**: off by {worst:g}, above {tolerance:g}"
-                            failures.append(f"resample {name} {label}: {result}")
+                            first = next(i for i in range(len(a)) if a[i] != b[i])
+                            result = f"**FAIL**: bytes differ from offset {first}"
+                        failures.append(f"resample {name} {label}: {result}")
                 lines.append(f"| `{name}` | {label} | {result} |")
-    lines += ["", f"Resampled outputs equal to FFmpeg's: {exact}/{total}; within the tolerance: {within}."]
-    record("Resampling (T24)", exact + within, total, understood=within)
+    lines += ["", f"Resampled outputs equal to FFmpeg's: {exact}/{total}."]
+    record("Resampling (T24)", exact, total)
 
 
 # Inputs whose decoded samples FFmpeg reads differently, for reasons other

@@ -1456,18 +1456,6 @@ fn storeGenerated(bytes: []u8, format: SampleFormat, v: f64) void {
     }
 }
 
-fn loadValue(bytes: []const u8, format: SampleFormat) f64 {
-    return switch (format.packedForm()) {
-        .u8 => @floatFromInt(bytes[0]),
-        .s16 => @floatFromInt(std.mem.readInt(i16, bytes[0..2], native_endian)),
-        .s32 => @floatFromInt(std.mem.readInt(i32, bytes[0..4], native_endian)),
-        .s64 => @floatFromInt(std.mem.readInt(i64, bytes[0..8], native_endian)),
-        .flt => @as(f32, @bitCast(std.mem.readInt(u32, bytes[0..4], native_endian))),
-        .dbl => @bitCast(std.mem.readInt(u64, bytes[0..8], native_endian)),
-        else => unreachable,
-    };
-}
-
 /// Runs one case's graph and checks every line after its definition.
 fn runCase(gpa: std.mem.Allocator, lines: []const []const u8) !void {
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
@@ -1573,7 +1561,6 @@ fn runCase(gpa: std.mem.Allocator, lines: []const []const u8) !void {
         return err;
     };
     // L
-    var resampling = false;
     var it = g.chainIterator();
     while (it.next()) |step| {
         const link = step.link orelse break;
@@ -1589,9 +1576,6 @@ fn runCase(gpa: std.mem.Allocator, lines: []const []const u8) !void {
         try testing.expectEqual(try std.fmt.parseInt(u32, fields.next().?, 10), link.time_base.num);
         try testing.expectEqual(try std.fmt.parseInt(u32, fields.next().?, 10), link.time_base.den);
         at += 1;
-    }
-    for (g.nodes.items) |n| {
-        if (n.run == .resample and n.run.resample.mode == .resample) resampling = true;
     }
     // O, as frames go in and out.
     var signal: resample.Signal = .{};
@@ -1609,7 +1593,7 @@ fn runCase(gpa: std.mem.Allocator, lines: []const []const u8) !void {
         while (true) {
             switch (try g.receive()) {
                 .output => |frame| {
-                    try checkOutput(lines[at], frame, resampling);
+                    try checkOutput(lines[at], frame);
                     at += 1;
                 },
                 .need_input => break,
@@ -1626,7 +1610,7 @@ fn runCase(gpa: std.mem.Allocator, lines: []const []const u8) !void {
     while (true) {
         switch (try g.receive()) {
             .output => |frame| {
-                try checkOutput(lines[at], frame, resampling);
+                try checkOutput(lines[at], frame);
                 at += 1;
             },
             .need_input => return error.TestUnexpectedResult,
@@ -1637,7 +1621,7 @@ fn runCase(gpa: std.mem.Allocator, lines: []const []const u8) !void {
     try testing.expectEqual(lines.len, at + 1);
 }
 
-fn checkOutput(line: []const u8, frame: Frame, resampling: bool) !void {
+fn checkOutput(line: []const u8, frame: Frame) !void {
     var fields = std.mem.tokenizeScalar(u8, line, ' ');
     if (!std.mem.eql(u8, fields.next().?, "O")) {
         std.debug.print("an extra output frame of {d}\n", .{frame.frameCount()});
@@ -1658,16 +1642,7 @@ fn checkOutput(line: []const u8, frame: Frame, resampling: bool) !void {
         var i: usize = 0;
         while (i < frame.data.len) : (i += width) std.mem.reverse(u8, little[i..][0..width]);
     }
-    if (!resampling) return testing.expectEqualSlices(u8, expected, little[0..frame.data.len]);
-    const limit = resample.tolerance(frame.format.sample_format.packedForm());
-    var i: usize = 0;
-    while (i < expected.len) : (i += width) {
-        const diff = @abs(loadValue(expected[i..], frame.format.sample_format) - loadValue(little[i..], frame.format.sample_format));
-        if (diff > limit) {
-            std.debug.print("sample {d}: off by {e}\n", .{ i / width, diff });
-            return error.TestExpectedApproxEqAbs;
-        }
-    }
+    try testing.expectEqualSlices(u8, expected, little[0..frame.data.len]);
 }
 
 test "every graph equals FFmpeg's: its chain, converters and output" {
@@ -1712,7 +1687,7 @@ const MultiCase = struct {
 };
 
 /// A sink's frame against the next line, `O <sink> ...`.
-fn expectFrame(arena: std.mem.Allocator, c: *MultiCase, sink: usize, frame: Frame, resampling: bool) !void {
+fn expectFrame(arena: std.mem.Allocator, c: *MultiCase, sink: usize, frame: Frame) !void {
     const line = c.next();
     var fields = std.mem.tokenizeScalar(u8, line, ' ');
     if (!std.mem.eql(u8, fields.next() orelse "", "O")) {
@@ -1720,7 +1695,7 @@ fn expectFrame(arena: std.mem.Allocator, c: *MultiCase, sink: usize, frame: Fram
         return error.TestUnexpectedResult;
     }
     try testing.expectEqual(sink, try std.fmt.parseInt(usize, fields.next().?, 10));
-    try checkOutput(try arena.print("O {s}", .{fields.rest()}), frame, resampling);
+    try checkOutput(try arena.print("O {s}", .{fields.rest()}), frame);
 }
 
 fn expectEvent(c: *MultiCase, kind: []const u8, sink: usize) !void {
@@ -1734,10 +1709,10 @@ fn expectEvent(c: *MultiCase, kind: []const u8, sink: usize) !void {
 }
 
 /// Reads sink `j` until it has no frame or ends; returns whether it ended.
-fn readSink(arena: std.mem.Allocator, c: *MultiCase, g: *Graph, j: usize, resampling: bool) !bool {
+fn readSink(arena: std.mem.Allocator, c: *MultiCase, g: *Graph, j: usize) !bool {
     while (true) {
         switch (try g.receiveFrom(j)) {
-            .output => |frame| try expectFrame(arena, c, j, frame, resampling),
+            .output => |frame| try expectFrame(arena, c, j, frame),
             .need_input => {
                 try expectEvent(c, "W", j);
                 return false;
@@ -1810,9 +1785,7 @@ fn runMultiCase(gpa: std.mem.Allocator, lines: []const []const u8) !void {
         return err;
     };
     // L: every filter's outputs, in graph order.
-    var resampling = false;
     for (g.nodes.items) |n| {
-        if (n.run == .resample and n.run.resample.mode == .resample) resampling = true;
         for (n.outputs, 0..) |o, pad| {
             const l = &g.links.items[o.?];
             var describe: [256]u8 = undefined;
@@ -1862,7 +1835,7 @@ fn runMultiCase(gpa: std.mem.Allocator, lines: []const []const u8) !void {
             'c' => g.closeSource(index),
             'r' => read: {
                 if (ended[index]) break :read;
-                ended[index] = readSink(arena, &c, &g, index, resampling) catch |err| {
+                ended[index] = readSink(arena, &c, &g, index) catch |err| {
                     if (err == error.QueueFull) break :read err;
                     return err;
                 };
@@ -1877,7 +1850,7 @@ fn runMultiCase(gpa: std.mem.Allocator, lines: []const []const u8) !void {
     }
     for (0..sinks.items.len) |j| {
         if (ended[j]) continue;
-        ended[j] = readSink(arena, &c, &g, j, resampling) catch |err| {
+        ended[j] = readSink(arena, &c, &g, j) catch |err| {
             if (err != error.QueueFull) return err;
             try testing.expectEqualStrings(try arena.print("F {d}", .{step + j}), c.next());
             return;

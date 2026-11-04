@@ -21,6 +21,7 @@
 //! Everything else follows FFmpeg's arithmetic.
 
 const std = @import("std");
+const libm = @import("../core/libm.zig");
 const audio = @import("../core/audio.zig");
 const typed_options = @import("../core/options.zig");
 
@@ -159,7 +160,7 @@ fn besselI0(x_in: f64) f64 {
     }
     const y = 1 / x - 1.0 / 15.0;
     const r = evalPoly(&bessel_p2, y) / evalPoly(&bessel_q2, y);
-    return @exp(x) / @sqrt(x) * r;
+    return libm.exp(x) / @sqrt(x) * r;
 }
 
 /// `lrintf` of a double: to `float`, then to the nearest integer, ties to even.
@@ -327,13 +328,13 @@ fn EngineIn(comptime format: audio.SampleFormat, comptime counting: bool) type {
             while (ph < ph_nb) : (ph += 1) {
                 const ph_f: f64 = @floatFromInt(ph);
                 var s: f64 = if (factor == 1.0)
-                    @sin(std.math.pi * ph_f / phases_f) * @as(f64, if (center & 1 != 0) 1 else -1)
+                    libm.sin(std.math.pi * ph_f / phases_f) * @as(f64, if (center & 1 != 0) 1 else -1)
                 else
                     0;
                 for (0..taps) |i| {
                     const offset: f64 = @floatFromInt(@as(i32, @intCast(i)) - center);
                     var x = std.math.pi * (offset - ph_f / phases_f) * factor;
-                    var y: f64 = if (x == 0) 1.0 else if (factor == 1.0) s / x else @sin(x) / x;
+                    var y: f64 = if (x == 0) 1.0 else if (factor == 1.0) s / x else libm.sin(x) / x;
                     switch (filter_type) {
                         .cubic => {
                             const d: f64 = -0.5;
@@ -346,7 +347,7 @@ fn EngineIn(comptime format: audio.SampleFormat, comptime counting: bool) type {
                         .blackman_nuttall => {
                             const taps_f: f64 = @floatFromInt(tap_count);
                             const w = 2.0 * x / (factor * taps_f);
-                            const t = -@cos(w);
+                            const t = -libm.cos(w);
                             y *= 0.3635819 - 0.4891775 * t + 0.1365995 * (2 * t * t - 1) - 0.0106411 * (4 * t * t * t - 3 * t);
                         },
                         .kaiser => {
@@ -853,19 +854,6 @@ fn storeSample(bytes: []u8, format: audio.SampleFormat, v: f64) void {
     }
 }
 
-/// One sample of a packed buffer as a double in its full scale, for the
-/// tolerance: integers as their value, floats as they are.
-fn loadValue(bytes: []const u8, format: audio.SampleFormat) f64 {
-    return switch (format) {
-        .u8 => @floatFromInt(bytes[0]),
-        .s16 => @floatFromInt(std.mem.readInt(i16, bytes[0..2], .little)),
-        .s32 => @floatFromInt(std.mem.readInt(i32, bytes[0..4], .little)),
-        .flt => @as(f32, @bitCast(std.mem.readInt(u32, bytes[0..4], .little))),
-        .dbl => @bitCast(std.mem.readInt(u64, bytes[0..8], .little)),
-        else => unreachable,
-    };
-}
-
 const Run = struct { out: []u8, frames: usize, delay: i64 };
 
 /// `swr_convert` of the whole input into at most `capacity` frames, then
@@ -906,20 +894,6 @@ fn runResample(gpa: std.mem.Allocator, comptime internal: audio.SampleFormat, in
     return .{ .out = out_bytes, .frames = count, .delay = delay };
 }
 
-/// The declared tolerance (port.md "Resampling"): the largest difference
-/// from FFmpeg's output allowed for each packed output format, in its own
-/// units. The filter's `sin` may differ from the C library's in the last
-/// bit; on the vectors integer and float outputs are exact and double ones
-/// within 2^-52.
-pub fn tolerance(format: audio.SampleFormat) f64 {
-    return switch (format) {
-        .u8, .s16, .s32 => 1,
-        .flt => std.math.ldexp(@as(f64, 1), -23),
-        .dbl => std.math.ldexp(@as(f64, 1), -50),
-        else => unreachable,
-    };
-}
-
 fn checkVector(line: []const u8, gpa: std.mem.Allocator) !void {
     var fields = std.mem.tokenizeScalar(u8, line, ' ');
     if (!std.mem.eql(u8, try field(&fields), "R")) return error.MalformedVector;
@@ -958,18 +932,10 @@ fn checkVector(line: []const u8, gpa: std.mem.Allocator) !void {
     const expected = try std.fmt.hexToBytes(expected_buffer[0..], hex);
     // FFmpeg's bytes are little-endian; ours are native.
     @import("../codec/pcm.zig").storedToLittle(out_format, run.out[0..expected.len]);
-    const out_width = out_format.bytesPerSample();
-    var i: usize = 0;
-    while (i < expected.len) : (i += out_width) {
-        const diff = @abs(loadValue(expected[i..], out_format) - loadValue(run.out[i..], out_format));
-        if (diff > tolerance(out_format)) {
-            std.debug.print("sample {d}: off by {e}\n", .{ i / out_width, diff });
-            return error.TestExpectedApproxEqAbs;
-        }
-    }
+    try std.testing.expectEqualSlices(u8, expected, run.out[0..expected.len]);
 }
 
-test "resampling equals libswresample's within the declared tolerance" {
+test "resampling equals libswresample's byte for byte" {
     const gpa = std.testing.allocator;
     var lines = std.mem.tokenizeScalar(u8, vectors, '\n');
     var count: usize = 0;
