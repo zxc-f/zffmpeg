@@ -89,6 +89,8 @@ escaping to a 5-bit raw sample size.
   STREAMINFO's count and its parameters to stay, which the output header
   holds before them (`FrameCountMismatch`, `UnsupportedFormat`), and a count
   for any output with a header: FFmpeg rewrites a seekable output's header.
+  Raw PCM output has no header to hold the count and takes the decoded
+  samples, as FFmpeg's does.
 
 ## Fixtures
 

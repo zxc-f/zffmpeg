@@ -363,6 +363,17 @@ pub const Conversion = struct {
             .flac => |*reader| if (reader.demuxer.?.info.stream_info) |si| si.max_blocksize else flac_max_frames,
             else => ffmpegPacketFrames(summary.input, summary.input_codec, summary.format),
         };
+        // Raw PCM has no header to hold STREAMINFO's count, so a FLAC stream
+        // that decodes to another count converts as FFmpeg converts it; the
+        // summary's counts are the decoded ones once `run` returns.
+        switch (input) {
+            .flac => |*reader| if (request.output.family() == .raw) {
+                reader.expected = null;
+                // The dither's calls still follow STREAMINFO's count.
+                summary.output_frame_count = null;
+            },
+            .wav, .au, .aiff, .caf, .raw => {},
+        }
         return .{
             .input = input,
             .limits = limits,
@@ -416,9 +427,16 @@ pub const Conversion = struct {
             },
             .caf, .flac => unreachable, // no muxer: `init` refused it
         }
-        // Every frame was read: an unknown count is now known.
-        if (c.summary.frame_count == null) c.summary.frame_count = @intCast(c.next_pts);
-        if (c.summary.output_frame_count == null) c.summary.output_frame_count = c.output_frames;
+        // Every frame was read: an unknown count is now known, and a FLAC
+        // stream's decoded count replaces STREAMINFO's (equal unless raw
+        // output let them differ).
+        const decoded = c.input == .flac;
+        if (c.summary.frame_count == null or decoded) c.summary.frame_count = @intCast(c.next_pts);
+        if (c.summary.output_frame_count == null or decoded) {
+            // `output_frames` counts resampled output only.
+            const resampled = c.summary.output_rate != c.summary.format.sample_rate;
+            c.summary.output_frame_count = if (resampled) c.output_frames else c.summary.frame_count;
+        }
     }
 
     fn transfer(c: *Conversion, comptime W: type, writer: *W) RunError!void {
@@ -1738,19 +1756,21 @@ test "every accepted FLAC fixture converts to the samples it encodes" {
             defer out.deinit();
             // FFmpeg's decoded storage, kept exactly.
             const output: Container = if (stream.bps > 16) .s32le else .s16le;
+            const summary = try convert(&reader, &out.writer, .{ .output = output, .mode = .transcode, .gpa = gpa }, .{});
+            try std.testing.expectEqual(Container.flac, summary.input);
+            try std.testing.expect(summary.input_stream == .flac);
+            try std.testing.expectEqual(stream.frames, summary.frame_count);
+            var digest: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(out.written(), &digest, .{});
+            try std.testing.expectEqualStrings(stream.pcm_sha256, &std.fmt.bytesToHex(digest, .lower));
+            // A header holding STREAMINFO's count is written first (port.md
+            // "FLAC contract"); raw PCM has none.
             var header_reader: std.Io.Reader = .fixed(fixtures.flac.bytes(fixture.name));
             const declared = (try flac.readHeader(&header_reader)).duration;
             if (declared != null and declared.? != stream.frames) {
-                // The header's count is written first (port.md "FLAC contract").
-                try std.testing.expectError(error.FrameCountMismatch, convert(&reader, &out.writer, .{ .output = output, .mode = .transcode, .gpa = gpa }, .{}));
-            } else {
-                const summary = try convert(&reader, &out.writer, .{ .output = output, .mode = .transcode, .gpa = gpa }, .{});
-                try std.testing.expectEqual(Container.flac, summary.input);
-                try std.testing.expect(summary.input_stream == .flac);
-                try std.testing.expectEqual(stream.frames, summary.frame_count);
-                var digest: [32]u8 = undefined;
-                std.crypto.hash.sha2.Sha256.hash(out.written(), &digest, .{});
-                try std.testing.expectEqualStrings(stream.pcm_sha256, &std.fmt.bytesToHex(digest, .lower));
+                reader = .fixed(fixtures.flac.bytes(fixture.name));
+                out.clearRetainingCapacity();
+                try std.testing.expectError(error.FrameCountMismatch, convert(&reader, &out.writer, .{ .output = .wav, .mode = .transcode, .gpa = gpa }, .{}));
             }
         }
     }
@@ -1776,6 +1796,16 @@ test "FLAC input: no copy, an allocator needed, the frame count checked" {
         .diagnostics = recorder.sink(.warning),
     }, .{}));
     try std.testing.expectEqualStrings("Decoding error: Invalid data found when processing input", recorder.lastMessage());
+    // Raw PCM has no header to hold the count: the stream converts, and the
+    // summary has the decoded count.
+    var header_reader: std.Io.Reader = .fixed(fixtures.flac.bytes("flac_junk_between_frames"));
+    const declared = (try flac.readHeader(&header_reader)).duration.?;
+    reader = .fixed(fixtures.flac.bytes("flac_junk_between_frames"));
+    out.clearRetainingCapacity();
+    const summary = try convert(&reader, &out.writer, .{ .output = .s16le, .mode = .transcode, .gpa = gpa }, .{});
+    try std.testing.expect(summary.frame_count.? < declared);
+    try std.testing.expectEqual(summary.frame_count, summary.output_frame_count);
+    try std.testing.expectEqual(summary.frame_count.? * 2 * summary.format.channelCount(), out.written().len);
 }
 
 test "FLAC to a WAV header, rematrixed and resampled" {

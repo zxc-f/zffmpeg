@@ -655,7 +655,8 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "FLAC to s16le", .set = .flac, .args = &.{"-i"}, .input = "flac_constant_mono_8k", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout = &flac_constant_s16le, .stderr = "" },
     .{ .name = "FLAC to s16be from a pipe", .set = .flac, .args = &.{ "-i", "-" }, .stdin_input = "flac_constant_mono_8k", .tail = &.{ "-f", "s16be", "-" }, .exit_code = 0, .stdout = &flac_constant_s16be, .stderr = "" },
     .{ .name = "FLAC copy has no output", .set = .flac, .args = &.{"-i"}, .input = "flac_constant_mono_8k", .tail = &.{ "-c", "copy", "-f", "wav", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
-    .{ .name = "FLAC that decodes short of STREAMINFO", .set = .flac, .args = &.{"-i"}, .input = "flac_junk_between_frames", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 2, .stdout_contains = "", .stderr_contains = ": FrameCountMismatch\n" },
+    .{ .name = "FLAC that decodes short of STREAMINFO", .set = .flac, .args = &.{"-i"}, .input = "flac_junk_between_frames", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stdout_contains = "", .stderr_contains = ": FrameCountMismatch\n" },
+    .{ .name = "FLAC that decodes short of STREAMINFO to raw PCM", .set = .flac, .args = &.{"-i"}, .input = "flac_junk_between_frames", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout_contains = "", .stderr = "" },
     .{ .name = "CAF output is unsupported", .args = &.{"-i"}, .input = "mono_8k", .tail = &.{ "-f", "caf", "-" }, .exit_code = 3, .stderr = "zffmpeg: caf: unsupported output format\n" },
 };
 

@@ -419,7 +419,9 @@ pub const Dither = struct {
     /// the chunks, decide the result. `total` is the stream's frame count;
     /// unknown, the last call counts as full, which can change the result
     /// only when `frames` does not divide the noise buffer and that call
-    /// would just fit at its end. Call before the first `convert`.
+    /// would just fit at its end. A stream longer than `total` (a FLAC input
+    /// whose STREAMINFO is wrong, converted to raw PCM) counts its calls
+    /// past it as full. Call before the first `convert`.
     pub fn setCalls(d: *Dither, frames: u32, total: ?u64) void {
         std.debug.assert(frames > 0 and d.noise_count == 0);
         d.call_frames = frames;
@@ -463,7 +465,7 @@ pub const Dither = struct {
             d.ns_pos = ns_end;
             d.call_left -= n;
             d.noise_pos += n;
-            if (d.remaining) |*r| r.* -= n;
+            if (d.remaining) |*r| r.* -|= n;
             done += n;
         }
     }
@@ -471,8 +473,8 @@ pub const Dither = struct {
     /// The size of the next of FFmpeg's calls.
     fn nextCall(d: *Dither) u64 {
         const r = d.remaining orelse return d.call_frames;
-        // More frames than `setCalls` was told of: a caller error.
-        std.debug.assert(r > 0);
+        // More frames than `setCalls` was told of: full calls.
+        if (r == 0) return d.call_frames;
         return @min(d.call_frames, r);
     }
 
