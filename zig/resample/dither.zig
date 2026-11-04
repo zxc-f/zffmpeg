@@ -33,6 +33,7 @@ const std = @import("std");
 const audio = @import("../core/audio.zig");
 const samples = @import("../core/samples.zig");
 const audioconvert = @import("audioconvert.zig");
+const diagnostics = @import("../core/diagnostics.zig");
 
 /// libswresample's dither methods (`SwrDitherType`), by its option names.
 pub const Method = enum {
@@ -61,6 +62,9 @@ pub const Options = struct {
     /// encoder keeps, 0 (all of them) or 2 through 32. FFmpeg's command line
     /// sets 24 for a 24-bit encoder.
     output_sample_bits: u8 = 0,
+    /// Where libswresample's warning goes when a noise-shaping method has
+    /// no filter at the rate and falls back to triangular high-pass (T17a).
+    diagnostics: ?diagnostics.Sink = null,
 };
 
 /// `dither_scale`'s largest value, `INT_MAX`, before it is stored as a float.
@@ -387,6 +391,7 @@ pub const Dither = struct {
                 // Shaping noise is float and unscaled.
                 dither.noise_scale = 1;
             } else {
+                diagnostics.report(options.diagnostics, .warning, "Requested noise shaping dither not available at this sampling rate, using triangular hp dither", .{});
                 method = .triangular_hp;
                 dither.method = method;
             }
@@ -793,4 +798,14 @@ test "the noise generator follows swri_get_dither's sequence" {
     const max: f64 = std.math.maxInt(u32);
     const expected = first / max - 0.5;
     try std.testing.expectEqual(expected, n.next());
+}
+
+test "the fallback from a shaping method is reported" {
+    var recorder: diagnostics.Recorder = .{};
+    // Lipshitz has a filter at 44.1 kHz only.
+    const in_format = try audio.Format.init(8000, 1, .flt);
+    const d = Dither.init(in_format, .s16, .{ .method = .lipshitz, .diagnostics = recorder.sink(.warning) }).?;
+    try std.testing.expectEqual(Method.triangular_hp, d.method);
+    try std.testing.expectEqual(1, recorder.count);
+    try std.testing.expectEqualStrings("Requested noise shaping dither not available at this sampling rate, using triangular hp dither", recorder.lastMessage());
 }

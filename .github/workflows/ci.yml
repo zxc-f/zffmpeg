@@ -166,6 +166,10 @@ jobs:
           clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/number_vectors.c \
             .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o number-vectors
           ./number-vectors | diff -u zig/testing/vectors/number.txt -
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/options_vectors.c \
+            .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a \
+            -lm -pthread -o options-vectors
+          ./options-vectors | diff -u zig/testing/vectors/options.txt -
 
       # The committed T24 oracle must be what this build's libswresample gives.
       - name: Check the resampling vectors (T24)

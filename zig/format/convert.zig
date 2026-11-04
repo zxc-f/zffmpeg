@@ -67,6 +67,7 @@ const rematrix = @import("../resample/rematrix.zig");
 const resample = @import("../resample/resample.zig");
 const swr = @import("../resample/swr.zig");
 const Frame = @import("../core/frame.zig").Frame;
+const diagnostics = @import("../core/diagnostics.zig");
 
 pub const Container = detect.Container;
 
@@ -105,6 +106,9 @@ pub const Request = struct {
     /// input `-ch_layout` names the layout, `6C` included; its `-ac` does
     /// not.
     guess_layout: bool = true,
+    /// Where FFmpeg's command line would log a warning (T17a): the guessed
+    /// layout. The dither's own go to `dither.diagnostics`.
+    diagnostics: ?diagnostics.Sink = null,
     /// The output's channel layout (FFmpeg's output `-ch_layout`; its `-ac N`
     /// gives N unspecified channels), for `transcode` (T23c): the samples
     /// are rematrixed as libswresample mixes them. An unspecified layout
@@ -264,7 +268,16 @@ pub const Conversion = struct {
                     },
                     .format = guessed: {
                         var format = info.format;
-                        if (request.guess_layout) format.layout = audio.guessLayout(format.layout);
+                        if (request.guess_layout) {
+                            const guessed = audio.guessLayout(format.layout);
+                            if (format.layout == .unspecified and guessed != .unspecified) {
+                                var name: [64]u8 = undefined;
+                                var w: std.Io.Writer = .fixed(&name);
+                                guessed.describe(&w) catch {};
+                                diagnostics.report(request.diagnostics, .warning, "Guessed Channel Layout: {s}", .{w.buffered()});
+                            }
+                            format.layout = guessed;
+                        }
                         break :guessed format;
                     },
                     // Set below, from the request.
@@ -1266,6 +1279,16 @@ test "an unspecified layout is guessed unless the request keeps it" {
         try std.testing.expectEqual(header_len, wav.headerLen(.s16le, summary.format, .riff));
         try std.testing.expectEqual(header_len + bytes.len, out.buffered().len);
     }
+}
+
+test "the guessed layout is reported as FFmpeg's command line logs it" {
+    var recorder: diagnostics.Recorder = .{};
+    var buffer: [512]u8 = undefined;
+    var reader: std.Io.Reader = .fixed(fixtures.bytes("fmt_channels6"));
+    var out: std.Io.Writer = .fixed(&buffer);
+    _ = try convert(&reader, &out, .{ .output = .wav, .mode = .transcode, .diagnostics = recorder.sink(.warning) }, .{});
+    try std.testing.expectEqual(1, recorder.count);
+    try std.testing.expectEqualStrings("Guessed Channel Layout: 5.1", recorder.lastMessage());
 }
 
 test "a requested output layout rematrixes, and only when transcoding" {

@@ -167,6 +167,10 @@ slowdowns of the default build.
 | `zig/core/number.zig` | `LGPL-2.1-or-later` (SPDX header) | Original code. The SI prefix values are FFmpeg's (`si_prefixes` in `libavutil/eval.c`), restated; parsing follows `av_strtod`, fftools' `parse_number` and glibc's `strtod`/`strtoul` in the C locale. |
 | `zig/testing/reference/number_vectors.c` | `LGPL-2.1-or-later` (SPDX header) | Original reference tool: it calls the pinned FFmpeg's `av_strtod` and restates fftools' `parse_number` to print the T17a oracle; not part of the port. |
 | `zig/testing/vectors/number.txt` | Generated data | Printed by `number_vectors.c` from the pinned `libavutil`; see the [reference README](testing/reference/README.md). |
+| `zig/core/options.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. Setting follows `av_opt_set` in `libavutil/opt.c` (`set_string_number`, `set_string_bool`, `write_number`) and `eval.c`'s whitespace removal and constants at the pinned revision; no code is copied. |
+| `zig/core/diagnostics.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. The levels are `libavutil/log.h`'s. |
+| `zig/testing/reference/options_vectors.c` | `LGPL-2.1-or-later` (SPDX header) | Original reference tool: it calls the pinned FFmpeg's `av_opt_set` on libswresample's options to print the T17a option oracle; not part of the port. |
+| `zig/testing/vectors/options.txt` | Generated data | Printed by `options_vectors.c` from the pinned `libswresample` and `libavutil`; see the [reference README](testing/reference/README.md). |
 | `zig/testing/vectors/rematrix.txt` | Generated data | Printed by `rematrix_vectors.c` from the pinned `libswresample`; see the [reference README](testing/reference/README.md). |
 | `zig/testing/vectors/chan.txt` | Generated data | Printed by `chan_vectors.c` from the pinned `libavformat`; see the [reference README](testing/reference/README.md). |
 | `zig/testing/vectors/dither.txt` | Generated data | Printed by `dither_vectors.c` from the pinned `libswresample`; see the [reference README](testing/reference/README.md). |

@@ -89,7 +89,12 @@ and fftools' `parse_number` restated in the generator):
 ```bash
 clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/number_vectors.c .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o number-vectors
 ./number-vectors | diff -u zig/testing/vectors/number.txt -
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/options_vectors.c .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o options-vectors
+./options-vectors | diff -u zig/testing/vectors/options.txt -
 ```
+
+The second, `options_vectors.c`, sets each of libswresample's resampler
+options with `av_opt_set` on a fresh context and prints what it stores.
 
 The T24 resampling vectors come from the reference's `libswresample` with
 its default options (`swr_convert` on generated input, drained as FFmpeg's

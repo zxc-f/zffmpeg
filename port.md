@@ -619,10 +619,14 @@ it:
 | Numbers | C's `strtod` in the C locale (white space, a sign, decimal or hexadecimal floats, `inf`, `nan`), or `strtoul` in base 16 for a text starting with `0x` (so `0x1p3` is 1 and the prefix `p`); rounding to nearest as glibc's. |
 | Suffixes | An SI prefix from `y` to `Y`, decimal, or binary with `i` (`44.1k` is 44100, `1Ki` 1024, `1E` 10^18), else `dB` (10^(x/20), through `exp2`, which may differ from the C library's in the last bit), then `B` (times 8). |
 | Options | `parse_number`: the whole text a number, within the option's range, an integer for an integer option (NaN is not). zffmpeg's `-ar` and `-ac` take it; `-ar 0` keeps the input's rate, as FFmpeg's encoder then does. |
-| Not yet | Typed option descriptors and the diagnostic sink (the rest of T17a); expressions (T25b); durations and sizes, which no option takes yet. |
+| Descriptors | Part 2, [core/options.zig](zig/core/options.zig): a component's options struct declares `option_specs`, FFmpeg's names (aliases too), help, ranges and named constants for its fields, checked at compile time (every field described, types, unique names, defaults in range). `set` takes text as `av_opt_set` does: the option's constants, `default`, `min`, `max`, `none` and `all`, or `av_strtod`'s number after white space is removed, within the range, integers rounded with ties to even; booleans by their words or a decimal. The resampler's options (`filter_size`, `phase_shift`, `linear_interp`, `exact_rational`, `cutoff` and `resample_cutoff`, `filter_type`, `kaiser_beta`) are the first. |
+| Diagnostics | [core/diagnostics.zig](zig/core/diagnostics.zig): a `Sink` with FFmpeg's log levels, passed explicitly; a component with none reports nothing. It carries libswresample's dither fallback warning and the command line's "Guessed Channel Layout". The tools pass none: they print errors only (the project owner's choice). |
+| Not yet | FFmpeg's expression evaluator for option values (`16*2`, `PI`; T25b), which `set` refuses until then; durations and sizes, which no option takes yet; a `-loglevel`. |
 
-The oracle is [number_vectors.c](zig/testing/reference/number_vectors.c):
-107 texts through the pinned `av_strtod` and `parse_number`.
+The oracles are [number_vectors.c](zig/testing/reference/number_vectors.c):
+107 texts through the pinned `av_strtod` and `parse_number`; and
+[options_vectors.c](zig/testing/reference/options_vectors.c): 136 texts set
+on libswresample's resampler options with `av_opt_set`.
 
 ### Resampling
 

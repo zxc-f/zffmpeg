@@ -61,6 +61,8 @@ pub const frame = @import("core/frame.zig");
 pub const stage = @import("core/stage.zig");
 pub const metadata = @import("core/metadata.zig");
 pub const number = @import("core/number.zig");
+pub const options = @import("core/options.zig");
+pub const diagnostics = @import("core/diagnostics.zig");
 pub const wav = @import("format/wav.zig");
 pub const au = @import("format/au.zig");
 pub const aiff = @import("format/aiff.zig");
@@ -87,6 +89,8 @@ test {
     _ = @import("core/stage.zig");
     _ = @import("core/metadata.zig");
     _ = @import("core/number.zig");
+    _ = @import("core/options.zig");
+    _ = @import("core/diagnostics.zig");
     _ = @import("format/wav.zig");
     _ = @import("format/au.zig");
     _ = @import("format/aiff.zig");

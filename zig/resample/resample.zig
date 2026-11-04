@@ -22,6 +22,7 @@
 
 const std = @import("std");
 const audio = @import("../core/audio.zig");
+const typed_options = @import("../core/options.zig");
 
 pub const FilterType = enum { cubic, blackman_nuttall, kaiser };
 
@@ -37,6 +38,27 @@ pub const Options = struct {
     cutoff: f64 = 0,
     filter_type: FilterType = .kaiser,
     kaiser_beta: f64 = 9,
+
+    /// libswresample's AVOptions for these fields (options.c), for
+    /// `core/options.zig`'s `set`.
+    pub const option_specs = [_]typed_options.Spec{
+        .{ .name = "filter_size", .field = "filter_size", .kind = .int, .help = "set swr resampling filter size", .min = 0, .max = std.math.maxInt(i32) },
+        .{ .name = "phase_shift", .field = "phase_shift", .kind = .int, .help = "set swr resampling phase shift", .min = 0, .max = 24 },
+        .{ .name = "linear_interp", .field = "linear_interp", .kind = .bool, .help = "enable linear interpolation", .min = 0, .max = 1 },
+        .{ .name = "exact_rational", .field = "exact_rational", .kind = .bool, .help = "enable exact rational", .min = 0, .max = 1 },
+        .{ .name = "cutoff", .field = "cutoff", .kind = .double, .help = "set cutoff frequency ratio", .min = 0, .max = 1 },
+        .{ .name = "resample_cutoff", .field = "cutoff", .kind = .double, .help = "set cutoff frequency ratio", .min = 0, .max = 1 },
+        .{ .name = "filter_type", .field = "filter_type", .kind = .int, .help = "select swr filter type", .min = 0, .max = 2, .constants = &.{
+            .{ .name = "cubic", .value = 0 },
+            .{ .name = "blackman_nuttall", .value = 1 },
+            .{ .name = "kaiser", .value = 2 },
+        } },
+        .{ .name = "kaiser_beta", .field = "kaiser_beta", .kind = .double, .help = "set swr Kaiser window beta", .min = 2, .max = 16 },
+    };
+
+    comptime {
+        typed_options.check(Options);
+    }
 };
 
 pub const Error = error{
@@ -997,4 +1019,59 @@ test "any input chunking gives the same output" {
             try std.testing.expectEqualSlices(f32, reference[0..total], out[0..total]);
         }
     }
+}
+
+const option_vectors = @embedFile("../testing/vectors/options.txt");
+const option_vector_count = 136;
+
+/// The option's stored value as `av_opt_get` reads it.
+fn storedValue(o: *const Options, name: []const u8) ?f64 {
+    inline for (Options.option_specs) |spec| {
+        if (std.mem.eql(u8, spec.name, name)) {
+            const v = @field(o, spec.field);
+            return switch (@typeInfo(@TypeOf(v))) {
+                .bool => if (v) 1 else 0,
+                .int => @floatFromInt(v),
+                .@"enum" => @floatFromInt(@backingInt(v)),
+                .float => v,
+                else => unreachable,
+            };
+        }
+    }
+    return null;
+}
+
+test "options are set as av_opt_set sets them, on every vector" {
+    var lines = std.mem.tokenizeScalar(u8, option_vectors, '\n');
+    var count: usize = 0;
+    while (lines.next()) |line| : (count += 1) {
+        var fields = std.mem.tokenizeScalar(u8, line, ' ');
+        const kind = fields.next().?;
+        const name = fields.next().?;
+        const text_hex = fields.next().?;
+        const want = fields.next().?;
+        var buffer: [64]u8 = undefined;
+        const text = if (std.mem.eql(u8, text_hex, "-")) "" else try std.fmt.hexToBytes(&buffer, text_hex);
+        errdefer std.debug.print("option vector {d}: {s} {s} '{s}'\n", .{ count + 1, kind, name, text });
+        var o: Options = .{};
+        const result = typed_options.set(Options, &o, name, text);
+        // Refused by FFmpeg, or an expression, which waits for T25b.
+        if (std.mem.eql(u8, want, "E") or kind[0] == 'X') {
+            if (result) |_| return error.TestUnexpectedResult else |_| {}
+            continue;
+        }
+        try result;
+        const got = storedValue(&o, name).?;
+        const expected: f64 = if (std.mem.indexOfScalar(u8, want, 'p') != null)
+            try std.fmt.parseFloat(f64, want)
+        else
+            @floatFromInt(try std.fmt.parseInt(i64, want, 10));
+        try std.testing.expectEqual(expected, got);
+    }
+    try std.testing.expectEqual(option_vector_count, count);
+}
+
+test "an unknown option is refused" {
+    var o: Options = .{};
+    try std.testing.expectError(error.UnknownOption, typed_options.set(Options, &o, "filter_lenght", "32"));
 }

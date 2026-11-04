@@ -243,6 +243,8 @@ port.md's contract table updated, and (after T06) the parser.
 | Decision | Current choice and reason | To change it |
 | --- | --- | --- |
 | Number syntax (T17a part 1) | `av_strtod` and `parse_number` exactly, quirks included (`0x1p3` is 1 pico, `1E` is 10^18, `nan` is not an integer), checked on 107 texts. `dB` goes through Zig's `exp2`, which may differ from glibc's in the last bit. | `core/number.zig`, `number_vectors.c`. |
+| Descriptors (part 2) | Options stay plain structs; a struct declares `option_specs` (FFmpeg's names, help, ranges, constants), which `options.check` validates at compile time and `options.set` uses to set a field from text as `av_opt_set` does, checked on 136 texts. Expressions wait for T25b: until then such text is `InvalidValue`, where FFmpeg evaluates it. | `core/options.zig`, `options_vectors.c`. |
+| Diagnostics (part 2) | The project owner chose a sink passed explicitly, at FFmpeg's levels, with the command-line tools giving none: they keep printing errors only, so their stderr contract stays. The library reports FFmpeg's warnings to a caller that gives one (the dither fallback, the guessed layout). A `-loglevel` can come later. | `core/diagnostics.zig`, `dither.Options.diagnostics`, `convert.Request.diagnostics`. |
 | `-ar 0`, `-ac 0` | zffmpeg's output `-ar 0` keeps the input's rate, as FFmpeg's encoder then does; `-ac 0` stays a usage error, before or after `-i` (FFmpeg rejects it before `-i` and ignores it after), as one rule for both. | `cli/ffmpeg.zig`, `status.layoutOption`. |
 
 ## Resampling
