@@ -2635,10 +2635,22 @@ names, not as an empty framework.
       ogg_get_length, whose scans leave the Vorbis private state and
       start times as FFmpeg's do): every line of vectors/ogg.txt, the
       streams' durations and start times and the packets' pts, dts,
-      durations and flags included, equals FFmpeg's. Remaining: part 3,
-      detection (the probe and the .ogg extension), zffprobe and stream
-      copy to framecrc; part 4, seeking (ogg_read_timestamp under
-      ff_seek_frame_binary).
+      durations and flags included, equals FFmpeg's (9a486ff).
+      Remaining, part 3: (1) codec registry: Vorbis and Opus descriptors
+      (`..AIL.`, no decoder or encoder), compare.py's registry check
+      requiring set equality only for codecs FFmpeg decodes and encodes;
+      (2) format registry: Container.ogg with ogg.probeScore, 6 probe
+      bytes and the `ogg` extension, no muxer, the listed difference
+      removed; (3) detection: an Ogg family whose probe opens the
+      demuxer (an allocator in detect.Options), reporting the first
+      audio stream as ffprobe -select_streams a:0 does, its sample
+      format unknown without a decoder (a probe-output decision for
+      port.md); (4) zffprobe on files through the seekable mode, for
+      durations; (5) the hash driver's stream copy to framecrc for Ogg,
+      as the ffmpeg program's -c copy gives it; (6) compare.py's Ogg
+      section (zffprobe against ffprobe, framecrc against ffmpeg -c copy).
+      Part 4: seeking (ogg_read_timestamp under ff_seek_frame_binary),
+      the seek oracle on the Ogg fixtures.
     ```
   - [ ] **T27b — Ogg mux.** Needs T27a.
     Done when FFmpeg demuxes our output to identical packets and timestamps.
