@@ -22,6 +22,8 @@ const flac = @import("../codec/flac.zig");
 const metadata = @import("../core/metadata.zig");
 const rational = @import("../core/rational.zig");
 const vorbiscomment = @import("vorbiscomment.zig");
+const demux = @import("demux.zig");
+const seek = @import("seek.zig");
 
 pub const Error = error{
     /// FFmpeg's AVERROR_INVALIDDATA (and AVERROR_UNKNOWN for a Vorbis
@@ -246,8 +248,9 @@ const Stream = struct {
     pduration: i64 = 0,
     granule: u64 = no_granule,
     start_granule: u64 = no_granule,
-    lastpts: i64 = nopts,
-    lastdts: i64 = nopts,
+    // ogg_new_stream zeroes the stream: 0, not AV_NOPTS_VALUE.
+    lastpts: i64 = 0,
+    lastdts: i64 = 0,
     sync_pos: i64 = -1,
     page_pos: i64 = 0,
     flags: u8 = 0,
@@ -261,6 +264,8 @@ const Stream = struct {
     incomplete: bool = false,
     page_start: bool = false,
     page_end: bool = false,
+    /// ogg_get_length's progress: 0, -1 waiting for a start, 1 done.
+    got_start: i8 = 0,
     got_data: bool = false,
     nb_header: u32 = 0,
     start_trimming: u32 = 0,
@@ -294,23 +299,17 @@ const Stream = struct {
 };
 
 /// A packet as FFmpeg's demuxer returns it, before libavformat's
-/// generic layer: borrowed until the next call.
-pub const Packet = struct {
-    stream: usize,
-    data: []const u8,
-    pts: i64,
-    dts: i64,
-    duration: i64,
-    /// AV_PKT_FLAG_KEY (1) and AV_PKT_FLAG_CORRUPT (2).
-    flags: u32,
+/// generic layer (demux.zig): borrowed until the next call. Its flags are
+/// AV_PKT_FLAG_CORRUPT's (2) or none; its skip samples, new extradata
+/// (a chained Vorbis stream's headers) and strings metadata (packed tags)
+/// are side data.
+pub const Packet = demux.SourcePacket;
+
+/// ogg_save's state.
+const Snapshot = struct {
     pos: i64,
-    /// Skip-samples side data: samples to drop at the start and the end.
-    skip: ?[2]u32 = null,
-    /// New-extradata side data (a chained Vorbis stream's headers).
-    new_extradata: ?[]const u8 = null,
-    /// Strings-metadata side data (av_packet_pack_dictionary's bytes):
-    /// the stream's tags were replaced.
-    new_metadata: ?[]const u8 = null,
+    curidx: i32,
+    streams: []Stream,
 };
 
 /// A byte source with FFmpeg's seekback for a refused page: pushed-back
@@ -322,9 +321,18 @@ const Source = struct {
     pushback_pos: usize = 0,
     /// The offset of the next byte read.
     pos: i64 = 0,
+    /// Repositions `reader`, for ogg_get_length's scans; null on a pipe.
+    seeker: ?seek.Seeker = null,
 
     fn deinit(s: *Source, gpa: std.mem.Allocator) void {
         s.pushback.deinit(gpa);
+    }
+
+    fn seekTo(s: *Source, pos: i64) Error!void {
+        s.seeker.?.seekTo(@intCast(pos)) catch return error.IoFailure;
+        s.pushback.clearRetainingCapacity();
+        s.pushback_pos = 0;
+        s.pos = pos;
     }
 
     /// Up to `out.len` bytes; fewer only at the end.
@@ -356,6 +364,9 @@ const Source = struct {
 };
 
 pub const Demuxer = struct {
+    /// The error set demux.zig's layer returns.
+    pub const ReadError = Error;
+
     gpa: std.mem.Allocator,
     src: Source,
     streams: std.ArrayList(Stream) = .empty,
@@ -380,12 +391,25 @@ pub const Demuxer = struct {
         d.side_extradata = null;
     }
 
-    /// ogg_read_header: the streams' headers, read up to the first data
-    /// packet of any stream.
+    /// ogg_read_header on a source that cannot seek (a pipe): the
+    /// streams' headers, read up to the first data packet of any stream.
     pub fn init(gpa: std.mem.Allocator, reader: *std.Io.Reader) Error!*Demuxer {
+        return initWith(gpa, reader, null);
+    }
+
+    /// ogg_read_header on a seekable source read from its start (a
+    /// file): as `init`, then ogg_get_length's scans, which set the
+    /// streams' durations and start times and, as FFmpeg's do, leave the
+    /// mappings' private state where they leave it.
+    pub fn initSeekable(gpa: std.mem.Allocator, reader: *std.Io.Reader, seeker: seek.Seeker) Error!*Demuxer {
+        return initWith(gpa, reader, seeker);
+    }
+
+    fn initWith(gpa: std.mem.Allocator, reader: *std.Io.Reader, seeker: ?seek.Seeker) Error!*Demuxer {
         const d = try gpa.create(Demuxer);
         errdefer gpa.destroy(d);
-        d.* = .{ .gpa = gpa, .src = .{ .reader = reader } };
+        d.* = .{ .gpa = gpa, .src = .{ .reader = reader, .seeker = seeker } };
+        if (seeker) |sk| d.src.pos = @intCast(sk.position());
         errdefer d.deinitFields();
         while (!d.headers) {
             var sid: i32 = -1;
@@ -406,7 +430,145 @@ pub const Demuxer = struct {
                 os.info.start_time = pts;
             }
         }
+        if (seeker != null) try d.getLength();
         return d;
+    }
+
+    /// ogg_save: the streams' page and packet state, kept for `restore`.
+    /// Their buffers are copied for the scan; the mappings' private
+    /// state and the stream info stay shared, as FFmpeg's pointers do.
+    fn save(d: *Demuxer) Error!Snapshot {
+        const saved = try d.gpa.alloc(Stream, d.streams.items.len);
+        errdefer d.gpa.free(saved);
+        for (d.streams.items, saved) |*os, *copy| {
+            copy.* = os.*;
+            // Shared: owned by the working stream only.
+            copy.info = .{};
+            copy.opus = .{};
+            copy.vorbis = .{};
+        }
+        var done: usize = 0;
+        errdefer for (d.streams.items[0..done], saved[0..done]) |*os, *copy| {
+            os.buf.deinit(d.gpa);
+            os.buf = copy.buf;
+        };
+        for (d.streams.items) |*os| {
+            os.buf = .empty;
+            try os.buf.appendSlice(d.gpa, saved[done].buf.items);
+            os.new_metadata = null;
+            os.new_extradata = null;
+            done += 1;
+        }
+        return .{ .pos = d.src.pos, .curidx = d.curidx, .streams = saved };
+    }
+
+    /// ogg_restore: the saved state back, the source where it was.
+    fn restore(d: *Demuxer, snap: Snapshot) Error!void {
+        defer d.gpa.free(snap.streams);
+        // Streams a scan added are dropped (FFmpeg keeps their AVStream).
+        while (d.streams.items.len > snap.streams.len) {
+            var extra = d.streams.pop().?;
+            extra.deinit(d.gpa);
+        }
+        for (d.streams.items, snap.streams) |*os, saved| {
+            os.buf.deinit(d.gpa);
+            if (os.new_metadata) |b| d.gpa.free(b);
+            if (os.new_extradata) |b| d.gpa.free(b);
+            const info = os.info;
+            const opus = os.opus;
+            const vorbis = os.vorbis;
+            os.* = saved;
+            os.info = info;
+            os.opus = opus;
+            os.vorbis = vorbis;
+        }
+        try d.src.seekTo(snap.pos);
+        d.page_pos = -1;
+        d.curidx = snap.curidx;
+    }
+
+    /// ogg_reset: every stream's page and packet state cleared, as after
+    /// a seek; a stream read from the data's start starts at 0.
+    fn reset(d: *Demuxer) void {
+        const start_pos = d.src.pos;
+        for (d.streams.items) |*os| {
+            os.buf.clearRetainingCapacity();
+            os.pstart = 0;
+            os.psize = 0;
+            os.granule = no_granule;
+            os.lastpts = nopts;
+            os.lastdts = nopts;
+            os.sync_pos = -1;
+            os.page_pos = 0;
+            os.nsegs = 0;
+            os.segp = 0;
+            os.incomplete = false;
+            os.got_data = false;
+            if (start_pos <= d.data_offset) os.lastpts = 0;
+            os.start_trimming = 0;
+            os.end_trimming = 0;
+            if (os.new_metadata) |b| d.gpa.free(b);
+            if (os.new_extradata) |b| d.gpa.free(b);
+            os.new_metadata = null;
+            os.new_extradata = null;
+        }
+        d.page_pos = -1;
+        d.curidx = -1;
+    }
+
+    /// ogg_get_length: each stream's duration from the last granule in the
+    /// input's last 65307 bytes, less its start, which a scan of the
+    /// packets from the data's start finds when no packet set it yet.
+    fn getLength(d: *Demuxer) Error!void {
+        const seeker = d.src.seeker.?;
+        const size: i64 = @intCast(seeker.size() orelse return);
+        const end = if (size > max_page_size) size - max_page_size else 0;
+        var streams_left: i32 = 0;
+        {
+            const snap = try d.save();
+            errdefer d.gpa.free(snap.streams);
+            try d.src.seekTo(end);
+            d.page_pos = -1;
+            while (true) {
+                var i: i32 = -1;
+                d.readPage(&i) catch break;
+                if (i < 0) continue;
+                const os = &d.streams.items[@intCast(i)];
+                if (os.granule == no_granule or os.granule == 0 or os.codec == null) continue;
+                os.info.duration = gpToPts(os, os.granule, null);
+                if (os.info.start_time != nopts) {
+                    os.info.duration -= os.info.start_time;
+                    streams_left -= @intFromBool(os.got_start == -1);
+                    os.got_start = 1;
+                } else if (os.got_start == 0) {
+                    os.got_start = -1;
+                    streams_left += 1;
+                }
+            }
+            try d.restore(snap);
+        }
+        const snap = try d.save();
+        errdefer d.gpa.free(snap.streams);
+        try d.src.seekTo(d.data_offset);
+        d.reset();
+        while (streams_left > 0) {
+            var i: i32 = -1;
+            d.oggPacket(&i, null, null, null) catch break;
+            if (i < 0) continue;
+            const os = &d.streams.items[@intCast(i)];
+            var unused: i64 = undefined;
+            const pts = calcPts(os, &unused);
+            if (os.info.duration == nopts) continue;
+            if (pts != nopts and os.info.start_time == nopts and os.got_start == 0) {
+                os.info.duration -= pts;
+                os.got_start = 1;
+                streams_left -= 1;
+            } else if (os.info.start_time != nopts and os.got_start == 0) {
+                os.got_start = 1;
+                streams_left -= 1;
+            }
+        }
+        try d.restore(snap);
     }
 
     fn deinitFields(d: *Demuxer) void {
@@ -429,6 +591,40 @@ pub const Demuxer = struct {
 
     pub fn stream(d: *const Demuxer, i: usize) *const StreamInfo {
         return &d.streams.items[i].info;
+    }
+
+    /// What libavformat's layer needs of stream `i` (demux.zig's Source).
+    pub fn setup(d: *const Demuxer, i: usize) demux.Setup {
+        const info = &d.streams.items[i].info;
+        return .{
+            .known = info.codec != null,
+            .time_base = info.time_base,
+            .sample_rate = info.sample_rate,
+            .channels = info.channels,
+            .parse_flac = info.codec == .flac,
+            // The reference build decodes FLAC, not Opus or Vorbis.
+            .has_decoder = info.codec == .flac,
+            .bit_rate = info.bit_rate,
+        };
+    }
+
+    pub fn durationOf(d: *Demuxer, i: usize) *i64 {
+        return &d.streams.items[i].info.duration;
+    }
+
+    pub fn fileSize(d: *const Demuxer) ?u64 {
+        const seeker = d.src.seeker orelse return null;
+        return seeker.size();
+    }
+
+    pub fn dataOffset(d: *const Demuxer) i64 {
+        return d.data_offset;
+    }
+
+    /// The stream's start time, which the demuxer and libavformat's layer
+    /// both set.
+    pub fn startTime(d: *Demuxer, i: usize) *i64 {
+        return &d.streams.items[i].info.start_time;
     }
 
     fn findStream(d: *const Demuxer, serial: u32) ?usize {
@@ -1005,13 +1201,13 @@ pub const Demuxer = struct {
             errdefer extradata.deinit(d.gpa);
             const id = try d.gpa.dupe(u8, v.packet[0].?);
             defer d.gpa.free(id);
-            const setup = try d.gpa.dupe(u8, v.packet[2].?);
-            defer d.gpa.free(setup);
+            const setup_header = try d.gpa.dupe(u8, v.packet[2].?);
+            defer d.gpa.free(setup_header);
             try fixupHeaders(d.gpa, v, &extradata);
             v.deinit(d.gpa);
             if (os.new_extradata) |b| d.gpa.free(b);
             os.new_extradata = try extradata.toOwnedSlice(d.gpa);
-            v.vp = VorbisParser.init(id, setup) orelse return error.InvalidOgg;
+            v.vp = VorbisParser.init(id, setup_header) orelse return error.InvalidOgg;
             v.bos_page_pos = -1;
         }
         return @intFromBool(skip_packet);
@@ -1198,13 +1394,17 @@ fn checkFixture(gpa: std.mem.Allocator, comptime name: []const u8) !void {
     var lines = std.mem.splitScalar(u8, want, '\n');
     var reader: std.Io.Reader = .fixed(fixtures.ogg.bytes(name));
     const open_line = lines.next().?;
-    const d = Demuxer.init(gpa, &reader) catch |err| {
+    // The oracle opens files, which seek.
+    const d = Demuxer.initSeekable(gpa, &reader, .fixed(&reader)) catch |err| {
         const expected: Error = if (std.mem.eql(u8, open_line, "O EOF")) error.Truncated else if (std.mem.eql(u8, open_line, "O PATCHWELCOME")) error.UnsupportedFormat else error.InvalidOgg;
         try testing.expectEqual(expected, err);
         return;
     };
     defer d.deinit();
     try testing.expectEqualStrings("O ok", open_line);
+    var layer = demux.Layer(Demuxer).init(gpa, d);
+    defer layer.deinit();
+    try layer.findStreamInfo();
     var buf: [256]u8 = undefined;
     var line = lines.next().?;
     var count: usize = 0;
@@ -1218,8 +1418,18 @@ fn checkFixture(gpa: std.mem.Allocator, comptime name: []const u8) !void {
         try testing.expectEqualStrings(f.next().?, try std.fmt.bufPrint(&buf, "{d}", .{info.sample_rate}));
         try testing.expectEqualStrings(f.next().?, try std.fmt.bufPrint(&buf, "{d}", .{info.channels}));
         try testing.expectEqualStrings(f.next().?, try std.fmt.bufPrint(&buf, "{d}/{d}", .{ info.time_base.num, info.time_base.den }));
-        _ = f.next(); // duration (libavformat's layer)
-        _ = f.next(); // start time
+        const duration = f.next().?;
+        const start = f.next().?;
+        {
+            var dbuf: [32]u8 = undefined;
+            try testing.expectEqualStrings(duration, if (info.duration == nopts) "N" else try std.fmt.bufPrint(&dbuf, "{d}", .{info.duration}));
+        }
+        {
+            var sbuf: [32]u8 = undefined;
+            const got_start = if (info.start_time == nopts) "N" else try std.fmt.bufPrint(&sbuf, "{d}", .{info.start_time});
+            errdefer std.debug.print("start: want {s} got {s}\n", .{ start, got_start });
+            try testing.expectEqualStrings(start, got_start);
+        }
         try testing.expectEqualStrings(f.next().?, try std.fmt.bufPrint(&buf, "{d}", .{info.initial_padding}));
         try testing.expectEqualStrings(f.next().?, try std.fmt.bufPrint(&buf, "{d}", .{info.seek_preroll}));
         try testing.expectEqualStrings(f.next().?, try std.fmt.bufPrint(&buf, "{d}", .{info.extradata.items.len}));
@@ -1230,7 +1440,7 @@ fn checkFixture(gpa: std.mem.Allocator, comptime name: []const u8) !void {
     try testing.expectEqual(count, d.streamCount());
     while (true) {
         if (std.mem.startsWith(u8, line, "R ")) {
-            const end = d.next();
+            const end = layer.next();
             if (std.mem.eql(u8, line, "R EOF")) {
                 try testing.expectEqual(null, try end);
             } else {
@@ -1239,16 +1449,16 @@ fn checkFixture(gpa: std.mem.Allocator, comptime name: []const u8) !void {
             return;
         }
         try testing.expect(std.mem.startsWith(u8, line, "P "));
-        const p = (try d.next()) orelse return error.TestUnexpectedEnd;
+        const p = (try layer.next()) orelse return error.TestUnexpectedEnd;
+        var got: [256]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&got);
+        try w.print("P {d} {d}", .{ p.stream, p.data.len });
+        if (p.pts) |v| try w.print(" {d}", .{v}) else try w.writeAll(" N");
+        if (p.dts) |v| try w.print(" {d}", .{v}) else try w.writeAll(" N");
+        try w.print(" {d} {x} {d} {d}", .{ p.duration, p.flags, p.pos, adler(p.data) });
+        try testing.expectEqualStrings(line, w.buffered());
         var f = std.mem.tokenizeScalar(u8, line, ' ');
-        _ = f.next();
-        try testing.expectEqualStrings(f.next().?, try std.fmt.bufPrint(&buf, "{d}", .{p.stream}));
-        try testing.expectEqualStrings(f.next().?, try std.fmt.bufPrint(&buf, "{d}", .{p.data.len}));
-        _ = f.next(); // pts
-        _ = f.next(); // dts
-        _ = f.next(); // duration
-        _ = f.next(); // flags
-        try testing.expectEqualStrings(f.next().?, try std.fmt.bufPrint(&buf, "{d}", .{p.pos}));
+        for (0..8) |_| _ = f.next();
         try testing.expectEqualStrings(f.next().?, try std.fmt.bufPrint(&buf, "{d}", .{adler(p.data)}));
         line = lines.next().?;
         var skip_seen = false;

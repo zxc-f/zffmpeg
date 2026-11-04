@@ -2599,8 +2599,8 @@ names, not as an empty framework.
 
     ```text
     ID / parent: T27a / T27
-    State: G2 (the demuxer's own layer matches FFmpeg's on every
-      fixture; libavformat's timestamp layer next)
+    State: G3 (every fixture's streams and packets equal FFmpeg's;
+      detection, zffprobe, stream copy and seeking remain)
     Plan: part 0, the contract (port.md "Ogg contract"), Python-made
       fixtures (generate.py: pages with CRC-32, FLAC, Opus and Vorbis
       mappings, a synthetic Vorbis setup header whose mode table
@@ -2625,14 +2625,20 @@ names, not as an empty framework.
       vorbis_parser.c): every fixture's codec parameters, extradata,
       packets (stream, bytes, position), side data (skip samples, new
       extradata, strings metadata), open errors and end of reading equal
-      FFmpeg's, in Debug, ReleaseSafe and ReleaseFast. Remaining: the
-      packets' pts, dts, duration and flags and the streams' duration and
-      start time come from libavformat's generic layer (compute_pkt_fields,
-      update_initial_timestamps and _durations, the FLAC parser for
-      headers, avformat_find_stream_info's read-ahead, estimate_timings and
-      ogg_get_length on a seekable input): part 2 ports that layer as
-      format/demux.zig; then detection, zffprobe and stream copy (part 3)
-      and seeking (part 4).
+      FFmpeg's, in Debug, ReleaseSafe and ReleaseFast. Part 2:
+      format/demux.zig, libavformat's generic layer for audio streams
+      without reordering (compute_pkt_fields, update_initial_timestamps
+      and _durations, the FLAC parser's complete-frames path,
+      avformat_find_stream_info's read-ahead with has_codec_parameters as
+      the reference build's decoders decide it, estimate_timings), and
+      ogg.zig's seekable mode (ogg_save, ogg_restore, ogg_reset,
+      ogg_get_length, whose scans leave the Vorbis private state and
+      start times as FFmpeg's do): every line of vectors/ogg.txt, the
+      streams' durations and start times and the packets' pts, dts,
+      durations and flags included, equals FFmpeg's. Remaining: part 3,
+      detection (the probe and the .ogg extension), zffprobe and stream
+      copy to framecrc; part 4, seeking (ogg_read_timestamp under
+      ff_seek_frame_binary).
     ```
   - [ ] **T27b — Ogg mux.** Needs T27a.
     Done when FFmpeg demuxes our output to identical packets and timestamps.
