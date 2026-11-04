@@ -109,6 +109,7 @@ pub const flacenc = @import("codec/flacenc.zig");
 pub const flacmux = @import("format/flacmux.zig");
 pub const ogg = @import("format/ogg.zig");
 pub const demux = @import("format/demux.zig");
+pub const oggmux = @import("format/oggmux.zig");
 pub const framehash = @import("format/framehash.zig");
 pub const seek = @import("format/seek.zig");
 pub const audioconvert = @import("resample/audioconvert.zig");
@@ -153,6 +154,7 @@ test {
     _ = @import("format/vorbiscomment.zig");
     _ = @import("format/ogg.zig");
     _ = @import("format/demux.zig");
+    _ = @import("format/oggmux.zig");
     _ = @import("format/framehash.zig");
     _ = @import("format/seek.zig");
     _ = @import("format/mov_chan.zig");

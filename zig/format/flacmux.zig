@@ -31,6 +31,7 @@ const pcm = @import("../codec/pcm.zig");
 const flac = @import("../codec/flac.zig");
 const flacenc = @import("../codec/flacenc.zig");
 const seek = @import("seek.zig");
+const vorbiscomment = @import("vorbiscomment.zig");
 
 pub const WriteOptions = struct {
     encoder: flacenc.Options = .{},
@@ -59,16 +60,6 @@ pub const WriteError = std.Io.Writer.Error || HeaderError || error{
     /// The output failed to seek back for the final STREAMINFO.
     IoFailure,
     OutOfMemory,
-};
-
-/// `ff_vorbiscomment_metadata_conv`: FFmpeg's generic names and the
-/// VORBIS_COMMENT names the muxer restores.
-const vorbis_names = [_]struct { native: []const u8, generic: []const u8 }{
-    .{ .native = "ALBUMARTIST", .generic = "album_artist" },
-    .{ .native = "TRACKNUMBER", .generic = "track" },
-    .{ .native = "DISCNUMBER", .generic = "disc" },
-    .{ .native = "DISCSUBTITLE", .generic = "disc_subtitle" },
-    .{ .native = "DESCRIPTION", .generic = "comment" },
 };
 
 const channel_mask_key = "WAVEFORMATEXTENSIBLE_CHANNEL_MASK";
@@ -106,53 +97,22 @@ fn muxerTags(gpa: std.mem.Allocator, tags: ?*const metadata.Dictionary, layout: 
         },
         .unspecified, .custom => {},
     }
-    var out: metadata.Dictionary = .empty;
-    errdefer out.deinit(gpa);
-    for (source.items()) |entry| {
-        var key = entry.key;
-        for (vorbis_names) |name| {
-            if (std.ascii.eqlIgnoreCase(key, name.generic)) {
-                key = name.native;
-                break;
-            }
-        }
-        try out.put(gpa, key, entry.value, .keep_distinct);
-    }
-    return out;
+    return vorbiscomment.toNative(gpa, &source);
 }
 
 const vendor = "ffmpeg";
-
-/// `ff_vorbiscomment_length`.
-fn commentLength(tags: *const metadata.Dictionary) u64 {
-    var len: u64 = 4 + vendor.len + 4;
-    for (tags.items()) |entry| len += 4 + entry.key.len + 1 + entry.value.len;
-    return len;
-}
 
 /// `ff_flac_write_header` and `flac_finish_header`: `fLaC`, STREAMINFO,
 /// VORBIS_COMMENT and the padding.
 fn writeHeader(out: *std.Io.Writer, streaminfo: *const [flac.streaminfo_size]u8, tags: *const metadata.Dictionary, padding: u24) std.Io.Writer.Error!void {
     try out.writeAll(&.{ 'f', 'L', 'a', 'C', 0x00, 0x00, 0x00, 0x22 });
     try out.writeAll(streaminfo);
-    const len: u24 = @intCast(commentLength(tags));
+    const len: u24 = @intCast(vorbiscomment.length(vendor, tags));
     var block: [4]u8 = undefined;
     block[0] = if (padding == 0) 0x84 else 0x04;
     std.mem.writeInt(u24, block[1..4], len, .big);
     try out.writeAll(&block);
-    var field: [4]u8 = undefined;
-    std.mem.writeInt(u32, &field, vendor.len, .little);
-    try out.writeAll(&field);
-    try out.writeAll(vendor);
-    std.mem.writeInt(u32, &field, @intCast(tags.count()), .little);
-    try out.writeAll(&field);
-    for (tags.items()) |entry| {
-        std.mem.writeInt(u32, &field, @intCast(entry.key.len + 1 + entry.value.len), .little);
-        try out.writeAll(&field);
-        try out.writeAll(entry.key);
-        try out.writeByte('=');
-        try out.writeAll(entry.value);
-    }
+    try vorbiscomment.write(out, vendor, tags);
     if (padding != 0) {
         block[0] = 0x81;
         std.mem.writeInt(u24, block[1..4], padding, .big);
@@ -198,7 +158,7 @@ pub const Writer = struct {
             error.InvalidTag => unreachable,
         };
         defer tags.deinit(gpa);
-        if (commentLength(&tags) >= (1 << 24) - 4) return error.TagsTooLong;
+        if (vorbiscomment.length(vendor, &tags) >= (1 << 24) - 4) return error.TagsTooLong;
     }
 
     /// A writer of `codec` (pcm_s16le or pcm_s32le, the encoder's input)

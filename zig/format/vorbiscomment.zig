@@ -171,6 +171,55 @@ fn convert(gpa: std.mem.Allocator, tags: *metadata.Dictionary) Error!void {
     tags.* = out;
 }
 
+/// ff_metadata_conv into the VORBIS_COMMENT names, as a muxer writes
+/// them: `source` rebuilt in order with AV_DICT_MULTIKEY | AV_DICT_DEDUP,
+/// FFmpeg's five generic names restored.
+pub fn toNative(gpa: std.mem.Allocator, source: *const metadata.Dictionary) error{OutOfMemory}!metadata.Dictionary {
+    var out: metadata.Dictionary = .empty;
+    errdefer out.deinit(gpa);
+    for (source.items()) |entry| {
+        var key = entry.key;
+        for (conv) |c| {
+            if (std.ascii.eqlIgnoreCase(key, c.generic)) {
+                key = c.native;
+                break;
+            }
+        }
+        out.put(gpa, key, entry.value, .keep_distinct) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            // The keys and values came from a dictionary.
+            error.InvalidTag => unreachable,
+        };
+    }
+    return out;
+}
+
+/// `ff_vorbiscomment_length`: the size `write` writes.
+pub fn length(vendor: []const u8, tags: *const metadata.Dictionary) u64 {
+    var len: u64 = 4 + vendor.len + 4;
+    for (tags.items()) |entry| len += 4 + entry.key.len + 1 + entry.value.len;
+    return len;
+}
+
+/// `ff_vorbiscomment_write` without chapters: the vendor string, the
+/// comment count and each `key=value`, lengths little-endian. A tag of
+/// 4 GiB or more is the caller's to refuse (`length` tells).
+pub fn write(out: *std.Io.Writer, vendor: []const u8, tags: *const metadata.Dictionary) std.Io.Writer.Error!void {
+    var field: [4]u8 = undefined;
+    std.mem.writeInt(u32, &field, @intCast(vendor.len), .little);
+    try out.writeAll(&field);
+    try out.writeAll(vendor);
+    std.mem.writeInt(u32, &field, @intCast(tags.count()), .little);
+    try out.writeAll(&field);
+    for (tags.items()) |entry| {
+        std.mem.writeInt(u32, &field, @intCast(entry.key.len + 1 + entry.value.len), .little);
+        try out.writeAll(&field);
+        try out.writeAll(entry.key);
+        try out.writeByte('=');
+        try out.writeAll(entry.value);
+    }
+}
+
 const testing = std.testing;
 
 fn comment(gpa: std.mem.Allocator, vendor: []const u8, entries: []const []const u8) ![]u8 {

@@ -180,6 +180,18 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/ogg_vectors
 LC_ALL=C ./ogg-vectors zig/testing/fixtures/ogg/*.ogg | diff -u zig/testing/vectors/ogg.txt -
 ```
 
+The T27b Ogg muxer vectors come from the reference's `libavformat`:
+`oggmux_vectors.c` muxes generated FLAC, Opus and Vorbis packets, headers
+and tags through the Ogg muxer as the ffmpeg program drives it under
+`-fflags +bitexact` (with and without `page_duration` and `serial_offset`,
+packets larger than a page, empty packets, refused headers) and prints
+every page of each output and its MD5:
+
+```bash
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/oggmux_vectors.c .references/ffmpeg-install/lib/libavformat.a .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o oggmux-vectors
+./oggmux-vectors | diff -u zig/testing/vectors/oggmux.txt -
+```
+
 The T26c FLAC encoder vectors come from the reference's `libavcodec`
 through its public API: `flacenc_vectors.c` encodes deterministic integer
 signals (the Zig test regenerates them from the printed parameters) at

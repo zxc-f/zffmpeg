@@ -226,6 +226,14 @@ jobs:
             -lm -pthread -o flacenc-vectors
           ./flacenc-vectors | diff -u zig/testing/vectors/flacenc.txt -
 
+      # The committed T27b oracle must be what this build's Ogg muxer writes.
+      - name: Check the Ogg muxer vectors (T27b)
+        run: |
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/oggmux_vectors.c \
+            .references/ffmpeg-install/lib/libavformat.a .references/ffmpeg-install/lib/libavcodec.a \
+            .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o oggmux-vectors
+          ./oggmux-vectors | diff -u zig/testing/vectors/oggmux.txt -
+
       # The committed T25c oracle must be what this build's libavfilter gives.
       - name: Check the multi-graph vectors (T25c)
         run: |
