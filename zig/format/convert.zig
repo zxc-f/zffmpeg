@@ -60,6 +60,8 @@ const au = @import("au.zig");
 const aiff = @import("aiff.zig");
 const raw = @import("raw.zig");
 const caf = @import("caf.zig");
+const flac = @import("flac.zig");
+const codecs = @import("../codec/registry.zig");
 const detect = @import("detect.zig");
 const audioconvert = @import("../resample/audioconvert.zig");
 const dither = @import("../resample/dither.zig");
@@ -155,7 +157,12 @@ pub const Summary = struct {
     input: Container,
     output: Container,
     mode: Mode,
+    /// The encoding of the samples the pipeline reads: the input's PCM
+    /// codec, or pcm_s16le for the frames a FLAC input decodes to.
     input_codec: pcm.Codec,
+    /// The input stream's codec: `input_codec` for PCM, or FLAC (T26a),
+    /// which no output carries, so it is never copied.
+    input_stream: codecs.Codec,
     /// The input codec when copying; when transcoding, the requested encoder
     /// or the output container's default codec.
     output_codec: pcm.Codec,
@@ -218,12 +225,18 @@ pub const Conversion = struct {
     /// Frames written so far (resampled output).
     output_frames: u64 = 0,
 
-    /// One parser per format family; the WAV parser also reads Wave64.
+    /// FFmpeg's frames per packet, the last aside: its conversion calls
+    /// libswresample once per packet (`ffmpegPacketFrames`).
+    packet_frames: u32,
+
+    /// One parser per format family; the WAV parser also reads Wave64. A
+    /// FLAC input reads as its decoded frames.
     const Parser = union(enum) {
         wav: wav.Parser,
         au: au.Parser,
         aiff: aiff.Parser,
         caf: caf.Parser,
+        flac: flac.DecodedReader,
         raw: raw.Parser,
     };
 
@@ -237,8 +250,11 @@ pub const Conversion = struct {
             .au => .{ .au = .init(source.reader(), limits.au) },
             .aiff => .{ .aiff = .init(source.reader(), limits.aiff) },
             .caf => .{ .caf = .init(source.reader(), limits.caf) },
+            // The demuxer and decoder allocate.
+            .flac => .{ .flac = .init(request.gpa orelse return error.UnsupportedOperation, source.reader(), request.diagnostics) },
             .raw => .{ .raw = source.rawParser(limits.raw) },
         };
+        errdefer deinitParser(&input);
         // The tags as the file stores them, renamed once the header is read.
         var stored: metadata.Dictionary = .empty;
         defer if (request.tags) |t| stored.deinit(t.gpa);
@@ -246,7 +262,7 @@ pub const Conversion = struct {
             std.debug.assert(t.dictionary.count() == 0);
             switch (input) {
                 .wav => |*parser| parser.collectTags(.{ .gpa = t.gpa, .dictionary = &stored }),
-                .au, .aiff, .caf, .raw => {},
+                .au, .aiff, .caf, .flac, .raw => {},
             }
         }
         var summary: Summary = switch (input) {
@@ -260,6 +276,7 @@ pub const Conversion = struct {
                     .output = request.output,
                     .mode = request.mode,
                     .input_codec = info.codec,
+                    .input_stream = if (@TypeOf(info) == flac.DecodedReader.Header) .flac else .{ .pcm = info.codec },
                     .output_codec = switch (request.mode) {
                         .copy => info.codec,
                         // The requested encoder, else the muxer's default; an
@@ -293,7 +310,7 @@ pub const Conversion = struct {
             // Later tags could not reach the output header; `stored` dies here.
             switch (input) {
                 .wav => |*parser| parser.tags = null,
-                .au, .aiff, .caf, .raw => {},
+                .au, .aiff, .caf, .flac, .raw => {},
             }
             var generic = try wav.genericTags(t.gpa, &stored);
             defer generic.deinit(t.gpa);
@@ -314,7 +331,7 @@ pub const Conversion = struct {
         // the codec, and copy takes no encoder and keeps the layout and the
         // rate; resampling needs an allocator.
         const supported = switch (request.mode) {
-            .copy => request.codec == null and request.output.carries(summary.input_codec) and
+            .copy => request.codec == null and summary.input_stream == .pcm and request.output.carries(summary.input_codec) and
                 summary.output_layout.eql(&summary.format.layout) and !resampling,
             .transcode => request.output.carries(summary.output_codec) and (!resampling or request.gpa != null),
         };
@@ -333,9 +350,34 @@ pub const Conversion = struct {
             .au => try au.Writer.check(summary.output_codec, summary.outputFormat(), try knownCount(summary), limits.au),
             .aiff => try aiff.Writer.check(summary.output_codec, summary.outputFormat(), try knownCount(summary), aiffOptions(limits)),
             .raw => try raw.Writer.check(summary.output_codec, summary.outputFormat(), rawOptions(limits)),
-            .caf => unreachable, // no muxer: refused above as UnsupportedOperation
+            .caf, .flac => unreachable, // no muxer: refused above as UnsupportedOperation
         }
-        return .{ .input = input, .limits = limits, .summary = summary, .tags = tags, .dither = request.dither, .gpa = request.gpa };
+        const packet_frames = switch (input) {
+            // FFmpeg's packets are the FLAC frames.
+            .flac => |*reader| reader.demuxer.?.info.stream_info.max_blocksize,
+            else => ffmpegPacketFrames(summary.input, summary.input_codec, summary.format),
+        };
+        return .{
+            .input = input,
+            .limits = limits,
+            .summary = summary,
+            .tags = tags,
+            .dither = request.dither,
+            .gpa = request.gpa,
+            .packet_frames = packet_frames,
+        };
+    }
+
+    /// Frees what a FLAC input allocated; nothing for the others.
+    pub fn deinit(c: *Conversion) void {
+        deinitParser(&c.input);
+    }
+
+    fn deinitParser(input: *Parser) void {
+        switch (input.*) {
+            .flac => |*reader| reader.deinit(),
+            .wav, .au, .aiff, .caf, .raw => {},
+        }
     }
 
     /// The frame count a writer's header needs up front.
@@ -366,7 +408,7 @@ pub const Conversion = struct {
                 var writer = raw.Writer.begin(out, s.output_codec, s.outputFormat(), s.output_frame_count, rawOptions(c.limits)) catch |err| return outputFailure(err);
                 try c.transfer(raw.Writer, &writer);
             },
-            .caf => unreachable, // no muxer: `init` refused it
+            .caf, .flac => unreachable, // no muxer: `init` refused it
         }
         // Every frame was read: an unknown count is now known.
         if (c.summary.frame_count == null) c.summary.frame_count = @intCast(c.next_pts);
@@ -413,7 +455,7 @@ pub const Conversion = struct {
                     dither.Dither.init(s.format, out_format.sample_format, options)
                 else
                     null;
-                if (dithered) |*d| d.setCalls(ffmpegPacketFrames(s.input, s.input_codec, s.format), s.frame_count);
+                if (dithered) |*d| d.setCalls(c.packet_frames, s.frame_count);
                 var stages: Transcoder(W) = .{
                     .decoder = .init(s.input_codec, s.format, &decoded),
                     // libswresample's conversion when the storage or the
@@ -457,7 +499,7 @@ pub const Conversion = struct {
         // FFmpeg's command line tells libswresample a 24-bit encoder keeps
         // 24 bits of s32.
         options.dither.output_sample_bits = if (s.output_codec.bytesPerSample() == 3) 24 else 0;
-        var converter = swr.Swr.init(gpa, s.format, out_format, ffmpegPacketFrames(s.input, s.input_codec, s.format), options) catch |err| switch (err) {
+        var converter = swr.Swr.init(gpa, s.format, out_format, c.packet_frames, options) catch |err| switch (err) {
             // `init` ran the same checks.
             error.UnsupportedLayout => unreachable,
             else => |e| return e,
@@ -560,6 +602,7 @@ fn ffmpegPacketFrames(container: Container, codec: pcm.Codec, format: audio.Form
         // (its bit rate over 80 bytes, over the block size), at most
         // INT_MAX bytes, rounded down to a power of two.
         .wav, .au, .raw => std.math.floorPowerOfTwo(u32, std.math.clamp(format.sample_rate / 10, 1, std.math.maxInt(i32) / block_align)),
+        .flac => unreachable, // Conversion.init takes STREAMINFO's block size
     };
 }
 
@@ -748,6 +791,7 @@ pub fn convert(reader: *std.Io.Reader, out: *std.Io.Writer, request: Request, li
     try source.open(reader, request.input);
 
     var conversion: Conversion = try .init(&source, request, limits);
+    defer conversion.deinit();
     try conversion.run(out);
     return conversion.summary;
 }
@@ -807,6 +851,7 @@ fn decodeOutput(container: Container, bytes: []const u8, storage: []i16, format:
             var parser: caf.Parser = .init(&reader, .{});
             return decodeWith(caf.Parser, &parser, storage);
         },
+        .flac => unreachable, // no FLAC output before T26c
     }
 }
 
@@ -868,6 +913,7 @@ fn rawOf(container: Container, bytes: []const u8, out: []u8, format: audio.Forma
         .aiff => _ = try aiff.decodeToRaw(&reader, &writer, .{}),
         .caf => _ = try caf.decodeToRaw(&reader, &writer, .{}),
         .raw => _ = try raw.decodeToRaw(&reader, &writer, container.rawCodec().?, paramsOf(format), bytes.len, .{}), // a raw container has a codec
+        .flac => unreachable, // no FLAC output before T26c
     }
     return writer.buffered();
 }
@@ -1645,10 +1691,11 @@ fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
         // A stream the probe accepts converts in every supported cell, with
         // the same format and frame count; one it rejects never converts.
         if (probed) |info| {
-            const supported = switch (request.mode) {
-                .copy => request.output.carries(info.codec),
+            // FLAC input needs an allocator, which these requests lack.
+            const supported = if (info.codec.pcmCodec()) |codec| switch (request.mode) {
+                .copy => request.output.carries(codec),
                 .transcode => true,
-            };
+            } else false;
             if (!supported) {
                 try std.testing.expectError(error.UnsupportedOperation, result);
             } else {
@@ -1673,4 +1720,72 @@ test "fuzz: conversion agrees with probing on arbitrary input" {
         fixtures.aiff.bytes("aifc_sowt"),
         fixtures.aiff.bytes("aiff_odd_data"),
     } });
+}
+
+test "every accepted FLAC fixture converts to the samples it encodes" {
+    const gpa = std.testing.allocator;
+    inline for (fixtures.flac.all) |fixture| {
+        if (fixture.expected == .accept) {
+            const stream = fixture.expected.accept;
+            var reader: std.Io.Reader = .fixed(fixtures.flac.bytes(fixture.name));
+            var out: std.Io.Writer.Allocating = .init(gpa);
+            defer out.deinit();
+            const summary = try convert(&reader, &out.writer, .{ .output = .s16le, .mode = .transcode, .gpa = gpa }, .{});
+            try std.testing.expectEqual(Container.flac, summary.input);
+            try std.testing.expect(summary.input_stream == .flac);
+            try std.testing.expectEqual(stream.frames, summary.frame_count);
+            var digest: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(out.written(), &digest, .{});
+            try std.testing.expectEqualStrings(stream.pcm_sha256, &std.fmt.bytesToHex(digest, .lower));
+        }
+    }
+}
+
+test "FLAC input: no copy, an allocator needed, the frame count checked" {
+    const gpa = std.testing.allocator;
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    const bytes = fixtures.flac.bytes("flac_mid_side");
+    var reader: std.Io.Reader = .fixed(bytes);
+    try std.testing.expectError(error.UnsupportedOperation, convert(&reader, &out.writer, .{ .output = .wav, .mode = .copy, .gpa = gpa }, .{}));
+    reader = .fixed(bytes);
+    try std.testing.expectError(error.UnsupportedOperation, convert(&reader, &out.writer, .{ .output = .wav, .mode = .transcode }, .{}));
+    // A frame FFmpeg's parser drops leaves the output short of STREAMINFO's
+    // count, which the header holds.
+    reader = .fixed(fixtures.flac.bytes("flac_junk_between_frames"));
+    var recorder: diagnostics.Recorder = .{};
+    try std.testing.expectError(error.FrameCountMismatch, convert(&reader, &out.writer, .{
+        .output = .wav,
+        .mode = .transcode,
+        .gpa = gpa,
+        .diagnostics = recorder.sink(.warning),
+    }, .{}));
+    try std.testing.expectEqualStrings("Decoding error: Invalid data found when processing input", recorder.lastMessage());
+}
+
+test "FLAC to a WAV header, rematrixed and resampled" {
+    const gpa = std.testing.allocator;
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    var reader: std.Io.Reader = .fixed(fixtures.flac.bytes("flac_six_channels_48k"));
+    const summary = try convert(&reader, &out.writer, .{
+        .output = .wav,
+        .mode = .transcode,
+        .layout = .stereo,
+        .sample_rate = 44100,
+        .gpa = gpa,
+    }, .{});
+    try std.testing.expectEqual(44100, summary.output_rate);
+    try std.testing.expect(summary.output_layout.eql(&.stereo));
+}
+
+test "FLAC input fails cleanly under every allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(gpa: std.mem.Allocator) !void {
+            var reader: std.Io.Reader = .fixed(fixtures.flac.bytes("flac_verbatim_stereo_44k1"));
+            var buffer: [4096]u8 = undefined;
+            var out: std.Io.Writer = .fixed(&buffer);
+            _ = try convert(&reader, &out, .{ .output = .s16le, .mode = .transcode, .gpa = gpa }, .{});
+        }
+    }.run, .{});
 }

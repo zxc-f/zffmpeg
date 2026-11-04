@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Original file for this project; not translated from FFmpeg source.
 // libavformat/allformats.c and the demuxer and muxer descriptors of wavdec.c,
-// wavenc.c, au.c, aiffdec.c and aiffenc.c at the pinned reference revision
+// wavenc.c, au.c, aiffdec.c, aiffenc.c, cafdec.c and flacdec.c at the
+// pinned reference revision
 // give the names, long names, extensions, MIME types and default codecs.
 //! The format registry (TODO.md T16): every container's FFmpeg name and long
 //! name, its demuxer's content probe, and its muxer's file-name extensions,
@@ -26,6 +27,7 @@ const au = @import("au.zig");
 const aiff = @import("aiff.zig");
 const raw = @import("raw.zig");
 const caf = @import("caf.zig");
+const flac = @import("flac.zig");
 
 pub const Container = enum {
     wav,
@@ -36,6 +38,8 @@ pub const Container = enum {
     aiff,
     /// Apple Core Audio Format, read only (T22d).
     caf,
+    /// Native FLAC, read only (T26a); its muxer comes with T26c.
+    flac,
     // Raw PCM (T22c), one format per codec FFmpeg has a raw format for, named
     // as the codec: every PCM codec but s64.
     u8,
@@ -54,7 +58,7 @@ pub const Container = enum {
     mulaw,
 
     /// The parser and writer family that reads and writes a container.
-    pub const Family = enum { wav, au, aiff, caf, raw };
+    pub const Family = enum { wav, au, aiff, caf, flac, raw };
 
     pub fn family(container: Container) Family {
         return switch (container) {
@@ -62,6 +66,7 @@ pub const Container = enum {
             .au => .au,
             .aiff => .aiff,
             .caf => .caf,
+            .flac => .flac,
             // Checked below: exactly the raw formats, each named as its codec.
             else => .raw,
         };
@@ -70,7 +75,7 @@ pub const Container = enum {
     /// The codec of a raw PCM format, which shares its name; null otherwise.
     pub fn rawCodec(container: Container) ?pcm.Codec {
         return switch (container) {
-            .wav, .w64, .au, .aiff, .caf => null,
+            .wav, .w64, .au, .aiff, .caf, .flac => null,
             // Compiles only if every other tag names a codec.
             inline else => |tag| @field(pcm.Codec, @tagName(tag)),
         };
@@ -181,6 +186,14 @@ pub const formats = [_]Format{
         // FFmpeg's CAF muxer is not ported (T22d is demux only).
         .muxer = null,
     },
+    .{
+        .container = .flac,
+        .name = "flac",
+        .long_name = "raw FLAC",
+        .demuxer = .{ .probe = flac.probeScore, .probe_bytes = flac.probe_bytes, .extensions = &.{"flac"} },
+        // FFmpeg's FLAC muxer comes with T26c.
+        .muxer = null,
+    },
     rawFormat(.u8, "PCM unsigned 8-bit", &.{"ub"}),
     rawFormat(.s8, "PCM signed 8-bit", &.{"sb"}),
     // FFmpeg gives `sw` to the native byte order's 16-bit format (`AV_NE`).
@@ -269,11 +282,11 @@ comptime {
         }
         if (format.demuxer) |demuxer| {
             // FFmpeg reads more and probes again while the best score is at
-            // most 25; a probe-less demuxer's extension scores 50, but a
-            // probing one's only 1, which would need that loop (detect.zig).
-            if (demuxer.probe != null and demuxer.extensions.len > 0) {
-                @compileError("a demuxer with a probe and extensions needs the probe retry: " ++ format.name);
-            }
+            // most 25 (detect.zig). That cannot change the winner as long as
+            // every probe reads a fixed number of bytes within the first
+            // probe buffer, which detect.zig checks: a low score, such as a
+            // probing demuxer's extension match (1) or raw FLAC's 13, wins
+            // after the retries exactly when it wins at once.
             checkExtensions(demuxer.extensions, format.name);
         }
         const muxer = format.muxer orelse continue;

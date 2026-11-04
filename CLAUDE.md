@@ -19,7 +19,8 @@ length (T22a), AIFF and AIFF-C with every PCM encoding of FFmpeg's table
 with conversion between every sample format and libswresample's dither
 (T23a), FFmpeg's channel layouts, 1 to 64 channels, in every container
 (T23b), rematrixing between them (T23c) and resampling (T24), with
-FFmpeg's option syntax (T17a), and an audio filter graph (T25a). The `av`
+FFmpeg's option syntax (T17a), an audio filter graph (T25), and FLAC with
+16-bit samples read and decoded as FFmpeg does (T26a). The `av`
 module (rooted at `zig/root.zig`) exports `pcm` (the PCM encodings,
 kernels and decoder/encoder stages), `audio`, `channel_layout` (FFmpeg's
 channel layouts), `time`, `samples` (decoded sample storage
@@ -32,15 +33,18 @@ channelmap, pan, amix, from filtergraph text, several inputs and outputs),
 `wav`
 (also Wave64), `au`,
 `aiff` and `raw` (bounded parsers and writers), `caf` (a bounded parser),
+`flac` (FFmpeg's FLAC demuxer, parser and decoder for 16-bit streams),
+`bits` (an MSB-first bit reader and FLAC's CRCs), `framehash` (FFmpeg's
+framecrc, framemd5 and streamhash text),
 `codecs` and `formats`
 (the codec and format registries), `detect` (detection with FFmpeg's scored
 probes and extension fallback), `audioconvert` and `dither` (sample format
 conversion, T23a), `convert` (the synchronous T13a conversion and
 stream-copy pipeline) and `file` (file and pipe adapters). Two tools sit on it:
-`zffprobe` probes WAV, Wave64, AU, AIFF, CAF and raw PCM, tags included, and `zffmpeg` (T13b)
-converts and stream-copies between them (CAF as an input), carrying tags,
+`zffprobe` probes WAV, Wave64, AU, AIFF, CAF, FLAC and raw PCM, tags included, and `zffmpeg` (T13b)
+converts and stream-copies between them (CAF and FLAC as inputs), carrying tags,
 with `-c:a` and FFmpeg's dither options. Tests cover 129 WAV,
-41 AU, 57 AIFF, 25 raw PCM and 58 CAF fixtures, process runs of both tools, and a CI comparison against a
+41 AU, 57 AIFF, 25 raw PCM, 58 CAF and 31 FLAC fixtures, process runs of both tools, and a CI comparison against a
 pinned FFmpeg build that also reads every `zffmpeg` output. Verification is
 Linux-only during development; Windows and ARM wait for T62–T63. T13, T14a
 (packets, frames and stages), T17b (the metadata dictionary), T20a (decoded
@@ -53,8 +57,9 @@ verified, completing T23, and so are T17 (T17a: number syntax, typed
 options, a diagnostic sink), T24 (resampling) and T25a (the audio filter
 graph's core), T25b (expressions, filtergraph text, atrim and asetpts)
 and T25c (several inputs and outputs on libavfilter's scheduler), completing
-T25; T26a (FLAC, with T18a and T19b) is next, and
-TODO.md lays out the roadmap through T64.
+T25, and T26a (FLAC demux and 16-bit decoding) with T18a (the bit reader
+and CRCs) and T19b (frame and stream hashes); T52a (the seek API and WAV
+seeking, with T15) is next, and TODO.md lays out the roadmap through T64.
  When the state changes, update the current-state statements in
 README.md, port.md ("Status and scope"), the TODO.md introduction and this file
 together.

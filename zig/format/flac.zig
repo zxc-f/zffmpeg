@@ -31,6 +31,9 @@ const flac_parser = @import("../codec/flac_parser.zig");
 const packet = @import("../core/packet.zig");
 const time = @import("../core/time.zig");
 const channel_layout = @import("../core/channel_layout.zig");
+const audio = @import("../core/audio.zig");
+const pcm = @import("../codec/pcm.zig");
+const diagnostics = @import("../core/diagnostics.zig");
 
 /// Contract errors (see the FLAC fixture README), plus `IoFailure` for a
 /// failing reader and `OutOfMemory`.
@@ -38,6 +41,9 @@ pub const Error = error{
     InvalidFlac,
     Truncated,
     UnsupportedFormat,
+    /// The decoded samples differ from STREAMINFO's count, which an output
+    /// header written before them already holds (`DecodedReader`).
+    FrameCountMismatch,
     IoFailure,
     OutOfMemory,
 };
@@ -208,7 +214,10 @@ pub const Demuxer = struct {
             var bytes: u64 = 0;
             while (d.first_dts == nopts and count < max_ts_probe and bytes < probesize) {
                 const q = try d.readFrameInternal() orelse break;
-                try d.packet_buffer.append(d.gpa, q);
+                d.packet_buffer.append(d.gpa, q) catch |err| {
+                    d.gpa.free(q.data);
+                    return err;
+                };
                 count += 1;
                 bytes += q.data.len;
             }
@@ -379,6 +388,115 @@ pub const Demuxer = struct {
     }
 };
 
+/// A FLAC input as the conversion pipeline reads PCM (format/convert.zig):
+/// the decoder's frames as pcm_s16le bytes, whole frames per read.
+///
+/// A packet the decoder refuses is reported to the diagnostic sink and
+/// skipped, as the ffmpeg program skips it. Because the pipeline writes an
+/// output header holding STREAMINFO's sample count before the samples, a
+/// stream that decodes to another count fails with `FrameCountMismatch`
+/// (before the extra samples, or at `finish` for missing ones), where
+/// FFmpeg would rewrite a seekable output's header.
+pub const DecodedReader = struct {
+    gpa: std.mem.Allocator,
+    reader: *std.Io.Reader,
+    sink: ?diagnostics.Sink,
+    demuxer: ?Demuxer = null,
+    decoder: ?decoder.Decoder = null,
+    /// The current frame's samples not yet delivered, borrowed from the
+    /// decoder.
+    pending: []const i16 = &.{},
+    channels: u8 = 0,
+    delivered: u64 = 0,
+    expected: ?u64 = null,
+    ended: bool = false,
+
+    pub const Header = struct {
+        /// The encoding of the bytes `readData` gives.
+        codec: pcm.Codec,
+        format: audio.Format,
+        /// STREAMINFO's sample count, when it has one.
+        frame_count: ?u64,
+        info: Info,
+    };
+
+    pub fn init(gpa: std.mem.Allocator, reader: *std.Io.Reader, sink: ?diagnostics.Sink) DecodedReader {
+        return .{ .gpa = gpa, .reader = reader, .sink = sink };
+    }
+
+    pub fn deinit(r: *DecodedReader) void {
+        if (r.decoder) |*d| d.deinit();
+        if (r.demuxer) |*d| d.deinit();
+        r.* = undefined;
+    }
+
+    pub fn readHeader(r: *DecodedReader) Error!Header {
+        std.debug.assert(r.demuxer == null);
+        r.demuxer = try Demuxer.init(r.gpa, r.reader);
+        const info = r.demuxer.?.info;
+        r.decoder = decoder.Decoder.init(r.gpa, info.stream_info) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            // readHeader accepted only 16-bit streams.
+            error.UnsupportedFormat => unreachable,
+        };
+        r.channels = info.stream_info.channels;
+        r.expected = info.duration;
+        const format = audio.Format.initLayout(info.stream_info.sample_rate, info.layout, .s16) catch return error.UnsupportedFormat;
+        return .{ .codec = .s16le, .format = format, .frame_count = info.duration, .info = info };
+    }
+
+    /// Whole frames of s16le samples into `output`, at least one while any
+    /// remain (one frame fits in 16 bytes); empty at the end.
+    pub fn readData(r: *DecodedReader, output: []u8) Error![]u8 {
+        while (r.pending.len == 0) {
+            if (!try r.nextFrame()) return output[0..0];
+        }
+        const frame_bytes = 2 * @as(usize, r.channels);
+        const frames = @min(output.len / frame_bytes, r.pending.len / r.channels);
+        std.debug.assert(frames > 0);
+        if (r.expected) |expected| {
+            if (r.delivered + frames > expected) return error.FrameCountMismatch;
+        }
+        const samples = r.pending[0 .. frames * r.channels];
+        for (samples, 0..) |sample, i| std.mem.writeInt(i16, output[2 * i ..][0..2], sample, .little);
+        r.pending = r.pending[samples.len..];
+        r.delivered += frames;
+        return output[0 .. frames * frame_bytes];
+    }
+
+    /// The next decoded frame into `pending`; false at the end.
+    fn nextFrame(r: *DecodedReader) Error!bool {
+        if (r.ended) return false;
+        const dec = &r.decoder.?;
+        while (true) {
+            const frame = dec.receive() catch |err| {
+                diagnostics.report(r.sink, .err, "Decoding error: {s}", .{switch (err) {
+                    error.InvalidData => "Invalid data found when processing input",
+                    error.UnsupportedFormat => "a frame left to T26b (a variable block size, or another rate or channel count)",
+                }});
+                continue;
+            };
+            if (frame) |f| {
+                r.pending = f.samples;
+                return true;
+            }
+            const p = try r.demuxer.?.next() orelse {
+                r.ended = true;
+                return false;
+            };
+            dec.send(p.data, p.pts);
+        }
+    }
+
+    /// Checks that the stream decoded to STREAMINFO's count.
+    pub fn finish(r: *DecodedReader) Error!void {
+        std.debug.assert(r.pending.len == 0);
+        if (r.expected) |expected| {
+            if (r.delivered != expected) return error.FrameCountMismatch;
+        }
+    }
+};
+
 fn addOverflows(a: i64, b: i64) bool {
     _ = std.math.add(i64, a, b) catch return true;
     return false;
@@ -498,7 +616,7 @@ const flacdec = decoder;
 
 /// The `P`, `D` and `X` lines of flac_vectors.c for `bytes`, and the SHA-256
 /// and count of every decoded sample.
-fn decodeLines(gpa: std.mem.Allocator, bytes: []const u8, out: *std.ArrayList(u8), pcm: *std.crypto.hash.sha2.Sha256, frames: *u64) !void {
+fn decodeLines(gpa: std.mem.Allocator, bytes: []const u8, out: *std.ArrayList(u8), samples_sha: *std.crypto.hash.sha2.Sha256, frames: *u64) !void {
     var reader: std.Io.Reader = .fixed(bytes);
     var d = try Demuxer.init(gpa, &reader);
     defer d.deinit();
@@ -525,7 +643,7 @@ fn decodeLines(gpa: std.mem.Allocator, bytes: []const u8, out: *std.ArrayList(u8
                 var le: [2]u8 = undefined;
                 std.mem.writeInt(i16, &le, s, .little);
                 adler.update(&le);
-                pcm.update(&le);
+                samples_sha.update(&le);
             }
             frames.* += frame.nb_samples;
             try out.appendSlice(gpa, try std.fmt.bufPrint(&line_buf, "D {d} {s} 0x{x:0>8}\n", .{ frame.nb_samples, formatTs(&a, frame.pts), adler.adler }));
@@ -566,4 +684,42 @@ test "every fixture decodes as FFmpeg decodes it, accepted ones to their samples
             },
         }
     }
+}
+
+test "the demuxer frees everything under every allocation failure" {
+    try testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn run(gpa: std.mem.Allocator) !void {
+            var reader: std.Io.Reader = .fixed(fixtures.flac.bytes("flac_junk_between_frames"));
+            var d = try Demuxer.init(gpa, &reader);
+            defer d.deinit();
+            while (try d.next()) |_| {}
+        }
+    }.run, .{});
+}
+
+fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
+    _ = context;
+    var input: [4096]u8 = undefined;
+    const len = smith.slice(&input);
+    // Demux and decode arbitrary bytes: errors are fine, crashes, leaks and
+    // unbounded loops are not.
+    var reader: std.Io.Reader = .fixed(input[0..len]);
+    var r: DecodedReader = .init(testing.allocator, &reader, null);
+    defer r.deinit();
+    _ = r.readHeader() catch return;
+    var out: [4096]u8 = undefined;
+    while (true) {
+        const data = r.readData(&out) catch return;
+        if (data.len == 0) break;
+    }
+    r.finish() catch {};
+}
+
+test "fuzz: the demuxer and decoder on arbitrary input" {
+    try testing.fuzz({}, fuzzOne, .{ .corpus = &.{
+        fixtures.flac.bytes("flac_constant_mono_8k"),
+        fixtures.flac.bytes("flac_lpc_zero_shift"),
+        fixtures.flac.bytes("flac_junk_between_frames"),
+        fixtures.flac.bytes("flac_mid_side"),
+    } });
 }

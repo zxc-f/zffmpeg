@@ -216,7 +216,9 @@ codec FFmpeg has one for, all but s64 (T22c), and the
 `amix`, `pan`, `channelmap`, `channelsplit` and `asplit` filters, which the
 T25a, T25b and T25c graph vectors run (`anull`, `aformat` and
 `atrim` come with the program, which
-selects the few other filters it always needs). There are no GPL, nonfree, external-library or
+selects the few other filters it always needs), and since T26a the FLAC
+demuxer, parser, decoder, encoder (for the five FFmpeg-made fixtures) and
+muxer, and the `framecrc`, `framemd5` and `streamhash` muxers T19b compares. There are no GPL, nonfree, external-library or
 hardware components, and autodetection is off. `--disable-x86asm` keeps the C
 code paths as the reference and avoids a NASM dependency. The broad FATE
 configuration is deliberately not used.

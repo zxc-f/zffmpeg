@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Original file for this project; not translated from FFmpeg source.
 // libavformat/format.c (probe_input_format_internal, av_probe_input_buffer2),
-// wavdec.c, au.c and aiffdec.c at the pinned reference revision describe the
-// scoring followed here.
+// wavdec.c, au.c, aiffdec.c, cafdec.c and flacdec.c at the pinned reference
+// revision describe the scoring followed here.
 //! Format detection (TODO.md T12c, T16): the content probes of the demuxers
 //! in the format registry (`registry.zig`), scored as FFmpeg scores them, so
 //! each stream gets FFmpeg's winner.
@@ -16,19 +16,21 @@
 //! format instead (`ffprobe -f`), which skips probing.
 //!
 //! FFmpeg reads more and probes again while the best score is at most 25
-//! (`AVPROBE_SCORE_RETRY`). Every registered probe decides within its first
-//! bytes and scores 0, 99 or 100, so that loop could never change a winner;
-//! this file checks at compile time that each probe needs no more than
-//! `probe_len` bytes. A probe that can score low must add the loop. A demuxer
-//! without a probe (a format without a content signature) is never chosen.
+//! (`AVPROBE_SCORE_RETRY`), accepting a low score only at the end of the
+//! input or of its largest probe buffer. Every registered probe reads a
+//! fixed number of bytes within the first `probe_len`, which this file
+//! checks at compile time, so the later rounds score every demuxer exactly
+//! as the first: the loop can delay a low-scoring winner, such as raw
+//! FLAC's 13 (T26a), but never change it. A probe that looks further must
+//! add the loop. A demuxer without a probe (a format without a content
+//! signature) is never chosen by content.
 //!
 //! A file name, when the caller has one, adds FFmpeg's extension hints
 //! (`av_match_ext`): a demuxer without a probe whose extension matches scores
 //! 50 (`AVPROBE_SCORE_EXTENSION`), so the raw PCM formats (T22c) are chosen
-//! by name only when no content probe recognizes the stream; a probing
-//! demuxer's match would score at least 1, and the registry rejects that
-//! combination until the retry loop exists. MIME types (HTTP only) and
-//! FFmpeg's skipping of a leading ID3v2 tag are not ported.
+//! by name only when no content probe recognizes the stream, and a probing
+//! demuxer's match scores at least 1 (FLAC's `flac`). MIME types (HTTP only)
+//! and FFmpeg's skipping of a leading ID3v2 tag are not ported.
 
 const std = @import("std");
 const audio = @import("../core/audio.zig");
@@ -39,15 +41,17 @@ const au = @import("au.zig");
 const aiff = @import("aiff.zig");
 const raw = @import("raw.zig");
 const caf = @import("caf.zig");
+const flac = @import("flac.zig");
+const codecs = @import("../codec/registry.zig");
 const registry = @import("registry.zig");
 const Replay = @import("replay.zig").Replay;
 
 pub const Container = registry.Container;
 
-/// The WAV, AU, AIFF and raw PCM contract errors, which share their common
-/// names, `UnknownFormat` for a stream no demuxer recognizes, and
-/// `UnusedOption`.
-pub const Error = wav.Error || au.Error || aiff.Error || raw.Error || caf.Error || error{
+/// The WAV, AU, AIFF, raw PCM, CAF and FLAC contract errors, which share
+/// their common names, `UnknownFormat` for a stream no demuxer recognizes,
+/// and `UnusedOption`.
+pub const Error = wav.Error || au.Error || aiff.Error || raw.Error || caf.Error || flac.Error || error{
     /// No demuxer's probe scored the stream, as FFmpeg's "Invalid data found
     /// when processing input"; force a format to parse it anyway.
     UnknownFormat,
@@ -182,9 +186,10 @@ pub const Input = struct {
 
 pub const Probed = struct {
     container: Container,
-    /// The stream's encoding, as FFmpeg's `codec_name` names it.
-    codec: pcm.Codec,
-    /// `sample_format` is `codec.storage()`.
+    /// The stream's codec, as FFmpeg's `codec_name` names it.
+    codec: codecs.Codec,
+    /// `sample_format` is the decoded storage: a PCM codec's `storage()`,
+    /// s16 for 16-bit FLAC.
     format: audio.Format,
     /// Sample frames in the stream; null for data of unknown length
     /// (`unknown_length`). Raw PCM is counted while validating.
@@ -227,33 +232,49 @@ pub fn probeWith(reader: *std.Io.Reader, limits: Limits, options: Options) Error
                 t.dictionary.* = generic;
             }
             std.debug.assert(Container.ofWav(info.variant) == input.container);
-            return .{ .container = input.container, .codec = info.codec, .format = info.format, .frame_count = info.frame_count };
+            return .{ .container = input.container, .codec = .{ .pcm = info.codec }, .format = info.format, .frame_count = info.frame_count };
         },
         .au => {
             var parser: au.Parser = .init(input.reader(), limits.au);
             const info = try parser.readHeader();
             try parser.finish();
-            return .{ .container = .au, .codec = info.codec, .format = info.format, .frame_count = info.frame_count };
+            return .{ .container = .au, .codec = .{ .pcm = info.codec }, .format = info.format, .frame_count = info.frame_count };
         },
         .aiff => {
             var parser: aiff.Parser = .init(input.reader(), limits.aiff);
             const info = try parser.readHeader();
             try parser.finish();
-            return .{ .container = .aiff, .codec = info.codec, .format = info.format, .frame_count = info.frame_count };
+            return .{ .container = .aiff, .codec = .{ .pcm = info.codec }, .format = info.format, .frame_count = info.frame_count };
         },
         .caf => {
             var parser: caf.Parser = .init(input.reader(), limits.caf);
             const info = try parser.readHeader();
             try parser.finish();
-            return .{ .container = .caf, .codec = info.codec, .format = info.format, .frame_count = info.frame_count };
+            return .{ .container = .caf, .codec = .{ .pcm = info.codec }, .format = info.format, .frame_count = info.frame_count };
         },
         .raw => {
             var parser = input.rawParser(limits.raw);
             const info = try parser.readHeader();
             try parser.finish();
-            return .{ .container = input.container, .codec = info.codec, .format = info.format, .frame_count = parser.frames_read };
+            return .{ .container = input.container, .codec = .{ .pcm = info.codec }, .format = info.format, .frame_count = parser.frames_read };
+        },
+        .flac => {
+            // The frames are the decoder's to check; FFmpeg's probe reads
+            // the header, and the duration comes from STREAMINFO.
+            const info = try flac.readHeader(input.reader());
+            return .{
+                .container = .flac,
+                .codec = .flac,
+                .format = try flacFormat(info),
+                .frame_count = info.duration,
+            };
         },
     }
+}
+
+/// The decoded stream of a FLAC input: interleaved s16 in FFmpeg's layout.
+pub fn flacFormat(info: flac.Info) error{UnsupportedFormat}!audio.Format {
+    return audio.Format.initLayout(info.stream_info.sample_rate, info.layout, .s16) catch error.UnsupportedFormat;
 }
 
 const fixtures = @import("../testing/fixtures.zig");
@@ -329,6 +350,23 @@ test "detection gives every CAF fixture FFmpeg's winner and then the parser's re
         const bytes = fixtures.caf.bytes(fixture.name);
         var direct: std.Io.Reader = .fixed(bytes);
         expectDetection(fixture.detected, bytes, caf.probe(&direct, .{})) catch |err| {
+            std.debug.print("fixture {s}\n", .{fixture.name});
+            return err;
+        };
+    }
+}
+
+/// A FLAC header read directly, as `expectSameResult` compares it.
+fn flacProbe(reader: *std.Io.Reader) Error!struct { format: audio.Format, frame_count: ?u64 } {
+    const info = try flac.readHeader(reader);
+    return .{ .format = try flacFormat(info), .frame_count = info.duration };
+}
+
+test "detection gives every FLAC fixture FFmpeg's winner and then the demuxer's header" {
+    inline for (fixtures.flac.all) |fixture| {
+        const bytes = fixtures.flac.bytes(fixture.name);
+        var direct: std.Io.Reader = .fixed(bytes);
+        expectDetection(fixture.detected, bytes, flacProbe(&direct)) catch |err| {
             std.debug.print("fixture {s}\n", .{fixture.name});
             return err;
         };
@@ -494,6 +532,7 @@ fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
         .aiff => try expectSameResult(aiff.probe(&direct, .{}), got, .aiff),
         .caf => try expectSameResult(caf.probe(&direct, .{}), got, .caf),
         .wav => try expectSameResult(wav.probe(&direct, .{}), got, container),
+        .flac => try expectSameResult(flacProbe(&direct), got, .flac),
         .raw => unreachable, // no content probe chooses raw PCM
     } else try std.testing.expectError(error.UnknownFormat, got);
 }
@@ -508,6 +547,7 @@ test "fuzz: detection agrees with the direct parser on arbitrary input" {
         fixtures.aiff.bytes("aifc_sowt"),
         fixtures.aiff.bytes("aiff_other_chunks"),
         fixtures.caf.bytes("caf_chunks_around_data"),
+        fixtures.flac.bytes("flac_constant_mono_8k"),
     } });
 }
 

@@ -3,7 +3,7 @@
 A native Zig multimedia library and tools, developed incrementally from FFmpeg's
 documented behavior and algorithms, one supported capability at a time.
 
-Current state: four containers and raw PCM work. The `av` library reads and
+Current state: five containers and raw PCM work. The `av` library reads and
 writes every WAV PCM encoding (u8, 16- to 64-bit integers, float, A-law,
 mu-law, plain or WAVE_FORMAT_EXTENSIBLE) in RIFF, RF64/BW64 or Sony Wave64,
 past 4 GiB, every PCM encoding of Sun AU, AIFF and AIFF-C with every PCM
@@ -33,7 +33,12 @@ The library's audio filter graph negotiates and runs chains of `anull`,
 `aformat`, `volume`, `aresample`, `atrim` and `asetpts` as libavfilter does
 (T25a), from filtergraph text with FFmpeg's expressions too (T25b), and
 graphs of several inputs and outputs with `asplit`, `channelsplit`,
-`channelmap`, `pan` and `amix` on libavfilter's scheduler (T25c). [TODO.md](TODO.md) holds the completion
+`channelmap`, `pan` and `amix` on libavfilter's scheduler (T25c). FLAC
+with 16-bit samples is read as FFmpeg's demuxer, parser and decoder read
+it, packet for packet and sample for sample, damaged streams included:
+`zffprobe` reports it and `zffmpeg` converts it to every PCM output (T26a),
+and the library writes FFmpeg's framecrc, framemd5 and streamhash text for
+comparisons (T19b), checked against 31 FLAC fixtures. [TODO.md](TODO.md) holds the completion
 evidence and the roadmap. Development is verified on Linux only. The compiler
 is **Zig 0.17.0**, enforced by the build.
 

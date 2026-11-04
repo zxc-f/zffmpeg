@@ -29,7 +29,7 @@ const examples = [_]Example{
 };
 
 /// The fixture directories: zig/testing/fixtures/wav/ and zig/testing/fixtures/au/.
-const FixtureSet = enum { wav, au, aiff, raw, caf };
+const FixtureSet = enum { wav, au, aiff, raw, caf, flac };
 
 /// A zffprobe process run with its expected exit code and output.
 const ProbeCase = struct {
@@ -423,7 +423,39 @@ const probe_cases = [_]ProbeCase{
     .{ .name = "a CAF packet table", .set = .caf, .fixture = "caf_pakt", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
     .{ .name = "a CAF without desc", .set = .caf, .args = &.{ "-f", "caf" }, .fixture = "caf_desc_missing", .exit_code = 2, .stderr_contains = ": InvalidCaf\n" },
     .{ .name = "a truncated CAF pipe", .set = .caf, .args = &.{"-"}, .stdin_fixture = "caf_truncated_data", .exit_code = 2, .stderr = "zffprobe: -: Truncated\n" },
+    // T26a: FLAC's report comes from STREAMINFO.
+    .{ .name = "FLAC", .set = .flac, .fixture = "flac_mid_side", .exit_code = 0, .stdout = flac_mid_side_report, .stderr = "" },
+    .{ .name = "FLAC 5.1 from a pipe", .set = .flac, .args = &.{"-"}, .stdin_fixture = "flac_six_channels_48k", .exit_code = 0, .stdout = flac_six_channels_report, .stderr = "" },
+    .{ .name = "24-bit FLAC", .set = .flac, .fixture = "flac_bps24", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
+    .{ .name = "FLAC without STREAMINFO first", .set = .flac, .fixture = "flac_no_streaminfo", .exit_code = 2, .stderr_contains = ": InvalidFlac\n" },
+    .{ .name = "a truncated FLAC header from a pipe", .set = .flac, .args = &.{"-"}, .stdin_fixture = "flac_truncated_metadata", .exit_code = 2, .stderr = "zffprobe: -: Truncated\n" },
 };
+
+const flac_mid_side_report =
+    \\format=flac
+    \\codec=flac
+    \\sample_fmt=s16
+    \\channels=2
+    \\channel_layout=stereo
+    \\sample_rate=44100
+    \\nb_samples=1152
+    \\duration_num=1152
+    \\duration_den=44100
+    \\
+;
+
+const flac_six_channels_report =
+    \\format=flac
+    \\codec=flac
+    \\sample_fmt=s16
+    \\channels=6
+    \\channel_layout=5.1(side)
+    \\sample_rate=48000
+    \\nb_samples=256
+    \\duration_num=256
+    \\duration_den=48000
+    \\
+;
 
 /// A zffmpeg process run: `args`, then the input fixture's path (or standard
 /// input), then `tail`, then an output file in a fresh directory if
@@ -487,6 +519,18 @@ const raw_alaw_mono_8k = @embedFile("zig/testing/fixtures/raw/raw_alaw_mono_8k.r
 /// errors, read and open failures, and the command line. The overwrite policy,
 /// same-file refusal, partial-output removal and write failures need prepared
 /// files; zig/testing/zffmpeg_cases.zig runs those.
+/// flac_constant_mono_8k's samples: 64 each of 0, 1000, -32768 and 32767.
+const flac_constant_s16le = constantSamples(.little);
+const flac_constant_s16be = constantSamples(.big);
+
+fn constantSamples(comptime endian: std.builtin.Endian) [512]u8 {
+    var out: [512]u8 = undefined;
+    for ([_]i16{ 0, 1000, -32768, 32767 }, 0..) |value, block| {
+        for (0..64) |i| std.mem.writeInt(i16, out[2 * (64 * block + i) ..][0..2], value, endian);
+    }
+    return out;
+}
+
 const convert_cases = [_]ConvertCase{
     .{ .name = "WAV to WAV", .args = &.{"-i"}, .input = "mono_8k", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_mono_8k, .stderr = "" },
     .{ .name = "WAV copy to WAV from a pipe", .args = &.{ "-i", "-" }, .stdin_input = "stereo_44k1", .tail = &.{ "-c", "copy", "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_stereo_44k1, .stderr = "" },
@@ -590,6 +634,12 @@ const convert_cases = [_]ConvertCase{
     // T22d: CAF is read only.
     .{ .name = "CAF copy to WAV", .set = .caf, .args = &.{"-i"}, .input = "caf_s16le_stereo_44k1", .tail = &.{ "-c", "copy", "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_stereo_44k1, .stderr = "" },
     .{ .name = "CAF copy to AU from a pipe", .set = .caf, .args = &.{ "-i", "-" }, .stdin_input = "caf_s16be_mono_8k", .tail = &.{ "-c", "copy", "-f", "au", "-" }, .exit_code = 0, .stdout = au_mono_8k, .stderr = "" },
+    // T26a: FLAC decodes; its constant subframes hold 64 each of 0, 1000,
+    // -32768 and 32767.
+    .{ .name = "FLAC to s16le", .set = .flac, .args = &.{"-i"}, .input = "flac_constant_mono_8k", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout = &flac_constant_s16le, .stderr = "" },
+    .{ .name = "FLAC to s16be from a pipe", .set = .flac, .args = &.{ "-i", "-" }, .stdin_input = "flac_constant_mono_8k", .tail = &.{ "-f", "s16be", "-" }, .exit_code = 0, .stdout = &flac_constant_s16be, .stderr = "" },
+    .{ .name = "FLAC copy has no output", .set = .flac, .args = &.{"-i"}, .input = "flac_constant_mono_8k", .tail = &.{ "-c", "copy", "-f", "wav", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
+    .{ .name = "FLAC that decodes short of STREAMINFO", .set = .flac, .args = &.{"-i"}, .input = "flac_junk_between_frames", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 2, .stdout_contains = "", .stderr_contains = ": FrameCountMismatch\n" },
     .{ .name = "CAF output is unsupported", .args = &.{"-i"}, .input = "mono_8k", .tail = &.{ "-f", "caf", "-" }, .exit_code = 3, .stderr = "zffmpeg: caf: unsupported output format\n" },
 };
 

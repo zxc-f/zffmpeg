@@ -271,7 +271,8 @@ fn parse(args: []const [:0]const u8) Parsed {
                 } else {
                     // An encoder, as FFmpeg names it (T23a).
                     const found = av.codecs.findEncoder(value) orelse return .{ .usage = .{ .reason = "unknown encoder", .arg = value } };
-                    encoder = found.codec;
+                    // Every registered encoder is PCM so far.
+                    encoder = found.codec.pcmCodec() orelse return .{ .usage = .{ .reason = "unknown encoder", .arg = value } };
                 }
             }
         } else if (std.mem.eql(u8, arg, "-dither_method") or std.mem.eql(u8, arg, "-dither_scale")) {
@@ -362,6 +363,7 @@ fn convert(io: std.Io, command: Command, request: av.convert.Request) ExitStatus
     var conversion = av.convert.Conversion.init(&source, request, .{}) catch |err| {
         return fail(io, command.input, withReadCause(err, &reader));
     };
+    defer conversion.deinit();
 
     var output_buffer: [av.file.default_buffer_len]u8 = undefined;
     if (isStdio(command.output)) {

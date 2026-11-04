@@ -6,15 +6,16 @@
 //!
 //! Every codec the port implements has one descriptor, as FFmpeg's
 //! `AVCodecDescriptor`: its media type, FFmpeg's name and long name, and the
-//! properties `ffmpeg -codecs` shows. The codec identity is `pcm.Codec` while
-//! every implemented codec is PCM; the first other codec widens it into a
-//! general identifier. The decoder and encoder registries list the
-//! implementations by name, as `allcodecs.c` registers them, and say which
-//! run as send/receive stages.
+//! properties `ffmpeg -codecs` shows. A codec is identified by `Codec`: a
+//! PCM encoding (`pcm.Codec`) or FLAC (T26a), the first codec that is not
+//! PCM. The decoder and encoder registries list the implementations by
+//! name, as `allcodecs.c` registers them, and say which run as send/receive
+//! stages.
 //!
-//! Everything is checked at compile time: one descriptor per codec, in the
-//! enum's order (so a lookup is an index), unique names, a decoder and an
-//! encoder for every codec, and stage types that keep the signatures of
+//! Everything is checked at compile time: one descriptor per codec, PCM in
+//! `pcm.Codec`'s order (so a lookup is an index) and then FLAC, unique
+//! names, a decoder for every codec and an encoder for every PCM codec
+//! (FLAC's comes with T26c), and stage types that keep the signatures of
 //! core/stage.zig. zig/testing/reference/compare.py compares the tables with
 //! the reference build's own `ffmpeg -codecs` listing.
 
@@ -34,8 +35,37 @@ pub const Props = struct {
     lossless: bool = false,
 };
 
+/// A codec the port implements.
+pub const Codec = union(enum) {
+    pcm: pcm.Codec,
+    flac,
+
+    /// FFmpeg's codec name, such as `pcm_s16le` or `flac`.
+    pub fn name(c: Codec) []const u8 {
+        return switch (c) {
+            .pcm => |p| p.name(),
+            .flac => "flac",
+        };
+    }
+
+    /// The PCM encoding, or null for a compressed codec.
+    pub fn pcmCodec(c: Codec) ?pcm.Codec {
+        return switch (c) {
+            .pcm => |p| p,
+            .flac => null,
+        };
+    }
+
+    pub fn eql(a: Codec, b: Codec) bool {
+        return switch (a) {
+            .pcm => |p| b == .pcm and b.pcm == p,
+            .flac => b == .flac,
+        };
+    }
+};
+
 pub const Descriptor = struct {
-    codec: pcm.Codec,
+    codec: Codec,
     media_type: MediaType,
     long_name: []const u8,
     props: Props,
@@ -51,32 +81,41 @@ const linear: Props = .{ .intra_only = true, .lossless = true };
 /// G.711 companding: every packet decodes alone, with quantization loss.
 const companded: Props = .{ .intra_only = true, .lossy = true };
 
-/// One per `pcm.Codec`, in its order.
+/// One per `pcm.Codec`, in its order, then FLAC.
 pub const descriptors = [_]Descriptor{
-    .{ .codec = .u8, .media_type = .audio, .long_name = "PCM unsigned 8-bit", .props = linear },
-    .{ .codec = .s8, .media_type = .audio, .long_name = "PCM signed 8-bit", .props = linear },
-    .{ .codec = .s16le, .media_type = .audio, .long_name = "PCM signed 16-bit little-endian", .props = linear },
-    .{ .codec = .s16be, .media_type = .audio, .long_name = "PCM signed 16-bit big-endian", .props = linear },
-    .{ .codec = .s24le, .media_type = .audio, .long_name = "PCM signed 24-bit little-endian", .props = linear },
-    .{ .codec = .s24be, .media_type = .audio, .long_name = "PCM signed 24-bit big-endian", .props = linear },
-    .{ .codec = .s32le, .media_type = .audio, .long_name = "PCM signed 32-bit little-endian", .props = linear },
-    .{ .codec = .s32be, .media_type = .audio, .long_name = "PCM signed 32-bit big-endian", .props = linear },
-    .{ .codec = .s64le, .media_type = .audio, .long_name = "PCM signed 64-bit little-endian", .props = linear },
-    .{ .codec = .s64be, .media_type = .audio, .long_name = "PCM signed 64-bit big-endian", .props = linear },
-    .{ .codec = .f32le, .media_type = .audio, .long_name = "PCM 32-bit floating point little-endian", .props = linear },
-    .{ .codec = .f32be, .media_type = .audio, .long_name = "PCM 32-bit floating point big-endian", .props = linear },
-    .{ .codec = .f64le, .media_type = .audio, .long_name = "PCM 64-bit floating point little-endian", .props = linear },
-    .{ .codec = .f64be, .media_type = .audio, .long_name = "PCM 64-bit floating point big-endian", .props = linear },
-    .{ .codec = .alaw, .media_type = .audio, .long_name = "PCM A-law / G.711 A-law", .props = companded },
-    .{ .codec = .mulaw, .media_type = .audio, .long_name = "PCM mu-law / G.711 mu-law", .props = companded },
+    pcmDescriptor(.u8, "PCM unsigned 8-bit", linear),
+    pcmDescriptor(.s8, "PCM signed 8-bit", linear),
+    pcmDescriptor(.s16le, "PCM signed 16-bit little-endian", linear),
+    pcmDescriptor(.s16be, "PCM signed 16-bit big-endian", linear),
+    pcmDescriptor(.s24le, "PCM signed 24-bit little-endian", linear),
+    pcmDescriptor(.s24be, "PCM signed 24-bit big-endian", linear),
+    pcmDescriptor(.s32le, "PCM signed 32-bit little-endian", linear),
+    pcmDescriptor(.s32be, "PCM signed 32-bit big-endian", linear),
+    pcmDescriptor(.s64le, "PCM signed 64-bit little-endian", linear),
+    pcmDescriptor(.s64be, "PCM signed 64-bit big-endian", linear),
+    pcmDescriptor(.f32le, "PCM 32-bit floating point little-endian", linear),
+    pcmDescriptor(.f32be, "PCM 32-bit floating point big-endian", linear),
+    pcmDescriptor(.f64le, "PCM 64-bit floating point little-endian", linear),
+    pcmDescriptor(.f64be, "PCM 64-bit floating point big-endian", linear),
+    pcmDescriptor(.alaw, "PCM A-law / G.711 A-law", companded),
+    pcmDescriptor(.mulaw, "PCM mu-law / G.711 mu-law", companded),
+    // Every FLAC frame decodes alone, exactly.
+    .{ .codec = .flac, .media_type = .audio, .long_name = "FLAC (Free Lossless Audio Codec)", .props = .{ .intra_only = true, .lossless = true } },
 };
 
-pub fn descriptor(codec: pcm.Codec) *const Descriptor {
-    return &descriptors[@backingInt(codec)];
+fn pcmDescriptor(codec: pcm.Codec, long_name: []const u8, props: Props) Descriptor {
+    return .{ .codec = .{ .pcm = codec }, .media_type = .audio, .long_name = long_name, .props = props };
+}
+
+pub fn descriptor(codec: Codec) *const Descriptor {
+    return switch (codec) {
+        .pcm => |p| &descriptors[@backingInt(p)],
+        .flac => &descriptors[descriptors.len - 1],
+    };
 }
 
 /// The codec FFmpeg names `name`, such as `pcm_s16le`, if the port implements it.
-pub fn find(name: []const u8) ?pcm.Codec {
+pub fn find(name: []const u8) ?Codec {
     for (&descriptors) |*d| {
         if (std.mem.eql(u8, d.name(), name)) return d.codec;
     }
@@ -85,26 +124,31 @@ pub fn find(name: []const u8) ?pcm.Codec {
 
 /// One decoder or encoder implementation, as `allcodecs.c` registers it.
 pub const Implementation = struct {
-    /// FFmpeg's decoder or encoder name; for PCM, the codec's name.
+    /// FFmpeg's decoder or encoder name; for PCM and FLAC, the codec's name.
     name: []const u8,
-    codec: pcm.Codec,
+    codec: Codec,
     /// Runs as a send/receive stage (`pcm.Decoder` or `pcm.Encoder`), which
     /// takes the codecs stored as s16 until T23a; the others decode and
-    /// encode through the `pcm.decode` and `pcm.encode` kernels only.
+    /// encode through the `pcm.decode` and `pcm.encode` kernels only, and
+    /// FLAC's decoder has its own send and receive (codec/flacdec.zig).
     stage: bool,
 };
 
+const pcm_count = @typeInfo(pcm.Codec).@"enum".field_names.len;
+
 /// Every PCM codec has a decoder and an encoder, named as the codec.
-fn implementations() [descriptors.len]Implementation {
-    var list: [descriptors.len]Implementation = undefined;
-    for (&list, descriptors) |*entry, d| {
-        entry.* = .{ .name = d.name(), .codec = d.codec, .stage = d.codec.storage() == .s16 };
+fn pcmImplementations() [pcm_count]Implementation {
+    var list: [pcm_count]Implementation = undefined;
+    for (&list, descriptors[0..pcm_count]) |*entry, d| {
+        entry.* = .{ .name = d.name(), .codec = d.codec, .stage = d.codec.pcm.storage() == .s16 };
     }
     return list;
 }
 
-pub const decoders: [descriptors.len]Implementation = implementations();
-pub const encoders: [descriptors.len]Implementation = implementations();
+/// The PCM decoders, then FLAC's (T26a).
+pub const decoders = pcmImplementations() ++ [_]Implementation{.{ .name = "flac", .codec = .flac, .stage = false }};
+/// The PCM encoders; FLAC's comes with T26c.
+pub const encoders: [pcm_count]Implementation = pcmImplementations();
 
 /// The decoder FFmpeg names `name`, if registered.
 pub fn findDecoder(name: []const u8) ?*const Implementation {
@@ -125,10 +169,12 @@ fn findIn(list: []const Implementation, name: []const u8) ?*const Implementation
 
 comptime {
     @setEvalBranchQuota(10_000);
-    const tags = @typeInfo(pcm.Codec).@"enum".field_names;
-    if (descriptors.len != tags.len) @compileError("every codec needs exactly one descriptor");
+    if (descriptors.len != pcm_count + 1) @compileError("every codec needs exactly one descriptor");
     for (descriptors, 0..) |d, i| {
-        if (@backingInt(d.codec) != i) @compileError("descriptors must follow pcm.Codec's order: " ++ d.name());
+        switch (d.codec) {
+            .pcm => |p| if (@backingInt(p) != i) @compileError("descriptors must follow pcm.Codec's order: " ++ d.name()),
+            .flac => if (i != descriptors.len - 1) @compileError("FLAC's descriptor comes last"),
+        }
         if (d.props.lossy and d.props.lossless) @compileError("a codec is lossy or lossless, not both: " ++ d.name());
     }
     for ([_][]const Implementation{ &decoders, &encoders }) |list| {
@@ -143,20 +189,25 @@ comptime {
 }
 
 test "descriptors are found by codec and by FFmpeg's name" {
-    try std.testing.expectEqualStrings("PCM signed 24-bit big-endian", descriptor(.s24be).long_name);
-    try std.testing.expectEqual(pcm.Codec.mulaw, find("pcm_mulaw"));
+    try std.testing.expectEqualStrings("PCM signed 24-bit big-endian", descriptor(.{ .pcm = .s24be }).long_name);
+    try std.testing.expect(find("pcm_mulaw").?.eql(.{ .pcm = .mulaw }));
+    try std.testing.expect(find("flac").?.eql(.flac));
     try std.testing.expectEqual(null, find("pcm_s16"));
-    try std.testing.expect(descriptor(.alaw).props.lossy and !descriptor(.alaw).props.lossless);
-    try std.testing.expect(descriptor(.f64le).props.lossless and descriptor(.f64le).props.intra_only);
+    try std.testing.expect(descriptor(.{ .pcm = .alaw }).props.lossy and !descriptor(.{ .pcm = .alaw }).props.lossless);
+    try std.testing.expect(descriptor(.{ .pcm = .f64le }).props.lossless and descriptor(.{ .pcm = .f64le }).props.intra_only);
+    try std.testing.expectEqualStrings("FLAC (Free Lossless Audio Codec)", descriptor(.flac).long_name);
 }
 
-test "every codec has a decoder and an encoder; the s16-stored ones run as stages" {
-    for (descriptors) |d| {
+test "every PCM codec has a decoder and an encoder; the s16-stored ones run as stages" {
+    for (descriptors[0..pcm_count]) |d| {
         const decoder = findDecoder(d.name()) orelse return error.TestExpectedValue;
         const encoder = findEncoder(d.name()) orelse return error.TestExpectedValue;
-        try std.testing.expectEqual(d.codec, decoder.codec);
-        try std.testing.expectEqual(d.codec, encoder.codec);
-        try std.testing.expectEqual(d.codec.storage() == .s16, decoder.stage);
+        try std.testing.expect(d.codec.eql(decoder.codec));
+        try std.testing.expect(d.codec.eql(encoder.codec));
+        try std.testing.expectEqual(d.codec.pcm.storage() == .s16, decoder.stage);
     }
     try std.testing.expectEqual(null, findDecoder("pcm_dvd"));
+    // FLAC decodes; its encoder comes with T26c.
+    try std.testing.expect(findDecoder("flac").?.codec.eql(.flac));
+    try std.testing.expectEqual(null, findEncoder("flac"));
 }

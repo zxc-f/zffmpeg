@@ -36,8 +36,11 @@ graph's core (anull, aformat, volume and aresample in a linear chain,
 negotiated as libavfilter negotiates); and T25b, FFmpeg's expressions,
 filtergraph text, atrim and asetpts; and T25c, graphs of several inputs
 and outputs on libavfilter's scheduler, with asplit, channelsplit,
-channelmap, pan and amix, which completes T25. **Next: T26a (FLAC demux and
-a first decoding subset, with T18a and T19b). See
+channelmap, pan and amix, which completes T25; and T26a, FLAC demux and
+16-bit decoding as FFmpeg's demuxer, parser and decoder do it, in zffprobe
+and as a zffmpeg input, with T18a, the bit reader and FLAC's CRCs, and
+T19b, FFmpeg's frame and stream hashes. **Next: T52a (the seek API and WAV
+seeking, with T15), which T26b needs. See
 [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as

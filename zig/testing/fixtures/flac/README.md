@@ -79,6 +79,11 @@ parameters per partition, all ones escaping to a 5-bit raw sample size.
 - Damaged input follows FFmpeg exactly, including a valid frame its parser
   drops after junk (`flac_junk_between_frames`).
 - 24-bit and headerless input are refused rather than misread until T26b.
+- Converting (`av.convert`, zffmpeg) needs the decoded samples to equal
+  STREAMINFO's count, which the output header holds before them
+  (`FrameCountMismatch` otherwise): `flac_junk_between_frames`, whose
+  dropped frame leaves it short, converts only in FFmpeg, which rewrites a
+  seekable output's header.
 
 ## Fixtures
 

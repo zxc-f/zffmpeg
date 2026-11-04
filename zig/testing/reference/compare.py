@@ -51,6 +51,7 @@ independent source as the committed fixtures.
 """
 
 import argparse
+import hashlib
 import pathlib
 import re
 import struct
@@ -69,6 +70,8 @@ EXIT_STATUS = {
     "InvalidAu": 2,
     "InvalidAiff": 2,
     "InvalidCaf": 2,
+    "InvalidFlac": 2,
+    "FrameCountMismatch": 2,
     "InvalidWave": 2,
     "InvalidFormat": 2,
     "Truncated": 2,
@@ -354,6 +357,8 @@ def detected_format(binary, path):
     demuxer then fails, so detection and parsing are judged apart."""
     process = run(binary, "-v", "debug", path)
     match = re.search(rb"Format (\S+) probed with size=\d+ and score=\d+", process.stderr)
+    # A winner scoring at most 25 (raw FLAC's 13, T26a) is logged differently.
+    match = match or re.search(rb"Format (\S+) detected only with low score of \d+", process.stderr)
     return match.group(1).decode() if match else None
 
 
@@ -1571,6 +1576,94 @@ def compare_pipes(args, lines, failures):
     ]
 
 
+# FLAC fixtures zffmpeg converts differently from the ffmpeg program (T26a).
+KNOWN_FLAC_CONVERSION_DIFFERENCES = {
+    "flac_junk_between_frames": "FFmpeg's parser drops a valid frame after the junk, so the samples fall short "
+                                "of STREAMINFO's count, which zffmpeg writes in the WAV header first "
+                                "(`FrameCountMismatch`); FFmpeg rewrites its seekable output's header",
+}
+
+
+def compare_flac(args, lines, failures):
+    """FLAC (T26a): each fixture's integrity and FFmpeg's detection, zffprobe's
+    report against ffprobe's fields, the contract's status for rejected ones
+    beside FFmpeg's verdict, and zffmpeg's WAV against the ffmpeg program's
+    bit-exact one."""
+    lines += [
+        "",
+        "## FLAC fixtures (T26a)",
+        "",
+        "| Fixture | zffprobe | FFmpeg | WAV conversion | Result |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    matched = total = 0
+    for fixture in generate.build_flac_fixtures():
+        total += 1
+        path = FIXTURES / "flac" / f"{fixture.name}.flac"
+        problems = []
+        if not path.exists():
+            failures.append(f"{fixture.name}: fixture file is missing")
+            continue
+        data = path.read_bytes()
+        if fixture.data is not None and data != fixture.data:
+            failures.append(f"{fixture.name}: fixture file differs from generate.py")
+            continue
+        if fixture.data is None and hashlib.sha256(data).hexdigest() != fixture.sha256:
+            failures.append(f"{fixture.name}: FFmpeg-made fixture differs from its recorded hash")
+            continue
+        theirs_detected = detected_format(args.ffprobe, path)
+        if theirs_detected != generate.ffmpeg_detect(data[:2048]):
+            problems.append(f"FFmpeg's probe picks {theirs_detected or 'nothing'}")
+        conversion = "-"
+        if fixture.reject:
+            problems += check_rejection(args.zffprobe, path, fixture.reject)
+            ours = f"`{fixture.reject}`"
+            theirs = ffmpeg_verdict(args, path)
+        else:
+            code, fields, err = zffprobe(args.zffprobe, path)
+            their_code, their_fields, their_err = ffprobe(args.ffprobe, path)
+            ours = "accepts" if code == 0 else f"exit {code}: {err}"
+            theirs = "accepts" if their_code == 0 else f"rejects: {clean(first_line(their_err), path)}"
+            expected = {
+                "format": their_fields.get("format_name"),
+                "codec": their_fields.get("codec_name"),
+                "sample_fmt": their_fields.get("sample_fmt"),
+                "channels": their_fields.get("channels"),
+                "channel_layout": their_fields.get("channel_layout"),
+                "sample_rate": their_fields.get("sample_rate"),
+                "nb_samples": their_fields.get("duration_ts"),
+                "duration_num": their_fields.get("duration_ts"),
+                "duration_den": their_fields.get("sample_rate"),
+            }
+            if code != 0 or their_code != 0:
+                problems.append(f"zffprobe exit {code}, ffprobe exit {their_code}")
+            elif fields != expected:
+                problems.append(f"zffprobe {fields}, ffprobe {expected}")
+            if their_fields.get("time_base") != f"1/{their_fields.get('sample_rate')}":
+                problems.append(f"ffprobe's time base {their_fields.get('time_base')}")
+            with tempfile.TemporaryDirectory() as work:
+                out_ours = pathlib.Path(work) / "ours.wav"
+                out_theirs = pathlib.Path(work) / "theirs.wav"
+                zr = run(args.zffmpeg, "-i", path, out_ours)
+                fr = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", path, "-fflags", "+bitexact",
+                         "-flags:a", "+bitexact", out_theirs)
+                same = zr.returncode == 0 and fr.returncode == 0 and out_ours.read_bytes() == out_theirs.read_bytes()
+                known = KNOWN_FLAC_CONVERSION_DIFFERENCES.get(fixture.name)
+                if same:
+                    conversion = "identical"
+                elif known:
+                    conversion = f"known: {known}"
+                else:
+                    conversion = "differs"
+                    problems.append(f"zffmpeg exit {zr.returncode} ({first_line(text(zr.stderr))}), ffmpeg exit "
+                                    f"{fr.returncode}; the WAV files differ")
+        matched += not problems
+        result = "pass" if not problems else "**FAIL**: " + "; ".join(problems)
+        lines.append(f"| `{fixture.name}` | {ours} | {theirs} | {conversion} | {result} |")
+        failures.extend(f"{fixture.name}: {problem}" for problem in problems)
+    lines += ["", f"FLAC fixtures matching the contract and FFmpeg: {matched}/{total}."]
+
+
 # Fixtures whose hash text differs from the ffmpeg program's for an
 # understood reason, by (fixture, mode): (reason).
 KNOWN_HASH_DIFFERENCES = {
@@ -1723,6 +1816,17 @@ def ffmpeg_help_fields(binary, kind, name):
     return fields
 
 
+# Registry entries that differ from the reference build's listings for an
+# understood reason: (kind, name) -> ((our flags, FFmpeg's flags), reason).
+KNOWN_REGISTRY_DIFFERENCES = {
+    ("codec", "flac"): (("D.AI.S", "DEAI.S"), "the FLAC encoder comes with T26c"),
+    ("format", "flac"): (("D.", "DE"), "the FLAC muxer comes with T26c"),
+    ("format only in FFmpeg", "framecrc"): ((None, None), "written by av.framehash for the hash comparison (T19b)"),
+    ("format only in FFmpeg", "framemd5"): ((None, None), "written by av.framehash for the hash comparison (T19b)"),
+    ("format only in FFmpeg", "streamhash"): ((None, None), "written by av.framehash for the hash comparison (T19b)"),
+}
+
+
 def compare_registries(args, lines, failures):
     """The registry dump against FFmpeg's own listings (T16). The reference
     build enables exactly the codecs and formats the port implements, so the
@@ -1759,8 +1863,10 @@ def compare_registries(args, lines, failures):
     if enabled != set(codecs):
         problems.append(f"codecs FFmpeg decodes and encodes {sorted(enabled)}, the registry {sorted(codecs)}")
     for name, value in codecs.items():
-        if their_codecs.get(name) != value:
-            problems.append(f"codec {name}: ours {value}, FFmpeg's {their_codecs.get(name)}")
+        theirs = their_codecs.get(name)
+        known = KNOWN_REGISTRY_DIFFERENCES.get(("codec", name))
+        if theirs != value and not (known and (value[0], theirs[0] if theirs else None) == known[0]):
+            problems.append(f"codec {name}: ours {value}, FFmpeg's {theirs}")
 
     their_formats = {}
     for line in text(run(args.ffmpeg, "-hide_banner", "-formats").stdout).splitlines():
@@ -1768,11 +1874,16 @@ def compare_registries(args, lines, failures):
         if match:
             flags = (match.group(1) + match.group(2)).replace(" ", ".")
             their_formats[match.group(3)] = (flags, match.group(4))
-    if set(their_formats) != set(formats):
+    # FFmpeg's hash muxers (T19b) are av.framehash's text, not zffmpeg
+    # outputs, so the format registry leaves them out.
+    hash_muxers = {name for (kind, name) in KNOWN_REGISTRY_DIFFERENCES if kind == "format only in FFmpeg"}
+    if set(their_formats) - hash_muxers != set(formats):
         problems.append(f"FFmpeg's formats {sorted(their_formats)}, the registry {sorted(formats)}")
     for name, value in formats.items():
-        if their_formats.get(name) != value:
-            problems.append(f"format {name}: ours {value}, FFmpeg's {their_formats.get(name)}")
+        theirs = their_formats.get(name)
+        known = KNOWN_REGISTRY_DIFFERENCES.get(("format", name))
+        if theirs != value and not (known and (value[0], theirs[0] if theirs else None) == known[0]):
+            problems.append(f"format {name}: ours {value}, FFmpeg's {theirs}")
         if value[0][0] == "D":
             # Detection's file-name hints (T22c) use the demuxers' extensions.
             theirs = ffmpeg_help_fields(args.ffmpeg, "demuxer", name).get("Common extensions", "-")
@@ -1788,6 +1899,9 @@ def compare_registries(args, lines, failures):
     lines += [
         "",
         "## Registries (T16)",
+        "",
+        "Understood differences: " + "; ".join(f"{kind} `{name}`: {reason}"
+                                                for (kind, name), (_, reason) in KNOWN_REGISTRY_DIFFERENCES.items()) + ".",
         "",
         f"Codec descriptors, decoders and encoders equal to `ffmpeg -codecs`: "
         f"{len(codecs) if not problems else 'see failures'} codecs; formats equal to `ffmpeg -formats`: "
@@ -1870,6 +1984,7 @@ def main():
             compare_ffmpeg_muxer(args, lines, failures, container, title, build)
 
     compare_pipes(args, lines, failures)
+    compare_flac(args, lines, failures)
     compare_hashes(args, lines, failures)
 
     if NOT_IMPLEMENTED:
