@@ -43,6 +43,7 @@ const flac = @import("../codec/flac.zig");
 const bits = @import("../codec/bits.zig");
 const rational = @import("../core/rational.zig");
 const seek = @import("seek.zig");
+const mpegaudio = @import("../codec/mpegaudio.zig");
 
 pub const nopts: i64 = std.math.minInt(i64);
 /// libavformat's base for timestamps counted before the first is known.
@@ -67,6 +68,19 @@ pub const Setup = struct {
     /// FLAC in a container: FFmpeg's FLAC parser reads each packet's
     /// frame header (AVSTREAM_PARSE_HEADERS).
     parse_flac: bool = false,
+    /// MPEG audio read raw: FFmpeg's mpegaudio parser splits the bytes into
+    /// frames and fills the codec parameters (AVSTREAM_PARSE_FULL_RAW).
+    parse_mpegaudio: bool = false,
+    /// A codec whose frame size libavformat could determine
+    /// (`determinable_frame_size`) with no decoder to give it: the
+    /// parameters never complete, so the read-ahead runs to its end.
+    frame_size_unknown: bool = false,
+    /// The gapless counts in samples: `start_skip_samples`, skipped from
+    /// the packet at timestamp 0, and the discard window
+    /// `first_discard_sample` to `last_discard_sample` (none when 0).
+    start_skip_samples: i64 = 0,
+    first_discard_sample: i64 = 0,
+    last_discard_sample: i64 = 0,
     /// What the reference build's decoder does when
     /// avformat_find_stream_info opens it.
     decoder: Decoder = .none,
@@ -168,12 +182,38 @@ const StreamState = struct {
     no_channels: bool = false,
     /// The index AVFMT_GENERIC_INDEX builds from the returned keyframes.
     index: seek.Index = .{},
+    /// FFmpeg's mpegaudio parser (`sti->parser`), closed by a flush, and
+    /// the codec context it fills (`sti->avctx`), which stays.
+    mpa: ?MpaParser = null,
+    codec: ?mpegaudio.Context = null,
     /// The samples the next packet's skip-samples side data discards,
     /// and the request a seek leaves for it (`seek_discard`,
     /// `seek_to_start`).
     skip_samples: i64 = 0,
     seek_discard: bool = false,
     seek_to_start: bool = false,
+};
+
+/// A parser with `av_parser_parse2`'s byte offsets.
+const MpaParser = struct {
+    parser: mpegaudio.Parser = .{},
+    cur_offset: i64,
+    next_frame_offset: i64,
+    frame_offset: i64 = 0,
+
+    fn deinit(p: *MpaParser, gpa: std.mem.Allocator) void {
+        p.parser.deinit(gpa);
+    }
+};
+
+/// A stream's codec parameters as libavformat's codec context has them:
+/// the demuxer's, then the parser's.
+pub const CodecParams = struct {
+    /// The MPEG audio codec, when the parser chose one.
+    mpa_codec: ?mpegaudio.Codec,
+    sample_rate: u32,
+    channels: u8,
+    bit_rate: i64,
 };
 
 pub fn Layer(comptime Source: type) type {
@@ -208,8 +248,20 @@ pub fn Layer(comptime Source: type) type {
             l.packet_buffer.deinit(l.gpa);
             l.parse_queue.deinit(l.gpa);
             if (l.current) |*h| h.deinit(l.gpa);
-            for (l.states.items) |*s| s.index.deinit(l.gpa);
+            for (l.states.items) |*s| {
+                s.index.deinit(l.gpa);
+                if (s.mpa) |*p| p.deinit(l.gpa);
+            }
             l.states.deinit(l.gpa);
+        }
+
+        /// The stream's codec parameters (`codecpar`, which follows the
+        /// parser's codec context).
+        pub fn codecParams(l: *Self, i: usize) Error!CodecParams {
+            const setup = l.src.setup(i);
+            const s = try l.state(i);
+            if (s.codec) |c| return .{ .mpa_codec = c.codec, .sample_rate = c.sample_rate, .channels = c.channels, .bit_rate = c.bit_rate };
+            return .{ .mpa_codec = null, .sample_rate = setup.sample_rate, .channels = setup.channels, .bit_rate = setup.bit_rate };
         }
 
         fn state(l: *Self, i: usize) Error!*StreamState {
@@ -366,7 +418,7 @@ pub fn Layer(comptime Source: type) type {
             if (l.bit_rate <= 0) {
                 var sum: i64 = 0;
                 for (0..l.src.streamCount()) |i| {
-                    const rate = l.src.setup(i).bit_rate;
+                    const rate = if (i < l.states.items.len) if (l.states.items[i].codec) |c| c.bit_rate else l.src.setup(i).bit_rate else l.src.setup(i).bit_rate;
                     if (rate > 0) {
                         if (std.math.maxInt(i64) - rate < sum) {
                             sum = 0;
@@ -394,6 +446,7 @@ pub fn Layer(comptime Source: type) type {
         /// has_codec_parameters for an audio stream.
         fn hasCodecParameters(setup: Setup, s: StreamState) bool {
             if (!setup.known) return false;
+            if (setup.frame_size_unknown) return false;
             if (setup.sample_rate == 0 and s.parser_rate == 0) return false;
             if (setup.channels == 0 or s.no_channels) return false;
             // A decoder that has not decoded yet leaves the sample format
@@ -450,10 +503,13 @@ pub fn Layer(comptime Source: type) type {
                     // The parsers flushed (nothing for complete frames),
                     // then the error, unless the parser still holds a
                     // packet, which goes first.
+                    if (err == error.OutOfMemory) return err;
+                    try l.flushParsers();
                     if (l.parse_queue.items.len > 0) break;
                     return err;
                 } orelse {
                     l.eof = true;
+                    try l.flushParsers();
                     break;
                 };
                 var h = try l.own(raw);
@@ -461,6 +517,11 @@ pub fn Layer(comptime Source: type) type {
                 const setup = l.src.setup(h.stream);
                 if (setup.parse_flac) {
                     try l.parseFlac(&h, setup);
+                    continue;
+                }
+                if (setup.parse_mpegaudio) {
+                    defer h.deinit(l.gpa);
+                    try l.parseMpa(h.stream, h.data, h.pos, setup);
                     continue;
                 }
                 try l.computePktFields(&h, setup);
@@ -482,8 +543,71 @@ pub fn Layer(comptime Source: type) type {
         /// The codec parameters' sample rate: the demuxer's, else the
         /// parser's.
         fn sampleRate(l: *Self, i: usize, s: *const StreamState) u32 {
+            if (s.codec) |c| return c.sample_rate;
             const rate = l.src.setup(i).sample_rate;
             return if (rate != 0) rate else s.parser_rate;
+        }
+
+        /// read_frame_internal at the end (or an error): parse_packet with
+        /// `flush` for every open parser, then the parser closed.
+        fn flushParsers(l: *Self) Error!void {
+            for (0..l.states.items.len) |i| {
+                const s = &l.states.items[i];
+                if (s.mpa == null) continue;
+                try l.parseMpa(i, &.{}, -1, l.src.setup(i));
+                if (s.mpa) |*p| p.deinit(l.gpa);
+                s.mpa = null;
+            }
+        }
+
+        /// parse_packet with FFmpeg's mpegaudio parser
+        /// (AVSTREAM_PARSE_FULL_RAW): each frame a packet at the parser's
+        /// frame offset, its duration the parser's frame (rounded down in
+        /// the time base), timestamps from compute_pkt_fields; the codec
+        /// context follows the frames. `data` empty flushes.
+        fn parseMpa(l: *Self, stream: usize, data_in: []const u8, pos: i64, setup: Setup) Error!void {
+            const s = try l.state(stream);
+            if (s.codec == null) s.codec = .{ .sample_rate = setup.sample_rate, .channels = setup.channels, .bit_rate = setup.bit_rate };
+            if (s.mpa == null) {
+                if (data_in.len == 0) return;
+                // PARSER_FLAG_FETCHED_OFFSET: the first packet's position.
+                s.mpa = .{ .cur_offset = pos, .next_frame_offset = pos };
+            }
+            const flushing = data_in.len == 0;
+            var data = data_in;
+            var got_output = flushing;
+            while (data.len > 0 or (flushing and got_output)) {
+                const p = &s.mpa.?;
+                const res = try p.parser.parse(l.gpa, &s.codec.?, data);
+                data = data[res.consumed..];
+                got_output = res.frame != null;
+                const frame = res.frame orelse {
+                    p.cur_offset += @intCast(res.consumed);
+                    continue;
+                };
+                p.frame_offset = p.next_frame_offset;
+                p.next_frame_offset = p.cur_offset + @as(i64, @intCast(res.consumed));
+                p.cur_offset += @intCast(res.consumed);
+                const ctx = s.codec.?;
+                var h: Held = .{
+                    .stream = stream,
+                    .data = try l.gpa.dupe(u8, frame),
+                    .pts = nopts,
+                    .dts = nopts,
+                    .duration = 0,
+                    .flags = 0,
+                    .pos = p.frame_offset,
+                    .skip = null,
+                    .new_extradata = null,
+                    .new_metadata = null,
+                };
+                errdefer h.deinit(l.gpa);
+                if (ctx.sample_rate > 0 and p.parser.duration > 0) {
+                    h.duration = rational.rescaleQRnd(p.parser.duration, .{ .num = 1, .den = @intCast(ctx.sample_rate) }, setup.time_base, .{ .mode = .down });
+                }
+                try l.computePktFields(&h, setup);
+                try l.parse_queue.append(l.gpa, h);
+            }
         }
 
         /// read_frame_internal's skip samples: after a seek, the priming
@@ -493,6 +617,18 @@ pub fn Layer(comptime Source: type) type {
         fn injectSkip(l: *Self, h: *Held) Error!void {
             const s = try l.state(h.stream);
             const setup = l.src.setup(h.stream);
+            var discard_padding: i64 = 0;
+            if (setup.first_discard_sample != 0 and h.pts != nopts) {
+                const rate = l.sampleRate(h.stream, s);
+                const pts = h.pts - if (isRelative(h.pts)) relative_ts_base else 0;
+                // ts_to_samples; codecpar->frame_size is 0 without a
+                // decoder.
+                const sample = rational.rescale(pts, setup.time_base.num * @as(i64, rate), setup.time_base.den);
+                const duration = @max(0, rational.rescale(h.duration, setup.time_base.num * @as(i64, rate), setup.time_base.den));
+                const end_sample = sample + duration;
+                if (duration > 0 and end_sample >= setup.first_discard_sample and sample < setup.last_discard_sample)
+                    discard_padding = @min(end_sample - setup.first_discard_sample, duration);
+            }
             if (s.seek_discard) {
                 const rate = l.sampleRate(h.stream, s);
                 if (setup.known and rate > 0) {
@@ -511,16 +647,17 @@ pub fn Layer(comptime Source: type) type {
                 }
                 s.seek_discard = false;
             }
+            if (setup.start_skip_samples != 0 and (h.pts == 0 or h.pts == relative_ts_base)) s.skip_samples = setup.start_skip_samples;
             s.skip_samples = @max(0, s.skip_samples);
-            if (s.skip_samples == 0) return;
-            var padding: u32 = 0;
+            if (s.skip_samples == 0 and discard_padding == 0) return;
+            var padding: u32 = @truncate(@as(u64, @bitCast(discard_padding)));
             if (h.skip) |kept| {
                 // FFmpeg reads the demuxer's count as an int.
                 const demuxer_skip: i32 = @bitCast(kept[0]);
                 s.skip_samples = @max(s.skip_samples, demuxer_skip);
-                padding = kept[1];
+                padding = @intCast(@max(discard_padding, kept[1]));
             }
-            h.skip = .{ @intCast(s.skip_samples), padding };
+            h.skip = .{ @truncate(@as(u64, @bitCast(s.skip_samples))), padding };
             s.skip_samples = 0;
         }
 
@@ -698,6 +835,9 @@ pub fn Layer(comptime Source: type) type {
             l.packet_buffer.clearRetainingCapacity();
             l.parse_queue.clearRetainingCapacity();
             for (l.states.items) |*s| {
+                // The parsers closed; the codec context stays.
+                if (s.mpa) |*p| p.deinit(l.gpa);
+                s.mpa = null;
                 s.last_ip_pts = nopts;
                 s.cur_dts = if (s.first_dts == nopts) relative_ts_base else nopts;
                 s.skip_samples = 0;

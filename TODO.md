@@ -3130,7 +3130,17 @@ names, not as an empty framework.
       format/id3v1.zig and format/avlanguage.zig (avlanguage.c's codes
       for COMM keys), the dictionary's AV_DICT_DONT_OVERWRITE
       (`keep_existing`): every opened fixture's format tags (ID3v2 of
-      every version, ID3v1, PRIV) equal mp3.txt's, 40/40.
+      every version, ID3v1, PRIV) equal mp3.txt's, 40/40 (ea9d87b). Part
+      2 and the demuxer of part 3: codec/mpegaudio.zig (the header
+      decoding, ff_combine_frame and the mpegaudio parser), demux.zig's
+      full-raw parsing (av_parser_parse2's offsets, the parser's codec
+      context as the stream's parameters, the parsers flushed at the end,
+      a frame size libavformat cannot learn without a decoder) and its
+      gapless side data (start_skip_samples, the discard window), and
+      format/mp3.zig (mp3_read_header with the Xing, Info, LAME, VBRI and
+      iTunSMPB tags, ReplayGain, the resync, the packets): every opened
+      fixture's streams, tags, timing and packets equal mp3.txt's, 40/40,
+      the picture stream and chapters filtered (notes.md "MP3").
   - [ ] **T29b — Layer III decoder.** Needs T18c and T29a. Huffman decoding,
     requantization, stereo modes, IMDCT, alias reduction and polyphase
     synthesis.
