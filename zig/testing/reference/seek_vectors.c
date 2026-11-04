@@ -22,7 +22,8 @@
 //   P <pts> <pos> <size>           the next packet after it (pts N when
 //                                  unset), or `P EOF`
 //   D <nb_samples> <hex>           the decoded frame's first 16 sample
-//                                  frames, as stored (packed formats)
+//                                  frames, as stored (packed formats), or
+//                                  `D none` (no frame, or no decoder)
 //
 // See zig/testing/reference/README.md for the build commands.
 
@@ -56,8 +57,10 @@ static int open_file(const char *path, struct Opened *o)
     }
     AVCodecParameters *par = o->fmt->streams[0]->codecpar;
     const AVCodec *codec = avcodec_find_decoder(par->codec_id);
+    // Without a decoder (T27a's Vorbis and Opus) the packets are still
+    // read and seeked; nothing is decoded.
     if (!codec)
-        return AVERROR_DECODER_NOT_FOUND;
+        return 0;
     o->dec = avcodec_alloc_context3(codec);
     if (!o->dec || avcodec_parameters_to_context(o->dec, par) < 0 || avcodec_open2(o->dec, codec, NULL) < 0)
         return AVERROR(ENOMEM);
@@ -100,8 +103,9 @@ static void print_next(struct Opened *o)
         else
             printf("%" PRId64, pkt->pts);
         printf(" %" PRId64 " %d\n", pkt->pos, pkt->size);
-        avcodec_flush_buffers(o->dec);
-        if (avcodec_send_packet(o->dec, pkt) >= 0 && avcodec_receive_frame(o->dec, frame) >= 0) {
+        if (o->dec)
+            avcodec_flush_buffers(o->dec);
+        if (o->dec && avcodec_send_packet(o->dec, pkt) >= 0 && avcodec_receive_frame(o->dec, frame) >= 0) {
             int bytes = av_get_bytes_per_sample(frame->format) * frame->ch_layout.nb_channels;
             int frames = frame->nb_samples < 16 ? frame->nb_samples : 16;
             printf("D %d ", frame->nb_samples);
