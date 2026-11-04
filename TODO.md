@@ -41,7 +41,9 @@ channelmap, pan and amix, which completes T25; and T26a, FLAC demux and
 and as a zffmpeg input, with T18a, the bit reader and FLAC's CRCs, and
 T19b, FFmpeg's frame and stream hashes; T15, FFmpeg's rational arithmetic
 and timestamp helpers; and T52a, the seek API with WAV and Wave64
-seeking. **Next: T26b (complete FLAC decoding and seeking). See
+seeking; and T26b, complete FLAC decoding (4 to 32 bits, variable
+blocking, metadata blocks, MD5) and FLAC seeking. **Next: T26c (the FLAC
+encoder, with T18b's bit writer). See
 [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
@@ -2406,7 +2408,7 @@ names, not as an empty framework.
     registry equal with its listed differences; its only failures the 165
     known inf and NaN samples of this machine's clang 23 build and the 11
     float streamhash decodes of the same samples.
-  - [ ] **T26b — Complete FLAC decoding and seeking.** Needs T17b, T26a and
+  - [x] **T26b — Complete FLAC decoding and seeking.** Needs T17b, T26a and
     T52a. Bit depths 4–32, variable block sizes, SEEKTABLE, VORBIS_COMMENT and
     PICTURE blocks, MD5 verification, and seeking by seek table and frame scan.
     Done when a named required fixture for each depth, block-size mode and
@@ -2415,43 +2417,75 @@ names, not as an empty framework.
 
     ```text
     ID / parent: T26b / T26
-    State: G3 (decoding and metadata verified; seeking and the optional
-      FATE report remain)
+    State: verified
     Supported behavior and explicit exclusions: 4 to 32 bits per sample
       (the 33-bit side channel of 32-bit stereo), variable blocking,
       headerless input, a STREAMINFO without a rate, mid-stream channel and
       rate changes in the decoder; VORBIS_COMMENT tags (and the channel
       mask), SEEKTABLE, CUESHEET and PICTURE blocks as data; MD5
-      verification on request. Excluded: pictures as a stream and chapters
-      in the probe output (no multi-stream model).
+      verification on request; av_seek_frame and avformat_seek_file as
+      FFmpeg seeks FLAC without fastseek (ff_seek_frame_binary over
+      flac_read_timestamp, the generic index, byte seeks). Excluded:
+      pictures as a stream and chapters in the probe output (no
+      multi-stream model); SEEKTABLE-driven fast seeking, which FFmpeg
+      uses only with -fflags fastseek.
     Needs (verified) / lands with / verified after: T17b, T26a, T52a.
-    Contract and source provenance: port.md "FLAC contract";
-      zig/testing/fixtures/flac/README.md; libavformat/flacdec.c,
-      flac_picture.c, oggparsevorbis.c (ff_vorbis_comment), metadata.c,
-      vorbiscomment.c, libavcodec/flacdec.c, flacdsp.c.
+    Contract and source provenance: port.md "FLAC contract" (Seeking and
+      MD5 rows); zig/testing/fixtures/flac/README.md;
+      libavformat/flacdec.c, flac_picture.c, oggparsevorbis.c
+      (ff_vorbis_comment), metadata.c, vorbiscomment.c, seek.c, utils.c
+      (ff_gen_search, ff_find_last_ts), libavcodec/flacdec.c, flacdsp.c,
+      parser.c.
     Required fixtures / optional corpus: 56 FLAC fixtures (25 new);
-      vectors/flac.txt with tags, chapters and pictures; FATE FLAC samples
-      to come as optional coverage (T19c).
+      vectors/flac.txt with tags, chapters and pictures; vectors/
+      seek_flac.txt; optional: 17 FATE FLAC cases (the tests of
+      tests/fate/flac.mak re-encoded by the pinned FFmpeg, and the FLAC
+      samples other FATE tests read) from fate_sync.sh.
     Ownership, state transitions and limits: flac.Info owns its tags,
-      pictures, chapters and seek points when read with an allocator.
+      pictures, chapters and seek points when read with an allocator; the
+      seekable demuxer owns its index and repositions the caller's
+      seek.Seeker.
     Comparison rule and intentional differences: as T26a's, plus the tags,
-      chapters and pictures exact; conversions that would need a rewritten
-      output header (unknown counts, mid-stream changes) are refused.
+      chapters and pictures exact; each seek's result, next packet
+      (timestamp, position, size) and first decoded samples exact.
+      Intentional: conversions that would need a rewritten output header
+      (counts that differ, mid-stream changes) are refused, except into
+      raw PCM, which takes the decoded samples as FFmpeg does; FFmpeg fails
+      every seek in a file with a PICTURE (its second stream), so
+      flac_picture is left out of the seek oracle.
     Implementation files and test entry points: codec/flacdec.zig,
       codec/bits.zig (64-bit reads), format/flac.zig (readHeaderAlloc,
-      DecodedReader.verify_md5, the tags, chapters and pictures test),
-      format/convert.zig, format/detect.zig.
-    Evidence commit / Linux CI run / reference report: d1da777, b0b1a68 /
-      local Linux runs / compare.py FLAC 56/56.
+      DecodedReader.verify_md5, Demuxer.initSeekable/seekFrame/seekFile;
+      the tags, chapters and pictures test, "every fixture seeks as FFmpeg
+      seeks it"), format/convert.zig, format/detect.zig,
+      resample/dither.zig; zffprobe and zffmpeg FLAC process cases in
+      build.zig; compare.py's FLAC, hash and FATE sections.
+    Evidence commit / Linux CI run / reference report: d1da777, b0b1a68,
+      b548c83, 019313a, 897fc70 / local Linux runs / below.
     Required cases: passed 56 / failed 0 / missing 0 (decoding and
-      metadata).
-    Optional cases: FATE FLAC, not yet run.
-    Fuzz seeds, budget and result: T26a's entry with the new fixtures as
-      seeds to add with part 2.
-    Remaining work or blocker / next action: part 2, seeking as FFmpeg
-      seeks FLAC (ff_seek_frame_binary over flac_read_timestamp, the
-      seek table with fast seeking), with a seek oracle; the FATE report.
+      metadata); seeks passed 2692 / failed 0.
+    Optional cases: FATE FLAC passed 17 / failed 0 / skipped 0.
+    Fuzz seeds, budget and result: the demuxer-and-decoder entry with six
+      T26b seeds added (24- and 32-bit, variable blocking, headerless,
+      metadata blocks, a channel change), run under zig build test; no
+      sustained run (the local fuzzer fails as T25a records).
+    Remaining work or blocker / next action: none; T26c is next.
     ```
+
+    Evidence (G5, local Linux x86-64 runs with Zig 0.17.0): commits
+    `d1da777` (every sample size, variable blocking, metadata), `b0b1a68`,
+    `b548c83` (seeking), `019313a` (the optional FATE coverage) and
+    `897fc70` (raw PCM output takes the decoded count, which FATE's
+    truncated `cover_art.flac` found). Local CI at `897fc70`: fmt,
+    `generate.py --check`, the example check, Debug and ReleaseSafe builds,
+    `zig build test` with 188/188 steps and 302/302 tests in Debug,
+    ReleaseSafe and ReleaseFast, and the three cross builds passed; every
+    vector generator reproduces its file from FFmpeg `5d5a38a`
+    (`flac_vectors.c` and `seek_vectors.c` on the FLAC fixtures included).
+    `compare.py`: FLAC fixtures **56/56**; hash texts 537/574 equal to the
+    ffmpeg program's, 26 understood; optional FATE FLAC **17/17** with
+    every sample present; its only failures the 176 known inf and NaN
+    samples of this machine's clang 23 build.
 
   - [ ] **T26c — FLAC encoder.** Needs T26b. Lands with T18b.
     FFmpeg's compression levels (LPC with quantized coefficients, Rice
@@ -2968,7 +3002,8 @@ fixtures, committed when small and redistributable or fetched by pinned hash.
     Optional cases: none
     Fuzz seeds, budget and result: none added; the local fuzzer fails as
       T25a records.
-    Remaining work or blocker / next action: T52b; T26b's FLAC seeking.
+    Remaining work or blocker / next action: T52b (FLAC seeking landed
+      with T26b).
     ```
 
     Evidence (G5, local Linux x86-64 runs with Zig 0.17.0, in the commit

@@ -41,7 +41,10 @@ and the library writes FFmpeg's framecrc, framemd5 and streamhash text for
 comparisons (T19b), checked against 31 FLAC fixtures. WAV and Wave64
 streams seek as FFmpeg's `av_seek_frame` and `avformat_seek_file` seek
 them, by timestamp or byte position (T52a), on FFmpeg's rational
-arithmetic (T15). [TODO.md](TODO.md) holds the completion
+arithmetic (T15). FLAC decodes completely since T26b: 4 to 32 bits per
+sample, variable blocking, tags, seek tables, cue sheets and pictures,
+MD5 verification and FFmpeg's seeking, over 56 FLAC fixtures, with
+FFmpeg's FATE FLAC samples as optional coverage. [TODO.md](TODO.md) holds the completion
 evidence and the roadmap. Development is verified on Linux only. The compiler
 is **Zig 0.17.0**, enforced by the build.
 
