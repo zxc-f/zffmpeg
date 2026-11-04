@@ -27,7 +27,7 @@ build="$root/.references/ffmpeg-build"
 # T22a, T22b), the raw PCM demuxers and muxers of every one of those codecs
 # FFmpeg has one for, all but s64 (T22c), the FLAC demuxer, parser, decoder,
 # encoder and muxer and the framecrc, framemd5 and streamhash muxers (T26a,
-# T19b), and the audio filters T24-T25 compare. The ffmpeg program
+# T19b), the Ogg demuxer (T27a), and the audio filters T24-T25 compare. The ffmpeg program
 # selects the few filters it always needs. No GPL, nonfree, external or
 # hardware components.
 pcm_codecs=pcm_u8,pcm_s8,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,pcm_s32be,pcm_s64le,pcm_s64be,pcm_f32le,pcm_f32be,pcm_f64le,pcm_f64be,pcm_alaw,pcm_mulaw
@@ -42,7 +42,7 @@ configure_args=(
     --disable-ffplay
     --disable-avdevice
     --enable-protocol=file,pipe
-    --enable-demuxer=wav,w64,au,aiff,caf,flac,"$pcm_formats"
+    --enable-demuxer=wav,w64,au,aiff,caf,flac,ogg,"$pcm_formats"
     --enable-decoder="$pcm_codecs",flac
     --enable-encoder="$pcm_codecs",flac
     --enable-muxer=wav,w64,au,aiff,flac,framecrc,framemd5,streamhash,"$pcm_formats"

@@ -2596,6 +2596,27 @@ names, not as an empty framework.
     Done when packets and timestamps equal the reference's
     (`-c copy -f framecrc`), without decoding, and damaged pages are reported
     as the contract says.
+
+    ```text
+    ID / parent: T27a / T27
+    State: G0 (the reference build reads Ogg; contract, fixtures and
+      oracle next)
+    Plan: part 0, the contract (port.md "Ogg contract"), Python-made
+      fixtures (generate.py: pages with CRC-32, FLAC, Opus and Vorbis
+      mappings, a synthetic Vorbis setup header whose mode table
+      vorbis_parser.c reads, multiplexed, chained and damaged streams)
+      and an oracle printing what avformat_find_stream_info and
+      av_read_frame give (streams, packets with pts, dts, duration,
+      position, flags and side data); part 1, pages and packets
+      (oggdec.c's ogg_read_page, ogg_packet); part 2, the three mappings
+      (oggparseflac.c, oggparseopus.c, oggparsevorbis.c with
+      vorbis_parser.c) and libavformat's timestamps for them; part 3,
+      detection, zffprobe and stream copy to framecrc; part 4, seeking
+      (ogg_read_timestamp under ff_seek_frame_binary) and the duration
+      scan from the end (ogg_get_length).
+    Evidence so far: build-ffmpeg.sh enables the Ogg demuxer (the
+      registry lists it as a T27a difference until it is registered).
+    ```
   - [ ] **T27b — Ogg mux.** Needs T27a.
     Done when FFmpeg demuxes our output to identical packets and timestamps.
   - [ ] **T27c — FFT and MDCT.** Needs T01. Lands with T27d. A native transform
