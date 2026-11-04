@@ -2754,7 +2754,7 @@ names, not as an empty framework.
 
     ```text
     ID / parent: T27d / T27
-    State: G1 (planned)
+    State: G2 (part 0 under way)
     Plan: part 0, the reference build enables FFmpeg's Vorbis decoder
       (and its native encoder, experimental, to make fixtures); its
       decoding in avformat_find_stream_info changes what the Ogg vectors
@@ -2776,6 +2776,22 @@ names, not as an empty framework.
       in av.convert and zffmpeg (Ogg Vorbis to every PCM output and to
       FLAC) and zffprobe's sample format (fltp), with compare.py against
       the ffmpeg program.
+    Evidence so far: build-ffmpeg.sh enables the Vorbis decoder and
+      encoder; codec/vorbis_data.zig transcribes vorbis_data.c's tables.
+      Found with the decoder enabled: ogg.txt is unchanged; the synthetic
+      Vorbis fixtures' fake setup header makes avcodec_open2 fail, which
+      leaves the decoder context with 0 channels (and fltp), so
+      avformat_find_stream_info reads ahead to the end and indexes every
+      packet, moving one seek of ogg_vorbis_stereo (3904 forward: 3840,
+      not 5248); ffprobe then refuses those files ("Could not open codec
+      for input stream 0"). seek_vectors.c now seeks without decoding when
+      the decoder refuses the stream (a FLAC fixture it failed to open,
+      flac_bps3, now opens: the port rejects it, so the FLAC test is
+      unchanged). Interim, until part 1 lands: demux.Setup must say what
+      the reference's decoder does at open (none, FLAC's first frame,
+      the sample format at open, or refused) and the seek vectors be
+      regenerated; compare.py's registry check needs the Vorbis encoder
+      (fixtures only) as a known difference.
     ```
 
 - [ ] **T28 — Opus decoder.** Checked when T28a–T28c are. Reference:
