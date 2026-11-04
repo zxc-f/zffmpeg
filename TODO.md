@@ -2961,6 +2961,22 @@ names, not as an empty framework.
     ```
   - [ ] **T28b — SILK.** Needs T28a.
     Done when the SILK-only test vectors meet `opus_compare`.
+
+    ```text
+    ID / parent: T28b / T28
+    State: G1 (planned)
+    Plan: part 1, FFmpeg's SILK decoder (opus/silk.c and tab.c's SILK
+      tables): LSF and LPC, pitch, LTP, excitation and the stereo unmixing,
+      as ff_silk_decode_superframe runs them, against an oracle calling
+      the reference's ff_silk_init and ff_silk_decode_superframe over
+      generated frames of every bandwidth, duration and channel count.
+      Part 2, dec.c's SILK path: libswresample from the SILK rate to 48 kHz
+      as dec.c configures it (filter_size 16, the initial silence of
+      silk_resample_delay, flushes on a mode or rate change), the delayed
+      samples and sync buffers, and the CELT redundancy frames with their
+      fades; then ogg_opus_frame_counts' SILK packets, its seeks and the
+      SILK-only RFC 8251 vectors 02, 03 and 04 through opus_compare.
+    ```
   - [ ] **T28c — Hybrid mode, multistream and trimming.** Needs T28b. Hybrid
     frames, channel mapping families, pre-skip and end trimming at 48 kHz.
     Done when every RFC test vector meets `opus_compare` and Ogg Opus timing
