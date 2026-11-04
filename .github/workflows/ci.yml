@@ -252,6 +252,10 @@ jobs:
             .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a \
             .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o celt-vectors
           ./celt-vectors | diff -u zig/testing/vectors/celt.txt -
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/silk_vectors.c \
+            .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a \
+            .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o silk-vectors
+          ./silk-vectors | diff -u zig/testing/vectors/silk.txt -
           clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/libm_vectors.c \
             .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o libm-vectors
           # glibc before 2.44 computes sinh, cosh and tanh differently (not

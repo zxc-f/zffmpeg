@@ -180,6 +180,7 @@ test {
     _ = @import("codec/float_dsp.zig");
     _ = @import("codec/celt.zig");
     _ = @import("codec/opusdec.zig");
+    _ = @import("codec/silk.zig");
     _ = @import("format/framehash.zig");
     _ = @import("format/seek.zig");
     _ = @import("format/mov_chan.zig");

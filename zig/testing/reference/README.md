@@ -212,7 +212,10 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/opus_parse_
 `ff_celt_decode_frame`, `ff_celt_flush`) over generated frame sequences,
 48 decoders of 20 frames with every frame size, mono and stereo, up- and
 downmixing, the hybrid start band and phase inversion on and off, and
-prints each frame's final range and the MD5 of its samples.
+prints each frame's final range and the MD5 of its samples;
+`silk_vectors.c` does the same for the SILK decoder (`ff_silk_init`,
+`ff_silk_decode_superframe`, `ff_silk_flush`) over 48 decoders of 20
+superframes of every bandwidth, duration and channel count (T28b).
 `libm_vectors.c` needs only the C library: it prints digests of what
 glibc's `exp2f`, `sinf` and `cosf` return on sampled floats and on every
 angle CELT's spreading rotation can take, and of the fifteen double
@@ -224,6 +227,8 @@ since 2.44); with an older glibc CI leaves those lines out:
 ```bash
 clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/celt_vectors.c .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o celt-vectors
 ./celt-vectors | diff -u zig/testing/vectors/celt.txt -
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/silk_vectors.c .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o silk-vectors
+./silk-vectors | diff -u zig/testing/vectors/silk.txt -
 clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/libm_vectors.c .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o libm-vectors
 ./libm-vectors | diff -u zig/testing/vectors/libm.txt -
 ```

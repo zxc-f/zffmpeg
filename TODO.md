@@ -2964,7 +2964,7 @@ names, not as an empty framework.
 
     ```text
     ID / parent: T28b / T28
-    State: G1 (planned)
+    State: G3 (part 1 done)
     Plan: part 1, FFmpeg's SILK decoder (opus/silk.c and tab.c's SILK
       tables): LSF and LPC, pitch, LTP, excitation and the stereo unmixing,
       as ff_silk_decode_superframe runs them, against an oracle calling
@@ -2976,6 +2976,13 @@ names, not as an empty framework.
       samples and sync buffers, and the CELT redundancy frames with their
       fades; then ogg_opus_frame_counts' SILK packets, its seeks and the
       SILK-only RFC 8251 vectors 02, 03 and 04 through opus_compare.
+    Evidence so far: part 1: codec/silk.zig with silk_tab.zig (tab.c's
+      SILK tables; ff_silk_model_lsf_s2's 16 rows the C leaves out are its
+      zeros): silk_vectors.c runs ff_silk_decode_superframe over 48
+      decoders of 20 generated superframes (narrow, medium and wide band,
+      10 to 60 ms, mono and stereo coded, mono and stereo output, LBRR,
+      flushes): all 960 equal, range decoder state and every sample, in
+      Debug, ReleaseSafe and ReleaseFast.
     ```
   - [ ] **T28c — Hybrid mode, multistream and trimming.** Needs T28b. Hybrid
     frames, channel mapping families, pre-skip and end trimming at 48 kHz.
