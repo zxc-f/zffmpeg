@@ -50,8 +50,10 @@ T19; and T27a, the Ogg demuxer with FFmpeg's FLAC, Opus and Vorbis
 mappings, without decoding, on libavformat's generic layer, in zffprobe, as
 a framecrc stream copy and seeking as FFmpeg does; and T27b, FFmpeg's Ogg
 muxer, with FLAC encoded into Ogg by zffmpeg byte for byte as the ffmpeg
-program writes it. **Next: T27c (FFT and MDCT), which lands with T27d
-(Vorbis decoder). See
+program writes it; and T27c, FFmpeg's float FFT and MDCT, T18c, the
+LSB-first reader and VLC tables, and T27d, the Vorbis decoder bit for bit
+FFmpeg's, with Ogg Vorbis and Ogg FLAC decoded by zffmpeg, which completes
+T27. **Next: T28a (range decoder and CELT). See
 [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
@@ -1175,7 +1177,7 @@ names, not as an empty framework.
     write past the slice is dropped and flagged without touching memory
     past it (ReleaseFast included). The FLAC encoder's every packet, made
     through it, equals FFmpeg's (T26c).
-  - [ ] **T18c — LSB-first reader and VLC tables.** Lands with T27d. An
+  - [x] **T18c — LSB-first reader and VLC tables.** Lands with T27d. An
     LSB-first reader and VLC/Huffman tables built at compile time; later
     consumers (T29b, T30b, T42a, T49b) need it.
     Done when exhaustive table vectors pass and over-reads are rejected in
@@ -1183,7 +1185,7 @@ names, not as an empty framework.
 
     ```text
     ID / parent: T18c / T18
-    State: G4 (implemented and checked; G5 lands with T27d)
+    State: G5 (verified, with T27d)
     Plan: codec/bits.zig gains FFmpeg's LSB-first reader (get_bits.h
       under BITSTREAM_READER_LE: get_bits, get_bits1, get_bits_long,
       skip_bits, get_bits_count, get_bits_left), over-reads returning
@@ -1208,7 +1210,12 @@ names, not as an empty framework.
       MD5 equal in Debug, ReleaseSafe and ReleaseFast. Decoding is
       checked by round trips through two and three levels and by the
       Vorbis decoder's packets against libavcodec (T27d). CI and local CI
-      check vlc.txt.
+      check vlc.txt. G5 on local Linux runs at 03d56bc: zig fmt, zig build test 339/339 in
+      Debug, ReleaseSafe and ReleaseFast (212 steps), the cross builds, and
+      .references/local-ci.sh: every vector check passes (tx.txt, vlc.txt,
+      vorbis.txt, the regenerated seek vectors), the comparison 5889 passed
+      with the 176 known clang 23 inf/NaN failures, the Ogg decoding 72/72,
+      and the optional FATE cases 37/37 (FLAC 17, Vorbis 20).
     ```
   - [ ] **T18d — Exp-Golomb codes.** Lands with T43a.
     Done when exhaustive vectors over the supported range pass. Frame hashes
@@ -2621,7 +2628,7 @@ names, not as an empty framework.
     FATE FLAC **17/17**; its only failures the 176 known inf and NaN
     samples of this machine's clang 23 build.
 
-- [ ] **T27 — Ogg, transforms and Vorbis.** Checked when T27a–T27d are.
+- [x] **T27 — Ogg, transforms and Vorbis.** Checked when T27a–T27d are.
   Reference: `libavformat/oggdec.c`, `oggparse*.c`, `oggenc.c`,
   `libavcodec/vorbisdec.c`, `vorbis.c`, `libavutil/tx.c`;
   `tests/fate/vorbis.mak`.
@@ -2718,14 +2725,14 @@ names, not as an empty framework.
     Limitations: FLAC is the only codec zffmpeg writes into Ogg; no stream
       copy into Ogg (T53); one stream per output.
     ```
-  - [ ] **T27c — FFT and MDCT.** Needs T01. Lands with T27d. A native transform
+  - [x] **T27c — FFT and MDCT.** Needs T01. Lands with T27d. A native transform
     module for the sizes the audio codecs need.
     Done when outputs match a float64 DFT oracle within a declared error, for
     every supported size.
 
     ```text
     ID / parent: T27c / T27
-    State: G4 (implemented and checked; G5 lands with T27d)
+    State: G5 (verified, with T27d)
     Scope: FFmpeg's float transforms for power-of-two lengths as the
       reference build's C code computes them (no x86 assembly): the
       split-radix FFT (fft2 to fft131072 codelets, the split-radix
@@ -2745,16 +2752,21 @@ names, not as an empty framework.
       middle half of the full IMDCT), the declared error is a relative
       RMS error of at most 4 float epsilons (measured 1.2e-7 for the FFT
       to 1024 points, 1.5e-7 for the MDCT to 2048 coefficients). CI and
-      local CI check tx.txt.
+      local CI check tx.txt. G5 on local Linux runs at 03d56bc: zig fmt, zig build test 339/339 in
+      Debug, ReleaseSafe and ReleaseFast (212 steps), the cross builds, and
+      .references/local-ci.sh: every vector check passes (tx.txt, vlc.txt,
+      vorbis.txt, the regenerated seek vectors), the comparison 5889 passed
+      with the 176 known clang 23 inf/NaN failures, the Ogg decoding 72/72,
+      and the optional FATE cases 37/37 (FLAC 17, Vorbis 20).
     ```
-  - [ ] **T27d — Vorbis decoder.** Needs T27a. Lands with T27c and T18c.
+  - [x] **T27d — Vorbis decoder.** Needs T27a. Lands with T27c and T18c.
     Codebooks, floors 0 and 1, residues 0–2 and coupling.
     Done when float output matches the reference within a declared tolerance on
     the required streams.
 
     ```text
     ID / parent: T27d / T27
-    State: G2 (part 0 under way)
+    State: G5 (verified)
     Plan: part 0, the reference build enables FFmpeg's Vorbis decoder
       (and its native encoder, experimental, to make fixtures); its
       decoding in avformat_find_stream_info changes what the Ogg vectors
@@ -2831,7 +2843,17 @@ names, not as an empty framework.
       72/72 conversions of the decodable fixtures into WAV, AU, AIFF,
       FLAC, Ogg, raw s16le and f32le, resampled and downmixed, byte for
       byte the ffmpeg program's with -bitexact, and FATE's 20 Vorbis decode
-      tests (optional) 20/20; 6 zffmpeg process runs. G5 remains.
+      tests (optional) 20/20; 6 zffmpeg process runs (fc63033); the seek
+      vectors regenerated for part 0a's oracle change, and av.vorbis and
+      av.oggdecode exported (03d56bc). G5 on local Linux runs at 03d56bc: zig fmt, zig build test 339/339 in
+      Debug, ReleaseSafe and ReleaseFast (212 steps), the cross builds, and
+      .references/local-ci.sh: every vector check passes (tx.txt, vlc.txt,
+      vorbis.txt, the regenerated seek vectors), the comparison 5889 passed
+      with the 176 known clang 23 inf/NaN failures, the Ogg decoding 72/72,
+      and the optional FATE cases 37/37 (FLAC 17, Vorbis 20).
+    Limitations: no Vorbis encoder; one decodable stream per input; a
+      seekable input decodes twice (the count ahead); from a pipe only
+      raw PCM, FLAC and Ogg outputs.
     ```
 
 - [ ] **T28 — Opus decoder.** Checked when T28a–T28c are. Reference:
