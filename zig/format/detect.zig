@@ -42,6 +42,9 @@ const aiff = @import("aiff.zig");
 const raw = @import("raw.zig");
 const caf = @import("caf.zig");
 const flac = @import("flac.zig");
+const ogg = @import("ogg.zig");
+const demux = @import("demux.zig");
+const seek = @import("seek.zig");
 const codecs = @import("../codec/registry.zig");
 const registry = @import("registry.zig");
 const Replay = @import("replay.zig").Replay;
@@ -51,7 +54,7 @@ pub const Container = registry.Container;
 /// The WAV, AU, AIFF, raw PCM, CAF and FLAC contract errors, which share
 /// their common names, `UnknownFormat` for a stream no demuxer recognizes,
 /// and `UnusedOption`.
-pub const Error = wav.Error || au.Error || aiff.Error || raw.Error || caf.Error || flac.Error || error{
+pub const Error = wav.Error || au.Error || aiff.Error || raw.Error || caf.Error || flac.Error || ogg.Error || error{
     /// No demuxer's probe scored the stream, as FFmpeg's "Invalid data found
     /// when processing input"; force a format to parse it anyway.
     UnknownFormat,
@@ -80,6 +83,10 @@ pub const Source = struct {
     /// Raw PCM stream parameters (`-sample_rate`, `-ch_layout`); null takes
     /// FFmpeg's defaults. Given for any other format, `UnusedOption`.
     raw: ?raw.Params = null,
+    /// The probed reader's own seeker, when it can seek (a file read from
+    /// its start): Ogg's durations come from scans of the whole input, as
+    /// FFmpeg's ogg_get_length makes them on a seekable input (T27a).
+    seeker: ?seek.Seeker = null,
 };
 
 /// FFmpeg's first probe size (`PROBE_BUF_MIN`).
@@ -194,6 +201,10 @@ pub const Probed = struct {
     /// Sample frames in the stream; null for data of unknown length
     /// (`unknown_length`). Raw PCM is counted while validating.
     frame_count: ?u64,
+    /// A decoder gives the stream's samples. Not for Vorbis and Opus
+    /// (T27a): FFmpeg leaves their sample format and layout unknown, and
+    /// `format` has only their rate and channel count.
+    decoded: bool = true,
 };
 
 pub const Options = struct {
@@ -204,6 +215,9 @@ pub const Options = struct {
     /// and FLAC's VORBIS_COMMENT (T26b). On failure the dictionary may hold
     /// some of them.
     tags: ?wav.Tags = null,
+    /// The allocator Ogg's demuxer needs (T27a); else the tags'. An Ogg
+    /// input without either is `UnsupportedFormat`.
+    gpa: ?std.mem.Allocator = null,
 };
 
 /// Detects the container, then validates the whole stream without decoding
@@ -282,12 +296,58 @@ pub fn probeWith(reader: *std.Io.Reader, limits: Limits, options: Options) Error
             }
             return probed;
         },
+        .ogg => return probeOgg(reader, &input, options),
     }
 }
 
 /// The decoded stream of a FLAC input: packed s16 or s32 in FFmpeg's
 /// layout; a rate neither STREAMINFO nor the first frame gives is
 /// `UnsupportedFormat`.
+/// Ogg (T27a): the demuxer and libavformat's read-ahead, as ffprobe opens
+/// the input; the first stream with a known codec, as `-select_streams
+/// a:0` reports it. Ogg's comments are stream tags, and the format has
+/// none, so no tags are added.
+fn probeOgg(reader: *std.Io.Reader, input: *Input, options: Options) Error!Probed {
+    const gpa = options.gpa orelse if (options.tags) |t| t.gpa else return error.UnsupportedFormat;
+    const d = if (options.source.seeker) |sk| blk: {
+        // Read from the start through the reader itself, which seeks.
+        sk.seekTo(0) catch return error.IoFailure;
+        break :blk try ogg.Demuxer.initSeekable(gpa, reader, sk);
+    } else try ogg.Demuxer.init(gpa, input.reader());
+    defer d.deinit();
+    var layer = demux.Layer(ogg.Demuxer).init(gpa, d);
+    defer layer.deinit();
+    try layer.findStreamInfo();
+    for (0..d.streamCount()) |i| {
+        const info = d.stream(i);
+        const codec: codecs.Codec = switch (info.codec orelse continue) {
+            .flac => .flac,
+            .vorbis => .vorbis,
+            .opus => .opus,
+        };
+        const decoded = codec == .flac;
+        const sample_format: audio.SampleFormat = if (decoded and flacBps(info) > 16) .s32 else .s16;
+        const layout: audio.ChannelLayout = if (decoded) flac_codec.channelLayout(info.channels) else .{ .unspecified = info.channels };
+        return .{
+            .container = .ogg,
+            .codec = codec,
+            .format = audio.Format.initLayout(info.sample_rate, layout, sample_format) catch return error.UnsupportedFormat,
+            .frame_count = if (info.duration >= 0) @intCast(info.duration) else null,
+            .decoded = decoded,
+        };
+    }
+    return error.UnsupportedFormat;
+}
+
+/// The bits per sample of an Ogg FLAC stream's STREAMINFO.
+fn flacBps(info: *const ogg.StreamInfo) u8 {
+    const e = info.extradata.items;
+    if (e.len < flac_codec.streaminfo_size) return 16;
+    return flac_codec.StreamInfo.parse(e[0..flac_codec.streaminfo_size]).bps;
+}
+
+const flac_codec = @import("../codec/flac.zig");
+
 pub fn flacFormat(info: flac.Info) error{UnsupportedFormat}!audio.Format {
     return audio.Format.initLayout(info.sample_rate, info.layout, info.sampleFormat()) catch error.UnsupportedFormat;
 }
@@ -548,6 +608,8 @@ fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
         .caf => try expectSameResult(caf.probe(&direct, .{}), got, .caf),
         .wav => try expectSameResult(wav.probe(&direct, .{}), got, container),
         .flac => try expectSameResult(flacProbe(&direct), got, .flac),
+        // Ogg's demuxer needs an allocator, which this probe has not.
+        .ogg => try std.testing.expectError(error.UnsupportedFormat, got),
         .raw => unreachable, // no content probe chooses raw PCM
     } else try std.testing.expectError(error.UnknownFormat, got);
 }

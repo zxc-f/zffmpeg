@@ -2186,7 +2186,6 @@ def ffmpeg_help_fields(binary, kind, name):
 # Registry entries that differ from the reference build's listings for an
 # understood reason: (kind, name) -> ((our flags, FFmpeg's flags), reason).
 KNOWN_REGISTRY_DIFFERENCES = {
-    ("format only in FFmpeg", "ogg"): ((None, None), "the Ogg demuxer comes with T27a"),
     ("format only in FFmpeg", "framecrc"): ((None, None), "written by av.framehash for the hash comparison (T19b)"),
     ("format only in FFmpeg", "framemd5"): ((None, None), "written by av.framehash for the hash comparison (T19b)"),
     ("format only in FFmpeg", "streamhash"): ((None, None), "written by av.framehash for the hash comparison (T19b)"),

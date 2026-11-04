@@ -162,7 +162,8 @@ fn write(
             try writer.writeData(encoded);
             try writer.finish();
         },
-        .caf, .flac => unreachable, // findMuxer returns only formats with a muxer
+        // CAF and Ogg have no muxer; FLAC is not a PCM writer.
+        .caf, .flac, .ogg => unreachable,
     }
 }
 

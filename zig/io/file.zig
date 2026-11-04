@@ -41,7 +41,11 @@ pub const WriteError = wav.WriteError || std.Io.File.Writer.Error;
 pub fn probeFile(io: std.Io, file: std.Io.File, buffer: []u8, limits: detect.Limits, options: detect.Options) ReadError!detect.Probed {
     var with_length = options;
     if (with_length.source.length == null) with_length.source.length = regularLength(io, file);
-    var reader = file.readerStreaming(io, buffer);
+    // A regular file is read positionally, which can seek back, for Ogg's
+    // duration scans (T27a); a streaming reader never seeks back.
+    const regular = with_length.source.length != null;
+    var reader = if (regular) file.reader(io, buffer) else file.readerStreaming(io, buffer);
+    if (regular and with_length.source.seeker == null) with_length.source.seeker = .file(&reader);
     return detect.probeWith(&reader.interface, limits, with_length) catch |err| return withReadCause(err, &reader);
 }
 

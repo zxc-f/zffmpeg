@@ -29,6 +29,7 @@ const aiff = @import("aiff.zig");
 const raw = @import("raw.zig");
 const caf = @import("caf.zig");
 const flac = @import("flac.zig");
+const ogg = @import("ogg.zig");
 
 pub const Container = enum {
     wav,
@@ -39,8 +40,10 @@ pub const Container = enum {
     aiff,
     /// Apple Core Audio Format, read only (T22d).
     caf,
-    /// Native FLAC, read only (T26a); its muxer comes with T26c.
+    /// Native FLAC (T26a), written since T26c.
     flac,
+    /// Ogg, read only (T27a).
+    ogg,
     // Raw PCM (T22c), one format per codec FFmpeg has a raw format for, named
     // as the codec: every PCM codec but s64.
     u8,
@@ -59,7 +62,7 @@ pub const Container = enum {
     mulaw,
 
     /// The parser and writer family that reads and writes a container.
-    pub const Family = enum { wav, au, aiff, caf, flac, raw };
+    pub const Family = enum { wav, au, aiff, caf, flac, ogg, raw };
 
     pub fn family(container: Container) Family {
         return switch (container) {
@@ -68,6 +71,7 @@ pub const Container = enum {
             .aiff => .aiff,
             .caf => .caf,
             .flac => .flac,
+            .ogg => .ogg,
             // Checked below: exactly the raw formats, each named as its codec.
             else => .raw,
         };
@@ -76,7 +80,7 @@ pub const Container = enum {
     /// The codec of a raw PCM format, which shares its name; null otherwise.
     pub fn rawCodec(container: Container) ?pcm.Codec {
         return switch (container) {
-            .wav, .w64, .au, .aiff, .caf, .flac => null,
+            .wav, .w64, .au, .aiff, .caf, .flac, .ogg => null,
             // Compiles only if every other tag names a codec.
             inline else => |tag| @field(pcm.Codec, @tagName(tag)),
         };
@@ -199,6 +203,14 @@ pub const formats = [_]Format{
         .demuxer = .{ .probe = flac.probeScore, .probe_bytes = flac.probe_bytes, .extensions = &.{"flac"} },
         // FFmpeg's FLAC muxer (T26c), which carries FLAC only.
         .muxer = .{ .extensions = &.{"flac"}, .mime_type = "audio/x-flac", .audio_codec = .flac, .carries = flacOnly },
+    },
+    .{
+        .container = .ogg,
+        .name = "ogg",
+        .long_name = "Ogg",
+        .demuxer = .{ .probe = ogg.probeScore, .probe_bytes = ogg.probe_bytes, .extensions = &.{"ogg"} },
+        // FFmpeg's Ogg muxer comes with T27b.
+        .muxer = null,
     },
     rawFormat(.u8, "PCM unsigned 8-bit", &.{"ub"}),
     rawFormat(.s8, "PCM signed 8-bit", &.{"sb"}),

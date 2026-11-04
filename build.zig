@@ -29,7 +29,7 @@ const examples = [_]Example{
 };
 
 /// The fixture directories: zig/testing/fixtures/wav/ and zig/testing/fixtures/au/.
-const FixtureSet = enum { wav, au, aiff, raw, caf, flac };
+const FixtureSet = enum { wav, au, aiff, raw, caf, flac, ogg };
 
 /// A zffprobe process run with its expected exit code and output.
 const ProbeCase = struct {
@@ -432,6 +432,15 @@ const probe_cases = [_]ProbeCase{
     .{ .name = "FLAC below 4 bits", .set = .flac, .fixture = "flac_bps3", .exit_code = 2, .stderr_contains = ": InvalidFlac\n" },
     .{ .name = "FLAC without STREAMINFO first", .set = .flac, .fixture = "flac_no_streaminfo", .exit_code = 2, .stderr_contains = ": InvalidFlac\n" },
     .{ .name = "a truncated FLAC header from a pipe", .set = .flac, .args = &.{"-"}, .stdin_fixture = "flac_truncated_metadata", .exit_code = 2, .stderr = "zffprobe: -: Truncated\n" },
+    // T27a: Ogg's first known stream; without a decoder, no sample format
+    // or layout; a file's duration from the demuxer's scans, a pipe's none.
+    .{ .name = "Ogg Opus", .set = .ogg, .fixture = "ogg_opus_stereo", .exit_code = 0, .stdout = "format=ogg\ncodec=opus\nsample_fmt=unknown\nchannels=2\nchannel_layout=unknown\nsample_rate=48000\nnb_samples=11520\nduration_num=11520\nduration_den=48000\n", .stderr = "" },
+    .{ .name = "Ogg Opus from a pipe", .set = .ogg, .args = &.{"-"}, .stdin_fixture = "ogg_opus_stereo", .exit_code = 0, .stdout_contains = "nb_samples=N/A\n", .stderr = "" },
+    .{ .name = "Ogg Vorbis", .set = .ogg, .fixture = "ogg_vorbis_stereo", .exit_code = 0, .stdout_contains = "codec=vorbis\nsample_fmt=unknown\n", .stderr = "" },
+    .{ .name = "Ogg FLAC", .set = .ogg, .fixture = "ogg_flac_stereo", .exit_code = 0, .stdout_contains = "codec=flac\nsample_fmt=s16\nchannels=2\nchannel_layout=stereo\n", .stderr = "" },
+    .{ .name = "Ogg beside an unknown stream", .set = .ogg, .fixture = "ogg_unknown_codec", .exit_code = 0, .stdout_contains = "codec=opus\n", .stderr = "" },
+    .{ .name = "Ogg without a page", .set = .ogg, .fixture = "ogg_no_pages", .exit_code = 2, .stderr_contains = ": Truncated\n" },
+    .{ .name = "Ogg Vorbis without a mode table", .set = .ogg, .fixture = "ogg_vorbis_bad_setup", .exit_code = 2, .stderr_contains = ": InvalidOgg\n" },
 };
 
 const flac_mid_side_report =

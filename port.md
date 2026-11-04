@@ -1082,7 +1082,9 @@ strings metadata). In summary (G0; the parts in TODO.md T27a widen it):
 | Mappings | FLAC (`0x7F FLAC` version 1 and STREAMINFO, then VORBIS_COMMENT; frames through FFmpeg's FLAC parser for their headers), Opus (OpusHead, OpusTags; packet durations from the TOC byte, pre-skip and end trimming as skip-samples side data, a granule above 2^62 refused) and Vorbis (identification, comment and setup headers as extradata; durations from the block sizes and the setup header's mode table as `vorbis_parser.c` reads it; pages whose granule is 0 lose their timestamps). Chained headers become new-extradata and strings-metadata side data. |
 | Timestamps | Each mapping's granule-to-timestamp rule, applied at the packet that ends a page, then libavformat's for the stream, as `ogg.txt` records them. |
 | Errors | Opening fails where FFmpeg's does: `InvalidOgg` for its INVALIDDATA and UNKNOWN (a header it cannot parse), `Truncated` for the input ending before the headers; after opening, a refused page or packet ends reading with `InvalidOgg`, as FFmpeg's `av_read_frame` returns its error. |
-| Seeking | Planned with T27a: `ogg_read_timestamp` under `ff_seek_frame_binary`, and the duration scan from the input's end (`ogg_get_length`). |
+| Probe output | `zffprobe` reports the first stream with a known codec (`ffprobe -select_streams a:0`): `format=ogg`, the codec, `sample_fmt` and `channel_layout` `unknown` for Vorbis and Opus (no decoder) and FLAC's decoded ones, and the duration a file's scans give (`ogg_get_length` on a seekable input, else `estimate_timings`' bit-rate estimate), in the stream's `1/rate` time base; from a pipe, which cannot seek, no duration (`N/A`), as ffprobe gives none. Ogg's comments are stream tags and the format has none, so no tag lines. A file is read positionally, as only such a reader seeks back. |
+| Conversion | `zffmpeg` refuses an Ogg input (`UnsupportedOperation`): no Vorbis or Opus decoder yet, and no Ogg stream copy. |
+| Seeking | Planned with T27a: `ogg_read_timestamp` under `ff_seek_frame_binary`. |
 | Writing | None until T27b. |
 
 ### Raw PCM contract
@@ -1158,7 +1160,9 @@ T09's `zffprobe` reports stable UTF-8 `key=value` lines, in this order:
 `nb_samples`, `duration_num`, `duration_den`. Use `wav`, `w64` (Sony Wave64,
 T21b), `au` (T12c), `aiff` (AIFF and AIFF-C, T22b), `caf` (T22d), `flac`
 (T26a, with codec `flac` and the decoded `sample_fmt`; see the
-[FLAC contract](#flac-contract)) or a raw format's name
+[FLAC contract](#flac-contract)), `ogg` (T27a: the first stream with a
+known codec, as `ffprobe -select_streams a:0` reports it; see the
+[Ogg contract](#ogg-contract)) or a raw format's name
 (`s16le`, `alaw`, ..., T22c), the stream's FFmpeg codec
 name (`pcm_s16le`, `pcm_s24le`, `pcm_alaw`, ... for WAV since T21a;
 `pcm_s16be`, `pcm_f32be`, ... for AU and AIFF), its
@@ -1167,7 +1171,9 @@ storage format as FFmpeg's `sample_fmt` (`s16`, `s32` for 24- and 32-bit,
 (since T23b): `unknown` when the container leaves it unspecified (a plain
 WAV header, AU, AIFF and CAF so far), else FFmpeg's description (`stereo`,
 `5.1`, `3 channels (FL+FR+USR20)`). Before T23b it printed `mono` or
-`stereo` from the channel count.
+`stereo` from the channel count. A stream no decoder reads (T27a's Vorbis
+and Opus, which the reference build does not decode) prints
+`sample_fmt=unknown` and `channel_layout=unknown`, as ffprobe does.
 `nb_samples` counts sample frames (samples per channel); duration is
 exact and unreduced in the stream's `1/sample_rate` time base:
 `duration_num = nb_samples` and `duration_den = sample_rate`, with no decimal

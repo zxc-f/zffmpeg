@@ -271,6 +271,8 @@ pub const Conversion = struct {
             .caf => .{ .caf = .init(source.reader(), limits.caf) },
             // The demuxer and decoder allocate.
             .flac => .{ .flac = .init(request.gpa orelse return error.UnsupportedOperation, source.reader(), request.diagnostics) },
+            // No Vorbis or Opus decoder, and no Ogg stream copy yet (T27a).
+            .ogg => return error.UnsupportedOperation,
             .raw => .{ .raw = source.rawParser(limits.raw) },
         };
         errdefer deinitParser(&input);
@@ -389,7 +391,7 @@ pub const Conversion = struct {
                 error.InvalidOption => error.InvalidOption,
                 error.TagsTooLong => error.LimitExceeded,
             },
-            .caf => unreachable, // no muxer: refused above as UnsupportedOperation
+            .caf, .ogg => unreachable, // no muxer: refused above as UnsupportedOperation
         }
         const packet_frames = switch (input) {
             // FFmpeg's packets are the FLAC frames.
@@ -479,7 +481,7 @@ pub const Conversion = struct {
                 defer writer.deinit();
                 try c.transfer(flacmux.Writer, &writer);
             },
-            .caf => unreachable, // no muxer: `init` refused it
+            .caf, .ogg => unreachable, // no muxer: `init` refused it
         }
         // Every frame was read: an unknown count is now known, and a FLAC
         // stream's decoded count replaces STREAMINFO's (equal unless raw
@@ -716,6 +718,7 @@ fn ffmpegPacketFrames(container: Container, codec: pcm.Codec, format: audio.Form
         // INT_MAX bytes, rounded down to a power of two.
         .wav, .au, .raw => std.math.floorPowerOfTwo(u32, std.math.clamp(format.sample_rate / 10, 1, std.math.maxInt(i32) / block_align)),
         .flac => unreachable, // Conversion.init takes STREAMINFO's block size
+        .ogg => unreachable, // Conversion.init refuses Ogg input
     };
 }
 
@@ -970,7 +973,7 @@ fn decodeOutput(container: Container, bytes: []const u8, storage: []i16, format:
             var parser: caf.Parser = .init(&reader, .{});
             return decodeWith(caf.Parser, &parser, storage);
         },
-        .flac => unreachable, // no FLAC output before T26c
+        .flac, .ogg => unreachable, // not this test's outputs
     }
 }
 
@@ -1032,7 +1035,7 @@ fn rawOf(container: Container, bytes: []const u8, out: []u8, format: audio.Forma
         .aiff => _ = try aiff.decodeToRaw(&reader, &writer, .{}),
         .caf => _ = try caf.decodeToRaw(&reader, &writer, .{}),
         .raw => _ = try raw.decodeToRaw(&reader, &writer, container.rawCodec().?, paramsOf(format), bytes.len, .{}), // a raw container has a codec
-        .flac => unreachable, // no FLAC output before T26c
+        .flac, .ogg => unreachable, // not this test's outputs
     }
     return writer.buffered();
 }
