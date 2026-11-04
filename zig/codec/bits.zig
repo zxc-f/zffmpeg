@@ -9,8 +9,9 @@
 // (AV_CRC_8_ATM, AV_CRC_16_ANSI) at the pinned reference revision describe
 // the behavior, restated here.
 //! An MSB-first bit reader over a borrowed slice (TODO.md T18a), with the
-//! over-read rules of FFmpeg's checked reader, its writer counterpart
-//! (T18b), and the CRCs FLAC uses.
+//! over-read rules of FFmpeg's checked reader, its LSB-first counterpart
+//! (`LsbReader`, FFmpeg's reader under BITSTREAM_READER_LE, T18c), its
+//! writer counterpart (T18b), and the CRCs FLAC uses.
 //!
 //! FFmpeg's input buffers carry zero padding past their end, and its
 //! checked reader stops its bit count 8 bits past the end. This reader
@@ -175,6 +176,80 @@ pub const BitReader = struct {
     pub fn riceFlac(r: *BitReader, k: u5, limit: i32, esc_len: u6) i32 {
         const v = r.golombJpegls(k, limit, esc_len);
         return @bitCast((v >> 1) ^ (0 -% (v & 1)));
+    }
+};
+
+/// FFmpeg's checked reader under BITSTREAM_READER_LE (Vorbis, T18c): the
+/// first bit read is each byte's least significant, and a value's first
+/// bit is its least significant. Over-reads behave as `BitReader`'s.
+pub const LsbReader = struct {
+    bytes: []const u8,
+    /// The bits read so far, at most `size + 8`.
+    index: usize = 0,
+    /// `bytes.len * 8`.
+    size: usize,
+
+    pub const InitError = BitReader.InitError;
+
+    /// `init_get_bits8`.
+    pub fn init(bytes: []const u8) InitError!LsbReader {
+        const limit = (std.math.maxInt(i32) - 64 * 8) / 8;
+        if (bytes.len >= limit) return error.InputTooLarge;
+        return .{ .bytes = bytes, .size = bytes.len * 8 };
+    }
+
+    /// The next 57 or more bits, the first in bit 0; zeros past the end.
+    fn window(r: *const LsbReader) u64 {
+        const start = r.index >> 3;
+        const shift: u6 = @intCast(r.index & 7);
+        if (start + 8 <= r.bytes.len) {
+            return std.mem.readInt(u64, r.bytes[start..][0..8], .little) >> shift;
+        }
+        var w: u64 = 0;
+        for (0..8) |k| {
+            const at = start + k;
+            const byte: u64 = if (at < r.bytes.len) r.bytes[at] else 0;
+            w |= byte << @intCast(8 * k);
+        }
+        return w >> shift;
+    }
+
+    /// `show_bits_long`: the next `n` bits (0 to 32) without consuming them.
+    pub fn peek(r: *const LsbReader, n: u6) u32 {
+        std.debug.assert(n <= 32);
+        if (n == 0) return 0;
+        const mask = (@as(u64, 1) << n) - 1;
+        return @intCast(r.window() & mask);
+    }
+
+    /// `skip_bits`: consumes `n` bits, the count saturating 8 bits past the
+    /// end.
+    pub fn skip(r: *LsbReader, n: usize) void {
+        r.index = @min(r.size + 8, r.index + @min(n, r.size + 8));
+    }
+
+    /// `get_bits_long`: the next `n` bits (0 to 32).
+    pub fn bits(r: *LsbReader, n: u6) u32 {
+        const value = r.peek(n);
+        r.skip(n);
+        return value;
+    }
+
+    /// `get_bits1`.
+    pub fn bit(r: *LsbReader) u1 {
+        return @intCast(r.bits(1));
+    }
+
+    /// `get_bits_count`.
+    pub fn count(r: *const LsbReader) usize {
+        return r.index;
+    }
+
+    /// `get_bits_left`: negative after an over-read.
+    pub fn left(r: *const LsbReader) i64 {
+        const size: i64 = @intCast(r.size);
+        const index: i64 = @intCast(r.index);
+        return size - index;
     }
 };
 
@@ -543,4 +618,29 @@ test "a write past the end is dropped and flagged, nothing past the slice touche
     try testing.expectEqual(16, w.count());
     w.flush();
     try testing.expectEqualSlices(u8, &.{ 0xab, 0xcd, 0x55 }, &backing);
+}
+
+test "the LSB-first reader takes each byte's low bits first, values low bit first" {
+    var r = try LsbReader.init(&.{ 0b1010_1101, 0x34, 0x12, 0xff, 0x01 });
+    try testing.expectEqual(1, r.bit());
+    try testing.expectEqual(0b110, r.bits(3));
+    try testing.expectEqual(0b1010, r.bits(4));
+    try testing.expectEqual(0x1234, r.bits(16));
+    try testing.expectEqual(0x1ff, r.peek(9));
+    // 16 bits were left: the rest reads as zeros, the count stops 8 bits on.
+    try testing.expectEqual(0x1ff, r.bits(32));
+    try testing.expectEqual(-8, r.left());
+}
+
+test "the LSB-first reader reads zeros past the end and stops counting 8 bits on" {
+    var r = try LsbReader.init(&.{0xff});
+    try testing.expectEqual(0xff, r.bits(32));
+    try testing.expectEqual(-8, r.left());
+    try testing.expectEqual(0, r.bits(32));
+    try testing.expectEqual(16, r.count());
+    try testing.expectEqual(0, r.bit());
+    try testing.expectEqual(16, r.count());
+    var empty = try LsbReader.init(&.{});
+    try testing.expectEqual(0, empty.bits(32));
+    try testing.expectEqual(8, empty.count());
 }

@@ -55,6 +55,8 @@
 //!   (`format/demux.zig`).
 //! - `tx`: FFmpeg's float FFT and MDCT for power-of-two lengths, bit for
 //!   bit its C codelets (`codec/tx.zig`).
+//! - `vlc`: FFmpeg's VLC decoding tables and lookup, for the LSB-first
+//!   reader in `bits` (`codec/vlc.zig`).
 //! - `framehash`: FFmpeg's framecrc, framemd5 and streamhash muxers' text
 //!   for one audio stream (`format/framehash.zig`).
 //! - `seek`: the seek API, FFmpeg's `av_seek_frame` and
@@ -113,6 +115,7 @@ pub const ogg = @import("format/ogg.zig");
 pub const demux = @import("format/demux.zig");
 pub const oggmux = @import("format/oggmux.zig");
 pub const tx = @import("codec/tx.zig");
+pub const vlc = @import("codec/vlc.zig");
 pub const framehash = @import("format/framehash.zig");
 pub const seek = @import("format/seek.zig");
 pub const audioconvert = @import("resample/audioconvert.zig");
@@ -159,6 +162,7 @@ test {
     _ = @import("format/demux.zig");
     _ = @import("format/oggmux.zig");
     _ = @import("codec/tx.zig");
+    _ = @import("codec/vlc.zig");
     _ = @import("format/framehash.zig");
     _ = @import("format/seek.zig");
     _ = @import("format/mov_chan.zig");

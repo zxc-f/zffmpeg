@@ -1183,7 +1183,7 @@ names, not as an empty framework.
 
     ```text
     ID / parent: T18c / T18
-    State: G1 (planned with T27d)
+    State: G4 (implemented and checked; G5 lands with T27d)
     Plan: codec/bits.zig gains FFmpeg's LSB-first reader (get_bits.h
       under BITSTREAM_READER_LE: get_bits, get_bits1, get_bits_long,
       skip_bits, get_bits_count, get_bits_left), over-reads returning
@@ -1196,6 +1196,19 @@ names, not as an empty framework.
       through libavcodec for generated code lengths (Vorbis' len2vlc,
       several nb_bits, LE and BE) and prints every entry and the symbols
       decoded from a generated bitstream; the test compares them all.
+    Evidence: bits.LsbReader (zeros past the end, the count stopping 8
+      bits on, in every optimize mode) and codec/vlc.zig (av.vlc: build
+      into a caller's buffer, Vlc.init at run time, get_vlc2 as `get`);
+      vlc_vectors.c restates vlc.h's struct and calls the exported
+      ff_vlc_init_sparse (get_vlc2 is an inline it cannot reach), so
+      vectors/vlc.txt holds 678 tables: complete and incomplete codes of
+      2 to 1000 symbols, lengths to 32, 1 to 11 bits a level, MSB-first
+      and VLC_INIT_LE, given symbols, duplicated codes (INVALIDDATA) and
+      over-long or over-wide codes (EINVAL); every result, size and entry
+      MD5 equal in Debug, ReleaseSafe and ReleaseFast. Decoding is
+      checked by round trips through two and three levels and by the
+      Vorbis decoder's packets against libavcodec (T27d). CI and local CI
+      check vlc.txt.
     ```
   - [ ] **T18d — Exp-Golomb codes.** Lands with T43a.
     Done when exhaustive vectors over the supported range pass. Frame hashes

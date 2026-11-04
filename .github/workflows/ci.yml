@@ -226,6 +226,14 @@ jobs:
             -lm -pthread -o flacenc-vectors
           ./flacenc-vectors | diff -u zig/testing/vectors/flacenc.txt -
 
+      # The committed T18c oracle must be what this build's VLC builder makes.
+      - name: Check the VLC vectors (T18c)
+        run: |
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/vlc_vectors.c \
+            .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libavutil.a \
+            -lm -pthread -o vlc-vectors
+          ./vlc-vectors | diff -u zig/testing/vectors/vlc.txt -
+
       # The committed T27c oracle must be what this build's libavutil
       # transforms give.
       - name: Check the transform vectors (T27c)

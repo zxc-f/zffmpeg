@@ -180,6 +180,18 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/ogg_vectors
 LC_ALL=C ./ogg-vectors zig/testing/fixtures/ogg/*.ogg | diff -u zig/testing/vectors/ogg.txt -
 ```
 
+The T18c VLC vectors come from the reference's `libavcodec`:
+`vlc_vectors.c` builds decoding tables with `ff_vlc_init_sparse` (its
+prototype and the `VLC` struct restated, as `vlc.h` is not installed) for
+generated prefix codes, complete and incomplete, MSB-first and
+`VLC_INIT_LE`, with symbols, duplicated codes and over-wide codewords, and
+prints the builder's result and the MD5 of every table entry:
+
+```bash
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/vlc_vectors.c .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o vlc-vectors
+./vlc-vectors | diff -u zig/testing/vectors/vlc.txt -
+```
+
 The T27c transform vectors come from the reference's `libavutil`:
 `tx_vectors.c` runs `av_tx_init`'s float FFT (2 to 131072 points, both
 directions) and MDCT (4 to 16384 coefficients, both directions, four
