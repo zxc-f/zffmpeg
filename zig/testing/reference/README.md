@@ -117,9 +117,16 @@ first decoded samples; every seek starts from a freshly opened file:
 clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/seek_vectors.c .references/ffmpeg-install/lib/libavformat.a .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o seek-vectors
 LC_ALL=C ./seek-vectors zig/testing/fixtures/wav/*.wav | diff -u zig/testing/vectors/seek.txt -
 LC_ALL=C ./seek-vectors zig/testing/fixtures/flac/*.flac | diff -u zig/testing/vectors/seek_flac.txt -
+LC_ALL=C ./seek-vectors zig/testing/fixtures/ogg/*.ogg | diff -u zig/testing/vectors/seek_ogg.txt -
 ```
 
-T26b runs the same generator on the FLAC fixtures (`seek_flac.txt`).
+T26b runs the same generator on the FLAC fixtures (`seek_flac.txt`), and
+T27a on the Ogg fixtures (`seek_ogg.txt`). Since T27a the generator also
+prints the packet's skip-samples side data (a `Z` line: the pre-roll that
+`avformat_seek_file` asks the decoder to drop), and opens a file whose
+codec the reference build cannot decode, reading and seeking its packets
+without decoding them (`D none`), which added the WAV fixtures with such
+codecs to `seek.txt`.
 
 T26b's optional FATE coverage reads FFmpeg's FATE samples, which
 `fate_sync.sh` fetches with rsync into the ignored `.references/fate-suite`

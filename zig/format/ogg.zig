@@ -19,6 +19,7 @@
 
 const std = @import("std");
 const flac = @import("../codec/flac.zig");
+const flacdec = @import("../codec/flacdec.zig");
 const metadata = @import("../core/metadata.zig");
 const rational = @import("../core/rational.zig");
 const vorbiscomment = @import("vorbiscomment.zig");
@@ -383,6 +384,9 @@ pub const Demuxer = struct {
     /// The returned packet's side data.
     side_metadata: ?[]u8 = null,
     side_extradata: ?[]u8 = null,
+    /// libavformat moved the source (`io_repositioned`): the next read
+    /// resets the streams first.
+    io_repositioned: bool = false,
 
     fn freeSideData(d: *Demuxer) void {
         if (d.side_metadata) |b| d.gpa.free(b);
@@ -605,7 +609,61 @@ pub const Demuxer = struct {
             // The reference build decodes FLAC, not Opus or Vorbis.
             .has_decoder = info.codec == .flac,
             .bit_rate = info.bit_rate,
+            .initial_padding = info.initial_padding,
+            .seek_preroll = info.seek_preroll,
         };
+    }
+
+    /// libavformat's `avio_seek` on the source (demux.zig's Source).
+    /// Needs `initSeekable`.
+    pub fn reposition(d: *Demuxer, pos: i64) Error!void {
+        try d.src.seekTo(pos);
+    }
+
+    /// libavformat moved the source itself: `io_repositioned`.
+    pub fn ioRepositioned(d: *Demuxer) void {
+        d.io_repositioned = true;
+    }
+
+    /// ogg_read_timestamp: from `pos.*`, the first timestamp of stream
+    /// `i`'s packets while the source is not past `pos_limit`; `pos.*`
+    /// becomes the position of the last packet read. The streams are
+    /// reset before and after. A failed read ends the scan, as FFmpeg's
+    /// does, except for a failure of the port's own (memory, I/O).
+    pub fn readTimestamp(d: *Demuxer, i: usize, pos: *i64, pos_limit: i64) Error!i64 {
+        try d.src.seekTo(pos.*);
+        d.reset();
+        var pts: i64 = nopts;
+        while (d.src.pos <= pos_limit) {
+            var idx: i32 = -1;
+            var pstart: usize = 0;
+            var psize: usize = 0;
+            d.oggPacket(&idx, &pstart, &psize, pos) catch |err| switch (err) {
+                error.OutOfMemory, error.IoFailure => |e| return e,
+                else => break,
+            };
+            // No supported mapping has keyframes to validate.
+            if (idx >= 0 and idx == i) {
+                var dts: i64 = undefined;
+                pts = calcPts(&d.streams.items[i], &dts);
+            }
+            if (pts != nopts) break;
+        }
+        d.reset();
+        return pts;
+    }
+
+    /// ogg_read_seek: the binary search over `readTimestamp` from the
+    /// layer (`layer.seekFrameBinary`, ff_seek_frame_binary), the streams
+    /// reset before and after; false when it finds nothing. `layer` is
+    /// demux.zig's `Layer(Demuxer)`, which calls this, hence `anytype`.
+    pub fn readSeek(d: *Demuxer, layer: anytype, i: usize, ts: i64, flags: seek.Flags) Error!bool {
+        std.debug.assert(i < d.streams.items.len);
+        d.reset();
+        // Keyframe seeking is for video streams only.
+        const found = try layer.seekFrameBinary(i, ts, flags);
+        d.reset();
+        return found;
     }
 
     pub fn durationOf(d: *Demuxer, i: usize) *i64 {
@@ -1217,6 +1275,10 @@ pub const Demuxer = struct {
     /// timestamps, duration, flags and side data FFmpeg's demuxer gives
     /// it; null at the end.
     pub fn next(d: *Demuxer) Error!?Packet {
+        if (d.io_repositioned) {
+            d.reset();
+            d.io_repositioned = false;
+        }
         while (true) {
             var idx: i32 = -1;
             var pstart: usize = 0;
@@ -1495,4 +1557,123 @@ test "the content probe" {
     try testing.expectEqual(0, probeScore("OggS\x00\x08"));
     try testing.expectEqual(0, probeScore("OggS\x01\x02"));
     try testing.expectEqual(0, probeScore("Ogg"));
+}
+
+const seek_vectors = @embedFile("../testing/vectors/seek_ogg.txt");
+
+fn seekBlock(name: []const u8) ?[]const u8 {
+    var start: ?usize = null;
+    var lines = std.mem.splitScalar(u8, seek_vectors, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "F ")) continue;
+        const at = @intFromPtr(line.ptr) - @intFromPtr(seek_vectors.ptr);
+        if (start) |s| return seek_vectors[s..at];
+        if (std.mem.eql(u8, line[2..], name)) start = at + line.len + 1;
+    }
+    return if (start) |s| seek_vectors[s..] else null;
+}
+
+/// The next packet's line and, for FLAC, its first 16 decoded sample
+/// frames, as seek_vectors.c prints them (the reference build decodes
+/// neither Opus nor Vorbis).
+fn nextAfterSeek(gpa: std.mem.Allocator, layer: anytype, d: *Demuxer, out: *std.ArrayList(u8)) !void {
+    const p = try layer.next() orelse return out.appendSlice(gpa, "P EOF\n");
+    var a: [24]u8 = undefined;
+    const pts = if (p.pts) |v| try std.fmt.bufPrint(&a, "{d}", .{v}) else "N";
+    const line = try std.fmt.allocPrint(gpa, "P {s} {d} {d}\n", .{ pts, p.pos, p.data.len });
+    defer gpa.free(line);
+    try out.appendSlice(gpa, line);
+    if (p.skip) |skip| {
+        const z = try std.fmt.allocPrint(gpa, "Z {d} {d}\n", .{ skip[0], skip[1] });
+        defer gpa.free(z);
+        try out.appendSlice(gpa, z);
+    }
+    const info = d.stream(p.stream);
+    if (info.codec != .flac or info.extradata.items.len != flac.streaminfo_size) return out.appendSlice(gpa, "D none\n");
+    var dec = try flacdec.Decoder.init(gpa, flac.StreamInfo.parse(info.extradata.items[0..flac.streaminfo_size]));
+    defer dec.deinit();
+    dec.send(p.data, p.pts);
+    const frame = (dec.receive() catch null) orelse return out.appendSlice(gpa, "D none\n");
+    // No supported stream asks for skipped samples here: FLAC has no
+    // pre-roll or padding.
+    try testing.expectEqual(null, p.skip);
+    const header = try std.fmt.allocPrint(gpa, "D {d} ", .{frame.nb_samples});
+    defer gpa.free(header);
+    try out.appendSlice(gpa, header);
+    const frames = @min(frame.nb_samples, 16);
+    switch (frame.samples) {
+        inline else => |samples| for (samples[0 .. frames * frame.channels]) |s| {
+            var le: [@sizeOf(@TypeOf(s))]u8 = undefined;
+            std.mem.writeInt(@TypeOf(s), &le, s, .little);
+            const hex = std.fmt.bytesToHex(le, .lower);
+            try out.appendSlice(gpa, &hex);
+        },
+    }
+    try out.append(gpa, '\n');
+}
+
+test "every Ogg fixture seeks as FFmpeg seeks it (vectors/seek_ogg.txt)" {
+    const gpa = testing.allocator;
+    var compared: usize = 0;
+    inline for (fixtures.ogg.all) |fixture| {
+        const block_text = seekBlock(fixture.name) orelse return error.MissingVector;
+        var lines = std.mem.splitScalar(u8, block_text, '\n');
+        if (std.mem.eql(u8, lines.next().?, "O ok")) {
+            _ = lines.next(); // I
+            var pending = lines.next();
+            while (pending) |k_line| {
+                pending = lines.next();
+                if (k_line.len == 0) continue;
+                var expected: std.ArrayList(u8) = .empty;
+                defer expected.deinit(gpa);
+                var f = std.mem.tokenizeScalar(u8, k_line, ' ');
+                _ = f.next();
+                const api = f.next().?[0];
+                const stream_index = try std.fmt.parseInt(i32, f.next().?, 10);
+                const ts = try std.fmt.parseInt(i64, f.next().?, 10);
+                var min_ts: i64 = 0;
+                var max_ts: i64 = 0;
+                if (api == 's') {
+                    min_ts = try std.fmt.parseInt(i64, f.next().?, 10);
+                    max_ts = try std.fmt.parseInt(i64, f.next().?, 10);
+                }
+                const flag_bits = try std.fmt.parseInt(u8, f.next().?, 16);
+                const flags: seek.Flags = .{ .backward = flag_bits & 1 != 0, .byte = flag_bits & 2 != 0, .any = flag_bits & 4 != 0 };
+                const ret = f.next().?;
+                if (std.mem.eql(u8, ret, "0")) {
+                    while (pending) |next_line| {
+                        if (next_line.len == 0 or next_line[0] == 'K') break;
+                        try expected.appendSlice(gpa, next_line);
+                        try expected.append(gpa, '\n');
+                        pending = lines.next();
+                    }
+                }
+                var reader: std.Io.Reader = .fixed(fixtures.ogg.bytes(fixture.name));
+                const d = try Demuxer.initSeekable(gpa, &reader, .fixed(&reader));
+                defer d.deinit();
+                var layer = demux.Layer(Demuxer).init(gpa, d);
+                defer layer.deinit();
+                try layer.findStreamInfo();
+                _ = try layer.next();
+                const result = if (api == 'f') layer.seekFrame(stream_index, ts, flags) else layer.seekFile(stream_index, min_ts, ts, max_ts, flags);
+                var actual: std.ArrayList(u8) = .empty;
+                defer actual.deinit(gpa);
+                if (result) |_| {
+                    try nextAfterSeek(gpa, &layer, d, &actual);
+                } else |err| switch (err) {
+                    error.InvalidStream => try actual.appendSlice(gpa, "EINVAL"),
+                    error.SeekFailed, error.InvalidRange => try actual.appendSlice(gpa, "-1"),
+                    else => return err,
+                }
+                const want = if (std.mem.eql(u8, ret, "0")) expected.items else ret;
+                testing.expectEqualStrings(want, actual.items) catch |err| {
+                    std.debug.print("fixture {s}: {s}\n", .{ fixture.name, k_line });
+                    return err;
+                };
+                compared += 1;
+            }
+        }
+    }
+    // Every seek of the fixtures FFmpeg opens.
+    try testing.expectEqual(918, compared);
 }

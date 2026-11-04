@@ -2726,9 +2726,277 @@ K f 0 192 2 0
 P N 91 1
 D none
 F extensible_cbsize_short
-O -1128613112
+O ok
+I 68 76 2 128000 1/8000
+K f 0 0 0 0
+P N 68 8
+D none
+K f 0 0 1 0
+P N 68 8
+D none
+K f 0 0 4 0
+P N 68 8
+D none
+K f 0 1 0 0
+P N 70 6
+D none
+K f 0 1 1 0
+P N 70 6
+D none
+K f 0 1 4 0
+P N 70 6
+D none
+K f 0 3 0 0
+P N 74 2
+D none
+K f 0 3 1 0
+P N 74 2
+D none
+K f 0 3 4 0
+P N 74 2
+D none
+K f 0 2 0 0
+P N 72 4
+D none
+K f 0 2 1 0
+P N 72 4
+D none
+K f 0 2 4 0
+P N 72 4
+D none
+K f 0 3 0 0
+P N 74 2
+D none
+K f 0 3 1 0
+P N 74 2
+D none
+K f 0 3 4 0
+P N 74 2
+D none
+K f 0 4 0 0
+P EOF
+K f 0 4 1 0
+P EOF
+K f 0 4 4 0
+P EOF
+K f 0 11 0 -1
+K f 0 11 1 -1
+K f 0 11 4 -1
+K f 0 -5 0 0
+P N 68 8
+D none
+K f 0 -5 1 0
+P N 68 8
+D none
+K f 0 -5 4 0
+P N 68 8
+D none
+K f -1 0 0 0
+P N 68 8
+D none
+K f -1 0 1 0
+P N 68 8
+D none
+K s -1 0 -9223372036854775808 9223372036854775807 0 0
+P N 68 8
+D none
+K f -1 1 0 0
+P N 68 8
+D none
+K f -1 1 1 0
+P N 68 8
+D none
+K s -1 1 -9223372036854775808 9223372036854775807 0 0
+P N 68 8
+D none
+K f -1 125 0 0
+P N 70 6
+D none
+K f -1 125 1 0
+P N 70 6
+D none
+K s -1 125 -9223372036854775808 9223372036854775807 0 0
+P N 70 6
+D none
+K f -1 1000 0 -1
+K f -1 1000 1 -1
+K s -1 1000 -9223372036854775808 9223372036854775807 0 -1
+K f -1 250000 0 -1
+K f -1 250000 1 -1
+K s -1 250000 -9223372036854775808 9223372036854775807 0 -1
+K f -1 1000000 0 -1
+K f -1 1000000 1 -1
+K s -1 1000000 -9223372036854775808 9223372036854775807 0 -1
+K s 0 2 -9223372036854775808 9223372036854775807 0 0
+P N 72 4
+D none
+K s 0 2 2 9223372036854775807 0 0
+P N 72 4
+D none
+K s 0 1 0 2 0 0
+P N 70 6
+D none
+K f 1 0 0 EINVAL
+K f 0 0 2 0
+P N 68 8
+D none
+K f 0 67 2 0
+P N 68 8
+D none
+K f 0 68 2 0
+P N 68 8
+D none
+K f 0 69 2 0
+P N 69 7
+D none
+K f 0 70 2 0
+P N 70 6
+D none
+K f 0 75 2 0
+P N 75 1
+D none
+K f 0 76 2 0
+P N 75 1
+D none
+K f 0 176 2 0
+P N 75 1
+D none
 F extensible_fmt18
-O -1128613112
+O ok
+I 46 54 2 128000 1/8000
+K f 0 0 0 0
+P N 46 8
+D none
+K f 0 0 1 0
+P N 46 8
+D none
+K f 0 0 4 0
+P N 46 8
+D none
+K f 0 1 0 0
+P N 48 6
+D none
+K f 0 1 1 0
+P N 48 6
+D none
+K f 0 1 4 0
+P N 48 6
+D none
+K f 0 3 0 0
+P N 52 2
+D none
+K f 0 3 1 0
+P N 52 2
+D none
+K f 0 3 4 0
+P N 52 2
+D none
+K f 0 2 0 0
+P N 50 4
+D none
+K f 0 2 1 0
+P N 50 4
+D none
+K f 0 2 4 0
+P N 50 4
+D none
+K f 0 3 0 0
+P N 52 2
+D none
+K f 0 3 1 0
+P N 52 2
+D none
+K f 0 3 4 0
+P N 52 2
+D none
+K f 0 4 0 0
+P EOF
+K f 0 4 1 0
+P EOF
+K f 0 4 4 0
+P EOF
+K f 0 11 0 -1
+K f 0 11 1 -1
+K f 0 11 4 -1
+K f 0 -5 0 0
+P N 46 8
+D none
+K f 0 -5 1 0
+P N 46 8
+D none
+K f 0 -5 4 0
+P N 46 8
+D none
+K f -1 0 0 0
+P N 46 8
+D none
+K f -1 0 1 0
+P N 46 8
+D none
+K s -1 0 -9223372036854775808 9223372036854775807 0 0
+P N 46 8
+D none
+K f -1 1 0 0
+P N 46 8
+D none
+K f -1 1 1 0
+P N 46 8
+D none
+K s -1 1 -9223372036854775808 9223372036854775807 0 0
+P N 46 8
+D none
+K f -1 125 0 0
+P N 48 6
+D none
+K f -1 125 1 0
+P N 48 6
+D none
+K s -1 125 -9223372036854775808 9223372036854775807 0 0
+P N 48 6
+D none
+K f -1 1000 0 -1
+K f -1 1000 1 -1
+K s -1 1000 -9223372036854775808 9223372036854775807 0 -1
+K f -1 250000 0 -1
+K f -1 250000 1 -1
+K s -1 250000 -9223372036854775808 9223372036854775807 0 -1
+K f -1 1000000 0 -1
+K f -1 1000000 1 -1
+K s -1 1000000 -9223372036854775808 9223372036854775807 0 -1
+K s 0 2 -9223372036854775808 9223372036854775807 0 0
+P N 50 4
+D none
+K s 0 2 2 9223372036854775807 0 0
+P N 50 4
+D none
+K s 0 1 0 2 0 0
+P N 48 6
+D none
+K f 1 0 0 EINVAL
+K f 0 0 2 0
+P N 46 8
+D none
+K f 0 45 2 0
+P N 46 8
+D none
+K f 0 46 2 0
+P N 46 8
+D none
+K f 0 47 2 0
+P N 47 7
+D none
+K f 0 48 2 0
+P N 48 6
+D none
+K f 0 53 2 0
+P N 53 1
+D none
+K f 0 54 2 0
+P N 53 1
+D none
+K f 0 154 2 0
+P N 53 1
+D none
 F extensible_mask_extra
 O ok
 I 68 84 4 256000 1/8000
@@ -3325,11 +3593,259 @@ K f 0 176 2 0
 P N 75 1
 D none
 F extensible_subformat_adpcm
-O -1128613112
+O ok
+I 68 76 1 64000 1/8000
+K f 0 0 0 0
+P N 68 8
+D none
+K f 0 0 1 0
+P N 68 8
+D none
+K f 0 0 4 0
+P N 68 8
+D none
+K f 0 1 0 0
+P N 69 7
+D none
+K f 0 1 1 0
+P N 69 7
+D none
+K f 0 1 4 0
+P N 69 7
+D none
+K f 0 3 0 0
+P N 71 5
+D none
+K f 0 3 1 0
+P N 71 5
+D none
+K f 0 3 4 0
+P N 71 5
+D none
+K f 0 8 0 0
+P EOF
+K f 0 8 1 0
+P EOF
+K f 0 8 4 0
+P EOF
+K f 0 15 0 -1
+K f 0 15 1 -1
+K f 0 15 4 -1
+K f 0 16 0 -1
+K f 0 16 1 -1
+K f 0 16 4 -1
+K f 0 23 0 -1
+K f 0 23 1 -1
+K f 0 23 4 -1
+K f 0 -5 0 0
+P N 68 8
+D none
+K f 0 -5 1 0
+P N 68 8
+D none
+K f 0 -5 4 0
+P N 68 8
+D none
+K f -1 0 0 0
+P N 68 8
+D none
+K f -1 0 1 0
+P N 68 8
+D none
+K s -1 0 -9223372036854775808 9223372036854775807 0 0
+P N 68 8
+D none
+K f -1 1 0 0
+P N 68 8
+D none
+K f -1 1 1 0
+P N 68 8
+D none
+K s -1 1 -9223372036854775808 9223372036854775807 0 0
+P N 68 8
+D none
+K f -1 125 0 0
+P N 69 7
+D none
+K f -1 125 1 0
+P N 69 7
+D none
+K s -1 125 -9223372036854775808 9223372036854775807 0 0
+P N 69 7
+D none
+K f -1 1000 0 0
+P EOF
+K f -1 1000 1 0
+P EOF
+K s -1 1000 -9223372036854775808 9223372036854775807 0 0
+P EOF
+K f -1 250000 0 -1
+K f -1 250000 1 -1
+K s -1 250000 -9223372036854775808 9223372036854775807 0 -1
+K f -1 1000000 0 -1
+K f -1 1000000 1 -1
+K s -1 1000000 -9223372036854775808 9223372036854775807 0 -1
+K s 0 8 -9223372036854775808 9223372036854775807 0 0
+P EOF
+K s 0 8 8 9223372036854775807 0 0
+P EOF
+K s 0 1 0 2 0 0
+P N 69 7
+D none
+K f 1 0 0 EINVAL
+K f 0 0 2 0
+P N 68 8
+D none
+K f 0 67 2 0
+P N 68 8
+D none
+K f 0 68 2 0
+P N 68 8
+D none
+K f 0 69 2 0
+P N 69 7
+D none
+K f 0 69 2 0
+P N 69 7
+D none
+K f 0 75 2 0
+P N 75 1
+D none
+K f 0 76 2 0
+P N 75 1
+D none
+K f 0 176 2 0
+P N 75 1
+D none
 F extensible_truncated
 O INVALIDDATA
 F extensible_unknown_subformat
-O -1128613112
+O ok
+I 68 76 2 128000 1/8000
+K f 0 0 0 0
+P 0 68 8
+D none
+K f 0 0 1 0
+P 0 68 8
+D none
+K f 0 0 4 0
+P 0 68 8
+D none
+K f 0 1 0 -1
+K f 0 1 1 0
+P 0 68 8
+D none
+K f 0 1 4 -1
+K f 0 3 0 -1
+K f 0 3 1 0
+P 0 68 8
+D none
+K f 0 3 4 -1
+K f 0 2 0 -1
+K f 0 2 1 0
+P 0 68 8
+D none
+K f 0 2 4 -1
+K f 0 3 0 -1
+K f 0 3 1 0
+P 0 68 8
+D none
+K f 0 3 4 -1
+K f 0 4 0 -1
+K f 0 4 1 0
+P 0 68 8
+D none
+K f 0 4 4 -1
+K f 0 11 0 -1
+K f 0 11 1 0
+P 0 68 8
+D none
+K f 0 11 4 -1
+K f 0 -5 0 0
+P 0 68 8
+D none
+K f 0 -5 1 -1
+K f 0 -5 4 0
+P 0 68 8
+D none
+K f -1 0 0 0
+P 0 68 8
+D none
+K f -1 0 1 0
+P 0 68 8
+D none
+K s -1 0 -9223372036854775808 9223372036854775807 0 0
+P 0 68 8
+D none
+K f -1 1 0 0
+P 0 68 8
+D none
+K f -1 1 1 0
+P 0 68 8
+D none
+K s -1 1 -9223372036854775808 9223372036854775807 0 0
+P 0 68 8
+D none
+K f -1 125 0 -1
+K f -1 125 1 0
+P 0 68 8
+D none
+K s -1 125 -9223372036854775808 9223372036854775807 0 0
+P 0 68 8
+D none
+K f -1 1000 0 -1
+K f -1 1000 1 0
+P 0 68 8
+D none
+K s -1 1000 -9223372036854775808 9223372036854775807 0 0
+P 0 68 8
+D none
+K f -1 250000 0 -1
+K f -1 250000 1 0
+P 0 68 8
+D none
+K s -1 250000 -9223372036854775808 9223372036854775807 0 0
+P 0 68 8
+D none
+K f -1 1000000 0 -1
+K f -1 1000000 1 0
+P 0 68 8
+D none
+K s -1 1000000 -9223372036854775808 9223372036854775807 0 0
+P 0 68 8
+D none
+K s 0 2 -9223372036854775808 9223372036854775807 0 0
+P 0 68 8
+D none
+K s 0 2 2 9223372036854775807 0 -1
+K s 0 1 0 2 0 0
+P 0 68 8
+D none
+K f 1 0 0 EINVAL
+K f 0 0 2 0
+P 0 68 8
+D none
+K f 0 67 2 0
+P 0 68 8
+D none
+K f 0 68 2 0
+P 0 68 8
+D none
+K f 0 69 2 0
+P 0 69 7
+D none
+K f 0 70 2 0
+P 0 70 6
+D none
+K f 0 75 2 0
+P 0 75 1
+D none
+K f 0 76 2 0
+P 0 75 1
+D none
+K f 0 176 2 0
+P 0 75 1
+D none
 F extensible_valid_bits_mismatch
 O ok
 I 68 80 6 384000 1/8000
@@ -4220,7 +4736,130 @@ K f 0 156 2 0
 P N 55 1
 D none
 F fmt_adpcm
-O -1128613112
+O ok
+I 44 52 1 64000 1/8000
+K f 0 0 0 0
+P N 44 8
+D none
+K f 0 0 1 0
+P N 44 8
+D none
+K f 0 0 4 0
+P N 44 8
+D none
+K f 0 1 0 0
+P N 45 7
+D none
+K f 0 1 1 0
+P N 45 7
+D none
+K f 0 1 4 0
+P N 45 7
+D none
+K f 0 3 0 0
+P N 47 5
+D none
+K f 0 3 1 0
+P N 47 5
+D none
+K f 0 3 4 0
+P N 47 5
+D none
+K f 0 8 0 0
+P EOF
+K f 0 8 1 0
+P EOF
+K f 0 8 4 0
+P EOF
+K f 0 15 0 -1
+K f 0 15 1 -1
+K f 0 15 4 -1
+K f 0 16 0 -1
+K f 0 16 1 -1
+K f 0 16 4 -1
+K f 0 23 0 -1
+K f 0 23 1 -1
+K f 0 23 4 -1
+K f 0 -5 0 0
+P N 44 8
+D none
+K f 0 -5 1 0
+P N 44 8
+D none
+K f 0 -5 4 0
+P N 44 8
+D none
+K f -1 0 0 0
+P N 44 8
+D none
+K f -1 0 1 0
+P N 44 8
+D none
+K s -1 0 -9223372036854775808 9223372036854775807 0 0
+P N 44 8
+D none
+K f -1 1 0 0
+P N 44 8
+D none
+K f -1 1 1 0
+P N 44 8
+D none
+K s -1 1 -9223372036854775808 9223372036854775807 0 0
+P N 44 8
+D none
+K f -1 125 0 0
+P N 45 7
+D none
+K f -1 125 1 0
+P N 45 7
+D none
+K s -1 125 -9223372036854775808 9223372036854775807 0 0
+P N 45 7
+D none
+K f -1 1000 0 0
+P EOF
+K f -1 1000 1 0
+P EOF
+K s -1 1000 -9223372036854775808 9223372036854775807 0 0
+P EOF
+K f -1 250000 0 -1
+K f -1 250000 1 -1
+K s -1 250000 -9223372036854775808 9223372036854775807 0 -1
+K f -1 1000000 0 -1
+K f -1 1000000 1 -1
+K s -1 1000000 -9223372036854775808 9223372036854775807 0 -1
+K s 0 8 -9223372036854775808 9223372036854775807 0 0
+P EOF
+K s 0 8 8 9223372036854775807 0 0
+P EOF
+K s 0 1 0 2 0 0
+P N 45 7
+D none
+K f 1 0 0 EINVAL
+K f 0 0 2 0
+P N 44 8
+D none
+K f 0 43 2 0
+P N 44 8
+D none
+K f 0 44 2 0
+P N 44 8
+D none
+K f 0 45 2 0
+P N 45 7
+D none
+K f 0 45 2 0
+P N 45 7
+D none
+K f 0 51 2 0
+P N 51 1
+D none
+K f 0 52 2 0
+P N 51 1
+D none
+K f 0 152 2 0
+P N 51 1
+D none
 F fmt_alaw_bits16
 O ok
 I 44 52 2 128000 1/8000
@@ -5672,7 +6311,141 @@ K f 0 152 2 0
 P N 51 1
 D none
 F fmt_float_bits16
-O -1128613112
+O ok
+I 44 52 2 128000 1/8000
+K f 0 0 0 0
+P N 44 8
+D none
+K f 0 0 1 0
+P N 44 8
+D none
+K f 0 0 4 0
+P N 44 8
+D none
+K f 0 1 0 0
+P N 46 6
+D none
+K f 0 1 1 0
+P N 46 6
+D none
+K f 0 1 4 0
+P N 46 6
+D none
+K f 0 3 0 0
+P N 50 2
+D none
+K f 0 3 1 0
+P N 50 2
+D none
+K f 0 3 4 0
+P N 50 2
+D none
+K f 0 2 0 0
+P N 48 4
+D none
+K f 0 2 1 0
+P N 48 4
+D none
+K f 0 2 4 0
+P N 48 4
+D none
+K f 0 3 0 0
+P N 50 2
+D none
+K f 0 3 1 0
+P N 50 2
+D none
+K f 0 3 4 0
+P N 50 2
+D none
+K f 0 4 0 0
+P EOF
+K f 0 4 1 0
+P EOF
+K f 0 4 4 0
+P EOF
+K f 0 11 0 -1
+K f 0 11 1 -1
+K f 0 11 4 -1
+K f 0 -5 0 0
+P N 44 8
+D none
+K f 0 -5 1 0
+P N 44 8
+D none
+K f 0 -5 4 0
+P N 44 8
+D none
+K f -1 0 0 0
+P N 44 8
+D none
+K f -1 0 1 0
+P N 44 8
+D none
+K s -1 0 -9223372036854775808 9223372036854775807 0 0
+P N 44 8
+D none
+K f -1 1 0 0
+P N 44 8
+D none
+K f -1 1 1 0
+P N 44 8
+D none
+K s -1 1 -9223372036854775808 9223372036854775807 0 0
+P N 44 8
+D none
+K f -1 125 0 0
+P N 46 6
+D none
+K f -1 125 1 0
+P N 46 6
+D none
+K s -1 125 -9223372036854775808 9223372036854775807 0 0
+P N 46 6
+D none
+K f -1 1000 0 -1
+K f -1 1000 1 -1
+K s -1 1000 -9223372036854775808 9223372036854775807 0 -1
+K f -1 250000 0 -1
+K f -1 250000 1 -1
+K s -1 250000 -9223372036854775808 9223372036854775807 0 -1
+K f -1 1000000 0 -1
+K f -1 1000000 1 -1
+K s -1 1000000 -9223372036854775808 9223372036854775807 0 -1
+K s 0 2 -9223372036854775808 9223372036854775807 0 0
+P N 48 4
+D none
+K s 0 2 2 9223372036854775807 0 0
+P N 48 4
+D none
+K s 0 1 0 2 0 0
+P N 46 6
+D none
+K f 1 0 0 EINVAL
+K f 0 0 2 0
+P N 44 8
+D none
+K f 0 43 2 0
+P N 44 8
+D none
+K f 0 44 2 0
+P N 44 8
+D none
+K f 0 45 2 0
+P N 45 7
+D none
+K f 0 46 2 0
+P N 46 6
+D none
+K f 0 51 2 0
+P N 51 1
+D none
+K f 0 52 2 0
+P N 51 1
+D none
+K f 0 152 2 0
+P N 51 1
+D none
 F fmt_rate0
 O INVALIDDATA
 F fmt_rate_over_limit
@@ -6113,7 +6886,77 @@ D 1 7f
 F fmt_truncated
 O INVALIDDATA
 F fmt_unsupported_before_invalid
-O -1128613112
+O ok
+I -1 44 1 64000 1/8000
+K f 0 0 0 0
+P EOF
+K f 0 0 1 0
+P EOF
+K f 0 0 4 0
+P EOF
+K f 0 1 0 -1
+K f 0 1 1 -1
+K f 0 1 4 -1
+K f 0 3 0 -1
+K f 0 3 1 -1
+K f 0 3 4 -1
+K f 0 0 0 0
+P EOF
+K f 0 0 1 0
+P EOF
+K f 0 0 4 0
+P EOF
+K f 0 -1 0 0
+P EOF
+K f 0 -1 1 0
+P EOF
+K f 0 -1 4 0
+P EOF
+K f 0 0 0 0
+P EOF
+K f 0 0 1 0
+P EOF
+K f 0 0 4 0
+P EOF
+K f 0 7 0 -1
+K f 0 7 1 -1
+K f 0 7 4 -1
+K f 0 -5 0 0
+P EOF
+K f 0 -5 1 0
+P EOF
+K f 0 -5 4 0
+P EOF
+K f -1 0 0 0
+P EOF
+K f -1 0 1 0
+P EOF
+K s -1 0 -9223372036854775808 9223372036854775807 0 0
+P EOF
+K f -1 1 0 0
+P EOF
+K f -1 1 1 0
+P EOF
+K s -1 1 -9223372036854775808 9223372036854775807 0 0
+P EOF
+K f -1 125 0 -1
+K f -1 125 1 -1
+K s -1 125 -9223372036854775808 9223372036854775807 0 -1
+K f -1 1000 0 -1
+K f -1 1000 1 -1
+K s -1 1000 -9223372036854775808 9223372036854775807 0 -1
+K f -1 250000 0 -1
+K f -1 250000 1 -1
+K s -1 250000 -9223372036854775808 9223372036854775807 0 -1
+K f -1 1000000 0 -1
+K f -1 1000000 1 -1
+K s -1 1000000 -9223372036854775808 9223372036854775807 0 -1
+K s 0 0 -9223372036854775808 9223372036854775807 0 0
+P EOF
+K s 0 0 0 9223372036854775807 0 0
+P EOF
+K s 0 1 0 2 0 -1
+K f 1 0 0 EINVAL
 F info_after_data
 O ok
 I 44 78 2 128000 1/8000

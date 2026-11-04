@@ -21,6 +21,10 @@
 //                                  return value
 //   P <pts> <pos> <size>           the next packet after it (pts N when
 //                                  unset), or `P EOF`
+//   Z <skip> <discard>             its skip-samples side data, when it has
+//                                  any: the samples its decoder drops at
+//                                  the start (the pre-roll a seek asks
+//                                  for) and at the end
 //   D <nb_samples> <hex>           the decoded frame's first 16 sample
 //                                  frames, as stored (packed formats), or
 //                                  `D none` (no frame, or no decoder)
@@ -36,6 +40,7 @@
 #include "libavcodec/avcodec.h"
 #include "libavformat/avformat.h"
 #include "libavutil/avutil.h"
+#include "libavutil/intreadwrite.h"
 #include "libavutil/log.h"
 #include "libavutil/samplefmt.h"
 
@@ -103,6 +108,10 @@ static void print_next(struct Opened *o)
         else
             printf("%" PRId64, pkt->pts);
         printf(" %" PRId64 " %d\n", pkt->pos, pkt->size);
+        size_t side_size;
+        const uint8_t *side = av_packet_get_side_data(pkt, AV_PKT_DATA_SKIP_SAMPLES, &side_size);
+        if (side && side_size >= 8)
+            printf("Z %u %u\n", AV_RL32(side), AV_RL32(side + 4));
         if (o->dec)
             avcodec_flush_buffers(o->dec);
         if (o->dec && avcodec_send_packet(o->dec, pkt) >= 0 && avcodec_receive_frame(o->dec, frame) >= 0) {

@@ -3,8 +3,11 @@
 // libavformat/demux.c (read_frame_internal, parse_packet, compute_pkt_fields,
 // update_initial_timestamps, update_initial_durations, select_from_pts_buffer,
 // update_dts_from_pts, av_read_frame, avformat_find_stream_info's read-ahead,
-// has_codec_parameters) and libavcodec/flac_parser.c's complete-frames path
-// at the pinned reference revision describe the behavior, restated here.
+// has_codec_parameters), libavformat/seek.c (av_seek_frame,
+// avformat_seek_file, seek_frame_generic, ff_seek_frame_binary,
+// ff_read_frame_flush, request_seek_discard) and libavcodec/flac_parser.c's
+// complete-frames path at the pinned reference revision describe the
+// behavior, restated here.
 //! libavformat's generic layer over a demuxer (TODO.md T27a): what
 //! `av_read_frame` does to the packets a demuxer gives before the caller
 //! sees them, for streams of audio without frame reordering, which is
@@ -26,11 +29,20 @@
 //! stream's start time and duration, which the demuxer and this layer
 //! both set, as both set FFmpeg's `AVStream`), `fileSize() ?u64` and
 //! `dataOffset() i64`.
+//!
+//! Seeking is libavformat's too: `seekFrame` (`av_seek_frame`) and
+//! `seekFile` (`avformat_seek_file`, with its pre-roll target and the
+//! skip samples it asks the next packets for) over the index of returned
+//! keyframes (AVFMT_GENERIC_INDEX). For them the source also has
+//! `reposition(pos)`, `ioRepositioned()` (it resets on its next read),
+//! `readTimestamp(i, *pos, pos_limit) !i64` for the binary search, and
+//! `readSeek(layer, i, ts, flags) !bool`, its own `read_seek`.
 
 const std = @import("std");
 const flac = @import("../codec/flac.zig");
 const bits = @import("../codec/bits.zig");
 const rational = @import("../core/rational.zig");
+const seek = @import("seek.zig");
 
 pub const nopts: i64 = std.math.minInt(i64);
 /// libavformat's base for timestamps counted before the first is known.
@@ -61,6 +73,9 @@ pub const Setup = struct {
     has_decoder: bool = false,
     /// `codecpar->bit_rate`, 0 when unknown.
     bit_rate: i64 = 0,
+    /// `codecpar->initial_padding` and `seek_preroll`, in samples.
+    initial_padding: u32 = 0,
+    seek_preroll: u32 = 0,
 };
 
 /// A packet as the demuxer gives it.
@@ -135,6 +150,14 @@ const StreamState = struct {
     /// -1 no decoder.
     found_decoder: i8 = 0,
     decoded: bool = false,
+    /// The index AVFMT_GENERIC_INDEX builds from the returned keyframes.
+    index: seek.Index = .{},
+    /// The samples the next packet's skip-samples side data discards,
+    /// and the request a seek leaves for it (`seek_discard`,
+    /// `seek_to_start`).
+    skip_samples: i64 = 0,
+    seek_discard: bool = false,
+    seek_to_start: bool = false,
 };
 
 pub fn Layer(comptime Source: type) type {
@@ -169,6 +192,7 @@ pub fn Layer(comptime Source: type) type {
             l.packet_buffer.deinit(l.gpa);
             l.parse_queue.deinit(l.gpa);
             if (l.current) |*h| h.deinit(l.gpa);
+            for (l.states.items) |*s| s.index.deinit(l.gpa);
             l.states.deinit(l.gpa);
         }
 
@@ -357,6 +381,9 @@ pub fn Layer(comptime Source: type) type {
             else
                 try l.readFrameInternal() orelse return null;
             l.current = h;
+            // av_read_frame's return_packet indexes every keyframe again,
+            // its timestamps now fixed.
+            if (h.flags & key_flag != 0) try l.addIndexEntry(h.stream, h.pos, h.dts);
             var pts = h.pts;
             var dts = h.dts;
             if (isRelative(dts)) dts -= relative_ts_base;
@@ -376,8 +403,17 @@ pub fn Layer(comptime Source: type) type {
         }
 
         /// read_frame_internal: the demuxer's next packet through the
-        /// parser or compute_pkt_fields; null at the end.
+        /// parser or compute_pkt_fields, with the skip samples a seek
+        /// asked for; null at the end.
         fn readFrameInternal(l: *Self) Error!?Held {
+            var h = try l.nextParsed() orelse return null;
+            errdefer h.deinit(l.gpa);
+            try l.injectSkip(&h);
+            return h;
+        }
+
+        /// read_frame_internal's packet, before its skip samples.
+        fn nextParsed(l: *Self) Error!?Held {
             while (l.parse_queue.items.len == 0) {
                 if (l.eof) return null;
                 const raw = l.src.next() catch |err| {
@@ -398,10 +434,64 @@ pub fn Layer(comptime Source: type) type {
                     continue;
                 }
                 try l.computePktFields(&h, setup);
+                // AVFMT_GENERIC_INDEX, which every format here has.
+                if (h.flags & key_flag != 0 and h.dts != nopts) try l.addIndexEntry(h.stream, h.pos, h.dts);
                 return h;
             }
             if (l.parse_queue.items.len == 0) return null;
             return l.parse_queue.orderedRemove(0);
+        }
+
+        /// av_add_index_entry for a keyframe: a relative timestamp is
+        /// taken as it is, less the relative base.
+        fn addIndexEntry(l: *Self, stream: usize, pos: i64, dts: i64) Error!void {
+            const s = try l.state(stream);
+            try s.index.add(l.gpa, pos, if (isRelative(dts)) dts - relative_ts_base else dts);
+        }
+
+        /// The codec parameters' sample rate: the demuxer's, else the
+        /// parser's.
+        fn sampleRate(l: *Self, i: usize, s: *const StreamState) u32 {
+            const rate = l.src.setup(i).sample_rate;
+            return if (rate != 0) rate else s.parser_rate;
+        }
+
+        /// read_frame_internal's skip samples: after a seek, the priming
+        /// before the start time, the initial padding on the stream's
+        /// first packet, else the decoder's pre-roll, made side data with
+        /// what the demuxer set (the formats here set no discard range).
+        fn injectSkip(l: *Self, h: *Held) Error!void {
+            const s = try l.state(h.stream);
+            const setup = l.src.setup(h.stream);
+            if (s.seek_discard) {
+                const rate = l.sampleRate(h.stream, s);
+                if (setup.known and rate > 0) {
+                    const start = l.src.startTime(h.stream).*;
+                    const first = h.dts != nopts and s.first_dts != nopts and h.dts <= s.first_dts;
+                    const in_priming = h.pts != nopts and start != nopts and h.pts < start;
+                    var skip: i64 = 0;
+                    // ts_to_samples: the priming ends at the start time.
+                    if (in_priming) skip = rational.rescale(start - h.pts, setup.time_base.num * @as(i64, rate), setup.time_base.den);
+                    if (first) {
+                        if (setup.initial_padding > 0) skip = setup.initial_padding;
+                    } else if (!(s.seek_to_start and h.pts != nopts and !in_priming)) {
+                        skip = @max(skip, setup.seek_preroll);
+                    }
+                    s.skip_samples = @max(s.skip_samples, @min(skip, std.math.maxInt(i32)));
+                }
+                s.seek_discard = false;
+            }
+            s.skip_samples = @max(0, s.skip_samples);
+            if (s.skip_samples == 0) return;
+            var padding: u32 = 0;
+            if (h.skip) |kept| {
+                // FFmpeg reads the demuxer's count as an int.
+                const demuxer_skip: i32 = @bitCast(kept[0]);
+                s.skip_samples = @max(s.skip_samples, demuxer_skip);
+                padding = kept[1];
+            }
+            h.skip = .{ @intCast(s.skip_samples), padding };
+            s.skip_samples = 0;
         }
 
         fn own(l: *Self, raw: SourcePacket) Error!Held {
@@ -548,6 +638,234 @@ pub fn Layer(comptime Source: type) type {
                 cur_dts = h.dts +% h.duration;
             }
             if (reached_end) s.cur_dts = cur_dts;
+        }
+
+        // Seeking (libavformat/seek.c). The source repositions itself
+        // (`reposition`, `ioRepositioned` for its next read), reads a
+        // timestamp for the binary search (`readTimestamp`) and runs its
+        // own `read_seek` (`readSeek`, which may call `seekFrameBinary`).
+
+        /// What a seek fails with.
+        pub const SeekError = Error || error{
+            /// A stream index neither -1 nor the input's (`AVERROR(EINVAL)`).
+            InvalidStream,
+            /// `min > ts` or `max < ts` in `seekFile` (-1).
+            InvalidRange,
+            /// No position was found (-1).
+            SeekFailed,
+        };
+
+        /// Every stream's state exists, as FFmpeg's streams all do.
+        fn ensureStates(l: *Self) Error!void {
+            if (l.src.streamCount() > 0) _ = try l.state(l.src.streamCount() - 1);
+        }
+
+        /// ff_read_frame_flush: the held packets dropped and each
+        /// stream's running timestamp unknown (relative before any).
+        pub fn flush(l: *Self) void {
+            for (l.packet_buffer.items) |*h| h.deinit(l.gpa);
+            for (l.parse_queue.items) |*h| h.deinit(l.gpa);
+            l.packet_buffer.clearRetainingCapacity();
+            l.parse_queue.clearRetainingCapacity();
+            for (l.states.items) |*s| {
+                s.last_ip_pts = nopts;
+                s.cur_dts = if (s.first_dts == nopts) relative_ts_base else nopts;
+                s.skip_samples = 0;
+                s.seek_discard = false;
+            }
+            l.eof = false;
+        }
+
+        /// avpriv_update_cur_dts: every stream's running timestamp from
+        /// `timestamp` in stream `ref`'s time base.
+        fn updateCurDts(l: *Self, ref: usize, timestamp: i64) void {
+            const ref_tb = l.src.setup(ref).time_base;
+            for (l.states.items, 0..) |*s, i| {
+                const tb = l.src.setup(i).time_base;
+                s.cur_dts = rational.rescale(timestamp, tb.den * @as(i64, ref_tb.num), tb.num * @as(i64, ref_tb.den));
+            }
+        }
+
+        fn fileSizeOrMax(l: *Self) i64 {
+            const size = l.src.fileSize() orelse return std.math.maxInt(i64);
+            return std.math.cast(i64, size) orelse std.math.maxInt(i64);
+        }
+
+        const SearchContext = struct {
+            l: *Self,
+            stream: usize,
+
+            fn readTimestamp(c: SearchContext, pos: *i64, pos_limit: i64) Error!i64 {
+                return c.l.src.readTimestamp(c.stream, pos, pos_limit);
+            }
+        };
+
+        const Search = seek.Search(SearchContext, Error, SearchContext.readTimestamp);
+
+        /// ff_seek_frame_binary over the source's `readTimestamp`, from
+        /// the bounds the index gives: false where FFmpeg's gives -1.
+        pub fn seekFrameBinary(l: *Self, stream: usize, target: i64, flags: seek.Flags) Error!bool {
+            try l.ensureStates();
+            const bounds = l.states.items[stream].index.bounds(target, flags.any);
+            const found = try Search.genSearch(.{ .l = l, .stream = stream }, l.src.dataOffset(), l.fileSizeOrMax(), target, bounds, flags.backward) orelse return false;
+            try l.src.reposition(found.pos);
+            l.flush();
+            l.updateCurDts(stream, found.ts);
+            return true;
+        }
+
+        /// av_find_default_stream_index over audio streams.
+        fn defaultStream(l: *Self) ?usize {
+            if (l.src.streamCount() == 0) return null;
+            var best: usize = 0;
+            var best_score: i32 = std.math.minInt(i32);
+            for (0..l.src.streamCount()) |i| {
+                const s = &l.states.items[i];
+                var score: i32 = 200; // not discarded
+                if (l.src.setup(i).known and l.sampleRate(i, s) != 0) score += 50;
+                if (s.codec_info_nb_frames > 0) score += 12;
+                if (score > best_score) {
+                    best_score = score;
+                    best = i;
+                }
+            }
+            return best;
+        }
+
+        /// `av_seek_frame` (seek_frame_internal): by byte position, else
+        /// the demuxer's own seek, else seek_frame_generic over the index.
+        pub fn seekFrame(l: *Self, stream: i32, timestamp: i64, flags: seek.Flags) SeekError!void {
+            if (stream < -1 or stream >= l.src.streamCount()) return error.InvalidStream;
+            try l.ensureStates();
+            if (flags.byte) {
+                l.flush();
+                return l.seekFrameByte(timestamp);
+            }
+            var index: usize = undefined;
+            var ts = timestamp;
+            if (stream < 0) {
+                index = l.defaultStream() orelse return error.SeekFailed;
+                ts = seek.defaultStreamTimestamp(ts, l.src.setup(index).time_base);
+            } else index = @intCast(stream);
+            l.flush();
+            if (try l.src.readSeek(l, index, ts, flags)) return;
+            // AVFMT_NOBINSEARCH: the generic search.
+            l.flush();
+            return l.seekFrameGeneric(index, ts, flags);
+        }
+
+        /// seek_frame_byte: the position clamped to the data.
+        fn seekFrameByte(l: *Self, pos_in: i64) Error!void {
+            var pos = pos_in;
+            const pos_min = l.src.dataOffset();
+            const pos_max = l.fileSizeOrMax() - 1;
+            if (pos < pos_min) {
+                pos = pos_min;
+            } else if (pos > pos_max) {
+                pos = pos_max;
+            }
+            try l.src.reposition(pos);
+            l.src.ioRepositioned();
+        }
+
+        /// seek_frame_generic: the index entry for `timestamp`, read
+        /// forward from the last one (or the data's start) when it is
+        /// not there yet.
+        fn seekFrameGeneric(l: *Self, stream: usize, timestamp: i64, flags: seek.Flags) SeekError!void {
+            var found = l.states.items[stream].index.search(timestamp, flags);
+            const count = l.states.items[stream].index.entries.items.len;
+            if (found == null and count > 0 and timestamp < l.states.items[stream].index.entries.items[0].timestamp) return error.SeekFailed;
+            if (found == null or found.? == count - 1) {
+                if (count > 0) {
+                    const ie = l.states.items[stream].index.entries.items[count - 1];
+                    try l.src.reposition(ie.pos);
+                    l.src.ioRepositioned();
+                    l.updateCurDts(stream, ie.timestamp);
+                } else {
+                    try l.src.reposition(l.src.dataOffset());
+                    l.src.ioRepositioned();
+                }
+                var nonkey: u32 = 0;
+                while (true) {
+                    // A read error ends the scan, as the end does.
+                    const p = (l.next() catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        else => break,
+                    }) orelse break;
+                    const dts = p.dts orelse continue;
+                    if (p.stream == stream and dts > timestamp) {
+                        if (p.flags & key_flag != 0) break;
+                        nonkey += 1;
+                        if (nonkey > 1001) break;
+                    }
+                }
+                try l.ensureStates();
+                found = l.states.items[stream].index.search(timestamp, flags);
+            }
+            const index = found orelse return error.SeekFailed;
+            l.flush();
+            if (try l.src.readSeek(l, stream, timestamp, flags)) return;
+            const ie = l.states.items[stream].index.entries.items[index];
+            try l.src.reposition(ie.pos);
+            l.src.ioRepositioned();
+            l.updateCurDts(stream, ie.timestamp);
+        }
+
+        /// seek_preroll: the largest audio pre-roll, in the seek's units.
+        fn seekPreroll(l: *Self, stream: i32) i64 {
+            const unit: rational.Rational = if (stream >= 0) l.src.setup(@intCast(stream)).time_base else .{ .num = 1, .den = seek.time_base_units };
+            var preroll: i64 = 0;
+            for (0..l.src.streamCount()) |i| {
+                const setup = l.src.setup(i);
+                const rate = l.sampleRate(i, &l.states.items[i]);
+                if (!setup.known or setup.seek_preroll == 0 or rate == 0) continue;
+                const v = rational.rescaleQRnd(setup.seek_preroll, .{ .num = 1, .den = @intCast(rate) }, unit, .{ .mode = .up });
+                preroll = @max(preroll, v);
+            }
+            return preroll;
+        }
+
+        /// `avformat_seek_file`: aimed early by the pre-roll (not before
+        /// `min_ts`, nor before the start unless `ts` is), through
+        /// seek_file's fallback onto `seekFrame`, again at `ts` when that
+        /// fails; then each stream's first packet discards what the seek
+        /// asks (request_seek_discard).
+        pub fn seekFile(l: *Self, stream: i32, min_ts: i64, ts: i64, max_ts: i64, flags_in: seek.Flags) SeekError!void {
+            if (min_ts > ts or max_ts < ts) return error.InvalidRange;
+            if (stream < -1 or stream >= l.src.streamCount()) return error.InvalidStream;
+            try l.ensureStates();
+            var flags = flags_in;
+            flags.backward = false;
+            var target = ts;
+            var target_max = max_ts;
+            if (!flags.byte) {
+                const preroll = l.seekPreroll(stream);
+                const start = if (stream >= 0) l.src.startTime(@intCast(stream)).* else l.start_time;
+                target = @max(rational.satSub(ts, preroll), min_ts);
+                if (start != nopts) target = @max(target, @min(start, ts));
+                if (max_ts != std.math.maxInt(i64)) target_max = rational.satSub(max_ts, rational.satSub(ts, target));
+            }
+            _ = seek.seekFile(l, seekFrameForFile, stream, min_ts, target, target_max, flags) catch |err| retry: {
+                if (err == error.OutOfMemory or target == ts) return err;
+                target = ts;
+                break :retry try seek.seekFile(l, seekFrameForFile, stream, min_ts, ts, max_ts, flags);
+            };
+            l.requestSeekDiscard(stream, target, flags);
+        }
+
+        fn seekFrameForFile(l: *Self, stream: i32, ts: i64, flags: seek.Flags) SeekError!void {
+            return l.seekFrame(stream, ts, flags);
+        }
+
+        /// request_seek_discard: each stream's next packet discards its
+        /// pre-roll, unless the seek went to the stream's start.
+        fn requestSeekDiscard(l: *Self, stream: i32, ts: i64, flags: seek.Flags) void {
+            const tb: rational.Rational = if (stream >= 0) l.src.setup(@intCast(stream)).time_base else .{ .num = 1, .den = seek.time_base_units };
+            for (l.states.items, 0..) |*s, i| {
+                const start = l.src.startTime(i).*;
+                s.seek_discard = true;
+                s.seek_to_start = !flags.byte and start != nopts and rational.compareTs(ts, tb, start, l.src.setup(i).time_base) <= 0;
+            }
         }
     };
 }
