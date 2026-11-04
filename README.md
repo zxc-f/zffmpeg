@@ -3,7 +3,7 @@
 A native Zig multimedia library and tools, developed incrementally from FFmpeg's
 documented behavior and algorithms, one supported capability at a time.
 
-Current state: five containers and raw PCM work. The `av` library reads and
+Current state: six containers and raw PCM work. The `av` library reads and
 writes every WAV PCM encoding (u8, 16- to 64-bit integers, float, A-law,
 mu-law, plain or WAVE_FORMAT_EXTENSIBLE) in RIFF, RF64/BW64 or Sony Wave64,
 past 4 GiB, every PCM encoding of Sun AU, AIFF and AIFF-C with every PCM
@@ -47,7 +47,12 @@ MD5 verification and FFmpeg's seeking, over 56 FLAC fixtures, with
 FFmpeg's FATE FLAC samples as optional coverage. And `zffmpeg` writes FLAC
 since T26c: FFmpeg's encoder and muxer, byte for byte the ffmpeg program's
 `-bitexact` output at every compression level and with every encoder
-option (`-compression_level`, `-lpc_type`, `-ch_mode`, ...). [TODO.md](TODO.md) holds the completion
+option (`-compression_level`, `-lpc_type`, `-ch_mode`, ...). Ogg is read
+since T27a as FFmpeg's demuxer reads it with its FLAC, Opus and Vorbis
+mappings, without decoding: packet for packet with libavformat's
+timestamps and side data, damaged pages and chained streams included,
+reported by `zffprobe`, copied to FFmpeg's framecrc text, and seeked as
+FFmpeg seeks it, over 20 Ogg fixtures. [TODO.md](TODO.md) holds the completion
 evidence and the roadmap. Development is verified on Linux only. The compiler
 is **Zig 0.17.0**, enforced by the build.
 

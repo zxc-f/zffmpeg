@@ -46,7 +46,9 @@ blocking, metadata blocks, MD5) and FLAC seeking; and T26c, FFmpeg's FLAC
 encoder and muxer packet for packet, as a zffmpeg output, with T18b's bit
 writer, which completes T26; and T19c, the optional FATE corpus with
 recorded provenance and the comparison's coverage summary, which completes
-T19. **Next: T27a (Ogg demux). See
+T19; and T27a, the Ogg demuxer with FFmpeg's FLAC, Opus and Vorbis
+mappings, without decoding, on libavformat's generic layer, in zffprobe, as
+a framecrc stream copy and seeking as FFmpeg does. **Next: T27b (Ogg mux). See
 [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
@@ -2590,7 +2592,7 @@ names, not as an empty framework.
   Reference: `libavformat/oggdec.c`, `oggparse*.c`, `oggenc.c`,
   `libavcodec/vorbisdec.c`, `vorbis.c`, `libavutil/tx.c`;
   `tests/fate/vorbis.mak`.
-  - [ ] **T27a — Ogg demux.** Needs T14a, T15, T16 and T52a. Pages with CRC,
+  - [x] **T27a — Ogg demux.** Needs T14a, T15, T16 and T52a. Pages with CRC,
     packets, chained streams and granule positions to timestamps, parsing only
     the FLAC, Opus and Vorbis headers; bisection seeking on seekable input.
     Done when packets and timestamps equal the reference's
@@ -2599,72 +2601,42 @@ names, not as an empty framework.
 
     ```text
     ID / parent: T27a / T27
-    State: G3 (every fixture's streams and packets equal FFmpeg's;
-      detection, zffprobe, stream copy and seeking remain)
-    Plan: part 0, the contract (port.md "Ogg contract"), Python-made
-      fixtures (generate.py: pages with CRC-32, FLAC, Opus and Vorbis
-      mappings, a synthetic Vorbis setup header whose mode table
-      vorbis_parser.c reads, multiplexed, chained and damaged streams)
-      and an oracle printing what avformat_find_stream_info and
-      av_read_frame give (streams, packets with pts, dts, duration,
-      position, flags and side data); part 1, pages and packets
-      (oggdec.c's ogg_read_page, ogg_packet); part 2, the three mappings
-      (oggparseflac.c, oggparseopus.c, oggparsevorbis.c with
-      vorbis_parser.c) and libavformat's timestamps for them; part 3,
-      detection, zffprobe and stream copy to framecrc; part 4, seeking
-      (ogg_read_timestamp under ff_seek_frame_binary) and the duration
-      scan from the end (ogg_get_length).
-    Evidence so far: build-ffmpeg.sh enables the Ogg demuxer (the
-      registry lists it as a T27a difference until it is registered),
-      0cc5d89; port.md "Ogg contract"; 20 Ogg fixtures from generate.py
-      (FLAC, Opus and Vorbis mappings, a multiplexed and a chained
-      stream, 9 damaged ones, 3 FFmpeg refuses) with vectors/ogg.txt from
-      ogg_vectors.c (164 packets), checked by CI and local CI.
-      Part 1: format/vorbiscomment.zig (7b1502d) and format/ogg.zig
-      (pages, packets, streams and chains, the three mappings and
-      vorbis_parser.c): every fixture's codec parameters, extradata,
-      packets (stream, bytes, position), side data (skip samples, new
-      extradata, strings metadata), open errors and end of reading equal
-      FFmpeg's, in Debug, ReleaseSafe and ReleaseFast. Part 2:
-      format/demux.zig, libavformat's generic layer for audio streams
-      without reordering (compute_pkt_fields, update_initial_timestamps
-      and _durations, the FLAC parser's complete-frames path,
-      avformat_find_stream_info's read-ahead with has_codec_parameters as
-      the reference build's decoders decide it, estimate_timings), and
-      ogg.zig's seekable mode (ogg_save, ogg_restore, ogg_reset,
-      ogg_get_length, whose scans leave the Vorbis private state and
-      start times as FFmpeg's do): every line of vectors/ogg.txt, the
-      streams' durations and start times and the packets' pts, dts,
-      durations and flags included, equals FFmpeg's (9a486ff).
-      Remaining, part 3: (1) codec registry: Vorbis and Opus descriptors
-      (`..AIL.`, no decoder or encoder), compare.py's registry check
-      requiring set equality only for codecs FFmpeg decodes and encodes;
-      (2) format registry: Container.ogg with ogg.probeScore, 6 probe
-      bytes and the `ogg` extension, no muxer, the listed difference
-      removed; (3) detection: an Ogg family whose probe opens the
-      demuxer (an allocator in detect.Options), reporting the first
-      audio stream as ffprobe -select_streams a:0 does, its sample
-      format unknown without a decoder (a probe-output decision for
-      port.md); (4) zffprobe on files through the seekable mode, for
-      durations; (5) the hash driver's stream copy to framecrc for Ogg,
-      as the ffmpeg program's -c copy gives it; (6) compare.py's Ogg
-      section (zffprobe against ffprobe, framecrc against ffmpeg -c copy).
-      Part 3 done: 29780ea (Vorbis and Opus descriptors), 39f2e5f
-      (registry, detection, zffprobe), 2c1fb67 (framecrc copy, compare.py
-      20/20). Part 4a: seek_vectors.c without a decoder and
-      vectors/seek_ogg.txt (918 seeks), 4a7749f. Remaining, part 4b:
-      move ff_gen_search, ff_find_last_ts and ff_seek_frame_binary from
-      flac.zig into seek.zig, generic over a read_timestamp (one
-      implementation; seek_flac.txt guards FLAC); ogg.zig's
-      ogg_read_seek and ogg_read_timestamp and its reset after a
-      reposition (io_repositioned); demux.zig's ff_read_frame_flush,
-      generic index (av_add_index_entry for key packets),
-      seek_frame_generic (the index, then reading forward), seek_frame_byte,
-      avformat_seek_file's pre-roll target and start-time clamp, and
-      request_seek_discard with read_frame_internal's skip-samples
-      injection (initial padding on the first packet, else the pre-roll);
-      then the seek test against seek_ogg.txt. Then G5: local CI, docs,
-      ledger.
+    State: G5 (verified)
+    Evidence: port.md "Ogg contract" and the "Ogg demuxer" ledger row; 20
+      Ogg fixtures from generate.py (FLAC, Opus and Vorbis mappings, a
+      multiplexed and a chained stream, 9 damaged ones, 3 FFmpeg
+      refuses). Part 0, the contract, fixtures and ogg_vectors.c (0cc5d89);
+      part 1, format/vorbiscomment.zig (7b1502d) and format/ogg.zig
+      (pages, packets, chains, the three mappings, vorbis_parser.c);
+      part 2, format/demux.zig, libavformat's generic layer
+      (compute_pkt_fields, update_initial_timestamps and _durations, the
+      FLAC parser's complete-frames path, avformat_find_stream_info's
+      read-ahead, estimate_timings) and ogg_get_length's scans (9a486ff):
+      every line of vectors/ogg.txt equals FFmpeg's; part 3, the Vorbis
+      and Opus descriptors (29780ea), Ogg in the registry, detection and
+      zffprobe (39f2e5f), the framecrc stream copy and compare.py's Ogg
+      section, 20/20 against ffprobe and ffmpeg -c copy (2c1fb67); part 4,
+      seek_vectors.c without a decoder and vectors/seek_ogg.txt (4a7749f),
+      then seeking (00c20d3): ff_gen_search, ff_find_last_ts and the
+      generic index moved into seek.zig, one implementation that FLAC
+      shares (seek_flac.txt's 2692 seeks still equal); demux.zig's
+      av_seek_frame, avformat_seek_file with its pre-roll target,
+      seek_frame_generic, seek_frame_byte, ff_read_frame_flush and
+      request_seek_discard with the skip-samples injection; ogg.zig's
+      ogg_read_timestamp, ogg_read_seek and io_repositioned. All 918 seeks
+      equal FFmpeg's, the next packet's skip samples (83 injected, a new
+      Z line of seek_vectors.c) and FLAC's decoded samples included.
+      seek.txt regenerated for part 4a's oracle change (WAV fixtures
+      FFmpeg opens without a decoder; the port rejects them, so the WAV
+      seek test's 3548 cases are unchanged). G5 on local Linux runs at
+      00c20d3 with the docs change: zig fmt, zig build test 326/326 in
+      Debug, ReleaseSafe and ReleaseFast, the cross builds, and
+      .references/local-ci.sh with every vector check passing and the
+      comparison at 5663 passed, 176 failed (the known clang 23 inf/NaN
+      cases), 17/17 optional FATE cases.
+    Limitations: no Vorbis or Opus decoder (T27d, T28), so no conversion
+      from Ogg; other mappings are streams without a codec; no muxer
+      (T27b).
     ```
   - [ ] **T27b — Ogg mux.** Needs T27a.
     Done when FFmpeg demuxes our output to identical packets and timestamps.

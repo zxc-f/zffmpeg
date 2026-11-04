@@ -329,8 +329,11 @@ const Source = struct {
         s.pushback.deinit(gpa);
     }
 
+    /// Fails without a seeker (a pipe), as FFmpeg's `avio_seek` does.
     fn seekTo(s: *Source, pos: i64) Error!void {
-        s.seeker.?.seekTo(@intCast(pos)) catch return error.IoFailure;
+        const seeker = s.seeker orelse return error.IoFailure;
+        const offset = std.math.cast(u64, pos) orelse return error.IoFailure;
+        seeker.seekTo(offset) catch return error.IoFailure;
         s.pushback.clearRetainingCapacity();
         s.pushback_pos = 0;
         s.pos = pos;
@@ -614,8 +617,8 @@ pub const Demuxer = struct {
         };
     }
 
-    /// libavformat's `avio_seek` on the source (demux.zig's Source).
-    /// Needs `initSeekable`.
+    /// libavformat's `avio_seek` on the source (demux.zig's Source):
+    /// `IoFailure` on a source opened with `init`, which cannot seek.
     pub fn reposition(d: *Demuxer, pos: i64) Error!void {
         try d.src.seekTo(pos);
     }
@@ -1676,4 +1679,16 @@ test "every Ogg fixture seeks as FFmpeg seeks it (vectors/seek_ogg.txt)" {
     }
     // Every seek of the fixtures FFmpeg opens.
     try testing.expectEqual(918, compared);
+}
+
+test "a demuxer that cannot seek fails a seek instead of repositioning" {
+    const gpa = testing.allocator;
+    var reader: std.Io.Reader = .fixed(fixtures.ogg.bytes("ogg_opus_stereo"));
+    const d = try Demuxer.init(gpa, &reader);
+    defer d.deinit();
+    var layer = demux.Layer(Demuxer).init(gpa, d);
+    defer layer.deinit();
+    try layer.findStreamInfo();
+    try testing.expectError(error.IoFailure, layer.seekFrame(0, 0, .{}));
+    try testing.expectError(error.IoFailure, layer.seekFrame(0, 0, .{ .byte = true }));
 }

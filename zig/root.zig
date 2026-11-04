@@ -48,11 +48,18 @@
 //!   parser and decoder read it: packets with libavformat's timestamps and
 //!   their decoding to s16 (`format/flac.zig`, `codec/flac.zig`,
 //!   `codec/flac_parser.zig`, `codec/flacdec.zig`).
+//! - `ogg`: FFmpeg's Ogg demuxer with the FLAC, Opus and Vorbis mappings,
+//!   without decoding (`format/ogg.zig`, `format/vorbiscomment.zig`).
+//! - `demux`: libavformat's generic layer over a demuxer: timestamps, the
+//!   stream-info read-ahead, timings and seeking; Ogg reads through it
+//!   (`format/demux.zig`).
 //! - `framehash`: FFmpeg's framecrc, framemd5 and streamhash muxers' text
 //!   for one audio stream (`format/framehash.zig`).
 //! - `seek`: the seek API, FFmpeg's `av_seek_frame` and
-//!   `avformat_seek_file` with a seekable source; WAV and Wave64 implement
-//!   it (`format/seek.zig`, `wav.Parser.seekFrame`).
+//!   `avformat_seek_file` with a seekable source, and the binary search
+//!   and index they share; WAV, Wave64, FLAC and Ogg implement it
+//!   (`format/seek.zig`, `wav.Parser.seekFrame`, `flac.Demuxer.seekFrame`,
+//!   `demux.Layer.seekFrame`).
 //! - `audioconvert`: sample format conversion between every format, packed
 //!   or planar, as libswresample converts (`resample/audioconvert.zig`).
 //! - `dither`: libswresample's dithered conversion, every method, noise
@@ -145,6 +152,7 @@ test {
     _ = @import("format/flacmux.zig");
     _ = @import("format/vorbiscomment.zig");
     _ = @import("format/ogg.zig");
+    _ = @import("format/demux.zig");
     _ = @import("format/framehash.zig");
     _ = @import("format/seek.zig");
     _ = @import("format/mov_chan.zig");
