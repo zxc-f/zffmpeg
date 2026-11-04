@@ -890,7 +890,9 @@ def compare_zffmpeg(args, lines, failures):
     transcoding only from samples stored as s16 (other storage needs
     sample-format conversion, T23a). Each supported cell writes a file that
     FFmpeg must probe and decode to the fixture's samples and stream; the same
-    command through standard input and output must give the same bytes. Every
+    command through standard input and output must give the same bytes, except
+    that raw PCM from a pipe into a container with a header must fail with
+    status 3, `UnsupportedStreamingSize`, writing nothing (T22c). Every
     other cell must fail with status 3 before creating any output. FFmpeg's
     Wave64 demuxer rejects an empty `data` chunk (24 bytes, its header only),
     so an empty Wave64 output must be refused by FFmpeg and read by zffprobe.
@@ -956,9 +958,16 @@ def compare_zffmpeg(args, lines, failures):
                 else:
                     written = out.read_bytes()
                     summary = f"{len(written)} bytes"
-                    pipe_code, pipe_out, _ = zffprobe_raw(args.zffmpeg, *input_args, "-i", "-", *options, "-",
-                                                          data=path.read_bytes())
-                    if pipe_code != 0 or pipe_out != written:
+                    pipe_code, pipe_out, pipe_err = zffprobe_raw(args.zffmpeg, *input_args, "-i", "-", *options, "-",
+                                                                 data=path.read_bytes())
+                    if container in generate.RAW_FORMATS and output not in generate.RAW_FORMATS:
+                        # Raw PCM from a pipe has no length for a header's sizes
+                        # (T22c contract): status 3 before any output.
+                        if pipe_code != 3 or b"UnsupportedStreamingSize" not in pipe_err or pipe_out:
+                            problems.append(f"through pipes zffmpeg exited {pipe_code} "
+                                            f"({first_line(text(pipe_err)) or 'no error'}), "
+                                            f"expected UnsupportedStreamingSize")
+                    elif pipe_code != 0 or pipe_out != written:
                         problems.append(f"through pipes zffmpeg exited {pipe_code} with different output")
                     codec = output_codec
                     # FFmpeg's command line guesses an unspecified layout, for copy

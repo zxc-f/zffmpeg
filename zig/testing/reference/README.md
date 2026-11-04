@@ -211,7 +211,9 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   Wave64, AU or AIFF; copy into a container that carries its codec) into a
   real file, which FFmpeg must probe and decode to the fixture's samples and
   stream; the same command through standard input and output must give the
-  same bytes. Copy into a container without the codec must exit 3 with
+  same bytes, except that raw PCM from a pipe into WAV, Wave64, AU or AIFF
+  must exit 3 with `UnsupportedStreamingSize` and write nothing, as the raw
+  PCM contract says. Copy into a container without the codec must exit 3 with
   `UnsupportedOperation` and create no file. Raw PCM inputs are forced with
   their parameters, and the raw `s16le`, `alaw` and `f64be` outputs are read
   back with the stream's; transcoding into A-law is lossy, so that output must
