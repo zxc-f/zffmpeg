@@ -9,13 +9,13 @@
 //! properties `ffmpeg -codecs` shows. A codec is identified by `Codec`: a
 //! PCM encoding (`pcm.Codec`) or FLAC (T26a), the first codec that is not
 //! PCM. The decoder and encoder registries list the implementations by
-//! name, as `allcodecs.c` registers them, and say which run as send/receive
-//! stages.
+//! name, as `allcodecs.c` registers them.
 //!
 //! Everything is checked at compile time: one descriptor per codec, PCM in
 //! `pcm.Codec`'s order (so a lookup is an index) and then FLAC, unique
 //! names, a decoder for every codec and an encoder for every PCM codec
-//! (FLAC's comes with T26c), and stage types that keep the signatures of
+//! (FLAC's comes with T26c), and the PCM stages (`pcm.Decoder`,
+//! `pcm.Encoder`, every PCM codec since T23a) keeping the signatures of
 //! core/stage.zig. zig/testing/reference/compare.py compares the tables with
 //! the reference build's own `ffmpeg -codecs` listing.
 
@@ -136,11 +136,6 @@ pub const Implementation = struct {
     /// FFmpeg's decoder or encoder name; for PCM and FLAC, the codec's name.
     name: []const u8,
     codec: Codec,
-    /// Marks the codecs stored as s16, T16's send/receive stages. Since T23a
-    /// `pcm.Decoder` and `pcm.Encoder` take every PCM codec and nothing reads
-    /// this flag; FLAC's, Vorbis' and Opus' decoders and FLAC's encoder have
-    /// their own APIs.
-    stage: bool,
 };
 
 const pcm_count = @typeInfo(pcm.Codec).@"enum".field_names.len;
@@ -149,20 +144,20 @@ const pcm_count = @typeInfo(pcm.Codec).@"enum".field_names.len;
 fn pcmImplementations() [pcm_count]Implementation {
     var list: [pcm_count]Implementation = undefined;
     for (&list, descriptors[0..pcm_count]) |*entry, d| {
-        entry.* = .{ .name = d.name(), .codec = d.codec, .stage = d.codec.pcm.storage() == .s16 };
+        entry.* = .{ .name = d.name(), .codec = d.codec };
     }
     return list;
 }
 
-/// The PCM decoders, then FLAC's (T26a), Vorbis' (T27d) and Opus' (T28a,
-/// CELT frames).
+/// The PCM decoders, then FLAC's (T26a), Vorbis' (T27d) and Opus' (T28),
+/// which have their own APIs.
 pub const decoders = pcmImplementations() ++ [_]Implementation{
-    .{ .name = "flac", .codec = .flac, .stage = false },
-    .{ .name = "vorbis", .codec = .vorbis, .stage = false },
-    .{ .name = "opus", .codec = .opus, .stage = false },
+    .{ .name = "flac", .codec = .flac },
+    .{ .name = "vorbis", .codec = .vorbis },
+    .{ .name = "opus", .codec = .opus },
 };
 /// The PCM encoders, then FLAC's (T26c).
-pub const encoders = pcmImplementations() ++ [_]Implementation{.{ .name = "flac", .codec = .flac, .stage = false }};
+pub const encoders = pcmImplementations() ++ [_]Implementation{.{ .name = "flac", .codec = .flac }};
 
 /// The decoder FFmpeg names `name`, if registered.
 pub fn findDecoder(name: []const u8) ?*const Implementation {
@@ -212,13 +207,12 @@ test "descriptors are found by codec and by FFmpeg's name" {
     try std.testing.expectEqualStrings("FLAC (Free Lossless Audio Codec)", descriptor(.flac).long_name);
 }
 
-test "every PCM codec has a decoder and an encoder; the s16-stored ones run as stages" {
+test "every PCM codec has a decoder and an encoder" {
     for (descriptors[0..pcm_count]) |d| {
         const decoder = findDecoder(d.name()) orelse return error.TestExpectedValue;
         const encoder = findEncoder(d.name()) orelse return error.TestExpectedValue;
         try std.testing.expect(d.codec.eql(decoder.codec));
         try std.testing.expect(d.codec.eql(encoder.codec));
-        try std.testing.expectEqual(d.codec.pcm.storage() == .s16, decoder.stage);
     }
     try std.testing.expectEqual(null, findDecoder("pcm_dvd"));
     // FLAC decodes (T26a) and encodes (T26c).
