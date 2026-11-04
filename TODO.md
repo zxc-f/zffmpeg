@@ -2599,7 +2599,8 @@ names, not as an empty framework.
 
     ```text
     ID / parent: T27a / T27
-    State: G1 (contract, fixtures and oracle written; the demuxer next)
+    State: G2 (the demuxer's own layer matches FFmpeg's on every
+      fixture; libavformat's timestamp layer next)
     Plan: part 0, the contract (port.md "Ogg contract"), Python-made
       fixtures (generate.py: pages with CRC-32, FLAC, Opus and Vorbis
       mappings, a synthetic Vorbis setup header whose mode table
@@ -2619,6 +2620,19 @@ names, not as an empty framework.
       (FLAC, Opus and Vorbis mappings, a multiplexed and a chained
       stream, 9 damaged ones, 3 FFmpeg refuses) with vectors/ogg.txt from
       ogg_vectors.c (164 packets), checked by CI and local CI.
+      Part 1: format/vorbiscomment.zig (7b1502d) and format/ogg.zig
+      (pages, packets, streams and chains, the three mappings and
+      vorbis_parser.c): every fixture's codec parameters, extradata,
+      packets (stream, bytes, position), side data (skip samples, new
+      extradata, strings metadata), open errors and end of reading equal
+      FFmpeg's, in Debug, ReleaseSafe and ReleaseFast. Remaining: the
+      packets' pts, dts, duration and flags and the streams' duration and
+      start time come from libavformat's generic layer (compute_pkt_fields,
+      update_initial_timestamps and _durations, the FLAC parser for
+      headers, avformat_find_stream_info's read-ahead, estimate_timings and
+      ogg_get_length on a seekable input): part 2 ports that layer as
+      format/demux.zig; then detection, zffprobe and stream copy (part 3)
+      and seeking (part 4).
     ```
   - [ ] **T27b — Ogg mux.** Needs T27a.
     Done when FFmpeg demuxes our output to identical packets and timestamps.

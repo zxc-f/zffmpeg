@@ -440,6 +440,29 @@ pub const flac = struct {
     }
 };
 
+pub const ogg = struct {
+    const Ogg = @This();
+
+    /// Whether FFmpeg opens the fixture; what it makes of each one opened
+    /// is vectors/ogg.txt (T27a).
+    pub const Expected = enum { accept, reject };
+
+    pub const Fixture = struct {
+        /// The file is fixtures/ogg/<name>.ogg.
+        name: []const u8,
+        /// Lowercase hexadecimal SHA-256 of the file.
+        sha256: []const u8,
+        expected: Ogg.Expected,
+    };
+
+    pub const all: []const Ogg.Fixture = @import("fixtures/ogg/manifest.zon");
+
+    /// The bytes of fixtures/ogg/<name>.ogg, embedded at compile time.
+    pub fn bytes(comptime name: []const u8) []const u8 {
+        return @embedFile("fixtures/ogg/" ++ name ++ ".ogg");
+    }
+};
+
 /// This file's own declarations: the WAV contract's `all` and `bytes`.
 const wav_contract = @This();
 
