@@ -179,6 +179,15 @@ jobs:
             -lm -pthread -o resample-vectors
           ./resample-vectors | diff -u zig/testing/vectors/resample.txt -
 
+      # The committed T25c oracle must be what this build's libavfilter gives.
+      - name: Check the multi-graph vectors (T25c)
+        run: |
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/multigraph_vectors.c \
+            .references/ffmpeg-install/lib/libavfilter.a .references/ffmpeg-install/lib/libswscale.a \
+            .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a \
+            -lm -pthread -o multigraph-vectors
+          ./multigraph-vectors | diff -u zig/testing/vectors/multigraph.txt -
+
       # The committed T25b oracle must be what this build's libavutil gives.
       - name: Check the expression vectors (T25b)
         run: |

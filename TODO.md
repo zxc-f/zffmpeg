@@ -2196,6 +2196,53 @@ names, not as an empty framework.
     Done when outputs match the reference and backpressure between branches is
     tested.
 
+    ```text
+    ID / parent: T25c / T25
+    State: implementing
+    Supported behavior and explicit exclusions: graphs of several buffer
+      sources and sinks, built from filtergraph text with link labels and
+      several chains (avfilter_graph_parse_ptr, the sources' and sinks'
+      names as labels), negotiated over every pad, and run by libavfilter's
+      scheduler: link frame queues, frame_wanted_out and frame_blocked_in,
+      input and output status with timestamps, ready priorities and
+      ff_filter_graph_run_once, buffersrc and buffersink as their API calls
+      run it, the default activation of filter_frame filters, and the
+      graph's frame queue limit (avfilter_graph_set_max_buffered_frames) as
+      backpressure. Filters: asplit, channelsplit, channelmap, pan
+      (through libswresample's matrix or channel mapping) and amix
+      (durations, weights, normalization, dropout transition). The single
+      chain of T25a and T25b runs on the same scheduler. Excluded: sink
+      frame sizes, commands, other filters.
+    Needs (verified) / lands with / verified after: T25b.
+    Contract and source provenance: libavfilter/avfilter.c (ff_filter_frame,
+      ff_filter_activate, filter_activate_default, request_frame_to_filter,
+      forward_status_change, the inlink and outlink functions),
+      avfiltergraph.c (ff_filter_graph_run_once, graph_check_validity),
+      filters.h (the FORWARD macros), framequeue.c, buffersrc.c,
+      buffersink.c, graphparser.c (labels, avfilter_graph_parse_ptr),
+      split.c, af_channelsplit.c, af_channelmap.c, af_pan.c, af_amix.c;
+      libswresample (swr_set_matrix, swr_set_channel_mapping).
+    Required fixtures / optional corpus: multigraph_vectors.c's 48 cases
+      (zig/testing/vectors/multigraph.txt); the 178 graphs of T25a and T25b
+      again; no optional corpus.
+    Ownership, state transitions and limits: the graph owns every queued
+      frame; a received frame stays valid until the next call on the
+      graph; queued frames are bounded only by the graph's limit, as in
+      FFmpeg; at most 64 channels.
+    Comparison rule and intentional differences: the configured graph exact
+      (every filter's output links in graph order), every sink's frames,
+      empty reads, ends and the failing step exact, samples exact where
+      FFmpeg's are exact (resampled within T24's tolerance).
+    Implementation files and test entry points: multigraph_vectors.c,
+      vectors/multigraph.txt.
+    Evidence commit / Linux CI run / reference report: pending.
+    Required cases: passed 0 / failed 0 / missing 48
+    Optional cases: none
+    Fuzz seeds, budget and result: none yet.
+    Remaining work or blocker / next action: part 1, the scheduler, several
+      inputs and outputs, and asplit.
+    ```
+
 ## Milestone 6: audio codecs
 
 - [ ] **T26 — FLAC.** Checked when T26a–T26c are. Reference:

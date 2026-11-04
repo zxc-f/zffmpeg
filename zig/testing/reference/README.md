@@ -105,6 +105,16 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/resample_ve
 ./resample-vectors | diff -u zig/testing/vectors/resample.txt -
 ```
 
+The T25c multi-graph vectors come from the reference's `libavfilter`:
+`multigraph_vectors.c` builds graphs of several sources and sinks from
+filtergraph text with labels, runs a script of frames, closes and reads,
+and prints each sink's frames, empty reads, ends and failures:
+
+```bash
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/multigraph_vectors.c .references/ffmpeg-install/lib/libavfilter.a .references/ffmpeg-install/lib/libswscale.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o multigraph-vectors
+./multigraph-vectors | diff -u zig/testing/vectors/multigraph.txt -
+```
+
 The T25b expression vectors come from the reference's `libavutil`
 (`av_expr_parse` and `av_expr_eval`, three evaluations of each expression):
 
@@ -150,7 +160,7 @@ with the install prefix and:
 --disable-network --disable-x86asm --disable-ffplay --disable-avdevice
 --enable-protocol=file,pipe --enable-demuxer=wav,w64,au,aiff,caf,$pcm_formats
 --enable-decoder=$pcm_codecs --enable-encoder=$pcm_codecs
---enable-muxer=wav,w64,au,aiff,$pcm_formats --enable-filter=aresample,volume,asetpts
+--enable-muxer=wav,w64,au,aiff,$pcm_formats --enable-filter=aresample,volume,asetpts,amix,pan,channelmap,channelsplit,asplit
 
 pcm_codecs=pcm_u8,pcm_s8,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,
   pcm_s32be,pcm_s64le,pcm_s64be,pcm_f32le,pcm_f32be,pcm_f64le,pcm_f64be,
@@ -170,8 +180,9 @@ whose copies of the AU writer-output fixtures must be byte-identical (T22a), the
 AIFF muxer, likewise for AIFF (T22b), the raw PCM demuxers and muxers of every
 codec FFmpeg has one for, all but s64 (T22c), and the
 `aresample` filter for the
-`ffmpeg` program's audio filter graph, and the `volume` and `asetpts`
-filters, which the T25a and T25b graph vectors run (`anull`, `aformat` and
+`ffmpeg` program's audio filter graph, and the `volume`, `asetpts`,
+`amix`, `pan`, `channelmap`, `channelsplit` and `asplit` filters, which the
+T25a, T25b and T25c graph vectors run (`anull`, `aformat` and
 `atrim` come with the program, which
 selects the few other filters it always needs). There are no GPL, nonfree, external-library or
 hardware components, and autodetection is off. `--disable-x86asm` keeps the C
