@@ -54,7 +54,10 @@ timestamps and side data, damaged pages and chained streams included,
 reported by `zffprobe`, copied to FFmpeg's framecrc text, and seeked as
 FFmpeg seeks it, over 20 Ogg fixtures; and `zffmpeg` writes FLAC into Ogg
 (`.ogg`, `.oga`) since T27b, byte for byte as the ffmpeg program's
-`-bitexact` output. [TODO.md](TODO.md) holds the completion
+`-bitexact` output. Vorbis decodes since T27d, bit for bit as FFmpeg's
+decoder (with FFmpeg's FFT and MDCT, T27c, and VLC tables, T18c): `zffmpeg`
+converts Ogg Vorbis and Ogg FLAC to every output as the ffmpeg program does,
+and `zffprobe` reports them as ffprobe does. [TODO.md](TODO.md) holds the completion
 evidence and the roadmap. Development is verified on Linux only. The compiler
 is **Zig 0.17.0**, enforced by the build.
 

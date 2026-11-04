@@ -57,6 +57,9 @@
 //!   bit its C codelets (`codec/tx.zig`).
 //! - `vlc`: FFmpeg's VLC decoding tables and lookup, for the LSB-first
 //!   reader in `bits` (`codec/vlc.zig`).
+//! - `vorbis`: FFmpeg's Vorbis decoder, bit for bit (`codec/vorbis.zig`).
+//! - `oggdecode`: an Ogg stream decoded as the ffmpeg program decodes it
+//!   (`format/oggdecode.zig`).
 //! - `framehash`: FFmpeg's framecrc, framemd5 and streamhash muxers' text
 //!   for one audio stream (`format/framehash.zig`).
 //! - `seek`: the seek API, FFmpeg's `av_seek_frame` and
@@ -116,6 +119,8 @@ pub const demux = @import("format/demux.zig");
 pub const oggmux = @import("format/oggmux.zig");
 pub const tx = @import("codec/tx.zig");
 pub const vlc = @import("codec/vlc.zig");
+pub const vorbis = @import("codec/vorbis.zig");
+pub const oggdecode = @import("format/oggdecode.zig");
 pub const framehash = @import("format/framehash.zig");
 pub const seek = @import("format/seek.zig");
 pub const audioconvert = @import("resample/audioconvert.zig");
