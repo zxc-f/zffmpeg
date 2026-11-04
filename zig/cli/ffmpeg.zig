@@ -7,6 +7,7 @@
 //!
 //!     zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate> | -ar <rate>]
 //!             [-ch_layout <layout> | -ac <channels>] -i <input | -> [-c copy|<encoder>]
+//!             [-ac <channels> | -ch_layout <layout>]
 //!             [-dither_method <method>] [-dither_scale <scale>] [-f <format>] <output | ->
 //!
 //! The input container is detected from content as FFmpeg's probing would
@@ -22,7 +23,10 @@
 //! samples are decoded and encoded again. `-dither_method` and
 //! `-dither_scale` after `-i` are libswresample's options, which dither a
 //! conversion to fewer bits as FFmpeg's would (T23a); `-c copy` ignores them,
-//! as FFmpeg does. Tags before the input's `data` are carried into a WAV
+//! as FFmpeg does. `-ac` or `-ch_layout` after `-i` names the output's
+//! channel layout, which the samples are rematrixed into as FFmpeg's
+//! libswresample mixes them (T23c); `-ac N` takes FFmpeg's default layout
+//! for N channels. Tags before the input's `data` are carried into a WAV
 //! output, as FFmpeg's default `-map_metadata` does (T21c).
 //!
 //! Every check that does not need the rest of the input happens before the
@@ -40,7 +44,7 @@ const status = @import("status.zig");
 const ExitStatus = status.ExitStatus;
 const printError = status.printError;
 
-const usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout <layout>] -i <input | -> [-c copy|<encoder>] [-dither_method <method>] [-dither_scale <scale>] [-f <format>] <output | ->\n";
+const usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout <layout>] -i <input | -> [-c copy|<encoder>] [-ac <channels> | -ch_layout <layout>] [-dither_method <method>] [-dither_scale <scale>] [-f <format>] <output | ->\n";
 const help = usage ++
     \\
     \\Converts one WAV, Wave64, AU, AIFF, CAF (input only) or raw PCM stream
@@ -52,6 +56,8 @@ const help = usage ++
     \\.aifc, .sb, .ub, .al, .ul, .sw). Formats: wav, w64, au, aiff and the raw
     \\formats u8, s8, s16le, s16be, s24le, s24be, s32le, s32be, f32le, f32be,
     \\f64le, f64be, alaw and mulaw.
+    \\After -i, -ac <channels> or -ch_layout <layout> remixes into that layout
+    \\as FFmpeg does (-ac takes the default layout for the count).
     \\-c copy keeps the encoded samples and needs the same codec on both sides;
     \\-c <encoder> (such as pcm_s24le) picks the output codec, which the output
     \\must carry. Transcoding converts the sample format as FFmpeg does.
@@ -76,6 +82,9 @@ const Command = struct {
     input_rate: ?[]const u8,
     input_layout: ?[]const u8,
     input_channels: ?[]const u8,
+    /// `-ch_layout` or `-ac` after `-i`: the output's layout (T23c).
+    output_layout: ?[]const u8,
+    output_channels: ?[]const u8,
     /// The `-f` value after `-i`, if any; resolved by `outputContainer`.
     format: ?[]const u8,
     mode: av.convert.Mode,
@@ -145,6 +154,10 @@ fn run(init: std.process.Init) ExitStatus {
         .ok => |params| params,
         .failed => |exit| return exit,
     };
+    const output_layout = switch (status.layoutOption(io, "zffmpeg", command.output_layout, command.output_channels)) {
+        .ok => |layout| layout,
+        .failed => |exit| return exit,
+    };
     // The input's tags are carried, as FFmpeg's default -map_metadata does
     // (T21c, the project owner's choice).
     var tags: av.metadata.Dictionary = .empty;
@@ -158,6 +171,7 @@ fn run(init: std.process.Init) ExitStatus {
         // FFmpeg's input -ch_layout names the stream's layout, which its
         // command line then leaves as it is; -ac gives a count it may name.
         .guess_layout = command.input_layout == null,
+        .layout = output_layout,
         .tags = .{ .gpa = init.gpa, .dictionary = &tags },
     });
 }
@@ -172,6 +186,8 @@ fn parse(args: []const [:0]const u8) Parsed {
     var input_rate: ?[]const u8 = null;
     var input_layout: ?[]const u8 = null;
     var input_channels: ?[]const u8 = null;
+    var output_layout: ?[]const u8 = null;
+    var output_channels: ?[]const u8 = null;
     var format: ?[]const u8 = null;
     var codec_given = false;
     var copy = false;
@@ -206,6 +222,13 @@ fn parse(args: []const [:0]const u8) Parsed {
                 if (input_layout != null or input_channels != null) return .{ .usage = .{ .reason = "given twice", .arg = arg } };
                 if (std.mem.eql(u8, arg, "-ac")) input_channels = args[i] else input_layout = args[i];
             }
+        } else if (input != null and (std.mem.eql(u8, arg, "-ch_layout") or std.mem.eql(u8, arg, "-ac"))) {
+            // After -i, the output's layout, which the samples are
+            // rematrixed into (T23c).
+            i += 1;
+            if (i == args.len) return .{ .usage = .{ .reason = "missing value for", .arg = arg } };
+            if (output_layout != null or output_channels != null) return .{ .usage = .{ .reason = "given twice", .arg = arg } };
+            if (std.mem.eql(u8, arg, "-ac")) output_channels = args[i] else output_layout = args[i];
         } else if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "-c") or std.mem.eql(u8, arg, "-c:a")) {
             // Before -i, FFmpeg applies these to the input; -f is an input
             // option here (T16), -c is not.
@@ -258,6 +281,8 @@ fn parse(args: []const [:0]const u8) Parsed {
         .input_rate = input_rate,
         .input_layout = input_layout,
         .input_channels = input_channels,
+        .output_layout = output_layout,
+        .output_channels = output_channels,
         .format = format,
         .mode = if (copy) .copy else .transcode,
         .encoder = encoder,

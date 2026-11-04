@@ -452,7 +452,7 @@ const ConvertCase = struct {
     stderr_contains: ?[]const u8 = null,
 };
 
-const zffmpeg_usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout <layout>] -i <input | -> [-c copy|<encoder>] [-dither_method <method>] [-dither_scale <scale>] [-f <format>] <output | ->\n";
+const zffmpeg_usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout <layout>] -i <input | -> [-c copy|<encoder>] [-ac <channels> | -ch_layout <layout>] [-dither_method <method>] [-dither_scale <scale>] [-f <format>] <output | ->\n";
 
 // The paired WAV and AU fixtures hold the same samples, so each is the exact
 // expected output of converting the other.
@@ -576,6 +576,10 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "raw PCM from a pipe to raw PCM", .set = .raw, .args = &.{ "-f", "alaw", "-i", "-" }, .stdin_input = "raw_alaw_mono_8k", .tail = &.{ "-c", "copy", "-f", "alaw", "-" }, .exit_code = 0, .stdout = raw_alaw_mono_8k, .stderr = "" },
     .{ .name = "raw parameters for a WAV input", .args = &.{ "-ar", "8000", "-i" }, .input = "mono_8k", .tail = &.{ "-f", "wav", "-" }, .exit_code = 1, .stderr_contains = ": -sample_rate and -ch_layout apply only to raw PCM input\n" },
     .{ .name = "-ac with -ch_layout", .args = &.{ "-ac", "1", "-ch_layout", "mono", "-i", "a.raw", "b.wav" }, .exit_code = 1, .stderr_contains = "given twice: -ch_layout\n" },
+    .{ .name = "an output -ac of 0", .args = &.{"-i"}, .input = "extensible_5point1", .tail = &.{ "-ac", "0", "-f", "wav", "-" }, .exit_code = 1, .stderr = "zffmpeg: 0: invalid channel count\n" },
+    .{ .name = "output -ac and -ch_layout together", .args = &.{ "-i", "a.wav", "-ac", "2", "-ch_layout", "mono", "b.wav" }, .exit_code = 1, .stderr_contains = "given twice: -ch_layout\n" },
+    .{ .name = "a layout change with -c copy", .args = &.{"-i"}, .input = "extensible_5point1", .tail = &.{ "-c", "copy", "-ac", "2", "-f", "wav", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
+    .{ .name = "a layout libswresample cannot mix", .args = &.{"-i"}, .input = "extensible_5point1", .tail = &.{ "-ch_layout", "FL+FR+SL", "-f", "wav", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedLayout\n" },
     .{ .name = "an invalid channel count", .set = .raw, .args = &.{ "-f", "s16le", "-ac", "0", "-i" }, .input = "raw_s16le_mono_8k", .tail = &.{ "-f", "wav", "-" }, .exit_code = 1, .stderr = "zffmpeg: 0: invalid channel count\n" },
     .{ .name = "-ac gives a count that FFmpeg's guess names", .set = .raw, .args = &.{ "-f", "s16le", "-ar", "8000", "-ac", "6", "-i" }, .input = "raw_s16le_6c", .tail = &.{ "-c", "copy", "-f", "s16le", "-" }, .exit_code = 0, .stdout = "\x00\x00\x01\x00\xff\xff\xff\x7f\x00\x80\x39\x30\xc7\xcf\x00\x01\x00\x00\x01\x00\xff\xff\xff\x7f", .stderr = "" },
     // T22d: CAF is read only.

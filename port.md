@@ -593,7 +593,8 @@ part, [resample/rematrix.zig](zig/resample/rematrix.zig), builds the matrix
 | Scaling | The largest sum of an output channel's coefficients is brought down to `maxval` (1 for integer output, which libswresample's command-line path clips at; never for float output, whose `maxval` is `INT_MAX`), or to the absolute value of a negative rematrix volume, then a positive rematrix volume multiplies the matrix. |
 | Options | libswresample's defaults: center and surround mix levels `C_30DB` and LFE 0, as its `float` options store them, so `(float)M_SQRT1_2`; rematrix volume 1. |
 | Applying it | `rematrix.Remix` and `rematrix.convert` (part 2): `swr_convert` with a layout change and no resampling. The internal format is `swr_init`'s, which differs when the matrix mixes channels rather than copying or silencing them (s16 input to a wider output then goes through float); s16p mixes with each row's coefficients times 32768, rounded through `lrintf` with the error carried along the row, and clips when a row's sum passes 32768; floats and doubles mix in their own precision. The kernels are libswresample's (`copy`, `sum2`, its 5.1 and 7.1 to stereo ones, and the general sum, which for s16p uses unrounded-row coefficients and wraps), in its order of operations, then dither, if any, and the output conversion. |
-| Not yet | zffmpeg's output `-ac`/`-ch_layout`; custom matrices, `rematrix_maxval`, `internal_sample_fmt`. |
+| Pipeline | `av.convert`'s `Request.layout`, from zffmpeg's output `-ac`/`-ch_layout`: the converter stage remixes with the dither after the mix, its noise following FFmpeg's packet sizes; packets shrink when many channels would overflow the fixed buffers. A layout equal to the input's after libswresample's defaults (six unspecified channels into 5.1) mixes nothing and only names the output. |
+| Not yet | Custom matrices, the mix-level options (`clev`, `slev`, `lfe_mix_level`, `rematrix_volume`, `rematrix_maxval`), `internal_sample_fmt`, and the matrix encodings on the command line (the library takes them). |
 
 The oracle is [rematrix_vectors.c](zig/testing/reference/rematrix_vectors.c):
 4833 matrices from the pinned `libswresample`, every pair of named layouts
@@ -601,7 +602,9 @@ for integer and float output, option sets on downmixes and custom layouts,
 equal coefficient by coefficient, bit for bit; and
 [remix_vectors.c](zig/testing/reference/remix_vectors.c): 1792 `swr_convert`
 runs, 25 layout pairs between eight sample formats each way and dithered
-outputs, whose output bytes the port gives exactly (an FNV-1a hash of each).
+outputs, whose output bytes the port gives exactly (an FNV-1a hash of each);
+and `compare.py` rematrixes every accepted fixture into six layouts with
+FFmpeg and zffmpeg and compares the samples.
 
 ## Modern Zig metaprogramming
 
@@ -1047,7 +1050,8 @@ T13b's [`zffmpeg`](zig/cli/ffmpeg.zig) is a thin command over the
 
 ```text
 zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate> | -ar <rate>]
-        [-ch_layout <layout> | -ac <channels>] -i <input | -> [-c copy|<encoder>] [-f <format>] <output | ->
+        [-ch_layout <layout> | -ac <channels>] -i <input | -> [-c copy|<encoder>]
+        [-ac <channels> | -ch_layout <layout>] [-f <format>] <output | ->
 ```
 
 | Case | Behavior |
@@ -1055,6 +1059,7 @@ zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate> | -ar <rate>]
 | Options | Exactly one `-i`. `-c copy` (or `-c:a copy`) asks for stream copy, `-c <encoder>` for that encoder (T23a); without `-c` the samples are transcoded to the output's default codec. `-f wav`, `-f w64` (Sony Wave64, since T21b), `-f au` or `-f aiff` (since T22b) names the output container, as does a raw PCM format's name (`-f s16le`, T22c). In FFmpeg an option before `-i` applies to the input: since T16 a `-f` there forces the input format (detection otherwise picks FFmpeg's winner, and an undetected input is `UnknownFormat`), since T22c the raw PCM options may go there, and any other option before `-i` is rejected rather than read as an output option. Nothing may follow the output. Repeated or unknown options are usage errors. |
 | Encoder | `-c copy` stream-copies; `-c <encoder>` (`-c:a`), FFmpeg's encoder name such as `pcm_s24le`, transcodes to that codec, which the output must carry (status 3 otherwise); an unknown name is a usage error. Without `-c` the output's default codec is used, and the sample format converts as FFmpeg's does (T23a). |
 | Dither | After `-i`, `-dither_method` (a libswresample method name, or FFmpeg's number for one, 0 for none) and `-dither_scale` (0 to 2147483647, default 1) dither the conversion as FFmpeg's would (T23a); `-c copy` ignores them, as FFmpeg does. A bad value is a usage error before any output (FFmpeg fails later, configuring its filter graph, and also takes option expressions); before `-i` they are a usage error, where FFmpeg takes them as input options and ignores them. |
+| Output layout | After `-i`, `-ch_layout <layout>` or `-ac <channels>` (T23c): the samples are rematrixed into that layout as FFmpeg's libswresample mixes them, bit-exact (`-ac N` and a layout of a count alone take FFmpeg's default layout for the count, as its command line picks one for a PCM encoder), dithered after the mix when `-dither_method` asks. A layout libswresample cannot mix is `UnsupportedLayout` (status 3) before any output; with `-c copy` a layout change is `UnsupportedOperation`, where FFmpeg ignores the option. |
 | Raw PCM input | Before `-i`, `-sample_rate` (or `-ar`) and `-ch_layout` (or `-ac`, which gives `NC`, a count alone, as FFmpeg's command line does) describe a raw input, FFmpeg's defaults 44100 Hz mono otherwise (T22c); for another input they are a usage error. A raw file's size gives its frame count; from standard input it is unknown, so only raw PCM output can be written. |
 | Output container | `-f`, else the output name's extension as the muxers declare it: `.wav`, `.w64`, `.au`, `.aif`, `.aiff`, `.afc`, `.aifc`, and the raw formats' `.ub`, `.sb`, `.al`, `.ul` and `.sw`, without regard to case (as FFmpeg's `av_match_ext`).
 

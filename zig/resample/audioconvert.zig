@@ -35,6 +35,7 @@ const samples = @import("../core/samples.zig");
 const stage = @import("../core/stage.zig");
 const Frame = @import("../core/frame.zig").Frame;
 const Dither = @import("dither.zig").Dither;
+const rematrix = @import("rematrix.zig");
 
 /// Stored samples are in the target's byte order (T20a).
 const native_endian = builtin.cpu.arch.endian();
@@ -212,6 +213,9 @@ pub const Converter = struct {
     storage: []u8,
     /// libswresample's dither (resample/dither.zig), with its scratch.
     dither: ?Dither = null,
+    /// A channel layout change (resample/rematrix.zig, T23c), borrowed:
+    /// the remix, then the dither if any, share the scratch.
+    remix: ?*const rematrix.Remix = null,
     scratch: []u8 = &.{},
     pending: ?Frame = null,
     state: stage.State = .accepting,
@@ -243,6 +247,17 @@ pub const Converter = struct {
         return c;
     }
 
+    /// A converter that changes the channel layout with `remix`, set up for
+    /// these formats by `Remix.init`, and dithers with `dither`, made by
+    /// `Dither.initInternal` for the output's channels in `remix.internal`.
+    /// `scratch` must hold `remix.scratchLen` bytes for the largest frame.
+    /// `remix` must outlive the converter.
+    pub fn initRemixed(in_format: audio.Format, out_format: audio.Format, storage: []u8, remix: *const rematrix.Remix, dither: ?Dither, scratch: []u8) Converter {
+        std.debug.assert(in_format.sample_rate == out_format.sample_rate);
+        std.debug.assert(remix.in_channels == in_format.channelCount() and remix.out_channels == out_format.channelCount());
+        return .{ .in_format = in_format, .out_format = out_format, .storage = storage, .remix = remix, .dither = dither, .scratch = scratch };
+    }
+
     pub fn send(c: *Converter, frame: Frame) Error!stage.Send {
         if (c.state != .accepting) return error.InputAfterEnd;
         if (c.pending != null) return .full;
@@ -256,7 +271,11 @@ pub const Converter = struct {
             const count = std.math.cast(u32, frames) orelse return error.OutputTooSmall;
             const layout = samples.Layout.init(c.out_format.sample_format, c.out_format.channelCount(), count, .{ .line = 1 }) catch return error.OutputTooSmall;
             const output = samples.Buffer.init(layout, c.storage) catch unreachable; // checked above
-            if (c.dither) |*d| {
+            if (c.remix) |remix| {
+                const scratch_len = remix.scratchLen(count);
+                if (scratch_len > c.scratch.len) return error.OutputTooSmall;
+                rematrix.convert(remix, output, frame.view(), count, c.scratch[0..scratch_len], if (c.dither) |*d| d else null);
+            } else if (c.dither) |*d| {
                 const scratch_len = d.scratchLen(count);
                 if (scratch_len > c.scratch.len) return error.OutputTooSmall;
                 d.convert(output, frame.view(), count, c.scratch[0..scratch_len]);

@@ -1383,6 +1383,91 @@ def compare_ffmpeg_muxer(args, lines, failures, container, title, build):
     ]
 
 
+# Inputs whose decoded samples FFmpeg reads differently, for reasons other
+# sections record: their remixed outputs differ by that alone.
+KNOWN_REMIX_DIFFERENCES = {
+    "au_trailing_bytes_after_data": "FFmpeg decodes the bytes after the declared data",
+    # FFmpeg reads their layout chunk after the samples (quad); the port
+    # mixes the default layout for four channels (4.0).
+    "aiff_chan_after_ssnd": "FFmpeg mixes the CHAN after SSND's quad",
+    "caf_chan_after_data": "FFmpeg mixes the chan after data's quad",
+}
+
+# Output layouts for zffmpeg's rematrix (T23c), as FFmpeg's output options:
+# downmixes, an upmix, a reorder, dither after the mix, and float output.
+REMIX_OPTIONS = [
+    ["-ac", "1"],
+    ["-ac", "2"],
+    ["-ch_layout", "5.1"],
+    ["-ch_layout", "FR+FL"],
+    ["-ac", "2", "-dither_method", "triangular"],
+    ["-ac", "2", "-c:a", "pcm_f32le"],
+]
+
+
+def compare_remix(args, lines, failures):
+    """zffmpeg's output -ac and -ch_layout against FFmpeg's (T23c): every
+    accepted fixture of every input container, rematrixed into each layout
+    of REMIX_OPTIONS and written as raw PCM by both (s16le, or f32le for the
+    float encoder), so the samples alone are compared, must give the same
+    bytes; where FFmpeg's libswresample cannot mix the layouts, zffmpeg must
+    refuse too, with status 3 and no output. The input differences recorded
+    for the other sections stay: FFmpeg decodes the bytes after an AU's
+    data (`au_trailing_bytes_after_data`)."""
+    lines += [
+        "",
+        "## zffmpeg rematrix against FFmpeg",
+        "",
+        "| Input | Options | Result |",
+        "| --- | --- | --- |",
+    ]
+    inputs = [(wav_container(f), FIXTURES / "wav" / f"{f.name}.wav", f) for f in generate.build_fixtures() if f.accept]
+    inputs += [(directory, FIXTURES / directory / f"{f.name}.{directory}", f)
+               for directory, _, build, _, _ in FORCED_CONTRACTS for f in build() if f.accept]
+    inputs += [(f.format, FIXTURES / "raw" / f"{f.name}.raw", f) for f in generate.build_raw_fixtures() if f.accept]
+    same = refused = total = 0
+    with tempfile.TemporaryDirectory() as tmp:
+        work = pathlib.Path(tmp)
+        for container, path, fixture in inputs:
+            if container in generate.RAW_FORMATS:
+                input_args = raw_input_args(container, fixture.params)
+            else:
+                input_args = forced_input(fixture, container)
+            problems = []
+            for options in REMIX_OPTIONS:
+                raw_format = "f32le" if "pcm_f32le" in options else "s16le"
+                theirs, ours = work / "ffmpeg.raw", work / "zffmpeg.raw"
+                for stale in (theirs, ours):
+                    stale.unlink(missing_ok=True)
+                process = run(args.ffmpeg, "-v", "error", "-nostdin", "-y", *input_args, "-i", path, *options,
+                              "-bitexact", "-f", raw_format, theirs)
+                code, _, err = zffprobe_raw(args.zffmpeg, "-y", *input_args, "-i", path, *options, "-f", raw_format,
+                                            ours)
+                total += 1
+                label = " ".join(options)
+                if process.returncode != 0:
+                    if code == 3 and not ours.exists():
+                        refused += 1
+                    else:
+                        problems.append(f"{label}: FFmpeg refuses ({first_line(text(process.stderr))}), "
+                                        f"zffmpeg exited {code}")
+                elif code != 0:
+                    problems.append(f"{label}: zffmpeg exited {code} ({first_line(text(err))})")
+                elif theirs.read_bytes() != ours.read_bytes():
+                    if fixture.name in KNOWN_REMIX_DIFFERENCES:
+                        same += 1
+                    else:
+                        problems.append(f"{label}: the output differs")
+                else:
+                    same += 1
+            result = "pass" if not problems else "**FAIL**: " + "; ".join(problems)
+            if not problems and fixture.name in KNOWN_REMIX_DIFFERENCES:
+                result = f"pass ({KNOWN_REMIX_DIFFERENCES[fixture.name]})"
+            lines.append(f"| `{fixture.name}` | {len(REMIX_OPTIONS)} layouts | {result} |")
+            failures.extend(f"remix {fixture.name}: {problem}" for problem in problems)
+    lines += ["", f"Rematrixed outputs equal to FFmpeg's: {same}/{total}; refused by both: {refused}."]
+
+
 def compare_pipes(args, lines, failures):
     """zffprobe through a pipe must match zffprobe on the file (T12c)."""
     cases = [(FIXTURES / "wav" / f"{f.name}.wav") for f in generate.build_fixtures()]
@@ -1625,6 +1710,7 @@ def main():
     compare_writer(args, lines, failures)
     compare_zffmpeg(args, lines, failures)
     compare_dither(args, lines, failures)
+    compare_remix(args, lines, failures)
     compare_ffmpeg_w64(args, lines, failures)
     for container, title, build, _, _ in FORCED_CONTRACTS:
         if container in MUXED_CONTRACTS:

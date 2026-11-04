@@ -16,8 +16,10 @@
 //! AU share A-law and µ-law, AU and AIFF the big-endian integer and float
 //! encodings, and WAV and AIFF u8, s16le (`sowt`), A-law and µ-law.
 //!
-//! Rate and channel-layout changes cannot be requested yet (TODO.md T23/T24);
-//! the output always has the input's format.
+//! A rate change cannot be requested yet (TODO.md T24); a channel layout can
+//! (`Request.layout`, T23c), and the samples are rematrixed into it as
+//! libswresample mixes them. Otherwise the output has the input's rate and
+//! layout.
 //!
 //! `Conversion.init` reads the input up to its first sample and makes every
 //! check that does not need the rest of it: the input header, the request
@@ -61,6 +63,7 @@ const caf = @import("caf.zig");
 const detect = @import("detect.zig");
 const audioconvert = @import("../resample/audioconvert.zig");
 const dither = @import("../resample/dither.zig");
+const rematrix = @import("../resample/rematrix.zig");
 
 pub const Container = detect.Container;
 
@@ -99,6 +102,13 @@ pub const Request = struct {
     /// input `-ch_layout` names the layout, `6C` included; its `-ac` does
     /// not.
     guess_layout: bool = true,
+    /// The output's channel layout (FFmpeg's output `-ch_layout`; its `-ac N`
+    /// gives N unspecified channels), for `transcode` (T23c): the samples
+    /// are rematrixed as libswresample mixes them. An unspecified layout
+    /// becomes the default for its count, as FFmpeg's command line picks
+    /// it for a PCM encoder. Null keeps the input's layout. With `copy`, a
+    /// layout other than the input's is `UnsupportedOperation`.
+    layout: ?audio.ChannelLayout = null,
     /// Carry the input's tags (T21c): `init` puts the tags FFmpeg's command
     /// would carry (`carriedTags`) from those before the input's `data` into
     /// the empty `tags.dictionary`, under FFmpeg's names, and a WAV output
@@ -113,7 +123,7 @@ pub const Request = struct {
 /// Failures before any output exists: the input header, the request and the
 /// output header. `LimitExceeded` can come from the input's or the output's
 /// limits.
-pub const InitError = detect.Error || wav.HeaderError || au.HeaderError || aiff.HeaderError || raw.HeaderError || error{
+pub const InitError = detect.Error || wav.HeaderError || au.HeaderError || aiff.HeaderError || raw.HeaderError || rematrix.Error || error{
     /// The request is outside the operation matrix: stream copy into a
     /// container that cannot carry the codec, or transcoding samples, or
     /// into a codec, not stored as s16 (sample-format conversion waits for
@@ -137,18 +147,22 @@ pub const Summary = struct {
     /// The input's format, with the layout FFmpeg's command line gives it
     /// (`audio.guessLayout`, unless `Request.guess_layout` is off: an
     /// unspecified one becomes the default for its channel count, as for a
-    /// plain WAV); the output's has the same rate
-    /// and layout, its sample format the output codec's storage
-    /// (`outputFormat`).
+    /// plain WAV); the output's has the same rate, the output layout and
+    /// the output codec's storage (`outputFormat`).
     format: audio.Format,
+    /// The output's layout: the requested one (`Request.layout`), else the
+    /// input's. A different one is rematrixed (T23c).
+    output_layout: audio.ChannelLayout,
     /// Sample frames in the input and the output. The duration is this many
     /// units of `format.timeBase()`, exactly, in both. Null until `run` for an
     /// input of unknown length (raw PCM output only), which `run` counts.
     frame_count: ?u64,
 
-    /// The output's format: the input's, stored as the output codec stores.
+    /// The output's format: the input's rate, the output layout, stored as
+    /// the output codec stores.
     pub fn outputFormat(s: Summary) audio.Format {
         var format = s.format;
+        format.layout = s.output_layout;
         format.sample_format = s.output_codec.storage();
         return format;
     }
@@ -209,7 +223,7 @@ pub const Conversion = struct {
                 .au, .aiff, .caf, .raw => {},
             }
         }
-        const summary: Summary = switch (input) {
+        var summary: Summary = switch (input) {
             inline else => |*parser| blk: {
                 const info = try parser.readHeader();
                 // Unknown for WAV and AU only on request, and for raw PCM
@@ -231,6 +245,8 @@ pub const Conversion = struct {
                         if (request.guess_layout) format.layout = audio.guessLayout(format.layout);
                         break :guessed format;
                     },
+                    // Set below, from the request.
+                    .output_layout = undefined,
                     .frame_count = frame_count,
                 };
             },
@@ -249,13 +265,22 @@ pub const Conversion = struct {
             t.dictionary.* = carried;
             tags = t.dictionary;
         }
+        // FFmpeg's set_channel_layout: an unspecified request takes the
+        // default for its count.
+        summary.output_layout = if (request.layout) |layout| switch (layout) {
+            .unspecified => |count| .default(count),
+            .native, .custom => layout,
+        } else summary.format.layout;
         // Any storage converts to any other (T23a); the output must carry
-        // the codec, and copy takes no encoder.
+        // the codec, and copy takes no encoder and keeps the layout.
         const supported = switch (request.mode) {
-            .copy => request.codec == null and request.output.carries(summary.input_codec),
+            .copy => request.codec == null and request.output.carries(summary.input_codec) and
+                summary.output_layout.eql(&summary.format.layout),
             .transcode => request.output.carries(summary.output_codec),
         };
         if (!supported) return error.UnsupportedOperation;
+        // A layout libswresample cannot mix fails before any output (T23c).
+        if (request.mode == .transcode) _ = try rematrix.needed(summary.format.layout, summary.output_layout);
         switch (request.output.family()) {
             .wav => try wav.Writer.check(summary.output_codec, summary.outputFormat(), try knownCount(summary), wavOptions(limits, request.output, tags)),
             .au => try au.Writer.check(summary.output_codec, summary.outputFormat(), try knownCount(summary), limits.au),
@@ -320,24 +345,47 @@ pub const Conversion = struct {
                 // keeps 24 bits of s32.
                 var options = c.dither;
                 options.output_sample_bits = if (s.output_codec.bytesPerSample() == 3) 24 else 0;
+                // A layout change rematrixes as libswresample does (T23c),
+                // through the internal format the mix picks, dithered after
+                // the mix; `init` checked that it can.
+                var remix: rematrix.Remix = undefined;
+                const remixing = remix.init(s.format, out_format.layout, out_format.sample_format, .{}) catch unreachable;
                 // Without a format change FFmpeg converts nothing.
-                const changes = out_format.sample_format != s.format.sample_format;
-                var dithered = if (changes) dither.Dither.init(s.format, out_format.sample_format, options) else null;
+                const changes = remixing or out_format.sample_format != s.format.sample_format;
+                // Without a mix the frames keep the input's layout, which
+                // the output's names (an unspecified one, as libswresample
+                // reads it); only the writer's header records the name.
+                var stage_format = out_format;
+                if (!remixing) stage_format.layout = s.format.layout;
+                var dithered = if (remixing)
+                    dither.Dither.initInternal(remix.internal, remix.out_channels, s.format.sample_rate, out_format.sample_format, options)
+                else if (changes)
+                    dither.Dither.init(s.format, out_format.sample_format, options)
+                else
+                    null;
                 if (dithered) |*d| d.setCalls(ffmpegPacketFrames(s.input, s.input_codec, s.format), s.frame_count);
                 var stages: Transcoder(W) = .{
                     .decoder = .init(s.input_codec, s.format, &decoded),
-                    // libswresample's conversion when the storage differs or
-                    // it dithers (T23a).
-                    .converter = if (dithered) |d|
-                        .initDithered(s.format, out_format, &converted, d, &scratch)
+                    // libswresample's conversion when the storage or the
+                    // layout differs, or it dithers (T23a, T23c).
+                    .converter = if (remixing)
+                        .initRemixed(s.format, out_format, &converted, &remix, dithered, &scratch)
+                    else if (dithered) |d|
+                        .initDithered(s.format, stage_format, &converted, d, &scratch)
                     else if (changes)
-                        .init(s.format, out_format, &converted)
+                        .init(s.format, stage_format, &converted)
                     else
                         null,
-                    .encoder = .init(s.output_codec, out_format, &encoded),
+                    .encoder = .init(s.output_codec, stage_format, &encoded),
                     .writer = writer,
                 };
-                while (try c.readPacket(&packet_bytes)) |packet| try stages.push(packet);
+                // The mix's scratch holds both sides in up to 8 bytes a
+                // sample, and the output up to 8: fewer frames per packet
+                // when the channels are many.
+                const in_frame_bytes = s.input_codec.bytesPerSample() * s.format.channelCount();
+                const most_frames = scratch.len / (8 * (s.format.channelCount() + out_format.channelCount()));
+                const packet_len = if (remixing) @min(packet_bytes.len, most_frames * in_frame_bytes) else packet_bytes.len;
+                while (try c.readPacket(packet_bytes[0..packet_len])) |packet| try stages.push(packet);
                 try stages.push(null);
             },
         }
@@ -1108,6 +1156,45 @@ test "an unspecified layout is guessed unless the request keeps it" {
         try std.testing.expectEqual(header_len, wav.headerLen(.s16le, summary.format, .riff));
         try std.testing.expectEqual(header_len + bytes.len, out.buffered().len);
     }
+}
+
+test "a requested output layout rematrixes, and only when transcoding" {
+    const five_one = fixtures.bytes("extensible_5point1");
+    var buffer: [512]u8 = undefined;
+    var reader: std.Io.Reader = .fixed(five_one);
+    var out: std.Io.Writer = .fixed(&buffer);
+    const summary = try convert(&reader, &out, .{ .output = .wav, .mode = .transcode, .layout = .stereo }, .{});
+    try std.testing.expect(summary.output_layout.eql(&audio.ChannelLayout.stereo));
+    try std.testing.expectEqual(2, summary.outputFormat().channelCount());
+    // Two frames of stereo s16 after the 44-byte plain header.
+    try std.testing.expectEqual(44 + 2 * 2 * 2, out.buffered().len);
+
+    // Copy cannot change the layout; transcoding into one libswresample
+    // cannot mix (a lone side channel) fails before any output.
+    var copy_reader: std.Io.Reader = .fixed(five_one);
+    var copy_out: std.Io.Writer = .fixed(&buffer);
+    try std.testing.expectError(error.UnsupportedOperation, convert(&copy_reader, &copy_out, .{ .output = .wav, .mode = .copy, .layout = .stereo }, .{}));
+    try std.testing.expectEqual(0, copy_out.buffered().len);
+    const lopsided = try audio.ChannelLayout.parse("FL+FR+SL");
+    var bad_reader: std.Io.Reader = .fixed(five_one);
+    var bad_out: std.Io.Writer = .fixed(&buffer);
+    try std.testing.expectError(error.UnsupportedLayout, convert(&bad_reader, &bad_out, .{ .output = .wav, .mode = .transcode, .layout = lopsided }, .{}));
+    try std.testing.expectEqual(0, bad_out.buffered().len);
+
+    // Six unspecified channels into 5.1, their default: nothing is mixed,
+    // and the header names 5.1.
+    const six = fixtures.raw.bytes("raw_s16le_6c");
+    var raw_reader: std.Io.Reader = .fixed(six);
+    var raw_out: std.Io.Writer = .fixed(&buffer);
+    const unmixed = try convert(&raw_reader, &raw_out, .{
+        .output = .wav,
+        .mode = .transcode,
+        .input = .{ .format = .s16le, .raw = .{ .sample_rate = 8000, .layout = .{ .unspecified = 6 } }, .length = six.len },
+        .guess_layout = false,
+        .layout = .default(6),
+    }, .{});
+    try std.testing.expect(unmixed.output_layout.eql(&audio.ChannelLayout.default(6)));
+    try std.testing.expectEqualSlices(u8, six, raw_out.buffered()[raw_out.buffered().len - six.len ..]);
 }
 
 test "an error found after samples were written fails the conversion" {

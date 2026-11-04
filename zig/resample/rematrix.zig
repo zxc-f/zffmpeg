@@ -211,6 +211,19 @@ fn sane(layout: *const Layout, mixed: bool) bool {
 /// multiplied by a positive rematrix volume. Entries outside the layouts'
 /// channel counts are 0.
 pub fn build(in_layout: Layout, out_layout: Layout, options: Options, maxval: f64, matrix: *Matrix) Error!void {
+    const cleaned = try clean(in_layout, out_layout);
+    matrix.* = @splat(@splat(0));
+    buildMatrix(&cleaned.in, &cleaned.out, options, maxval, matrix);
+    if (options.rematrix_volume > 0) {
+        for (matrix) |*row| {
+            for (row) |*value| value.* *= options.rematrix_volume;
+        }
+    }
+}
+
+/// `swr_build_matrix2`'s layouts after `clean_layout` and `clean_downmix`,
+/// once they pass `sane_layout`.
+fn clean(in_layout: Layout, out_layout: Layout) Error!struct { in: Layout, out: Layout } {
     var in = cleanLayout(in_layout);
     var out = cleanLayout(out_layout);
     cleanDownmix(&out, &in);
@@ -218,14 +231,19 @@ pub fn build(in_layout: Layout, out_layout: Layout, options: Options, maxval: f6
     // The same channels on both sides change their places at most.
     const mixed = presentMask(&in) != presentMask(&out);
     if (!sane(&in, mixed) or !sane(&out, mixed)) return error.UnsupportedLayout;
+    return .{ .in = in, .out = out };
+}
 
-    matrix.* = @splat(@splat(0));
-    buildMatrix(&in, &out, options, maxval, matrix);
-    if (options.rematrix_volume > 0) {
-        for (matrix) |*row| {
-            for (row) |*value| value.* *= options.rematrix_volume;
-        }
-    }
+/// Whether libswresample rematrixes from `in` to `out` at the default
+/// volume, checked as `swr_init` does: false for the same layout, true when
+/// it can mix them, `UnsupportedLayout` when it cannot. Unspecified layouts
+/// take the default for their counts.
+pub fn needed(in: Layout, out: Layout) Error!bool {
+    const in_layout = withDefault(in);
+    const out_layout = withDefault(out);
+    if (in_layout.eql(&out_layout)) return false;
+    _ = try clean(in_layout, out_layout);
+    return true;
 }
 
 /// `build_matrix`, which `swr_build_matrix2` calls after its checks.
@@ -630,7 +648,8 @@ pub const Remix = struct {
                     const target = r.matrix[i][j] * 32768 + rem;
                     const native = lrintf(target);
                     r.ints[i][j] = native;
-                    rem += target - @as(f64, @floatFromInt(native));
+                    const native_wide: f64 = @floatFromInt(native);
+                    rem += target - native_wide;
                     sum += @abs(native);
                 }
                 max_sum = @max(max_sum, sum);

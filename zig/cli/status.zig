@@ -29,7 +29,7 @@ pub const Error = av.convert.Error ||
 pub fn of(err: Error) ExitStatus {
     return switch (err) {
         error.InvalidRiff, error.InvalidWave, error.InvalidAu, error.InvalidAiff, error.InvalidCaf, error.InvalidFormat, error.Truncated => .invalid,
-        error.UnsupportedFormat, error.UnsupportedStreamingSize, error.UnsupportedOperation, error.UnknownFormat => .unsupported,
+        error.UnsupportedFormat, error.UnsupportedStreamingSize, error.UnsupportedOperation, error.UnknownFormat, error.UnsupportedLayout => .unsupported,
         error.LimitExceeded,
         error.SizeOverflow,
         error.OutOfMemory,
@@ -71,10 +71,7 @@ pub const RawParams = union(enum) {
 
 /// Parses `-sample_rate` (or zffmpeg's `-ar`), `-ch_layout` and zffmpeg's
 /// `-ac`, as given; null for each one absent. A rate that is not a decimal
-/// number, or a layout FFmpeg cannot parse, is a usage error; a layout of
-/// more than two channels (as text or a count) or an ambisonic one is
-/// unsupported, until raw PCM widens (T23b); `-ac` gives FFmpeg's default
-/// layout for the count.
+/// number is a usage error; the layout is `layoutOption`'s.
 pub fn rawParams(io: std.Io, tool: []const u8, rate_text: ?[]const u8, layout_text: ?[]const u8, channels_text: ?[]const u8) RawParams {
     if (rate_text == null and layout_text == null and channels_text == null) return .{ .ok = null };
     var params: av.raw.Params = .{};
@@ -84,8 +81,32 @@ pub fn rawParams(io: std.Io, tool: []const u8, rate_text: ?[]const u8, layout_te
             return .{ .failed = .usage };
         };
     }
+    switch (layoutOption(io, tool, layout_text, channels_text)) {
+        .ok => |layout| if (layout) |l| {
+            params.layout = l;
+        },
+        .failed => |exit| return .{ .failed = exit },
+    }
+    return .{ .ok = params };
+}
+
+/// A channel layout from the command line, or the exit status its
+/// diagnostic was printed with.
+pub const LayoutOption = union(enum) {
+    /// Null when neither option was given.
+    ok: ?av.channel_layout.Layout,
+    failed: ExitStatus,
+};
+
+/// Parses `-ch_layout` or zffmpeg's `-ac`, at most one of them given. Text
+/// FFmpeg cannot parse, or a count that is not a positive decimal number,
+/// is a usage error; an ambisonic layout, or a custom one past 64
+/// channels, is unsupported. FFmpeg's command line passes `-ac N` on as N
+/// channels, unspecified: the layout `NC` to a raw demuxer, an unspecified
+/// encoder layout for an output (T23c).
+pub fn layoutOption(io: std.Io, tool: []const u8, layout_text: ?[]const u8, channels_text: ?[]const u8) LayoutOption {
     if (layout_text) |text| {
-        params.layout = av.channel_layout.Layout.parse(text) catch |err| switch (err) {
+        const layout = av.channel_layout.Layout.parse(text) catch |err| switch (err) {
             error.InvalidLayout => {
                 printError(io, "{s}: {s}: invalid channel layout\n", .{ tool, text });
                 return .{ .failed = .usage };
@@ -95,16 +116,15 @@ pub fn rawParams(io: std.Io, tool: []const u8, rate_text: ?[]const u8, layout_te
                 return .{ .failed = .unsupported };
             },
         };
+        return .{ .ok = layout };
     }
     if (channels_text) |text| {
-        // FFmpeg's command line passes `-ac N` to a raw demuxer as the layout
-        // `NC`: N channels, unspecified, which its guess may then name.
         const count = std.fmt.parseInt(u16, text, 10) catch 0;
         if (count == 0) {
             printError(io, "{s}: {s}: invalid channel count\n", .{ tool, text });
             return .{ .failed = .usage };
         }
-        params.layout = .{ .unspecified = count };
+        return .{ .ok = .{ .unspecified = count } };
     }
-    return .{ .ok = params };
+    return .{ .ok = null };
 }

@@ -320,6 +320,21 @@ build include the WAV muxer. Its first run, locally on Windows at commit
   s16) rejected before any output: **54/54**.
 - Fixtures whose pipe result equals the file result: **105/105**.
 
+T23c added rematrixing: the matrix (4833 vectors), the kernels (1792
+`swr_convert` vectors) and zffmpeg's output `-ac`/`-ch_layout`, with a new
+section that rematrixes every accepted fixture into six layouts (`-ac 1`,
+`-ac 2`, `5.1`, `FR+FL`, `-ac 2` dithered, `-ac 2` to `pcm_f32le`) with
+FFmpeg and zffmpeg and compares the samples as raw PCM. The run, locally on
+Linux x86-64 as for T23b part 3, gave 819 equal outputs of 924, 30 refused
+by both (layouts libswresample cannot mix, such as 64 unspecified
+channels), and three inputs FFmpeg decodes differently recorded; the other
+75 differ only at the inf and NaN samples of the 15 float fixtures, as the
+90 transcodes elsewhere, which this compiler's FFmpeg converts to 0 (every
+float-output case agrees). It also showed a WAV writer difference outside
+T23c: FFmpeg's muxer writes a `fact` count of 1 for an empty non-PCM
+stream, its sample count 0 − `INT64_MAX` truncated to 32 bits, where the
+port writes 0.
+
 T23b part 6 let raw PCM take any `-ch_layout` of at most 64 channels and
 made zffmpeg keep a layout an input `-ch_layout` names, as FFmpeg's command
 line does (only `-ac` is guessed). The run, locally on Linux x86-64 as for
