@@ -1180,6 +1180,23 @@ names, not as an empty framework.
     consumers (T29b, T30b, T42a, T49b) need it.
     Done when exhaustive table vectors pass and over-reads are rejected in
     ReleaseFast.
+
+    ```text
+    ID / parent: T18c / T18
+    State: G1 (planned with T27d)
+    Plan: codec/bits.zig gains FFmpeg's LSB-first reader (get_bits.h
+      under BITSTREAM_READER_LE: get_bits, get_bits1, get_bits_long,
+      skip_bits, get_bits_count, get_bits_left), over-reads returning
+      zeros as FFmpeg's padded buffer does but never reading past the
+      slice, so ReleaseFast stays bounded; codec/vlc.zig ports vlc.c's
+      table builder (ff_vlc_init_sparse: multi-level tables of nb_bits,
+      VLC_INIT_LE's bit-reversed codes) and get_vlc2 with its max depth,
+      usable at compile time (later codecs' static tables) and at run
+      time (Vorbis' codebooks). Oracle: vlc_vectors.c builds tables
+      through libavcodec for generated code lengths (Vorbis' len2vlc,
+      several nb_bits, LE and BE) and prints every entry and the symbols
+      decoded from a generated bitstream; the test compares them all.
+    ```
   - [ ] **T18d — Exp-Golomb codes.** Lands with T43a.
     Done when exhaustive vectors over the supported range pass. Frame hashes
     need none of T18: they use the standard library's Adler-32 and MD5 (T19b).
@@ -2721,6 +2738,32 @@ names, not as an empty framework.
     Codebooks, floors 0 and 1, residues 0–2 and coupling.
     Done when float output matches the reference within a declared tolerance on
     the required streams.
+
+    ```text
+    ID / parent: T27d / T27
+    State: G1 (planned)
+    Plan: part 0, the reference build enables FFmpeg's Vorbis decoder
+      (and its native encoder, experimental, to make fixtures); its
+      decoding in avformat_find_stream_info changes what the Ogg vectors
+      record for the synthetic Vorbis fixtures, so ogg.txt, seek_ogg.txt
+      and demux.zig's has_decoder follow, with the decoder's header
+      check deciding found_decoder as FFmpeg's avcodec_open2 does;
+      fixtures: Vorbis streams FFmpeg's encoder makes (committed, checked
+      by hash, as the FFmpeg-made FLAC fixtures) and damaged variants, with
+      FATE's vorbis/*.ogg samples as optional coverage (fate_samples.txt);
+      an oracle printing each decoded frame (sample count, pts, MD5 of
+      the float planes) or error. Part 1 (with T18c): the identification
+      and setup headers (codebooks with their VLCs and lookup values,
+      floors 0 and 1, residues 0-2, mappings, modes) as vorbisdec.c
+      parses them. Part 2: audio packets (floor decode and render,
+      residue decode, inverse coupling, the MDCT of T27c, windowing and
+      overlap-add) and libavcodec's decode.c around them (skip samples,
+      the first frame's discard); the declared tolerance is bit-exact
+      unless a difference is shown to be the platform's. Part 3: Vorbis
+      in av.convert and zffmpeg (Ogg Vorbis to every PCM output and to
+      FLAC) and zffprobe's sample format (fltp), with compare.py against
+      the ffmpeg program.
+    ```
 
 - [ ] **T28 — Opus decoder.** Checked when T28a–T28c are. Reference:
   `libavcodec/opus/`, `libavformat/oggparseopus.c`; RFC 6716, RFC 7845 and
