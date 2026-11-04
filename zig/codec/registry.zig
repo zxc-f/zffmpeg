@@ -130,7 +130,8 @@ pub const Implementation = struct {
     /// Runs as a send/receive stage (`pcm.Decoder` or `pcm.Encoder`), which
     /// takes the codecs stored as s16 until T23a; the others decode and
     /// encode through the `pcm.decode` and `pcm.encode` kernels only, and
-    /// FLAC's decoder has its own send and receive (codec/flacdec.zig).
+    /// FLAC's decoder and encoder have their own APIs (codec/flacdec.zig,
+    /// codec/flacenc.zig).
     stage: bool,
 };
 
@@ -147,8 +148,8 @@ fn pcmImplementations() [pcm_count]Implementation {
 
 /// The PCM decoders, then FLAC's (T26a).
 pub const decoders = pcmImplementations() ++ [_]Implementation{.{ .name = "flac", .codec = .flac, .stage = false }};
-/// The PCM encoders; FLAC's comes with T26c.
-pub const encoders: [pcm_count]Implementation = pcmImplementations();
+/// The PCM encoders, then FLAC's (T26c).
+pub const encoders = pcmImplementations() ++ [_]Implementation{.{ .name = "flac", .codec = .flac, .stage = false }};
 
 /// The decoder FFmpeg names `name`, if registered.
 pub fn findDecoder(name: []const u8) ?*const Implementation {
@@ -207,7 +208,7 @@ test "every PCM codec has a decoder and an encoder; the s16-stored ones run as s
         try std.testing.expectEqual(d.codec.pcm.storage() == .s16, decoder.stage);
     }
     try std.testing.expectEqual(null, findDecoder("pcm_dvd"));
-    // FLAC decodes; its encoder comes with T26c.
+    // FLAC decodes (T26a) and encodes (T26c).
     try std.testing.expect(findDecoder("flac").?.codec.eql(.flac));
-    try std.testing.expectEqual(null, findEncoder("flac"));
+    try std.testing.expect(findEncoder("flac").?.codec.eql(.flac));
 }

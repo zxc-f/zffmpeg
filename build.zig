@@ -500,7 +500,7 @@ const ConvertCase = struct {
     stderr_contains: ?[]const u8 = null,
 };
 
-const zffmpeg_usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout <layout>] -i <input | -> [-c copy|<encoder>] [-ar <rate>] [-ac <channels> | -ch_layout <layout>] [-dither_method <method>] [-dither_scale <scale>] [-f <format>] <output | ->\n";
+const zffmpeg_usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout <layout>] -i <input | -> [-c copy|<encoder>] [-ar <rate>] [-ac <channels> | -ch_layout <layout>] [-dither_method <method>] [-dither_scale <scale>] [FLAC encoder options] [-f <format>] <output | ->\n";
 
 // The paired WAV and AU fixtures hold the same samples, so each is the exact
 // expected output of converting the other.
@@ -658,6 +658,15 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "FLAC that decodes short of STREAMINFO", .set = .flac, .args = &.{"-i"}, .input = "flac_junk_between_frames", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stdout_contains = "", .stderr_contains = ": FrameCountMismatch\n" },
     .{ .name = "FLAC that decodes short of STREAMINFO to raw PCM", .set = .flac, .args = &.{"-i"}, .input = "flac_junk_between_frames", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout_contains = "", .stderr = "" },
     .{ .name = "CAF output is unsupported", .args = &.{"-i"}, .input = "mono_8k", .tail = &.{ "-f", "caf", "-" }, .exit_code = 3, .stderr = "zffmpeg: caf: unsupported output format\n" },
+    // T26c: FLAC output, the ffmpeg program's block size (the input's first
+    // frame) and FFmpeg's header; standard output cannot seek back, so its
+    // STREAMINFO stays as first written.
+    .{ .name = "FLAC to FLAC on standard output", .set = .flac, .args = &.{"-i"}, .input = "flac_ffmpeg_level5_stereo", .tail = &.{ "-compression_level", "8", "-f", "flac", "-" }, .exit_code = 0, .stdout_contains = "fLaC\x00\x00\x00\x22\x04\x80\x04\x80", .stderr = "" },
+    .{ .name = "FLAC in WAV is unsupported", .set = .flac, .args = &.{"-i"}, .input = "flac_ffmpeg_level5_stereo", .tail = &.{ "-c:a", "flac", "-f", "wav", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
+    .{ .name = "FLAC copy into FLAC is unsupported", .set = .flac, .args = &.{"-i"}, .input = "flac_ffmpeg_level5_stereo", .tail = &.{ "-c", "copy", "-f", "flac", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
+    .{ .name = "a FLAC first frame under 16 samples", .args = &.{"-i"}, .input = "mono_8k", .tail = &.{ "-f", "flac", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedFormat\n" },
+    .{ .name = "an invalid FLAC encoder option value", .args = &.{ "-i", "a.wav", "-lpc_type", "burg", "b.flac" }, .exit_code = 1, .stderr_contains = "invalid value for: -lpc_type\n" },
+    .{ .name = "FLAC encoder options FFmpeg refuses together", .set = .flac, .args = &.{"-i"}, .input = "flac_ffmpeg_level5_stereo", .tail = &.{ "-min_prediction_order", "9", "-max_prediction_order", "8", "-f", "flac", "-" }, .exit_code = 1, .stderr_contains = ": InvalidOption\n" },
 };
 
 pub fn build(b: *std.Build) void {

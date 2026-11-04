@@ -130,6 +130,73 @@ pub const Seeker = struct {
     };
 };
 
+/// An output the caller can reposition, as a seekable `AVIOContext` lets a
+/// muxer rewrite its header at the end (T26c). Writes go through the
+/// writer the muxer was given; this only moves it.
+pub const OutputSeeker = struct {
+    context: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        /// Flushes, then writes continue at `offset`.
+        seekTo: *const fn (context: *anyopaque, offset: u64) error{IoFailure}!void,
+        /// The offset of the next byte written.
+        position: *const fn (context: *anyopaque) u64,
+    };
+
+    pub fn seekTo(s: OutputSeeker, offset: u64) error{IoFailure}!void {
+        return s.vtable.seekTo(s.context, offset);
+    }
+
+    pub fn position(s: OutputSeeker) u64 {
+        return s.vtable.position(s.context);
+    }
+
+    /// A writer over a fixed buffer (`std.Io.Writer.fixed`): moving back
+    /// keeps the bytes after the new position, so moving forward again to
+    /// the old end restores them.
+    pub fn fixed(writer: *std.Io.Writer) OutputSeeker {
+        return .{ .context = writer, .vtable = &fixed_vtable };
+    }
+
+    const fixed_vtable: VTable = .{
+        .seekTo = struct {
+            fn seekTo(context: *anyopaque, offset: u64) error{IoFailure}!void {
+                const w: *std.Io.Writer = @ptrCast(@alignCast(context));
+                const end = std.math.cast(usize, offset) orelse return error.IoFailure;
+                if (end > w.buffer.len) return error.IoFailure;
+                w.end = end;
+            }
+        }.seekTo,
+        .position = struct {
+            fn position(context: *anyopaque) u64 {
+                const w: *std.Io.Writer = @ptrCast(@alignCast(context));
+                return w.end;
+            }
+        }.position,
+    };
+
+    /// A file writer; its `interface` is what the muxer writes to.
+    pub fn file(writer: *std.Io.File.Writer) OutputSeeker {
+        return .{ .context = writer, .vtable = &file_vtable };
+    }
+
+    const file_vtable: VTable = .{
+        .seekTo = struct {
+            fn seekTo(context: *anyopaque, offset: u64) error{IoFailure}!void {
+                const w: *std.Io.File.Writer = @ptrCast(@alignCast(context));
+                w.seekTo(offset) catch return error.IoFailure;
+            }
+        }.seekTo,
+        .position = struct {
+            fn position(context: *anyopaque) u64 {
+                const w: *std.Io.File.Writer = @ptrCast(@alignCast(context));
+                return w.logicalPos();
+            }
+        }.position,
+    };
+};
+
 /// `seek_file`'s fallback onto `av_seek_frame`, which every demuxer here
 /// uses: `seekFrame` toward the nearer bound's side, then, if that fails,
 /// to that bound and back. `avformat_seek_file`'s preroll and start-time
@@ -196,4 +263,34 @@ test "a file reader seeks and reports its position and size" {
     try std.testing.expectEqual('7', try reader.interface.takeByte());
     try seeker.seekTo(2);
     try std.testing.expectEqual('2', try reader.interface.takeByte());
+}
+
+test "an output seeker rewrites earlier bytes of a file and of a buffer" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const f = try tmp.dir.createFile(io, "out", .{});
+    var buffer: [4]u8 = undefined;
+    var writer = f.writerStreaming(io, &buffer);
+    const seeker: OutputSeeker = .file(&writer);
+    try writer.interface.writeAll("0123456789");
+    try std.testing.expectEqual(10, seeker.position());
+    try seeker.seekTo(2);
+    try writer.interface.writeAll("ab");
+    try seeker.seekTo(10);
+    try writer.interface.writeAll("!");
+    try writer.interface.flush();
+    f.close(io);
+    var read_buffer: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("01ab456789!", try tmp.dir.readFile(io, "out", &read_buffer));
+
+    var bytes: [16]u8 = undefined;
+    var fixed_writer: std.Io.Writer = .fixed(&bytes);
+    const fixed_seeker: OutputSeeker = .fixed(&fixed_writer);
+    try fixed_writer.writeAll("0123456789");
+    try fixed_seeker.seekTo(2);
+    try fixed_writer.writeAll("ab");
+    try fixed_seeker.seekTo(10);
+    try std.testing.expectEqualStrings("01ab456789", fixed_writer.buffered());
+    try std.testing.expectError(error.IoFailure, fixed_seeker.seekTo(17));
 }

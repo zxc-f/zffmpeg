@@ -37,7 +37,7 @@ pub fn of(err: Error) ExitStatus {
         error.ProcessFdQuotaExceeded,
         error.SystemFdQuotaExceeded,
         => .limit,
-        error.UnusedOption => .usage,
+        error.UnusedOption, error.InvalidOption => .usage,
         error.Canceled => .canceled,
         else => .io,
     };

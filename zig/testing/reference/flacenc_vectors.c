@@ -110,6 +110,10 @@ static int64_t sample(const char *signal, int bits, int c, int i, int64_t *state
         state[c] += (x - state[c]) / 8;
         v = state[c] * 2;
         v = v / 8 * 8;
+    } else if (!strcmp(signal, "ramp")) {
+        // Slow ramps, which the LPC analysis fits almost exactly: the last
+        // bits of FFmpeg's autocorrelation decide the coefficients.
+        v = ((int64_t)i * (c ? -987654321LL : 1234567890123LL)) >> (64 - bits);
     } else if (!strcmp(signal, "extremes")) {
         // Alternating extremes, which no predictor keeps within 32 bits.
         v = ((i + c) & 1) ? top - 1 : -top;
@@ -318,6 +322,10 @@ static const struct Case cases[] = {
     { "bits32_wasted", "wasted", 2, 48000, 1, 32, 3000, 1152, "strict=experimental:ch_mode=mid_side" },
     { "bits32_search", "smooth", 2, 48000, 1, 32, 3000, 1152, "strict=experimental:compression_level=12" },
     { "bits16_extremes", "extremes", 2, 44100, 0, 0, 3000, 1152, "-" },
+    { "ramp32", "ramp", 2, 48000, 1, 32, 5000, 4096, "strict=experimental" },
+    { "ramp32_odd", "ramp", 2, 48000, 1, 32, 4999, 4095, "strict=experimental:compression_level=8" },
+    { "ramp32_cholesky", "ramp", 1, 48000, 1, 32, 3000, 1152, "strict=experimental:lpc_type=cholesky" },
+    { "ramp24", "ramp", 2, 48000, 1, 24, 5000, 4096, "-" },
     // Sample rates: the table, kHz, tens of Hz, Hz, STREAMINFO only, too high.
     { "rate8000", "tone", 1, 8000, 0, 0, 1000, 0, "-" },
     { "rate192000", "tone", 1, 192000, 0, 0, 1000, 0, "-" },

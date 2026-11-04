@@ -3,12 +3,19 @@
 // fftools/ffmpeg_opt.c at the pinned reference revision was read for the -y/-n
 // and same-file behavior; see port.md "zffmpeg command" for the differences.
 //! zffmpeg: converts or stream-copies one WAV, Wave64, AU, AIFF, CAF (input
-//! only) or raw PCM stream (TODO.md T13b, T21b, T22b, T22c, T22d).
+//! only), FLAC or raw PCM stream (TODO.md T13b, T21b, T22b, T22c, T22d,
+//! T26a, T26c).
 //!
 //!     zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate> | -ar <rate>]
 //!             [-ch_layout <layout> | -ac <channels>] -i <input | -> [-c copy|<encoder>]
 //!             [-ar <rate>] [-ac <channels> | -ch_layout <layout>]
-//!             [-dither_method <method>] [-dither_scale <scale>] [-f <format>] <output | ->
+//!             [-dither_method <method>] [-dither_scale <scale>]
+//!             [FLAC encoder options] [-f <format>] <output | ->
+//!
+//! `-c:a flac`, the default for a `.flac` output, encodes as FFmpeg's FLAC
+//! encoder and muxer do (T26c), with its options after `-i` in FFmpeg's
+//! syntax; a file output gets the encoder's final STREAMINFO, standard
+//! output the first, as FFmpeg's muxer does on a pipe.
 //!
 //! The input container is detected from content as FFmpeg's probing would
 //! (T16), with the file name's extension as FFmpeg's fallback for raw PCM
@@ -44,18 +51,19 @@ const status = @import("status.zig");
 const ExitStatus = status.ExitStatus;
 const printError = status.printError;
 
-const usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout <layout>] -i <input | -> [-c copy|<encoder>] [-ar <rate>] [-ac <channels> | -ch_layout <layout>] [-dither_method <method>] [-dither_scale <scale>] [-f <format>] <output | ->\n";
+const usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout <layout>] -i <input | -> [-c copy|<encoder>] [-ar <rate>] [-ac <channels> | -ch_layout <layout>] [-dither_method <method>] [-dither_scale <scale>] [FLAC encoder options] [-f <format>] <output | ->\n";
 const help = usage ++
     \\
-    \\Converts one WAV, Wave64, AU, AIFF, CAF (input only) or raw PCM stream
-    \\(standard input or output with -). The input container is detected from content, or for raw
-    \\PCM from the name (.sb, .ub, .al, .ul, .sw), or forced with -f before -i.
+    \\Converts one WAV, Wave64, AU, AIFF, CAF (input only), FLAC or raw PCM
+    \\stream (standard input or output with -). The input container is detected
+    \\from content, or for raw PCM from the name (.sb, .ub, .al, .ul, .sw), or
+    \\forced with -f before -i.
     \\Before -i, -sample_rate (or -ar) and -ch_layout (or -ac) describe raw
     \\PCM input, 44100 Hz mono by default. The output container is the -f after
     \\-i, or the output name's extension (.wav, .w64, .au, .aif, .aiff, .afc,
-    \\.aifc, .sb, .ub, .al, .ul, .sw). Formats: wav, w64, au, aiff and the raw
-    \\formats u8, s8, s16le, s16be, s24le, s24be, s32le, s32be, f32le, f32be,
-    \\f64le, f64be, alaw and mulaw.
+    \\.aifc, .flac, .sb, .ub, .al, .ul, .sw). Formats: wav, w64, au, aiff, flac
+    \\and the raw formats u8, s8, s16le, s16be, s24le, s24be, s32le, s32be,
+    \\f32le, f32be, f64le, f64be, alaw and mulaw.
     \\After -i, -ac <channels> or -ch_layout <layout> remixes into that layout
     \\as FFmpeg does (-ac takes the default layout for the count), and -ar
     \\<rate> resamples as FFmpeg's aresample does.
@@ -66,6 +74,14 @@ const help = usage ++
     \\f_weighted, modified_e_weighted, improved_e_weighted, shibata,
     \\low_shibata, high_shibata, or FFmpeg's number) and -dither_scale (0 to
     \\2147483647, default 1) dither the conversion as FFmpeg does.
+    \\-c flac (the default for .flac) encodes FLAC as FFmpeg does, with its
+    \\options: -compression_level (0 to 12, default 5), -lpc_type (none,
+    \\fixed, levinson, cholesky), -lpc_passes, -lpc_coeff_precision,
+    \\-min_prediction_order, -max_prediction_order, -prediction_order_method
+    \\(estimation, 2level, 4level, 8level, search, log), -min_partition_order,
+    \\-max_partition_order, -ch_mode (auto, indep, left_side, right_side,
+    \\mid_side), -exact_rice_parameters, -multi_dim_quant, and -strict
+    \\experimental for 32 bits per sample.
     \\-y replaces an existing output; without it (or with -n) an existing output
     \\is an error.
     \\Exit codes: 0 success, 1 usage, 2 invalid or truncated media,
@@ -92,7 +108,9 @@ const Command = struct {
     format: ?[]const u8,
     mode: av.convert.Mode,
     /// The `-c` encoder, when it names one rather than `copy`.
-    encoder: ?av.pcm.Codec,
+    encoder: ?av.codecs.Codec,
+    /// The FLAC encoder's options after `-i` (T26c).
+    flac: av.flacenc.AvOptions,
     dither: av.dither.Options,
     overwrite: bool,
 };
@@ -179,6 +197,7 @@ fn run(init: std.process.Init) ExitStatus {
         .output = container,
         .mode = command.mode,
         .codec = command.encoder,
+        .flac = command.flac.toOptions(),
         .dither = command.dither,
         .input = .{ .format = input_container, .raw = raw_params },
         // FFmpeg's input -ch_layout names the stream's layout, which its
@@ -207,7 +226,8 @@ fn parse(args: []const [:0]const u8) Parsed {
     var format: ?[]const u8 = null;
     var codec_given = false;
     var copy = false;
-    var encoder: ?av.pcm.Codec = null;
+    var encoder: ?av.codecs.Codec = null;
+    var flac: av.flacenc.AvOptions = .{};
     var dither_method: ?[]const u8 = null;
     var dither_scale: ?[]const u8 = null;
     var yes = false;
@@ -269,10 +289,9 @@ fn parse(args: []const [:0]const u8) Parsed {
                 if (std.mem.eql(u8, value, "copy")) {
                     copy = true;
                 } else {
-                    // An encoder, as FFmpeg names it (T23a).
+                    // An encoder, as FFmpeg names it (T23a, T26c).
                     const found = av.codecs.findEncoder(value) orelse return .{ .usage = .{ .reason = "unknown encoder", .arg = value } };
-                    // Every registered encoder is PCM so far.
-                    encoder = found.codec.pcmCodec() orelse return .{ .usage = .{ .reason = "unknown encoder", .arg = value } };
+                    encoder = found.codec;
                 }
             }
         } else if (std.mem.eql(u8, arg, "-dither_method") or std.mem.eql(u8, arg, "-dither_scale")) {
@@ -284,6 +303,13 @@ fn parse(args: []const [:0]const u8) Parsed {
             const slot = if (std.mem.eql(u8, arg, "-dither_method")) &dither_method else &dither_scale;
             if (slot.* != null) return .{ .usage = .{ .reason = "given twice", .arg = arg } };
             slot.* = args[i];
+        } else if (input != null and isFlacOption(arg)) {
+            // The FLAC encoder's options, in FFmpeg's syntax (T26c); FFmpeg
+            // leaves them unused for another encoder, as zffmpeg does.
+            i += 1;
+            if (i == args.len) return .{ .usage = .{ .reason = "missing value for", .arg = arg } };
+            av.options.set(av.flacenc.AvOptions, &flac, arg[1..], args[i]) catch
+                return .{ .usage = .{ .reason = "invalid value for", .arg = arg } };
         } else if (arg.len > 1 and arg[0] == '-') {
             return .{ .usage = .{ .reason = "unknown option", .arg = arg } };
         } else {
@@ -310,6 +336,7 @@ fn parse(args: []const [:0]const u8) Parsed {
         .format = format,
         .mode = if (copy) .copy else .transcode,
         .encoder = encoder,
+        .flac = flac,
         .dither = dither,
         .overwrite = yes,
     } };
@@ -322,6 +349,14 @@ fn outputContainer(command: Command) error{ FormatRequired, UnknownFormat, Unkno
     if (isStdio(command.output)) return error.FormatRequired;
     // The muxers' extensions, without regard to case, as FFmpeg matches them.
     return av.formats.muxerForExtension(std.fs.path.extension(command.output)) orelse error.UnknownExtension;
+}
+
+fn isFlacOption(arg: []const u8) bool {
+    if (arg.len < 2 or arg[0] != '-') return false;
+    inline for (av.flacenc.AvOptions.option_specs) |spec| {
+        if (std.mem.eql(u8, arg[1..], spec.name)) return true;
+    }
+    return false;
 }
 
 fn isRawOption(arg: []const u8) bool {
@@ -386,7 +421,9 @@ fn convert(io: std.Io, command: Command, request: av.convert.Request) ExitStatus
         else => return fail(io, command.output, err),
     };
     var writer = output_file.writerStreaming(io, &output_buffer);
-    const result = conversion.run(&writer.interface);
+    // A file can seek back, so a FLAC output's final STREAMINFO replaces the
+    // first, as FFmpeg's muxer does on a seekable output (T26c).
+    const result = conversion.runTo(&writer.interface, .file(&writer));
     // Close before removing: a file cannot be deleted while open everywhere.
     output_file.close(io);
     result catch |err| {

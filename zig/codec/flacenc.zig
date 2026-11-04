@@ -18,6 +18,7 @@ const std = @import("std");
 const bits = @import("bits.zig");
 const flac = @import("flac.zig");
 const lpc = @import("lpc.zig");
+const options_zig = @import("../core/options.zig");
 
 const max_fixed_order = 4;
 const max_partition_order = 8;
@@ -65,6 +66,78 @@ pub const Options = struct {
     multi_dim_quant: bool = false,
     /// `-strict experimental`: 32-bit samples stay 32 bits.
     strict_experimental: bool = false,
+};
+
+/// The options as FFmpeg's command line sets them (T17a's `options.set`):
+/// FFmpeg's names, ranges, named constants and -1 defaults, the generic
+/// `compression_level` and `strict` among them. `toOptions` gives the
+/// encoder's.
+pub const AvOptions = struct {
+    compression_level: i32 = -1,
+    lpc_coeff_precision: i32 = 15,
+    lpc_type: i32 = -1,
+    lpc_passes: i32 = 2,
+    min_partition_order: i32 = -1,
+    max_partition_order: i32 = -1,
+    prediction_order_method: i32 = -1,
+    ch_mode: i32 = -1,
+    exact_rice_parameters: bool = false,
+    multi_dim_quant: bool = false,
+    min_prediction_order: i32 = -1,
+    max_prediction_order: i32 = -1,
+    strict: i32 = 0,
+
+    const int_min: f64 = std.math.minInt(i32);
+    const int_max: f64 = std.math.maxInt(i32);
+
+    pub const option_specs = [_]options_zig.Spec{
+        .{ .name = "compression_level", .field = "compression_level", .kind = .int, .help = "", .min = int_min, .max = int_max },
+        .{ .name = "lpc_coeff_precision", .field = "lpc_coeff_precision", .kind = .int, .help = "LPC coefficient precision", .min = 0, .max = max_lpc_precision },
+        .{ .name = "lpc_type", .field = "lpc_type", .kind = .int, .help = "LPC algorithm", .min = -1, .max = 3, .constants = &.{
+            .{ .name = "none", .value = 0 }, .{ .name = "fixed", .value = 1 }, .{ .name = "levinson", .value = 2 }, .{ .name = "cholesky", .value = 3 },
+        } },
+        .{ .name = "lpc_passes", .field = "lpc_passes", .kind = .int, .help = "Number of passes to use for Cholesky factorization during LPC analysis", .min = 1, .max = int_max },
+        .{ .name = "min_partition_order", .field = "min_partition_order", .kind = .int, .help = "", .min = -1, .max = max_partition_order },
+        .{ .name = "max_partition_order", .field = "max_partition_order", .kind = .int, .help = "", .min = -1, .max = max_partition_order },
+        .{ .name = "prediction_order_method", .field = "prediction_order_method", .kind = .int, .help = "Search method for selecting prediction order", .min = -1, .max = 5, .constants = &.{
+            .{ .name = "estimation", .value = 0 }, .{ .name = "2level", .value = 1 }, .{ .name = "4level", .value = 2 }, .{ .name = "8level", .value = 3 }, .{ .name = "search", .value = 4 }, .{ .name = "log", .value = 5 },
+        } },
+        .{ .name = "ch_mode", .field = "ch_mode", .kind = .int, .help = "Stereo decorrelation mode", .min = -1, .max = 3, .constants = &.{
+            .{ .name = "auto", .value = -1 }, .{ .name = "indep", .value = 0 }, .{ .name = "left_side", .value = 1 }, .{ .name = "right_side", .value = 2 }, .{ .name = "mid_side", .value = 3 },
+        } },
+        .{ .name = "exact_rice_parameters", .field = "exact_rice_parameters", .kind = .bool, .help = "Calculate rice parameters exactly", .min = 0, .max = 1 },
+        .{ .name = "multi_dim_quant", .field = "multi_dim_quant", .kind = .bool, .help = "Multi-dimensional quantization", .min = 0, .max = 1 },
+        .{ .name = "min_prediction_order", .field = "min_prediction_order", .kind = .int, .help = "", .min = -1, .max = lpc.max_order },
+        .{ .name = "max_prediction_order", .field = "max_prediction_order", .kind = .int, .help = "", .min = -1, .max = lpc.max_order },
+        .{ .name = "strict", .field = "strict", .kind = .int, .help = "how strictly to follow the standards", .min = int_min, .max = int_max, .constants = &.{
+            .{ .name = "very", .value = 2 }, .{ .name = "strict", .value = 1 }, .{ .name = "normal", .value = 0 }, .{ .name = "unofficial", .value = -1 }, .{ .name = "experimental", .value = -2 },
+        } },
+    };
+
+    comptime {
+        options_zig.check(AvOptions);
+    }
+
+    /// The encoder's options; the ranges above keep every value in its
+    /// field.
+    pub fn toOptions(o: AvOptions) Options {
+        return .{
+            .compression_level = if (o.compression_level < 0) null else o.compression_level,
+            .lpc_type = if (o.lpc_type < 0) null else @fromBackingInt(@intCast(o.lpc_type)),
+            .lpc_passes = @intCast(o.lpc_passes),
+            .lpc_coeff_precision = @intCast(o.lpc_coeff_precision),
+            .min_prediction_order = if (o.min_prediction_order < 0) null else @intCast(o.min_prediction_order),
+            .max_prediction_order = if (o.max_prediction_order < 0) null else @intCast(o.max_prediction_order),
+            .prediction_order_method = if (o.prediction_order_method < 0) null else @fromBackingInt(@intCast(o.prediction_order_method)),
+            .min_partition_order = if (o.min_partition_order < 0) null else @intCast(o.min_partition_order),
+            .max_partition_order = if (o.max_partition_order < 0) null else @intCast(o.max_partition_order),
+            .ch_mode = if (o.ch_mode < 0) null else @fromBackingInt(@intCast(o.ch_mode)),
+            .exact_rice_parameters = o.exact_rice_parameters,
+            .multi_dim_quant = o.multi_dim_quant,
+            // FFmpeg's FF_COMPLIANCE_EXPERIMENTAL is -2.
+            .strict_experimental = o.strict <= -2,
+        };
+    }
 };
 
 pub const InitError = error{
@@ -173,6 +246,50 @@ pub const Encoder = struct {
     /// `flac_encode_init`: checks the stream and the options as FFmpeg
     /// does, in its order, and writes the first STREAMINFO.
     pub fn init(gpa: std.mem.Allocator, params: Params, options: Options) InitError!*Encoder {
+        const set = try setup(params, options);
+        const e = try gpa.create(Encoder);
+        errdefer gpa.destroy(e);
+        e.* = .{
+            .gpa = gpa,
+            .params = params,
+            .options = set.resolved,
+            .bits_per_raw_sample = set.bits_per_raw_sample,
+            .bps_code = set.bps_code,
+            .channels = params.channels,
+            .sample_rate = params.sample_rate,
+            .sr_code = set.sr_code,
+            .frame_size = set.frame_size,
+            .min_framesize = 0,
+            .max_framesize = maxFrameSize(set.frame_size, params.channels, set.bits_per_raw_sample),
+            .md5 = .init(.{}),
+            .lpc_ctx = undefined,
+            .subframes = undefined,
+            .samples_33bps = &.{},
+            .rc_udata = &.{},
+            .rc_sums = undefined,
+            .md5_buffer = &.{},
+        };
+        try e.allocate();
+        e.writeStreaminfo();
+        e.min_framesize = e.max_framesize;
+        return e;
+    }
+
+    /// The checks `init` makes, without allocating: what FFmpeg's
+    /// `avcodec_open2` would refuse.
+    pub fn validate(params: Params, options: Options) error{ UnsupportedFormat, InvalidOption }!void {
+        _ = try setup(params, options);
+    }
+
+    const Setup = struct {
+        bits_per_raw_sample: u8,
+        bps_code: u3,
+        sr_code: [2]u32,
+        resolved: Resolved,
+        frame_size: u32,
+    };
+
+    fn setup(params: Params, options: Options) error{ UnsupportedFormat, InvalidOption }!Setup {
         // Out-of-range options fail where FFmpeg sets them, before the
         // encoder's checks. A precision of 0, which FFmpeg's range allows
         // and its arithmetic does not, is refused too.
@@ -269,32 +386,7 @@ pub const Encoder = struct {
             frame_size = selectBlocksize(freq, block_time_ms[level]);
         }
 
-        const e = try gpa.create(Encoder);
-        errdefer gpa.destroy(e);
-        e.* = .{
-            .gpa = gpa,
-            .params = params,
-            .options = resolved,
-            .bits_per_raw_sample = bits_per_raw_sample,
-            .bps_code = bps_code,
-            .channels = channels,
-            .sample_rate = freq,
-            .sr_code = sr_code,
-            .frame_size = frame_size,
-            .min_framesize = 0,
-            .max_framesize = maxFrameSize(frame_size, channels, bits_per_raw_sample),
-            .md5 = .init(.{}),
-            .lpc_ctx = undefined,
-            .subframes = undefined,
-            .samples_33bps = &.{},
-            .rc_udata = &.{},
-            .rc_sums = undefined,
-            .md5_buffer = &.{},
-        };
-        try e.allocate();
-        e.writeStreaminfo();
-        e.min_framesize = e.max_framesize;
-        return e;
+        return .{ .bits_per_raw_sample = bits_per_raw_sample, .bps_code = bps_code, .sr_code = sr_code, .resolved = resolved, .frame_size = frame_size };
     }
 
     fn allocate(e: *Encoder) std.mem.Allocator.Error!void {
@@ -1305,6 +1397,9 @@ const Signal = struct {
             }
         } else if (std.mem.eql(u8, g.kind, "steps")) {
             v = (@as(i64, @mod(@divTrunc(i, 300), 5)) - 2) * @divTrunc(top, 3) + channel;
+        } else if (std.mem.eql(u8, g.kind, "ramp")) {
+            const slope: i64 = if (c != 0) -987654321 else 1234567890123;
+            v = (@as(i64, i) * slope) >> @intCast(64 - @as(u7, g.bits));
         } else if (std.mem.eql(u8, g.kind, "extremes")) {
             v = if ((i + c) & 1 != 0) top - 1 else -top;
             if (g.rng() & 1 != 0) v = -top;
@@ -1435,7 +1530,27 @@ test "every case encodes as FFmpeg's encoder does (vectors/flacenc.txt)" {
         try checkCase(testing.allocator, line, &lines);
         cases += 1;
     }
-    try testing.expectEqual(80, cases);
+    try testing.expectEqual(84, cases);
+}
+
+test "FFmpeg's option text sets the encoder's options" {
+    var o: AvOptions = .{};
+    try options_zig.set(AvOptions, &o, "lpc_type", "cholesky");
+    try options_zig.set(AvOptions, &o, "ch_mode", "mid_side");
+    try options_zig.set(AvOptions, &o, "prediction_order_method", "8level");
+    try options_zig.set(AvOptions, &o, "strict", "experimental");
+    try options_zig.set(AvOptions, &o, "compression_level", "8");
+    try options_zig.set(AvOptions, &o, "exact_rice_parameters", "1");
+    try testing.expectError(error.OutOfRange, options_zig.set(AvOptions, &o, "max_prediction_order", "33"));
+    try testing.expectError(error.UnknownOption, options_zig.set(AvOptions, &o, "frame_size", "4096"));
+    const resolved = o.toOptions();
+    try testing.expectEqual(lpc.Type.cholesky, resolved.lpc_type.?);
+    try testing.expectEqual(flac.ChannelMode.mid_side, resolved.ch_mode.?);
+    try testing.expectEqual(lpc.OrderMethod.eight_level, resolved.prediction_order_method.?);
+    try testing.expectEqual(8, resolved.compression_level.?);
+    try testing.expect(resolved.strict_experimental and resolved.exact_rice_parameters);
+    try testing.expectEqual(null, resolved.max_prediction_order);
+    try testing.expectEqual(null, (AvOptions{}).toOptions().ch_mode);
 }
 
 test "frames the encoder refuses, and every allocation failure" {

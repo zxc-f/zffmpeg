@@ -182,6 +182,12 @@ pub fn channelLayout(channels: u8) channel_layout.Layout {
     return .{ .native = layout_masks[channels - 1] };
 }
 
+/// `ff_flac_is_native_layout`: whether `mask` is one of FLAC's layouts,
+/// whatever its channel count.
+pub fn isNativeLayout(mask: u64) bool {
+    return std.mem.findScalar(u64, &layout_masks, mask) != null;
+}
+
 /// flac.c's flac_channel_layouts: mono, stereo, surround, quad, 5.0, 5.1,
 /// 6.1 and 7.1, by FFmpeg's names for them.
 const layout_masks = masks: {

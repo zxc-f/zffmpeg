@@ -1255,6 +1255,16 @@ pub const DecodedReader = struct {
         };
     }
 
+    /// The sample count of the first decoded frame, which the ffmpeg
+    /// program's FLAC encoder takes as its block size (T26c); null for a
+    /// stream without frames. The frame is decoded ahead; `readData` still
+    /// returns it first.
+    pub fn firstFrameSamples(r: *DecodedReader) Error!?u32 {
+        std.debug.assert(r.delivered == 0);
+        if (r.pendingFrames() == 0 and !try r.nextFrame()) return null;
+        return @intCast(r.pendingFrames());
+    }
+
     /// Whole frames of samples into `output`, at least one while any remain
     /// (one frame fits in 32 bytes); empty at the end.
     pub fn readData(r: *DecodedReader, output: []u8) Error![]u8 {

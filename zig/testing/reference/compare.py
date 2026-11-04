@@ -1800,6 +1800,152 @@ FATE_FLAC_SAMPLES = [
 ]
 
 
+def flac_output_inputs(work):
+    """The WAV inputs of the FLAC output comparison (T26c), made here with
+    the standard library: a tenth of a second or more of each sample format
+    FFmpeg's FLAC encoder takes through its two storages, so that blocks are
+    whole and the last one short."""
+    import math
+    import random
+    specs = [
+        # name, format tag, bits, channels, rate, frames
+        ("s16_stereo_44k1", 1, 16, 2, 44100, 9000),
+        ("u8_mono_8k", 1, 8, 1, 8000, 3000),
+        ("s24_stereo_96k", 1, 24, 2, 96000, 12000),
+        ("s32_stereo_48k", 1, 32, 2, 48000, 6000),
+        ("f32_stereo_44k1", 3, 32, 2, 44100, 6000),
+        ("f64_mono_48k", 3, 64, 1, 48000, 6000),
+        ("s16_6ch_48k", 1, 16, 6, 48000, 5000),
+        ("s16_mono_22k", 1, 16, 1, 22050, 5000),
+        ("s64_ramp_stereo", 1, 64, 2, 44100, 5000),
+    ]
+    paths = {}
+    for name, tag, bits, channels, rate, frames in specs:
+        rnd = random.Random(name)
+        data = bytearray()
+        for i in range(frames):
+            for c in range(channels):
+                if name.startswith("s64"):
+                    # Slow ramps: the LPC analysis' last bits matter.
+                    v = i * (1234567890123 if c == 0 else -987654321)
+                    data += struct.pack("<q", v)
+                    continue
+                x = math.sin(i * (0.01 + 0.003 * c)) * 0.6 + (rnd.random() - 0.5) * 0.05
+                if tag == 3:
+                    data += struct.pack("<f" if bits == 32 else "<d", x)
+                elif bits == 8:
+                    data += bytes([int(x * 127) + 128])
+                else:
+                    data += int(x * (2 ** (bits - 1) - 1)).to_bytes(bits // 8, "little", signed=True)
+        align = channels * bits // 8
+        fmt = struct.pack("<HHIIHH", tag, channels, rate, rate * align, align, bits)
+        body = b"WAVE" + b"fmt " + struct.pack("<I", len(fmt)) + fmt + b"data" + struct.pack("<I", len(data)) + data
+        path = work / f"{name}.wav"
+        path.write_bytes(b"RIFF" + struct.pack("<I", len(body)) + body)
+        paths[name] = path
+    return paths
+
+
+# Encoder options compared on every FLAC output input (T26c).
+FLAC_OUTPUT_OPTIONS = [[]] + [["-compression_level", str(level)] for level in range(13)] + [
+    ["-strict", "experimental"],
+    ["-compression_level", "12", "-strict", "-2"],
+    ["-lpc_type", "cholesky", "-lpc_passes", "3"],
+    ["-lpc_type", "none"],
+    ["-ch_mode", "mid_side", "-exact_rice_parameters", "1"],
+    ["-prediction_order_method", "8level", "-max_prediction_order", "32"],
+    ["-multi_dim_quant", "1", "-max_prediction_order", "4"],
+    ["-min_partition_order", "0", "-max_partition_order", "0", "-lpc_coeff_precision", "7"],
+    ["-ar", "48000"],
+    ["-ac", "1"],
+    ["-ar", "22050", "-ac", "2"],
+]
+
+
+def compare_flac_output(args, lines, failures):
+    """zffmpeg's FLAC output (T26c) against the ffmpeg program's with
+    `-bitexact`: the same bytes, as a file (STREAMINFO rewritten at the
+    end) and on a pipe (as first written), and FFmpeg's decoding of ours
+    equal to the samples the encoder takes. The FLAC fixtures FFmpeg made
+    are inputs too. Sizes per compression level are recorded."""
+    rows = []
+    same = total = 0
+    sizes = {}
+    with tempfile.TemporaryDirectory() as work:
+        work = pathlib.Path(work)
+        inputs = flac_output_inputs(work)
+        for fixture in ("flac_ffmpeg_level5_stereo", "flac_ffmpeg_level8_mono", "flac_ffmpeg_lpc_orders"):
+            inputs[fixture] = FIXTURES / "flac" / f"{fixture}.flac"
+        for name, source in inputs.items():
+            problems = []
+            for opts in FLAC_OUTPUT_OPTIONS:
+                total += 1
+                theirs, ours = work / "theirs.flac", work / "ours.flac"
+                for path in (theirs, ours):
+                    path.unlink(missing_ok=True)
+                tp = run(args.ffmpeg, "-nostdin", "-v", "error", "-y", "-i", source, "-bitexact", "-c:a", "flac", *opts, theirs)
+                zp = run(args.zffmpeg, "-y", "-i", source, *opts, ours)
+                label = " ".join(opts) or "defaults"
+                if tp.returncode != 0 or zp.returncode != 0:
+                    problems.append(f"{label}: FFmpeg {tp.returncode}, zffmpeg {zp.returncode} "
+                                    f"({first_line(text(zp.stderr))})")
+                    continue
+                if theirs.read_bytes() != ours.read_bytes():
+                    problems.append(f"{label}: the files differ")
+                    continue
+                # A pipe cannot seek back: STREAMINFO stays as first written.
+                tpipe = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", source, "-bitexact", "-c:a", "flac", *opts,
+                            "-f", "flac", "-")
+                zpipe = run(args.zffmpeg, "-i", source, *opts, "-f", "flac", "-")
+                if tpipe.stdout != zpipe.stdout:
+                    problems.append(f"{label}: the piped output differs")
+                    continue
+                # FFmpeg decodes ours to the samples the encoder took: those
+                # of the same conversion to pcm_s32le, shifted as the stream
+                # keeps them (s16 outputs compare as s16).
+                probe = run(args.ffprobe, "-v", "error", "-show_entries", "stream=sample_fmt,bits_per_raw_sample",
+                            "-of", "default=nw=1:nk=1", ours)
+                fields = text(probe.stdout).split()
+                fmt = "s16le" if fields and fields[0] == "s16" else "s32le"
+                decoded = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", ours, "-f", fmt, "-").stdout
+                pairs = [opts[i:i + 2] for i in range(0, len(opts), 2) if opts[i] in ("-ar", "-ac")]
+                conversion_opts = [x for pair in pairs for x in pair]
+                expected = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", source, *conversion_opts, "-f", fmt, "-").stdout
+                bits = int(fields[1]) if len(fields) > 1 and fields[1].isdigit() else 0
+                if fmt == "s32le" and bits and bits < 32:
+                    # The encoder keeps the top `bits` bits of each sample.
+                    mask = struct.pack("<i", -(1 << (32 - bits)))
+                    keep = int.from_bytes(mask, "little")
+                    words = struct.unpack(f"<{len(expected) // 4}I", expected)
+                    expected = struct.pack(f"<{len(words)}I", *(w & keep for w in words))
+                if decoded != expected:
+                    problems.append(f"{label}: FFmpeg's decoding differs from the encoder's input")
+                    continue
+                same += 1
+                if len(opts) == 2 and opts[0] == "-compression_level":
+                    sizes.setdefault(name, {})[int(opts[1])] = ours.stat().st_size
+            result = "pass" if not problems else "**FAIL**: " + "; ".join(problems)
+            rows.append(f"| `{name}` | {len(FLAC_OUTPUT_OPTIONS)} | {result} |")
+            failures.extend(f"FLAC output {name}: {p}" for p in problems)
+    lines += [
+        "",
+        "## FLAC output (T26c)",
+        "",
+        f"zffmpeg's FLAC equal to the ffmpeg program's (`-bitexact`) as a file and on a pipe, and decoded by FFmpeg "
+        f"to the encoder's input: {same}/{total}.",
+        "",
+        "| Input | Option sets | Result |",
+        "| --- | --- | --- |",
+    ] + rows + [
+        "",
+        "Bytes per compression level (zffmpeg's, which equal FFmpeg's):",
+        "",
+        "| Input | " + " | ".join(str(level) for level in range(13)) + " |",
+        "| --- |" + " --- |" * 13,
+    ] + [f"| `{name}` | " + " | ".join(str(per.get(level, "-")) for level in range(13)) + " |"
+         for name, per in sizes.items()]
+
+
 def compare_fate(args, lines, failures):
     """Optional coverage (T26b, T19c): FATE's FLAC tests, the reference
     sample encoded by FFmpeg with the test's options and decoded by zffmpeg
@@ -1819,14 +1965,35 @@ def compare_fate(args, lines, failures):
                             f"missing |")
                 continue
             flac = work / "in.flac"
+            encoded = ""
             if opts is not None:
                 enc = run(args.ffmpeg, "-nostdin", "-v", "error", "-y", "-i", source, "-c", "flac", *opts,
-                          "-fflags", "+bitexact", flac)
+                          "-fflags", "+bitexact", "-flags:a", "+bitexact", flac)
                 if enc.returncode != 0:
                     failed += 1
                     rows.append(f"| {name} | **FAIL**: FFmpeg could not encode: {first_line(text(enc.stderr))} |")
                     failures.append(f"{name}: FFmpeg could not encode the reference")
                     continue
+                # T26c: zffmpeg's encoding with the test's options.
+                ours_flac = work / "ours.flac"
+                zenc = run(args.zffmpeg, "-y", "-i", source, *opts, ours_flac)
+                rewrapped = ""
+                if zenc.returncode != 0 and b"InvalidRiff" in zenc.stderr:
+                    # The WAV contract refuses a chunk past the RIFF extent,
+                    # which FFmpeg reads; its stream copy into a valid WAV
+                    # gives the encoder the same packets.
+                    valid = work / "valid.wav"
+                    run(args.ffmpeg, "-nostdin", "-v", "error", "-y", "-i", source, "-c", "copy", "-bitexact", valid)
+                    zenc = run(args.zffmpeg, "-y", "-i", valid, *opts, ours_flac)
+                    rewrapped = "; from FFmpeg's copy into a valid WAV, as the sample's `data` runs past its " \
+                                "RIFF extent, which the WAV contract refuses"
+                if zenc.returncode != 0 or ours_flac.read_bytes() != flac.read_bytes():
+                    failed += 1
+                    why = first_line(text(zenc.stderr)) if zenc.returncode else "the encoded files differ"
+                    rows.append(f"| {name} | **FAIL**: zffmpeg's encoding: {why} |")
+                    failures.append(f"{name}: zffmpeg's FLAC encoding differs from FFmpeg's ({why})")
+                    continue
+                encoded = f"encoded identically ({flac.stat().st_size} bytes{rewrapped}), "
             else:
                 flac = source
             if codec is None:
@@ -1838,7 +2005,7 @@ def compare_fate(args, lines, failures):
             theirs = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", flac, "-map", "0:a", "-c:a", codec, "-f", fmt, "-")
             if ours.returncode == 0 and theirs.returncode == 0 and ours.stdout == theirs.stdout:
                 passed += 1
-                rows.append(f"| {name} | pass: {len(ours.stdout)} bytes of {fmt} |")
+                rows.append(f"| {name} | pass: {encoded}{len(ours.stdout)} bytes of {fmt} |")
             else:
                 failed += 1
                 why = first_line(text(ours.stderr)) if ours.returncode else "the samples differ"
@@ -1936,8 +2103,6 @@ def ffmpeg_help_fields(binary, kind, name):
 # Registry entries that differ from the reference build's listings for an
 # understood reason: (kind, name) -> ((our flags, FFmpeg's flags), reason).
 KNOWN_REGISTRY_DIFFERENCES = {
-    ("codec", "flac"): (("D.AI.S", "DEAI.S"), "the FLAC encoder comes with T26c"),
-    ("format", "flac"): (("D.", "DE"), "the FLAC muxer comes with T26c"),
     ("format only in FFmpeg", "framecrc"): ((None, None), "written by av.framehash for the hash comparison (T19b)"),
     ("format only in FFmpeg", "framemd5"): ((None, None), "written by av.framehash for the hash comparison (T19b)"),
     ("format only in FFmpeg", "streamhash"): ((None, None), "written by av.framehash for the hash comparison (T19b)"),
@@ -2104,6 +2269,7 @@ def main():
 
     compare_pipes(args, lines, failures)
     compare_flac(args, lines, failures)
+    compare_flac_output(args, lines, failures)
     compare_hashes(args, lines, failures)
     compare_fate(args, lines, failures)
 

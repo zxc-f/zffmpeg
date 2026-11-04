@@ -22,6 +22,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const pcm = @import("../codec/pcm.zig");
+const codecs = @import("../codec/registry.zig");
 const wav = @import("wav.zig");
 const au = @import("au.zig");
 const aiff = @import("aiff.zig");
@@ -98,15 +99,20 @@ pub const Container = enum {
         };
     }
 
-    /// Whether this container's muxer can carry `codec`.
+    /// Whether this container's muxer can carry the PCM codec `codec`.
     pub fn carries(container: Container, codec: pcm.Codec) bool {
+        return container.carriesCodec(.{ .pcm = codec });
+    }
+
+    /// Whether this container's muxer can carry `codec`.
+    pub fn carriesCodec(container: Container, codec: codecs.Codec) bool {
         const muxer = container.format().muxer orelse return false;
         return muxer.carries(codec);
     }
 
-    /// The codec transcoding writes, for samples stored as s16: FFmpeg's
-    /// default audio codec for the muxer, or null for a container without one.
-    pub fn s16Codec(container: Container) ?pcm.Codec {
+    /// The codec transcoding writes unless asked otherwise: FFmpeg's default
+    /// audio codec for the muxer, or null for a container without one.
+    pub fn defaultCodec(container: Container) ?codecs.Codec {
         const muxer = container.format().muxer orelse return null;
         return muxer.audio_codec;
     }
@@ -130,8 +136,8 @@ pub const Muxer = struct {
     extensions: []const []const u8,
     mime_type: ?[]const u8,
     /// FFmpeg's `audio_codec`, the one an output gets unless asked otherwise.
-    audio_codec: pcm.Codec,
-    carries: *const fn (codec: pcm.Codec) bool,
+    audio_codec: codecs.Codec,
+    carries: *const fn (codec: codecs.Codec) bool,
 };
 
 pub const Format = struct {
@@ -150,21 +156,21 @@ pub const formats = [_]Format{
         .name = "wav",
         .long_name = "WAV / WAVE (Waveform Audio)",
         .demuxer = .{ .probe = wav.probeScore, .probe_bytes = wav.probe_bytes },
-        .muxer = .{ .extensions = &.{"wav"}, .mime_type = "audio/x-wav", .audio_codec = .s16le, .carries = wav.carries },
+        .muxer = .{ .extensions = &.{"wav"}, .mime_type = "audio/x-wav", .audio_codec = .{ .pcm = .s16le }, .carries = pcmOnly(wav.carries) },
     },
     .{
         .container = .w64,
         .name = "w64",
         .long_name = "Sony Wave64",
         .demuxer = .{ .probe = wav.w64ProbeScore, .probe_bytes = wav.w64_probe_bytes },
-        .muxer = .{ .extensions = &.{"w64"}, .mime_type = null, .audio_codec = .s16le, .carries = wav.carries },
+        .muxer = .{ .extensions = &.{"w64"}, .mime_type = null, .audio_codec = .{ .pcm = .s16le }, .carries = pcmOnly(wav.carries) },
     },
     .{
         .container = .au,
         .name = "au",
         .long_name = "Sun AU",
         .demuxer = .{ .probe = au.probeScore, .probe_bytes = au.probe_bytes },
-        .muxer = .{ .extensions = &.{"au"}, .mime_type = "audio/basic", .audio_codec = .s16be, .carries = au.carries },
+        .muxer = .{ .extensions = &.{"au"}, .mime_type = "audio/basic", .audio_codec = .{ .pcm = .s16be }, .carries = pcmOnly(au.carries) },
     },
     .{
         .container = .aiff,
@@ -174,8 +180,8 @@ pub const formats = [_]Format{
         .muxer = .{
             .extensions = &.{ "aif", "aiff", "afc", "aifc" },
             .mime_type = "audio/aiff",
-            .audio_codec = .s16be,
-            .carries = aiff.carries,
+            .audio_codec = .{ .pcm = .s16be },
+            .carries = pcmOnly(aiff.carries),
         },
     },
     .{
@@ -191,8 +197,8 @@ pub const formats = [_]Format{
         .name = "flac",
         .long_name = "raw FLAC",
         .demuxer = .{ .probe = flac.probeScore, .probe_bytes = flac.probe_bytes, .extensions = &.{"flac"} },
-        // FFmpeg's FLAC muxer comes with T26c.
-        .muxer = null,
+        // FFmpeg's FLAC muxer (T26c), which carries FLAC only.
+        .muxer = .{ .extensions = &.{"flac"}, .mime_type = "audio/x-flac", .audio_codec = .flac, .carries = flacOnly },
     },
     rawFormat(.u8, "PCM unsigned 8-bit", &.{"ub"}),
     rawFormat(.s8, "PCM signed 8-bit", &.{"sb"}),
@@ -222,16 +228,32 @@ fn rawFormat(comptime container: Container, long_name: []const u8, extensions: [
         .name = @tagName(container),
         .long_name = long_name,
         .demuxer = .{ .probe = null, .probe_bytes = 0, .extensions = extensions },
-        .muxer = .{ .extensions = extensions, .mime_type = null, .audio_codec = codec, .carries = onlyCodec(codec) },
+        .muxer = .{ .extensions = extensions, .mime_type = null, .audio_codec = .{ .pcm = codec }, .carries = onlyCodec(codec) },
     };
 }
 
-fn onlyCodec(comptime codec: pcm.Codec) *const fn (pcm.Codec) bool {
+fn onlyCodec(comptime codec: pcm.Codec) *const fn (codecs.Codec) bool {
     return struct {
-        fn carries(other: pcm.Codec) bool {
-            return other == codec;
+        fn carries(other: codecs.Codec) bool {
+            return other.eql(.{ .pcm = codec });
         }
     }.carries;
+}
+
+/// A PCM muxer's `carries`, which carries no FLAC.
+fn pcmOnly(comptime carries: fn (pcm.Codec) bool) *const fn (codecs.Codec) bool {
+    return struct {
+        fn f(codec: codecs.Codec) bool {
+            return switch (codec) {
+                .pcm => |p| carries(p),
+                .flac => false,
+            };
+        }
+    }.f;
+}
+
+fn flacOnly(codec: codecs.Codec) bool {
+    return codec == .flac;
 }
 
 /// The container FFmpeg names `name`, if it has a demuxer (an input `-f`).
@@ -349,7 +371,7 @@ test "raw formats are named as their codecs, have no probe, and carry only their
     try std.testing.expectEqual(Container.mulaw, findDemuxer("mulaw"));
     try std.testing.expectEqual(null, findDemuxer("s64le")); // FFmpeg has none
     try std.testing.expect(Container.s24be.carries(.s24be) and !Container.s24be.carries(.s24le));
-    try std.testing.expectEqual(pcm.Codec.f32le, Container.f32le.s16Codec());
+    try std.testing.expect(Container.f32le.defaultCodec().?.eql(.{ .pcm = .f32le }));
     try std.testing.expectEqual(null, Container.alaw.format().demuxer.?.probe); // `alaw` has a demuxer
     try std.testing.expectEqual(Container.alaw, muxerForExtension(".AL"));
     const native: Container = if (native_endian == .little) .s16le else .s16be;
@@ -365,9 +387,14 @@ test "extensions match as FFmpeg's av_match_ext does" {
 }
 
 test "the default codecs are FFmpeg's and each muxer carries them" {
-    try std.testing.expectEqual(pcm.Codec.s16le, Container.wav.s16Codec());
-    try std.testing.expectEqual(pcm.Codec.s16le, Container.w64.s16Codec());
-    try std.testing.expectEqual(pcm.Codec.s16be, Container.au.s16Codec());
-    try std.testing.expectEqual(pcm.Codec.s16be, Container.aiff.s16Codec());
+    try std.testing.expect(Container.wav.defaultCodec().?.eql(.{ .pcm = .s16le }));
+    try std.testing.expect(Container.w64.defaultCodec().?.eql(.{ .pcm = .s16le }));
+    try std.testing.expect(Container.au.defaultCodec().?.eql(.{ .pcm = .s16be }));
+    try std.testing.expect(Container.aiff.defaultCodec().?.eql(.{ .pcm = .s16be }));
     try std.testing.expect(Container.aiff.carries(.s16le) and !Container.au.carries(.s16le));
+    // FLAC carries FLAC only (T26c); no PCM muxer carries it.
+    try std.testing.expect(Container.flac.defaultCodec().?.eql(.flac));
+    try std.testing.expect(Container.flac.carriesCodec(.flac) and !Container.flac.carries(.s16le));
+    try std.testing.expect(!Container.wav.carriesCodec(.flac));
+    try std.testing.expectEqual(Container.flac, muxerForExtension(".flac"));
 }

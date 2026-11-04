@@ -32,6 +32,8 @@
 //!   (`codec/bits.zig`).
 //! - `flacenc`: FFmpeg's FLAC encoder, packet for packet, with its LPC
 //!   analysis (`codec/flacenc.zig`, `codec/lpc.zig`).
+//! - `flacmux`: FFmpeg's FLAC muxer with the encoder before it, a PCM
+//!   writer as the other containers' (`format/flacmux.zig`).
 //! - `wav`: bounded RIFF/WAVE, RF64/BW64 and Sony Wave64 parsing and
 //!   known-length writing for the WAV PCM encodings (`format/wav.zig`).
 //! - `au`: bounded Sun AU parsing and known-length writing for s16 big-endian
@@ -97,6 +99,7 @@ pub const raw = @import("format/raw.zig");
 pub const caf = @import("format/caf.zig");
 pub const flac = @import("format/flac.zig");
 pub const flacenc = @import("codec/flacenc.zig");
+pub const flacmux = @import("format/flacmux.zig");
 pub const framehash = @import("format/framehash.zig");
 pub const seek = @import("format/seek.zig");
 pub const audioconvert = @import("resample/audioconvert.zig");
@@ -137,6 +140,7 @@ test {
     _ = @import("format/raw.zig");
     _ = @import("format/caf.zig");
     _ = @import("format/flac.zig");
+    _ = @import("format/flacmux.zig");
     _ = @import("format/framehash.zig");
     _ = @import("format/seek.zig");
     _ = @import("format/mov_chan.zig");

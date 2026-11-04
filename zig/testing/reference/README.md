@@ -124,8 +124,10 @@ T26b runs the same generator on the FLAC fixtures (`seek_flac.txt`).
 T26b's optional FATE coverage reads FFmpeg's FATE samples, which
 `fate_sync.sh` fetches with rsync into the ignored `.references/fate-suite`:
 the reference samples of `tests/fate/flac.mak`, encoded by FFmpeg with each
-test's options and decoded by zffmpeg and FFmpeg, and the FLAC samples other
-FATE tests read, decoded by both. `compare.py` reports each case as passed,
+test's options and decoded by zffmpeg and FFmpeg, and since T26c also encoded
+by zffmpeg, which must give FFmpeg's bytes (a WAV sample the WAV contract
+refuses is encoded from FFmpeg's stream copy into a valid WAV), and the FLAC
+samples other FATE tests read, decoded by both. `compare.py` reports each case as passed,
 failed or skipped; a missing sample is skipped, not failed:
 
 ```bash
@@ -272,7 +274,9 @@ selects the few other filters it always needs), and since T26a the FLAC
 demuxer, parser, decoder, encoder (for the five FFmpeg-made fixtures) and
 muxer, and the `framecrc`, `framemd5` and `streamhash` muxers T19b compares. There are no GPL, nonfree, external-library or
 hardware components, and autodetection is off. `--disable-x86asm` keeps the C
-code paths as the reference and avoids a NASM dependency. The broad FATE
+code paths as the reference and avoids a NASM dependency; inline assembly
+stays, so the FLAC encoder's autocorrelation runs `x86/lpc_init.c`'s SSE2
+version, whose summation order the port follows (T26c). The broad FATE
 configuration is deliberately not used.
 
 ## Recorded run
@@ -405,6 +409,16 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   fixture with an 8-byte-aligned payload into Wave64; `zffprobe` must report
   it and `zffmpeg -c copy -f wav` must give back exactly the fixture. FFmpeg's
   muxer counts the alignment padding in its sizes, unlike ours.
+- **FLAC output (T26c).** Nine WAV inputs `compare.py` makes (s16, u8, s24,
+  s32, f32, f64, six channels, mono 22.05 kHz, and s64 ramps whose LPC fit
+  rests on the autocorrelation's last bits) and three FFmpeg-made FLAC
+  fixtures, each under 25 option sets (the defaults, every compression
+  level, `-strict experimental`, LPC types and orders, stereo modes,
+  `-ar` and `-ac`): zffmpeg's `.flac` file must equal the ffmpeg program's
+  `-bitexact` one (STREAMINFO rewritten at the end), its output on a pipe
+  FFmpeg's on a pipe (STREAMINFO as first written), and FFmpeg must decode
+  it to the encoder's input. The report records the bytes per compression
+  level.
 - **Pipes.** `zffprobe -` reading each of the 223 WAV, AU, AIFF and raw PCM fixtures (raw ones forced) from a
   pipe must give the same status, report and error as reading the file, with
   the path shown as `-`.
@@ -459,6 +473,24 @@ build include the WAV muxer. Its first run, locally on Windows at commit
   unsupported cells (copy across containers, transcoding samples not stored as
   s16) rejected before any output: **54/54**.
 - Fixtures whose pipe result equals the file result: **105/105**.
+
+T26c added FLAC output: the encoder vectors (84 cases, `flacenc.txt`) and
+compare.py's FLAC output section. The run, locally on Linux x86-64 at the
+T26c part-4 tree, reported:
+
+- zffmpeg's FLAC equal to the ffmpeg program's `-bitexact` file and piped
+  output, and decoded by FFmpeg to the encoder's input: **300/300** (12
+  inputs, 25 option sets each), with the bytes per compression level in
+  the report, zffmpeg's equal to FFmpeg's.
+- Optional FATE FLAC: **17/17**, the 10 encoder tests encoded by zffmpeg
+  as FFmpeg encodes them (`fate-flac-24-comp-8` from FFmpeg's copy of its
+  sample into a valid WAV, as the sample's `data` runs past its RIFF
+  extent).
+- Registries equal to `ffmpeg -codecs`, `-formats` and `-h muxer=...`,
+  the FLAC encoder and muxer now registered.
+- The only failures the 176 known inf and NaN samples of this machine's
+  clang 23 build (90 conversions, 75 rematrix options, 11 streamhash
+  decodes).
 
 T26a added FLAC, with T19b's hash comparison, and the reference build's
 FLAC components and hash muxers. The run, locally on Linux x86-64 as for

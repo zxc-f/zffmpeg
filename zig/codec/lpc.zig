@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Translated from FFmpeg at the pinned reference revision:
-// libavcodec/lpc.c (Copyright (c) 2006 Justin Ruggles), lpc_functions.h
+// libavcodec/lpc.c (Copyright (c) 2006 Justin Ruggles), x86/lpc_init.c
+// (lpc_compute_autocorr_sse2's summation order), lpc_functions.h
 // (compute_lpc_coefs), lpc.h, and libavutil/lls.c (Copyright (c) 2006 Michael
 // Niedermayer) with float_dsp.c's ff_scalarproduct_double_c; LGPL 2.1 or
 // later, as LICENSE holds.
@@ -9,10 +10,12 @@
 //! Cholesky least squares with its reweighting passes, coefficient
 //! quantization and order estimation.
 //!
-//! Every double operation runs in the order of FFmpeg's C path (the
-//! reference build has no x86 assembly), so the coefficients and shifts are
-//! FFmpeg's bit for bit; Zig contracts no multiply-add without `@mulAdd`,
-//! as FFmpeg's x86-64 baseline build has none to contract to.
+//! Every double operation runs in the order of FFmpeg's x86-64 build: its
+//! C code, except the autocorrelation, whose inline SSE2 version the
+//! reference's `--disable-x86asm` keeps (libavcodec/x86/lpc_init.c), so
+//! the coefficients and shifts are FFmpeg's bit for bit. Zig contracts no
+//! multiply-add without `@mulAdd`, as FFmpeg's x86-64 baseline build has
+//! none to contract to.
 
 const std = @import("std");
 
@@ -117,14 +120,14 @@ const Lls = struct {
 
 /// `LPCContext`: the windowed samples and the two least-squares models.
 pub const Context = struct {
-    /// The windowed block with one zero before it: FFmpeg's
-    /// autocorrelation reads `data[-1]`, its zeroed padding.
+    /// The windowed block (FFmpeg's padding around it reads as zeros in
+    /// `computeAutocorr`).
     windowed: []f64,
     lls: *[2]Lls,
 
     /// Room for blocks of up to `max_blocksize` samples.
     pub fn init(gpa: std.mem.Allocator, max_blocksize: usize) std.mem.Allocator.Error!Context {
-        const windowed = try gpa.alloc(f64, max_blocksize + 1);
+        const windowed = try gpa.alloc(f64, max_blocksize);
         errdefer gpa.free(windowed);
         @memset(windowed, 0);
         const lls = try gpa.create([2]Lls);
@@ -158,7 +161,7 @@ pub const Context = struct {
     ) usize {
         std.debug.assert(max >= min_order and max <= max_order and min >= min_order and min <= max);
         std.debug.assert(lpc_type == .levinson or lpc_type == .cholesky);
-        std.debug.assert(samples.len + 1 <= ctx.windowed.len and samples.len > max);
+        std.debug.assert(samples.len <= ctx.windowed.len and samples.len > max);
         const blocksize = samples.len;
         var autoc: [max_order + 1]f64 = undefined;
         var ref: [max_order]f64 = @splat(0);
@@ -167,9 +170,9 @@ pub const Context = struct {
         const lpc_passes: u32 = if (passes_option == 0) 2 else passes_option;
 
         if (lpc_type == .levinson or (lpc_type == .cholesky and lpc_passes > 1)) {
-            const data = ctx.windowed[1..][0..blocksize];
+            const data = ctx.windowed[0..blocksize];
             applyWelchWindow(samples, data);
-            computeAutocorr(ctx.windowed[0 .. blocksize + 1], max, &autoc);
+            computeAutocorr(data, max, &autoc);
             computeLpcCoefs(autoc[0 .. max + 1], max, &lpc);
             for (0..max) |i| ref[i] = @abs(lpc[i][i]);
             pass += 1;
@@ -255,26 +258,38 @@ fn applyWelchWindow(data: []const i32, w_data: []f64) void {
     }
 }
 
-/// `lpc_compute_autocorr_c` over `padded`, the block after one zero (the
-/// `data[-1]` FFmpeg reads): `autoc[0..lag + 1]`.
-fn computeAutocorr(padded: []const f64, lag: usize, autoc: *[max_order + 1]f64) void {
-    const len = padded.len - 1;
-    // data[k] is padded[k + 1].
+/// `lpc_compute_autocorr_sse2` (libavcodec/x86/lpc_init.c), which
+/// FFmpeg's x86 builds use whenever the CPU has SSE2, the reference's
+/// `--disable-x86asm` included (it is inline assembly): `autoc[0..lag + 1]`
+/// of `data`. Each sum runs in two lanes, the even positions from 1.0 and
+/// the odd ones from 0.0, over sample pairs (an odd block's last pair reads
+/// the zero after it) and the zeros before the block, and the lanes are
+/// added at the end. FFmpeg's C loop, one lane from 1.0, can differ in the
+/// last bits, which can change a quantized coefficient.
+fn computeAutocorr(data: []const f64, lag: usize, autoc: *[max_order + 1]f64) void {
+    const len = data.len;
+    // The positions the pairs cover: `len` rounded up to even.
+    const span = len + (len & 1);
+    const sum = struct {
+        fn at(d: []const f64, k: isize) f64 {
+            return if (k < 0 or k >= d.len) 0 else d[@intCast(k)];
+        }
+
+        fn of(d: []const f64, n: usize, lagged: usize) f64 {
+            var lanes = [2]f64{ 1.0, 0.0 };
+            var m: usize = 0;
+            while (m < n) : (m += 1) {
+                const k: isize = @intCast(m);
+                lanes[m & 1] += at(d, k) * at(d, k - @as(isize, @intCast(lagged)));
+            }
+            return lanes[0] + lanes[1];
+        }
+    };
     var j: usize = 0;
     while (j < lag) : (j += 2) {
-        var sum0: f64 = 1.0;
-        var sum1: f64 = 1.0;
-        for (j..len) |i| {
-            sum0 += padded[i + 1] * padded[i - j + 1];
-            sum1 += padded[i + 1] * padded[i - j];
-        }
-        autoc[j] = sum0;
-        autoc[j + 1] = sum1;
-    }
-    if (j == lag) {
-        var sum: f64 = 1.0;
-        for (j - 1..len) |i| sum += padded[i + 1] * padded[i + 1 - j];
-        autoc[j] = sum;
+        autoc[j] = sum.of(data, span, j);
+        autoc[j + 1] = sum.of(data, span, j + 1);
+        if (j + 2 == lag) autoc[j + 2] = sum.of(data, span, j + 2);
     }
 }
 

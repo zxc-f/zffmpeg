@@ -21,8 +21,8 @@ with conversion between every sample format and libswresample's dither
 (T23b), rematrixing between them (T23c) and resampling (T24), with
 FFmpeg's option syntax (T17a), an audio filter graph (T25), and FLAC with
 16-bit samples read and decoded as FFmpeg does (T26a), and WAV seeking
-(T52a) on FFmpeg's rational arithmetic (T15), and complete FLAC decoding
-and seeking (T26b). The `av`
+(T52a) on FFmpeg's rational arithmetic (T15), complete FLAC decoding
+and seeking (T26b), and FFmpeg's FLAC encoder and muxer (T26c). The `av`
 module (rooted at `zig/root.zig`) exports `pcm` (the PCM encodings,
 kernels and decoder/encoder stages), `audio`, `channel_layout` (FFmpeg's
 channel layouts), `time`, `samples` (decoded sample storage
@@ -36,8 +36,9 @@ channelmap, pan, amix, from filtergraph text, several inputs and outputs),
 (also Wave64), `au`,
 `aiff` and `raw` (bounded parsers and writers), `caf` (a bounded parser),
 `flac` (FFmpeg's FLAC demuxer, parser and decoder, 4 to 32 bits, with
-metadata blocks and seeking),
-`bits` (an MSB-first bit reader and FLAC's CRCs), `framehash` (FFmpeg's
+metadata blocks and seeking), `flacenc` and `flacmux` (FFmpeg's FLAC
+encoder, packet for packet, and its muxer as a PCM writer),
+`bits` (an MSB-first bit reader and writer and FLAC's CRCs), `framehash` (FFmpeg's
 framecrc, framemd5 and streamhash text), `rational` (FFmpeg's rational
 arithmetic and timestamp helpers), `seek` (the seek API),
 `codecs` and `formats`
@@ -46,8 +47,8 @@ probes and extension fallback), `audioconvert` and `dither` (sample format
 conversion, T23a), `convert` (the synchronous T13a conversion and
 stream-copy pipeline) and `file` (file and pipe adapters). Two tools sit on it:
 `zffprobe` probes WAV, Wave64, AU, AIFF, CAF, FLAC and raw PCM, tags included, and `zffmpeg` (T13b)
-converts and stream-copies between them (CAF and FLAC as inputs), carrying tags,
-with `-c:a` and FFmpeg's dither options. Tests cover 129 WAV,
+converts and stream-copies between them (CAF as input only), carrying tags,
+with `-c:a`, FFmpeg's dither options and its FLAC encoder options. Tests cover 129 WAV,
 41 AU, 57 AIFF, 25 raw PCM, 58 CAF and 56 FLAC fixtures, process runs of both tools, and a CI comparison against a
 pinned FFmpeg build that also reads every `zffmpeg` output. Verification is
 Linux-only during development; Windows and ARM wait for T62–T63. T13, T14a
@@ -64,8 +65,9 @@ and T25c (several inputs and outputs on libavfilter's scheduler), completing
 T25, and T26a (FLAC demux and 16-bit decoding) with T18a (the bit reader
 and CRCs) and T19b (frame and stream hashes), T15 (rational arithmetic and
 timestamps) and T52a (the seek API and WAV seeking), and T26b (complete
-FLAC decoding and seeking); T26c (the FLAC encoder, with T18b's bit
-writer) is next, and TODO.md lays out the roadmap through T64.
+FLAC decoding and seeking) and T26c (the FLAC encoder and muxer, with
+T18b's bit writer), completing T26; TODO.md's near-term order names the
+next task, and it lays out the roadmap through T64.
  When the state changes, update the current-state statements in
 README.md, port.md ("Status and scope"), the TODO.md introduction and this file
 together.

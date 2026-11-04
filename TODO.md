@@ -42,8 +42,10 @@ and as a zffmpeg input, with T18a, the bit reader and FLAC's CRCs, and
 T19b, FFmpeg's frame and stream hashes; T15, FFmpeg's rational arithmetic
 and timestamp helpers; and T52a, the seek API with WAV and Wave64
 seeking; and T26b, complete FLAC decoding (4 to 32 bits, variable
-blocking, metadata blocks, MD5) and FLAC seeking. **Next: T26c (the FLAC
-encoder, with T18b's bit writer). See
+blocking, metadata blocks, MD5) and FLAC seeking; and T26c, FFmpeg's FLAC
+encoder and muxer packet for packet, as a zffmpeg output, with T18b's bit
+writer, which completes T26. **Next: T19c (the optional corpus report,
+whose FATE FLAC part T26b and T26c began), then T27a (Ogg demux). See
 [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
@@ -1156,9 +1158,17 @@ names, not as an empty framework.
     count 8 bits past the end, FFmpeg's checked reader, so decoders refuse
     them (`flacdec.zig`'s overread case runs in ReleaseFast too). The
     T26a fixtures decode through it bit-exactly.
-  - [ ] **T18b — Bit writer.** Lands with T26c.
+  - [x] **T18b — Bit writer.** Lands with T26c.
     Done when round-trip vectors against T18a pass, including flush and
     padding rules.
+    Evidence: `bits.BitWriter` in [codec/bits.zig](zig/codec/bits.zig),
+    commit `94c4c6f`, local Linux runs as T26c's. Every width from 0 to 64
+    at every bit offset round-trips through the T18a reader, signed writes
+    (33-bit samples included) and FLAC's Rice code for every parameter 0 to
+    30 too; `flush` pads with zero bits whatever the buffer held, and a
+    write past the slice is dropped and flagged without touching memory
+    past it (ReleaseFast included). The FLAC encoder's every packet, made
+    through it, equals FFmpeg's (T26c).
   - [ ] **T18c — LSB-first reader and VLC tables.** Lands with T27d. An
     LSB-first reader and VLC/Huffman tables built at compile time; later
     consumers (T29b, T30b, T42a, T49b) need it.
@@ -2315,7 +2325,7 @@ names, not as an empty framework.
 
 ## Milestone 6: audio codecs
 
-- [ ] **T26 — FLAC.** Checked when T26a–T26c are. Reference:
+- [x] **T26 — FLAC.** Checked when T26a–T26c are. Reference:
   `libavformat/flacdec.c`, `flacenc.c`, `libavcodec/flacdec.c`, `flacenc.c`,
   `flac.c`, `flacdsp.c`, `flac_parser.c`; `tests/fate/flac.mak`.
   Required fixtures are generated with Python (verbatim, constant and fixed
@@ -2487,7 +2497,7 @@ names, not as an empty framework.
     every sample present; its only failures the 176 known inf and NaN
     samples of this machine's clang 23 build.
 
-  - [ ] **T26c — FLAC encoder.** Needs T26b. Lands with T18b.
+  - [x] **T26c — FLAC encoder.** Needs T26b. Lands with T18b.
     FFmpeg's compression levels (LPC with quantized coefficients, Rice
     partitions).
     Done when FFmpeg decodes our output to the original samples at every level,
@@ -2495,45 +2505,71 @@ names, not as an empty framework.
 
     ```text
     ID / parent: T26c / T26
-    State: G3 (the encoder verified packet for packet; the muxer, the
-      pipeline and zffmpeg's -c:a flac remain)
+    State: verified
     Supported behavior and explicit exclusions: port.md "FLAC contract",
-      Encoder and Writing rows: FFmpeg's encoder on s16 and s32 input,
-      16, 24 and (strict experimental) 32 bits per sample, 1 to 8
-      channels, every rate FFmpeg codes, levels 0 to 12 and every encoder
-      option. Excluded: lpc_coeff_precision 0 (FFmpeg's arithmetic is
-      undefined there), attached pictures in the muxer.
+      Encoder and Writing rows, and "zffmpeg command", FLAC output row:
+      FFmpeg's encoder on s16 and s32 input, 16, 24 and (strict
+      experimental) 32 bits per sample with the 33-bit side channel, 1 to
+      8 channels, every rate FFmpeg codes, levels 0 to 12 and every encoder
+      option; FFmpeg's muxer with the carried tags, the channel mask tag
+      and padding, STREAMINFO rewritten on a seekable output; zffmpeg's
+      -c:a flac with the ffmpeg program's block size, storage and depth.
+      Excluded: lpc_coeff_precision 0, FLAC in other containers, stream
+      copy into FLAC, attached pictures, -frame_size.
     Needs (verified) / lands with / verified after: T26b; T18b.
     Contract and source provenance: port.md "FLAC contract";
       libavcodec/flacenc.c, flacdsp_lpc_template.c, lpc.c,
-      lpc_functions.h, put_bits.h, libavutil/lls.c, libavformat/flacenc.c,
-      flacenc_header.c, vorbiscomment.c, fftools/ffmpeg_enc.c (the block
-      size the ffmpeg program sets).
-    Required fixtures / optional corpus: vectors/flacenc.txt (80 cases of
-      generated signals: 73 encodes, 290 packets, 7 refusals); the WAV,
-      AU, AIFF, CAF, raw and FLAC fixtures through zffmpeg to come.
+      lpc_functions.h, x86/lpc_init.c, put_bits.h, libavutil/lls.c,
+      libavformat/flacenc.c, flacenc_header.c, vorbiscomment.c,
+      metadata.c, mux.c (init_muxer's encoder tags), fftools/ffmpeg_enc.c,
+      ffmpeg_sched.c (the block size from the first frame).
+    Required fixtures / optional corpus: vectors/flacenc.txt (84 cases of
+      generated signals: 77 encodes, 7 refusals); compare.py's FLAC output
+      inputs (9 made WAVs, 3 FLAC fixtures, 25 option sets each); optional:
+      the 10 FATE FLAC encoder tests' reference samples.
     Ownership, state transitions and limits: the encoder copies each
-      frame and lends its packet until the next call; buffers sized for
-      the block size at init.
+      frame and lends its packet until the next call; the writer holds
+      samples until the first frame's size is known, then one block.
     Comparison rule and intentional differences: every packet's bytes
-      (MD5), timestamp and duration and both STREAMINFOs exact.
+      (MD5), timestamp and duration and both STREAMINFOs exact; zffmpeg's
+      files and piped output equal the ffmpeg program's -bitexact ones
+      byte for byte. Intentional: the refusals above; the autocorrelation
+      in x86-64's SSE2 order (FFmpeg's C loop elsewhere).
     Implementation files and test entry points: codec/bits.zig
-      (BitWriter: "the writer round-trips every width at every offset",
-      signed, Rice, overflow), codec/lpc.zig, codec/flacenc.zig ("every
-      case encodes as FFmpeg's encoder does", refusals and allocation
-      failure).
-    Evidence commit / Linux CI run / reference report: parts 0-3 (this
-      card's commit) / local Linux runs / to come.
-    Required cases: encoder vectors passed 80 / failed 0.
-    Optional cases: none yet
-    Fuzz seeds, budget and result: none yet.
-    Remaining work or blocker / next action: part 4, FFmpeg's FLAC
-      muxer (STREAMINFO rewritten on a seekable output), the conversion
-      pipeline (the ffmpeg program's sample format, bits_per_raw_sample
-      and block size), zffmpeg's -c:a flac with the encoder options, and
-      compare.py: byte-identical files, FFmpeg's decoding of ours, sizes
-      per level.
+      (BitWriter), codec/lpc.zig, codec/flacenc.zig ("every case encodes
+      as FFmpeg's encoder does", option text, refusals, allocation
+      failure), format/flacmux.zig (round trip, header, short stream),
+      format/seek.zig (OutputSeeker), format/convert.zig (FLAC output,
+      FLAC to FLAC, allocation failure, carried encoder tags),
+      format/registry.zig, codec/registry.zig, cli/ffmpeg.zig; 6 zffmpeg
+      process cases in build.zig; compare.py's FLAC output and FATE
+      sections.
+    Evidence commit / Linux CI run / reference report: 94c4c6f and the
+      part-4 commit / local Linux runs / below.
+    Required cases: encoder vectors passed 84 / failed 0; FLAC output
+      passed 300 / failed 0.
+    Optional cases: FATE FLAC passed 17 / failed 0 / skipped 0 (the 10
+      encoder tests encoded identically by zffmpeg).
+    Fuzz seeds, budget and result: none added; the encoder takes no
+      untrusted bytes, and its input is bounded by the block size.
+    Remaining work or blocker / next action: none.
     ```
+
+    Evidence (G5, local Linux x86-64 runs with Zig 0.17.0): commits
+    `94c4c6f` (contract, oracle, T18b, LPC analysis, encoder) and the
+    part-4 commit that records this (muxer, pipeline, zffmpeg, compare.py,
+    and the SSE2 autocorrelation order found by an s64 ramp, now the
+    oracle's `ramp32` cases). Local CI on that tree: fmt,
+    `generate.py --check`, the example check, Debug and ReleaseSafe
+    builds, `zig build test` with 194/194 steps and 319/319 tests in
+    Debug, ReleaseSafe and ReleaseFast, the three cross builds, and every
+    vector generator, `flacenc_vectors.c` included, reproducing its file
+    from FFmpeg `5d5a38a`. `compare.py`: FLAC output **300/300** with the
+    bytes per level recorded (for the 44.1 kHz s16 stereo input, 36074 at
+    level 0 to 33797 at level 12, the same as FFmpeg's); the registry
+    equal to FFmpeg's, the FLAC encoder and muxer now registered; optional
+    FATE FLAC **17/17**; its only failures the 176 known inf and NaN
+    samples of this machine's clang 23 build.
 
 - [ ] **T27 — Ogg, transforms and Vorbis.** Checked when T27a–T27d are.
   Reference: `libavformat/oggdec.c`, `oggparse*.c`, `oggenc.c`,
