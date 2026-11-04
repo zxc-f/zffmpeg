@@ -42,6 +42,12 @@ pub const Stream = struct {
     extradata: ?[]const u8 = null,
 };
 
+/// A packet's side data as framecrc names it (`av_packet_side_data_name`).
+pub const SideData = struct {
+    name: []const u8,
+    data: []const u8,
+};
+
 const nopts: i64 = std.math.minInt(i64);
 const Md5 = std.crypto.hash.Md5;
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -122,6 +128,13 @@ pub const Writer = struct {
     /// One packet: a line for framecrc and framemd5, the running hash for
     /// streamhash.
     pub fn writePacket(w: *Writer, p: packet.Packet) std.Io.Writer.Error!void {
+        return w.writePacketSide(p, &.{});
+    }
+
+    /// `writePacket` with the packet's side data, which framecrc lists
+    /// after the flags as `, S=<count>` and each one's name, size and
+    /// Adler-32 (T27a); framemd5 and streamhash do not show it.
+    pub fn writePacketSide(w: *Writer, p: packet.Packet, side: []const SideData) std.Io.Writer.Error!void {
         if (w.kind == .streamhash) {
             w.sha.update(p.data);
             w.size += p.data.len;
@@ -146,6 +159,10 @@ pub const Writer = struct {
         // AV_PKT_FLAG_KEY is 1 and AV_PKT_FLAG_DISCARD 4.
         const flags: u32 = @as(u32, @intFromBool(p.flags.key)) | @as(u32, @intFromBool(p.flags.discard)) << 2;
         if (flags != 1) try w.out.print(", F=0x{X}", .{flags});
+        if (side.len > 0) {
+            try w.out.print(", S={d}", .{side.len});
+            for (side) |sd| try w.out.print(", {s}, {d:>8}, 0x{x:0>8}", .{ sd.name, sd.data.len, adler32(sd.data) });
+        }
         try w.out.writeAll("\n");
     }
 

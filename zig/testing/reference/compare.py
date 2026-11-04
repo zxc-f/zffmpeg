@@ -2008,6 +2008,75 @@ def compare_flac_output(args, lines, failures):
          for name, per in sizes.items()]
 
 
+# Ogg fixtures whose copy the ffmpeg program changes past libavformat
+# (T27a): ogg.txt holds what av_read_frame gives for every one.
+KNOWN_OGG_COPY_DIFFERENCES = {
+    "ogg_multiplexed": "two audio streams: the ffmpeg program's choice of one is not modeled",
+    "ogg_chained_opus": "the chain's timestamps restart, and the program's muxing holds a non-increasing dts at the "
+                        "last one (mux_fixup_ts, T53)",
+}
+
+
+def compare_ogg(args, lines, failures):
+    """The Ogg fixtures (T27a): zffprobe against ffprobe's first audio
+    stream (codec, sample format, channels, layout, rate, duration), and
+    the hash driver's stream copy against `ffmpeg -c copy -f framecrc`."""
+    rows = []
+    passed = 0
+    fixtures = sorted((FIXTURES / "ogg").glob("*.ogg"))
+    for path in fixtures:
+        name = path.stem
+        problems = []
+        theirs = run(args.ffprobe, "-v", "error", "-select_streams", "a:0", "-show_entries",
+                     "stream=codec_name,sample_fmt,channels,channel_layout,sample_rate,duration_ts", "-of",
+                     "default=nw=1", path)
+        ours = run(args.zffprobe, path)
+        if theirs.returncode != 0 or not theirs.stdout.strip():
+            if ours.returncode == 0:
+                problems.append("zffprobe accepts what ffprobe refuses")
+        elif ours.returncode != 0:
+            problems.append(f"zffprobe refuses: {first_line(text(ours.stderr))}")
+        else:
+            f = dict(line.split("=", 1) for line in text(theirs.stdout).splitlines() if "=" in line)
+            o = dict(line.split("=", 1) for line in text(ours.stdout).splitlines() if "=" in line)
+            want = {"codec": f.get("codec_name"), "sample_fmt": f.get("sample_fmt"), "channels": f.get("channels"),
+                    "channel_layout": f.get("channel_layout"), "sample_rate": f.get("sample_rate"),
+                    "nb_samples": f.get("duration_ts")}
+            for key, value in want.items():
+                if o.get(key) != value:
+                    problems.append(f"{key}: zffprobe {o.get(key)}, ffprobe {value}")
+        ref = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", path, "-c", "copy", "-fflags", "+bitexact", "-f",
+                  "framecrc", "-")
+        mine = run(args.hasher, "framecrc", "copy", path)
+        if ref.returncode == 0 and ref.stdout:
+            if mine.returncode != 0 or mine.stdout != ref.stdout:
+                if name in KNOWN_OGG_COPY_DIFFERENCES:
+                    pass
+                else:
+                    problems.append("the framecrc copy differs" if mine.returncode == 0
+                                    else f"the hash driver fails: {first_line(text(mine.stderr))}")
+        elif mine.returncode == 0 and mine.stdout.count(b"\n0,") > 0:
+            problems.append("the hash driver copies what FFmpeg refuses")
+        if problems:
+            failures.extend(f"ogg {name}: {p}" for p in problems)
+            rows.append(f"| `{name}` | **FAIL**: {'; '.join(problems)} |")
+        else:
+            passed += 1
+            note = KNOWN_OGG_COPY_DIFFERENCES.get(name)
+            rows.append(f"| `{name}` | pass{' (copy: ' + note + ')' if note else ''} |")
+    lines += [
+        "",
+        "## Ogg fixtures (T27a)",
+        "",
+        f"Ogg fixtures whose zffprobe report equals ffprobe's and whose copy equals `ffmpeg -c copy -f framecrc`: "
+        f"{passed}/{len(fixtures)} (vectors/ogg.txt holds every packet av_read_frame gives).",
+        "",
+        "| Fixture | Result |",
+        "| --- | --- |",
+    ] + rows
+    record("Ogg fixtures (T27a)", passed, len(fixtures), understood=sum(1 for p in fixtures if p.stem in KNOWN_OGG_COPY_DIFFERENCES))
+
+
 def compare_fate(args, lines, failures):
     """Optional coverage (T26b, T19c): FATE's FLAC tests, the reference
     sample encoded by FFmpeg with the test's options and decoded by zffmpeg
@@ -2361,6 +2430,7 @@ def main():
     compare_pipes(args, lines, failures)
     compare_flac(args, lines, failures)
     compare_flac_output(args, lines, failures)
+    compare_ogg(args, lines, failures)
     compare_hashes(args, lines, failures)
     compare_fate(args, lines, failures)
     coverage_summary(lines, failures)

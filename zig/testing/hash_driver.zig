@@ -60,8 +60,11 @@ fn run(init: std.process.Init) Status {
     var out_buffer: [4096]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(io, &out_buffer);
     const out = &stdout.interface;
-    const result = if (av.detect.probeHead(bytes, std.fs.path.basename(args[3])) == .flac)
+    const head = av.detect.probeHead(bytes, std.fs.path.basename(args[3]));
+    const result = if (head == .flac)
         hashFlac(io, gpa, kind, mode, bytes, out)
+    else if (head == .ogg)
+        if (mode == .copy) hashOgg(gpa, kind, bytes, out) else error.OggNotDecoded
     else if (kind != .streamhash)
         error.PcmNeedsStreamhash
     else
@@ -75,6 +78,69 @@ fn run(init: std.process.Init) Status {
         return .failure;
     };
     return .ok;
+}
+
+/// Ogg (T27a), `ffmpeg -i <input> -c copy -f <muxer>`: the input read
+/// as the ffmpeg program opens a file, the one audio stream it maps, its
+/// layout the default for its channel count, as the program gives a copied
+/// stream without one, and each packet's side data.
+fn hashOgg(gpa: std.mem.Allocator, kind: av.framehash.Kind, bytes: []const u8, out: *std.Io.Writer) !void {
+    var reader: std.Io.Reader = .fixed(bytes);
+    const d = try av.ogg.Demuxer.initSeekable(gpa, &reader, .fixed(&reader));
+    defer d.deinit();
+    var layer = av.demux.Layer(av.ogg.Demuxer).init(gpa, d);
+    defer layer.deinit();
+    try layer.findStreamInfo();
+    var chosen: ?usize = null;
+    for (0..d.streamCount()) |i| {
+        if (d.stream(i).codec == null) continue;
+        // More than one audio stream needs the program's stream choice,
+        // which the driver does not model.
+        if (chosen != null) return error.SeveralAudioStreams;
+        chosen = i;
+    }
+    const index = chosen orelse return error.NoAudioStream;
+    const info = d.stream(index);
+    const tb = info.time_base;
+    var w: av.framehash.Writer = .init(kind, out, .{
+        .time_base = .{ .num = @intCast(tb.num), .den = @intCast(tb.den) },
+        .codec = @tagName(info.codec.?),
+        .sample_rate = info.sample_rate,
+        .layout = .default(info.channels),
+        .extradata = if (info.extradata.items.len > 0) info.extradata.items else null,
+    });
+    try w.writeHeader();
+    // The program ends the input at a demuxing error ("Error during
+    // demuxing") and keeps what it read.
+    while (layer.next() catch null) |p| {
+        if (p.stream != index) continue;
+        var skip: [10]u8 = @splat(0);
+        var side: [3]av.framehash.SideData = undefined;
+        var n: usize = 0;
+        if (p.skip) |s| {
+            std.mem.writeInt(u32, skip[0..4], s[0], .little);
+            std.mem.writeInt(u32, skip[4..8], s[1], .little);
+            side[n] = .{ .name = "Skip Samples", .data = &skip };
+            n += 1;
+        }
+        if (p.new_metadata) |m| {
+            side[n] = .{ .name = "Strings Metadata", .data = m };
+            n += 1;
+        }
+        if (p.new_extradata) |e| {
+            side[n] = .{ .name = "New Extradata", .data = e };
+            n += 1;
+        }
+        try w.writePacketSide(.{
+            .data = p.data,
+            .time_base = .{ .num = @intCast(tb.num), .den = @intCast(tb.den) },
+            .pts = p.pts,
+            .dts = p.dts,
+            .duration = p.duration,
+            .flags = .{ .key = p.flags & 1 != 0 },
+        }, side[0..n]);
+    }
+    try w.finish();
 }
 
 fn hashFlac(io: std.Io, gpa: std.mem.Allocator, kind: av.framehash.Kind, mode: Mode, bytes: []const u8, out: *std.Io.Writer) !void {
