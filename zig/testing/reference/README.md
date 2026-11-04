@@ -121,6 +121,17 @@ LC_ALL=C ./seek-vectors zig/testing/fixtures/flac/*.flac | diff -u zig/testing/v
 
 T26b runs the same generator on the FLAC fixtures (`seek_flac.txt`).
 
+T26b's optional FATE coverage reads FFmpeg's FATE samples, which
+`fate_sync.sh` fetches with rsync into the ignored `.references/fate-suite`:
+the reference samples of `tests/fate/flac.mak`, encoded by FFmpeg with each
+test's options and decoded by zffmpeg and FFmpeg, and the FLAC samples other
+FATE tests read, decoded by both. `compare.py` reports each case as passed,
+failed or skipped; a missing sample is skipped, not failed:
+
+```bash
+bash zig/testing/reference/fate_sync.sh
+```
+
 The T15 rational vectors come from the reference's `libavutil`: its
 rational arithmetic (`av_reduce`, `av_mul_q` and the others, `av_cmp_q`,
 `av_nearer_q`, `av_d2q`) and timestamp helpers (`av_gcd`, `av_rescale_rnd`

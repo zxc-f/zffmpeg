@@ -1769,6 +1769,93 @@ def compare_hashes(args, lines, failures):
     lines += [f"| `{name}` | {mode} | {reason} |" for (name, mode), reason in KNOWN_HASH_DIFFERENCES.items()]
 
 
+# tests/fate/flac.mak: (test, reference sample, encoder options, decoded codec).
+FATE_FLAC = [
+    ("fate-flac-16-chmode-indep", "audio-reference/luckynight_2ch_44kHz_s16.wav", ["-ch_mode", "indep"], "pcm_s16le"),
+    ("fate-flac-16-chmode-left_side", "audio-reference/luckynight_2ch_44kHz_s16.wav", ["-ch_mode", "left_side"],
+     "pcm_s16le"),
+    ("fate-flac-16-chmode-mid_side", "audio-reference/luckynight_2ch_44kHz_s16.wav", ["-ch_mode", "mid_side"],
+     "pcm_s16le"),
+    ("fate-flac-16-chmode-right_side", "audio-reference/luckynight_2ch_44kHz_s16.wav", ["-ch_mode", "right_side"],
+     "pcm_s16le"),
+    ("fate-flac-16-fixed", "audio-reference/luckynight_2ch_44kHz_s16.wav", ["-lpc_type", "fixed"], "pcm_s16le"),
+    ("fate-flac-16-lpc-cholesky", "audio-reference/luckynight_2ch_44kHz_s16.wav", ["-lpc_type", "cholesky"],
+     "pcm_s16le"),
+    ("fate-flac-16-lpc-levinson", "audio-reference/luckynight_2ch_44kHz_s16.wav", ["-lpc_type", "levinson"],
+     "pcm_s16le"),
+    ("fate-flac-24-comp-8", "audio-reference/divertimenti_2ch_96kHz_s24.wav", ["-compression_level", "8"], "pcm_s24le"),
+    ("fate-flac-32-wasted-bits", "audio-reference/drums_2ch_44kHz_s32_wastedbits.wav", ["-strict", "experimental"],
+     "pcm_s32le"),
+    ("fate-flac-rice-params", "audio-reference/chorusnoise_2ch_44kHz_s16.wav", [], "pcm_s16le"),
+]
+# FLAC samples other FATE tests read, decoded as they are.
+FATE_FLAC_SAMPLES = [
+    "cover_art/cover_art.flac",
+    "filter/hdcd-mix.flac",
+    "filter/hdcd-false-positive.flac",
+    "filter/hdcd-encoding-errors.flac",
+    "filter/hdcd-fake20bit.flac",
+    "filter/seq-3341-7_seq-3342-5-24bit.flac",
+    "filter/out-of-phase-1000hz.flac",
+]
+
+
+def compare_fate(args, lines, failures):
+    """Optional coverage (T26b, T19c): FATE's FLAC tests, the reference
+    sample encoded by FFmpeg with the test's options and decoded by zffmpeg
+    and by FFmpeg, and the FLAC samples other FATE tests read, decoded by
+    both. A missing sample is skipped and reported, never failed."""
+    suite = pathlib.Path(args.fate_suite)
+    rows = []
+    passed = failed = skipped = 0
+    with tempfile.TemporaryDirectory() as work:
+        work = pathlib.Path(work)
+        cases = [(name, suite / ref, opts, codec) for name, ref, opts, codec in FATE_FLAC]
+        cases += [(f"sample {sample}", suite / sample, None, None) for sample in FATE_FLAC_SAMPLES]
+        for name, source, opts, codec in cases:
+            if not source.exists():
+                skipped += 1
+                rows.append(f"| {name} | skipped: `{source.relative_to(suite) if suite in source.parents else source}` "
+                            f"missing |")
+                continue
+            flac = work / "in.flac"
+            if opts is not None:
+                enc = run(args.ffmpeg, "-nostdin", "-v", "error", "-y", "-i", source, "-c", "flac", *opts,
+                          "-fflags", "+bitexact", flac)
+                if enc.returncode != 0:
+                    failed += 1
+                    rows.append(f"| {name} | **FAIL**: FFmpeg could not encode: {first_line(text(enc.stderr))} |")
+                    failures.append(f"{name}: FFmpeg could not encode the reference")
+                    continue
+            else:
+                flac = source
+            if codec is None:
+                probe = run(args.ffprobe, "-v", "error", "-select_streams", "a:0", "-show_entries",
+                            "stream=bits_per_raw_sample", "-of", "default=nw=1:nk=1", flac)
+                codec = "pcm_s32le" if int(text(probe.stdout).strip() or 16) > 16 else "pcm_s16le"
+            fmt = codec[len("pcm_"):]
+            ours = run(args.zffmpeg, "-i", flac, "-c:a", codec, "-f", fmt, "-")
+            theirs = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", flac, "-map", "0:a", "-c:a", codec, "-f", fmt, "-")
+            if ours.returncode == 0 and theirs.returncode == 0 and ours.stdout == theirs.stdout:
+                passed += 1
+                rows.append(f"| {name} | pass: {len(ours.stdout)} bytes of {fmt} |")
+            else:
+                failed += 1
+                why = first_line(text(ours.stderr)) if ours.returncode else "the samples differ"
+                rows.append(f"| {name} | **FAIL**: {why} |")
+                failures.append(f"{name}: zffmpeg's decoding differs from FFmpeg's ({why})")
+    lines += [
+        "",
+        "## Optional FATE FLAC coverage (T26b)",
+        "",
+        f"Samples from `{suite}` (fetched by `fate_sync.sh`): passed {passed}, failed {failed}, "
+        f"skipped {skipped} (missing samples are skipped, not failed).",
+        "",
+        "| Case | Result |",
+        "| --- | --- |",
+    ] + rows
+
+
 def compare_unknown_length(args, lines, failures):
     """The fixtures whose result changes with the parser's `unknown_length` option (T21b).
 
@@ -1950,6 +2037,8 @@ def main():
     parser.add_argument("--zffmpeg", required=True)
     parser.add_argument("--registry", required=True, help="the registry dump (zig build test-tools)")
     parser.add_argument("--hasher", required=True, help="the hash driver (zig build test-tools)")
+    parser.add_argument("--fate-suite", default=str(HERE.parent.parent.parent / ".references" / "fate-suite"),
+                        help="FATE samples for the optional coverage (fate_sync.sh); missing ones are skipped")
     parser.add_argument("--report", help="also write the Markdown report to this file")
     args = parser.parse_args()
 
@@ -2016,6 +2105,7 @@ def main():
     compare_pipes(args, lines, failures)
     compare_flac(args, lines, failures)
     compare_hashes(args, lines, failures)
+    compare_fate(args, lines, failures)
 
     if NOT_IMPLEMENTED:
         lines += ["", "## Not implemented", ""]
