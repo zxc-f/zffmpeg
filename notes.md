@@ -268,6 +268,14 @@ port.md's contract table updated, and (after T06) the parser.
 | Frames on branches | asplit and channelsplit give each output its own copy where FFmpeg shares references; filters that would write a shared frame copy it in FFmpeg anyway. A frame pool or reference counting can come with a measured need. | `cloneOwned`, `ChannelSplit.output`. |
 | libswresample options | aresample takes the options the port implements (rates, formats, layouts, dither, T24's resampler); the rest of libswresample's names are `UnsupportedOption` rather than ignored. | `filters.AResample`. |
 
+## FLAC
+
+| Decision | Current choice and reason | To change it |
+| --- | --- | --- |
+| Fixtures (T26a) | Most fixtures come from `generate.py`'s own FLAC writer, independent of FFmpeg and the port, so the expected samples are what was encoded. Five come from FFmpeg's encoder, for real-world LPC streams; they are committed and checked by hash, not remade in CI, because the encoder's floating-point analysis may differ between builds. | `generate.py` `FLAC_FFMPEG`, `reference/flac_fixtures.sh`. |
+| Damaged input | Followed exactly as FFmpeg's parser and decoder handle it, including the valid frame its header scoring drops after junk, rather than a cleaner recovery: packets and timestamps are part of the comparison. | The FLAC contract; `flac_junk_between_frames`. |
+| Parser reads | The demuxer feeds the parser 1024-byte reads, FFmpeg's raw packet size. FFmpeg's reads are shorter where its I/O buffer ends, which the port does not model; for valid streams the packets do not depend on it. | The FLAC contract's packet row. |
+
 ## Raw PCM contract
 
 | Decision | Current choice and reason | To change it |

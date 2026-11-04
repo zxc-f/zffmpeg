@@ -1020,6 +1020,28 @@ summary:
 
 FFmpeg's probe detects `caff`, version 1 and a `desc` of size 32.
 
+### FLAC contract
+
+T26a adds native FLAC (`fLaC` and metadata blocks, then frames) with 16-bit
+samples, read only, as FFmpeg's FLAC demuxer, parser and decoder read it.
+The canonical fixture contract is
+[zig/testing/fixtures/flac/README.md](zig/testing/fixtures/flac/README.md),
+and [flac.txt](zig/testing/vectors/flac.txt), printed by
+[flac_vectors.c](zig/testing/reference/flac_vectors.c) from the pinned
+libavformat and libavcodec, is the oracle for every fixture's stream,
+packets, decoded frames and decoding errors. In summary:
+
+| Case | Behavior |
+| --- | --- |
+| Metadata | `fLaC`, then blocks of a 1-byte type with the last-block flag and a 24-bit size. STREAMINFO (34 bytes) first and once (`InvalidFlac` otherwise); other blocks skipped (VORBIS_COMMENT, PICTURE, SEEKTABLE and CUESHEET are read in T26b). A cut block is `Truncated`. Without `fLaC`, FFmpeg's headerless mode, `UnsupportedFormat` until T26b. |
+| STREAMINFO | A maximum block size of at least 16 (`InvalidFlac`), 16 bits per sample and a nonzero rate (`UnsupportedFormat` otherwise, T26b); 1 to 8 channels, FFmpeg's layouts for them; the 36-bit sample count is the stream's duration when nonzero; the MD5 is not checked (T26b). |
+| Packets | The input in 1024-byte reads through FFmpeg's FLAC parser: frame headers checked by their CRC-8 and scored by the CRC-16s and the frame numbers between them, ten headers buffered before the first frame is returned; junk before a header is a packet of its own, and a frame the scoring rejects is dropped, as FFmpeg drops it. Timestamps and durations are libavformat's for a parsed raw stream. |
+| Frames | Fixed block sizes (a variable-block-size frame is `UnsupportedFormat`, T26b), constant, verbatim, fixed and LPC subframes, wasted bits, Rice and Rice2 residuals with escapes, independent channels and left/side, right/side and mid/side stereo, decoded to interleaved s16 bit for bit. A frame FFmpeg's decoder refuses (a bad header, reserved codes, a residual that does not fit) is an error for that packet only, as FFmpeg's decoder returns one; the CRC-16 is not checked, FFmpeg's default. A frame whose bits per sample, rate or channel count differ from STREAMINFO is `UnsupportedFormat` (T26b). |
+| Writing | None until T26c. |
+
+FFmpeg's probe scores `fLaC` with a plausible STREAMINFO 100, other `fLaC`
+input 50, and a frame header at the start 13.
+
 ### Raw PCM contract
 
 T22c adds FFmpeg's raw PCM formats: header-less interleaved samples, one

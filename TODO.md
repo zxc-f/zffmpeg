@@ -2280,6 +2280,44 @@ names, not as an empty framework.
     subframes at 16 bits, and stereo decorrelation.
     Done when the required fixtures decode bit-exactly and packets match the
     reference.
+
+    ```text
+    ID / parent: T26a / T26
+    State: G0 (contract, fixtures and oracle)
+    Supported behavior and explicit exclusions: native FLAC (fLaC,
+      STREAMINFO first, other metadata blocks skipped) with 16-bit samples
+      and fixed block sizes; packets as FFmpeg's demuxer and parser give
+      them (1024-byte reads, header scoring, junk packets, libavformat's
+      timestamps); constant, verbatim, fixed and LPC subframes, wasted bits,
+      Rice and Rice2 residuals with escapes, every channel assignment,
+      decoded to s16 bit for bit, with FFmpeg's per-packet decoding errors.
+      Excluded until T26b: other bit depths, variable block sizes,
+      headerless input, tags, pictures, seek tables, cue sheets, MD5
+      checks, seeking.
+    Needs (verified) / lands with / verified after: T13b, T14a, T16, T19a /
+      T18a, T19b.
+    Contract and source provenance: port.md "FLAC contract";
+      zig/testing/fixtures/flac/README.md; libavformat/flacdec.c,
+      rawdec.c, demux.c (parse_packet, compute_pkt_fields),
+      libavcodec/flac_parser.c, parser.c, flac.c, flacdec.c, flacdsp.c,
+      get_bits.h, golomb.h, libavutil/crc.c, adler32.c.
+    Required fixtures / optional corpus: 31 FLAC fixtures (26 from
+      generate.py, 5 from FFmpeg's encoder), vectors/flac.txt from
+      flac_vectors.c; no optional corpus.
+    Ownership, state transitions and limits: to be recorded with the
+      demuxer (part 2).
+    Comparison rule and intentional differences: the stream, every packet
+      (size, pts, dts, duration, flags, Adler-32) and every decoded frame
+      or error exact; decoded samples equal the encoded ones.
+    Implementation files and test entry points: to come (parts 1-4).
+    Evidence commit / Linux CI run / reference report: to come.
+    Required cases: to come.
+    Optional cases: none
+    Fuzz seeds, budget and result: to come.
+    Remaining work or blocker / next action: part 1, T18a's bit reader and
+      CRCs; part 2, the demuxer and parser; part 3, the decoder and T19b's
+      hashes; part 4, detection, zffprobe and zffmpeg.
+    ```
   - [ ] **T26b — Complete FLAC decoding and seeking.** Needs T17b, T26a and
     T52a. Bit depths 4–32, variable block sizes, SEEKTABLE, VORBIS_COMMENT and
     PICTURE blocks, MD5 verification, and seeking by seek table and frame scan.

@@ -105,6 +105,24 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/resample_ve
 ./resample-vectors | diff -u zig/testing/vectors/resample.txt -
 ```
 
+The T26a FLAC vectors come from the reference's `libavformat` and
+`libavcodec`: `flac_vectors.c` opens each FLAC fixture as the ffmpeg program
+opens an input, then prints the stream, every packet `av_read_frame` returns
+and every frame or error the FLAC decoder gives for it:
+
+```bash
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/flac_vectors.c .references/ffmpeg-install/lib/libavformat.a .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o flac-vectors
+LC_ALL=C ./flac-vectors zig/testing/fixtures/flac/*.flac | diff -u zig/testing/vectors/flac.txt -
+```
+
+The FFmpeg-made FLAC fixtures (`flac_ffmpeg_*`) come from the reference's
+FLAC encoder; `flac_fixtures.sh` remakes them and prints their hashes, which
+`generate.py` records:
+
+```bash
+bash zig/testing/reference/flac_fixtures.sh .references/ffmpeg-install
+```
+
 The T25c multi-graph vectors come from the reference's `libavfilter`:
 `multigraph_vectors.c` builds graphs of several sources and sinks from
 filtergraph text with labels, runs a script of frames, closes and reads,
@@ -158,9 +176,10 @@ with the install prefix and:
 ```text
 --cc=clang --disable-everything --disable-autodetect --disable-doc
 --disable-network --disable-x86asm --disable-ffplay --disable-avdevice
---enable-protocol=file,pipe --enable-demuxer=wav,w64,au,aiff,caf,$pcm_formats
---enable-decoder=$pcm_codecs --enable-encoder=$pcm_codecs
---enable-muxer=wav,w64,au,aiff,$pcm_formats --enable-filter=aresample,volume,asetpts,amix,pan,channelmap,channelsplit,asplit
+--enable-protocol=file,pipe --enable-demuxer=wav,w64,au,aiff,caf,flac,$pcm_formats
+--enable-decoder=$pcm_codecs,flac --enable-encoder=$pcm_codecs,flac
+--enable-muxer=wav,w64,au,aiff,flac,framecrc,framemd5,streamhash,$pcm_formats
+--enable-parser=flac --enable-filter=aresample,volume,asetpts,amix,pan,channelmap,channelsplit,asplit
 
 pcm_codecs=pcm_u8,pcm_s8,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,
   pcm_s32be,pcm_s64le,pcm_s64be,pcm_f32le,pcm_f32be,pcm_f64le,pcm_f64be,

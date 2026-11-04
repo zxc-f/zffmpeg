@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LGPL-2.1-or-later
 # Original file for this project.
-"""Generate the fixtures for the WAV (TODO.md T02), AU (T12a), AIFF (T22b), raw PCM (T22c) and CAF (T22d) contracts.
+"""Generate the fixtures for the WAV (TODO.md T02), AU (T12a), AIFF (T22b), raw PCM (T22c), CAF (T22d) and FLAC (T26a) contracts.
 
 Every fixture is defined below and built byte by byte with the Python standard
 library, independently of the Zig implementation. From those lists this script
@@ -22,11 +22,17 @@ writes:
 * caf/<name>.caf       the CAF fixture files (T22d)
 * caf/manifest.zon     CAF expected results
 * caf/README.md        the CAF table between the GENERATED markers
+* flac/<name>.flac     the FLAC fixture files (T26a), except the FFmpeg-made
+                       flac_ffmpeg_*.flac, which are committed and checked
+                       against their recorded hashes
+* flac/manifest.zon    FLAC expected results, with each output's PCM hash
+* flac/README.md       the FLAC table between the GENERATED markers
 
 Usage, from the repository root:
 
     python3 zig/testing/fixtures/generate.py           # rewrite the outputs
     python3 zig/testing/fixtures/generate.py --check   # fail if any output is stale
+    python3 zig/testing/fixtures/generate.py --flac-input NAME   # an FFmpeg-made fixture's input
 """
 
 import argparse
@@ -1942,7 +1948,8 @@ def ffmpeg_detect(data):
     """The format FFmpeg's content probing picks for `data`, or None (T16).
 
     An independent reading of the probes in wavdec.c (wav_probe, w64_probe),
-    au.c (au_probe), aiffdec.c (aiff_probe) and cafdec.c (probe) and of format.c's choice: the highest nonzero score wins, a
+    au.c (au_probe), aiffdec.c (aiff_probe), cafdec.c (probe) and flacdec.c
+    (flac_probe, raw_flac_probe) and of format.c's choice: the highest nonzero score wins, a
     tie at the highest means none. The first probe buffer holds 2048 bytes, and
     these probes never ask for more. File-name extensions (T22c) play no part:
     no fixture's extension is a raw format's."""
@@ -1966,6 +1973,22 @@ def ffmpeg_detect(data):
     if (padded[:4] == b"caff" and padded[4:6] == b"\x00\x01" and padded[8:12] == b"desc"
             and struct.unpack(">Q", padded[12:20])[0] == 32):
         scores["caf"] = 100
+    # flacdec.c's flac_probe and raw_flac_probe (T26a), on the padded buffer.
+    padded = head + bytes(32)
+    scores["flac"] = 0
+    if len(head) and (struct.unpack(">H", padded[:2])[0] & 0xFFFE) == 0xFFF8:
+        if ((padded[2] & 0xF0) != 0 and (padded[2] & 0x0F) != 0x0F and (padded[3] & 0xF0) < (8 + 2) << 4
+                and (padded[3] & 0x06) != 0x06 and (padded[3] & 0x01) == 0):
+            scores["flac"] = 50 // 4 + 1
+    elif len(head) >= 4 + 4 + 13 and head[:4] == b"fLaC":
+        size = int.from_bytes(head[5:8], "big")
+        min_block, max_block = struct.unpack(">HH", head[8:12])
+        rate = int.from_bytes(head[18:21], "big") >> 4
+        if ((head[4] & 0x7F) == 0 and size == 34 and min_block >= 16 and max_block >= min_block
+                and 0 < rate <= 655350):
+            scores["flac"] = 100
+        else:
+            scores["flac"] = 50
     best = max(scores.values())
     winners = [name for name, score in scores.items() if score == best]
     return winners[0] if best > 0 and len(winners) == 1 else None
@@ -2065,7 +2088,533 @@ def render_readme(path, table):
     return (text[:begin] + table + text[end:]).encode()
 
 
-def outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures):
+# --- FLAC fixtures (T26a) -----------------------------------------------------
+#
+# A FLAC writer built from the format's description (xiph.org's format.html),
+# independently of FFmpeg and of the Zig decoder: it writes constant,
+# verbatim, fixed and LPC subframes with Rice-coded residuals, every channel
+# assignment, wasted bits, and the header's code forms. Each accepted
+# fixture records the samples it encodes; the decoder must give them back.
+# The flac_ffmpeg_* fixtures are FFmpeg's encoder's output, made by
+# zig/testing/reference/flac_fixtures.sh from inputs this script writes
+# (--flac-input); they are committed, their hashes are recorded here and
+# checked, and their expected samples are their inputs.
+
+FLAC_DIR = HERE / "flac"
+FLAC_MANIFEST = FLAC_DIR / "manifest.zon"
+FLAC_README = FLAC_DIR / "README.md"
+
+# The contract's errors for FLAC (zig/testing/fixtures.zig FlacFailure).
+FLAC_ERRORS = (
+    "InvalidFlac",
+    "Truncated",
+    "UnsupportedFormat",
+)
+
+
+class BitWriter:
+    """MSB-first bits."""
+
+    def __init__(self):
+        self.value = 0
+        self.count = 0
+
+    def put(self, bits, value):
+        assert bits >= 0
+        if bits:
+            assert 0 <= value < (1 << bits), (bits, value)
+        self.value = (self.value << bits) | value
+        self.count += bits
+
+    def put_signed(self, bits, value):
+        assert -(1 << (bits - 1)) <= value < (1 << (bits - 1)), (bits, value)
+        self.put(bits, value & ((1 << bits) - 1))
+
+    def unary(self, zeros):
+        self.put(zeros + 1, 1)
+
+    def align(self):
+        self.put(-self.count % 8, 0)
+
+    def bytes(self):
+        assert self.count % 8 == 0
+        return self.value.to_bytes(self.count // 8, "big") if self.count else b""
+
+
+def flac_crc8(data):
+    crc = 0
+    for b in data:
+        crc ^= b
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x07) & 0xFF if crc & 0x80 else (crc << 1) & 0xFF
+    return crc
+
+
+def flac_crc16(data):
+    crc = 0
+    for b in data:
+        crc ^= b << 8
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x8005) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
+    return crc
+
+
+def flac_utf8(value):
+    """The frame number in FLAC's extended UTF-8."""
+    if value < 0x80:
+        return bytes([value])
+    for length in range(2, 8):
+        if value < (1 << (5 * length + 1)):
+            break
+    out = []
+    for _ in range(length - 1):
+        out.append(0x80 | (value & 0x3F))
+        value >>= 6
+    first = ((0xFF << (8 - length)) & 0xFF) | value
+    return bytes([first] + out[::-1])
+
+
+FLAC_BLOCK_CODES = {192: 1, 576: 2, 1152: 3, 2304: 4, 4608: 5, 256: 8, 512: 9, 1024: 10, 2048: 11,
+                    4096: 12, 8192: 13, 16384: 14, 32768: 15}
+FLAC_RATE_CODES = {88200: 1, 176400: 2, 192000: 3, 8000: 4, 16000: 5, 22050: 6, 24000: 7, 32000: 8,
+                   44100: 9, 48000: 10, 96000: 11}
+
+
+def fixed_residual(samples, order):
+    """The residual of fixed predictor `order`."""
+    coeffs = {0: [], 1: [1], 2: [2, -1], 3: [3, -3, 1], 4: [4, -6, 4, -1]}[order]
+    res = []
+    for i in range(order, len(samples)):
+        pred = sum(c * samples[i - 1 - k] for k, c in enumerate(coeffs))
+        res.append(samples[i] - pred)
+    return res
+
+
+def rice_bits(values, param):
+    total = 0
+    for v in values:
+        u = (v << 1) ^ (v >> 63)  # zigzag
+        total += (u >> param) + 1 + param
+    return total
+
+
+def best_param(values, limit):
+    return min(range(limit + 1), key=lambda k: rice_bits(values, k))
+
+
+def write_residual(w, residual, block, order, partition_order=0, method=0, params=None, escape=()):
+    """A residual: partitions of `block >> partition_order` samples, the
+    first short by the predictor order; Rice parameters chosen or given;
+    partitions in `escape` written raw (a 5-bit size, then the values)."""
+    w.put(2, method)
+    w.put(4, partition_order)
+    limit = 14 if method == 0 else 30
+    escape_code = 15 if method == 0 else 31
+    parts = 1 << partition_order
+    size = block >> partition_order
+    at = 0
+    for p in range(parts):
+        n = size - (order if p == 0 else 0)
+        values = residual[at:at + n]
+        at += n
+        if p in escape:
+            bits = max((max(abs(v) for v in values) if values else 0).bit_length() + 1, 1)
+            w.put(4 if method == 0 else 5, escape_code)
+            w.put(5, bits)
+            for v in values:
+                w.put_signed(bits, v)
+            continue
+        k = params[p] if params else best_param(values, limit)
+        w.put(4 if method == 0 else 5, k)
+        for v in values:
+            u = (v << 1) ^ (v >> 63)
+            w.unary(u >> k)
+            w.put(k, u & ((1 << k) - 1))
+    assert at == len(residual)
+
+
+def lpc_coefficients(samples, order, precision):
+    """Quantized LPC coefficients for `samples` (autocorrelation with a
+    Welch window, Levinson-Durbin), FLAC's way: `precision` bits each and the
+    largest shift that keeps them in range, at most 15."""
+    n = len(samples)
+    window = [1.0 - ((2.0 * i - (n - 1)) / (n + 1)) ** 2 for i in range(n)]
+    x = [s * w for s, w in zip(samples, window)]
+    autoc = [sum(x[i] * x[i - lag] for i in range(lag, n)) for lag in range(order + 1)]
+    autoc[0] = autoc[0] * (1.0 + 1e-9) + 1e-9
+    lpc = [0.0] * order
+    error = autoc[0]
+    for i in range(order):
+        r = -autoc[i + 1]
+        for j in range(i):
+            r -= lpc[j] * autoc[i - j]
+        r /= error
+        new = lpc[:]
+        new[i] = r
+        for j in range(i):
+            new[j] = lpc[j] + r * lpc[i - 1 - j]
+        lpc = new
+        error *= 1.0 - r * r
+    coeffs = [-c for c in lpc]  # predict s[i] = sum(coeffs[j] * s[i-1-j])
+    limit = (1 << (precision - 1)) - 1
+    biggest = max(abs(c) for c in coeffs) or 1.0
+    shift = 15
+    while shift > 0 and biggest * (1 << shift) > limit:
+        shift -= 1
+    quantized = [max(-limit - 1, min(limit, round(c * (1 << shift)))) for c in coeffs]
+    return quantized, shift
+
+
+def lpc_residual(samples, coeffs, shift):
+    order = len(coeffs)
+    return [samples[i] - (sum(c * samples[i - 1 - j] for j, c in enumerate(coeffs)) >> shift)
+            for i in range(order, len(samples))]
+
+
+def write_subframe(w, samples, bps, kind, order=0, wasted=0, precision=12, coeffs=None, shift=None, **residual):
+    """One subframe of `samples` (already the channel's, side included) at
+    `bps` bits, `wasted` low bits zero and stripped. LPC coefficients are
+    computed unless given, with their shift."""
+    w.put(1, 0)
+    if kind == "constant":
+        w.put(6, 0)
+    elif kind == "verbatim":
+        w.put(6, 1)
+    elif kind == "fixed":
+        w.put(6, 8 + order)
+    else:
+        w.put(6, 32 + order - 1)
+    if wasted:
+        w.put(1, 1)
+        w.unary(wasted - 1)
+        assert all(v % (1 << wasted) == 0 for v in samples)
+        samples = [v >> wasted for v in samples]
+        bps -= wasted
+    else:
+        w.put(1, 0)
+    if kind == "constant":
+        assert len(set(samples)) == 1
+        w.put_signed(bps, samples[0])
+    elif kind == "verbatim":
+        for v in samples:
+            w.put_signed(bps, v)
+    elif kind == "fixed":
+        for v in samples[:order]:
+            w.put_signed(bps, v)
+        write_residual(w, fixed_residual(samples, order), len(samples), order, **residual)
+    else:
+        if coeffs is None:
+            coeffs, shift = lpc_coefficients(samples, order, precision)
+        assert len(coeffs) == order and 0 <= shift <= 15
+        for v in samples[:order]:
+            w.put_signed(bps, v)
+        w.put(4, precision - 1)
+        w.put_signed(5, shift)
+        # The bitstream holds the coefficient of the latest sample first.
+        for c in coeffs:
+            w.put_signed(precision, c)
+        write_residual(w, lpc_residual(samples, coeffs, shift), len(samples), order, **residual)
+
+
+def flac_frame(number, channels_data, rate, assignment="independent", subframes=None, block_code=None,
+               rate_code=None, corrupt=None):
+    """A frame of 16-bit samples: `channels_data` per channel; `subframes`
+    gives each channel's (kind, options); the header's codes default to the
+    table's, else 8 or 16 bits at the end."""
+    block = len(channels_data[0])
+    channels = len(channels_data)
+    if block_code is None:
+        block_code = FLAC_BLOCK_CODES.get(block, 6 if block <= 256 else 7)
+    if rate_code is None:
+        rate_code = FLAC_RATE_CODES.get(rate, 0)
+    h = BitWriter()
+    h.put(14, 0x3FFE)
+    h.put(1, 0)
+    h.put(1, 0)  # fixed block size
+    h.put(4, block_code)
+    h.put(4, rate_code)
+    codes = {"independent": channels - 1, "left_side": 8, "right_side": 9, "mid_side": 10}
+    h.put(4, codes[assignment])
+    h.put(3, 4)  # 16 bits
+    h.put(1, 0)
+    header = h.bytes() + flac_utf8(number)
+    if block_code == 6:
+        header += bytes([block - 1])
+    elif block_code == 7:
+        header += struct.pack(">H", block - 1)
+    if rate_code == 12:
+        header += bytes([rate // 1000])
+    elif rate_code == 13:
+        header += struct.pack(">H", rate)
+    elif rate_code == 14:
+        header += struct.pack(">H", rate // 10)
+    header += bytes([flac_crc8(header)])
+    left = channels_data[0]
+    right = channels_data[1] if channels > 1 else None
+    if assignment == "left_side":
+        coded = [left, [l - r for l, r in zip(left, right)]]
+        widths = [16, 17]
+    elif assignment == "right_side":
+        coded = [[l - r for l, r in zip(left, right)], right]
+        widths = [17, 16]
+    elif assignment == "mid_side":
+        coded = [[(l + r) >> 1 for l, r in zip(left, right)], [l - r for l, r in zip(left, right)]]
+        widths = [16, 17]
+    else:
+        coded = channels_data
+        widths = [16] * channels
+    w = BitWriter()
+    for i, data in enumerate(coded):
+        kind, options = (subframes[i] if subframes else ("fixed", {"order": 2}))
+        write_subframe(w, data, widths[i], kind, **options)
+    w.align()
+    frame = header + w.bytes()
+    if corrupt:
+        frame = corrupt(frame)
+    return frame + struct.pack(">H", flac_crc16(frame))
+
+
+def flac_block(kind, body, last=False, size=None):
+    return bytes([(0x80 if last else 0) | kind]) + struct.pack(">I", len(body) if size is None else size)[1:] + body
+
+
+def streaminfo(rate, channels, total, min_block=4096, max_block=4096, bps=16, min_frame=0, max_frame=0):
+    w = BitWriter()
+    w.put(16, min_block)
+    w.put(16, max_block)
+    w.put(24, min_frame)
+    w.put(24, max_frame)
+    w.put(20, rate)
+    w.put(3, channels - 1)
+    w.put(5, bps - 1)
+    w.put(36, total)
+    w.put(128, 0)  # no MD5 (FFmpeg does not check it here)
+    return w.bytes()
+
+
+def flac_file(rate, channels, frames, total, blocks=(), block_size=None, bps=16):
+    """fLaC, STREAMINFO, `blocks` (type, body), then the frames."""
+    sizes = [block_size or 4096] * 2
+    info = flac_block(0, streaminfo(rate, channels, total, sizes[0], sizes[1], bps), last=not blocks)
+    rest = b"".join(flac_block(t, b, last=i == len(blocks) - 1) for i, (t, b) in enumerate(blocks))
+    return b"fLaC" + info + rest + b"".join(frames)
+
+
+def flac_signal(count, channels, seed=1, amplitude=12000):
+    """Smoothed pseudo-random 16-bit samples, one list per channel."""
+    state = seed
+    memory = [0.0] * channels
+    out = [[] for _ in range(channels)]
+    for _ in range(count):
+        for c in range(channels):
+            state = (state * 6364136223846793005 + 1442695040888963407) & 0xFFFFFFFFFFFFFFFF
+            top = (state >> 32) & 0xFFFFFFFF
+            white = (top - (1 << 32) if top & 0x80000000 else top) / 2147483648.0
+            memory[c] = memory[c] * 0.9 + white * 0.1
+            out[c].append(max(-32768, min(32767, round(memory[c] * amplitude * 4))))
+    return out
+
+
+def interleave(channels_data):
+    return [v for frame in zip(*channels_data) for v in frame]
+
+
+@dataclasses.dataclass
+class FlacFixture:
+    name: str
+    group: str
+    rule: str
+    data: bytes  # None for FFmpeg-made fixtures, checked by hash
+    channels: int = 0
+    rate: int = 0
+    samples: list = None  # interleaved s16, the expected output
+    reject: str = None
+    made_by: str = "generate.py"
+    sha256: str = None
+
+
+# FFmpeg-made fixtures: name -> (channels, rate, samples per channel, seed,
+# the encoder options), and the hash of the file made from them. Inputs are
+# flac_signal's; zig/testing/reference/flac_fixtures.sh writes the files.
+FLAC_FFMPEG = {
+    "flac_ffmpeg_level0_stereo": (2, 44100, 9216, 7, "-compression_level 0 -frame_size 1152",
+                                  "77275125d498e5a6ad86f7938ab087aa6a159f53dad295a048172e82511ca1ce"),
+    "flac_ffmpeg_level5_stereo": (2, 44100, 9216, 7, "-compression_level 5 -frame_size 1152",
+                                  "ce61749e50a18f0a56c141b374cf27948aa57df9d5ac0e260f8e0e2d3ad1a2b8"),
+    "flac_ffmpeg_level8_mono": (1, 8000, 4000, 9, "-compression_level 8",
+                                "bf42b84a3ee47b00eab083e2d65bd248549ca4cb1b4675a721d0fdcaf7c39b0b"),
+    "flac_ffmpeg_level12_stereo": (2, 48000, 6000, 11, "-compression_level 12 -frame_size 2000",
+                                   "8eb582889da8376aeffc31c159dfce5e047799fa4dd4602137e2c2f58f1b79dc"),
+    "flac_ffmpeg_lpc_orders": (1, 44100, 8192, 13,
+                               "-compression_level 12 -lpc_type levinson -min_prediction_order 1 "
+                               "-max_prediction_order 32 -frame_size 512",
+                               "5cd62bce081c2055ee9786ee6ffdbc3a5bd8c6c8baecfefb10bf7adf34edd103"),
+}
+
+
+def flac_ffmpeg_input(name):
+    channels, rate, count, seed, _, _ = FLAC_FFMPEG[name]
+    return interleave(flac_signal(count, channels, seed=seed))
+
+
+def build_flac_fixtures():
+    fx = []
+
+    def ok(name, rule, rate, channels_data, frames, blocks=(), group="accepted", block_size=None):
+        total = len(channels_data[0])
+        fx.append(FlacFixture(name, group, rule,
+                              flac_file(rate, len(channels_data), frames, total, blocks, block_size),
+                              channels=len(channels_data), rate=rate, samples=interleave(channels_data)))
+
+    def framed(rate, channels_data, block, **frame_options):
+        """Frames of `block` samples (the last shorter), with options."""
+        frames = []
+        for n, start in enumerate(range(0, len(channels_data[0]), block)):
+            part = [c[start:start + block] for c in channels_data]
+            frames.append(flac_frame(n, part, rate, **frame_options))
+        return frames
+
+    def bad(name, group, rule, data, error):
+        assert error in FLAC_ERRORS, error
+        fx.append(FlacFixture(name, group, rule, data, reject=error))
+
+    mono = flac_signal(576, 1, seed=3)
+    stereo = flac_signal(1152, 2, seed=5)
+
+    # Subframe kinds.
+    consts = [[0] * 64, [1000] * 64, [-32768] * 64, [32767] * 64]
+    ok("flac_constant_mono_8k", "Constant subframes, 64-sample frames (an 8-bit size at the header's end).", 8000,
+       [sum(consts, [])], [flac_frame(n, [c], 8000, subframes=[("constant", {})]) for n, c in enumerate(consts)],
+       block_size=64)
+    ok("flac_verbatim_stereo_44k1", "Verbatim subframes, independent channels, 192-sample frames; the last "
+       "frame shorter (a 16-bit size).", 44100, [c[:500] for c in stereo],
+       framed(44100, [c[:500] for c in stereo], 192, subframes=[("verbatim", {}), ("verbatim", {})]), block_size=192)
+    ok("flac_fixed_orders_mono", "Fixed predictors of orders 0 to 4, one per 576-sample frame, partition "
+       "orders 0 to 4.", 44100, [sum(flac_signal(576 * 5, 1, seed=4), [])],
+       [flac_frame(n, [part], 44100, subframes=[("fixed", {"order": n, "partition_order": n})])
+        for n, part in enumerate(chunks(sum(flac_signal(576 * 5, 1, seed=4), []), 576))], block_size=576)
+    lpc_mono = flac_signal(4096 * 4, 1, seed=14)
+    orders = [1, 8, 12, 32]
+    ok("flac_lpc_orders_mono", "LPC subframes of orders 1, 8, 12 and 32, one per 4096-sample frame, with "
+       "12-bit coefficients and partition orders 0, 3, 8 and 6.", 44100, lpc_mono,
+       [flac_frame(n, [part], 44100, subframes=[("lpc", {"order": order, "partition_order": po})])
+        for n, (order, po, part) in enumerate(zip(orders, [0, 3, 8, 6], chunks(lpc_mono[0], 4096)))])
+    ok("flac_lpc_precision", "LPC of order 8 with 15-bit coefficients on the 17-bit side channel "
+       "(the 64-bit prediction path) and 5-bit coefficients on the mid channel.", 48000, stereo,
+       framed(48000, stereo, 1152, assignment="mid_side",
+              subframes=[("lpc", {"order": 8, "precision": 5}), ("lpc", {"order": 8, "precision": 15})]),
+       block_size=1152)
+    ok("flac_lpc_zero_shift", "LPC of order 2 with given coefficients 2 and -1 and a shift of 0.", 32000, mono,
+       framed(32000, mono, 576, subframes=[("lpc", {"order": 2, "coeffs": [2, -1], "shift": 0})]), block_size=576)
+    for assignment in ("left_side", "right_side", "mid_side"):
+        ok(f"flac_{assignment}", f"Stereo as {assignment.replace('_', '/')}: the side channel has 17 bits.",
+           44100, stereo, framed(44100, stereo, 576, assignment=assignment), block_size=576)
+    ok("flac_rice_escape", "A residual partition coded raw (Rice escape) beside Rice-coded ones.", 22050, mono,
+       framed(22050, mono, 576, subframes=[("fixed", {"order": 1, "partition_order": 2, "escape": (1, 3)})]),
+       block_size=576)
+    loud = [[(v * 3) // 2 for v in flac_signal(576, 1, seed=8, amplitude=20000)[0]]]
+    loud = [[max(-32768, min(32767, v)) for v in loud[0]]]
+    ok("flac_rice2_params", "Rice coding with 5-bit parameters (method 1), one above 14.", 48000, loud,
+       framed(48000, loud, 576, subframes=[("fixed", {"order": 0, "method": 1, "partition_order": 1,
+                                                       "params": [15, 16]})]), block_size=576)
+    coarse = [[(v // 4) * 4 for v in mono[0]]]
+    ok("flac_wasted_bits", "Samples that are multiples of 4, with two wasted bits.", 16000, coarse,
+       framed(16000, coarse, 576, subframes=[("fixed", {"order": 2, "wasted": 2})]), block_size=576)
+    many = flac_signal(16 * 300, 1, seed=6)
+    ok("flac_many_frames", "300 frames of 16 samples: frame numbers past 127 take two UTF-8 bytes.", 8000, many,
+       framed(8000, many, 16, subframes=[("fixed", {"order": 1})]), block_size=16)
+    six = flac_signal(256, 6, seed=10)
+    ok("flac_six_channels_48k", "Six independent channels; a 256-sample block (code 8).", 48000, six,
+       framed(48000, six, 256, subframes=[("fixed", {"order": 2})] * 6), block_size=256)
+    for name, rate, code, rule in (("flac_rate_khz", 11000, 12, "A rate in kHz (code 12)."),
+                                   ("flac_rate_hz", 12345, 13, "A rate in Hz (code 13)."),
+                                   ("flac_rate_tens", 50000, 14, "A rate in tens of Hz (code 14)."),
+                                   ("flac_rate_streaminfo", 37800, 0, "The rate from STREAMINFO (code 0).")):
+        part = flac_signal(192, 1, seed=12)
+        ok(name, rule, rate, part, [flac_frame(0, part, rate, rate_code=code)], block_size=192)
+    ok("flac_metadata_blocks", "PADDING, APPLICATION and an unknown block before the frames, skipped.", 44100, mono,
+       framed(44100, mono, 576), blocks=((1, bytes(16)), (2, b"zffm" + bytes(4)), (100, b"x" * 7)), block_size=576)
+
+    # Damaged streams: what FFmpeg's parser and decoder make of them is the
+    # oracle's (flac_vectors.c).
+    frames = framed(44100, mono, 192)
+    frames[1] = frames[1][:-6] + bytes([frames[1][-6] ^ 0x10]) + frames[1][-5:]
+    ok("flac_corrupt_frame_data", "The second frame's data damaged: its CRC-16 fails.", 44100, mono, frames,
+       group="damaged", block_size=192)
+    frames = framed(44100, mono, 192)
+    frames.insert(1, b"\xff\xf8\x12\x34junk\xff\xf9")
+    ok("flac_junk_between_frames", "Junk with false sync codes between the first two frames.", 44100, mono, frames,
+       group="damaged", block_size=192)
+
+    # Refused.
+    info = streaminfo(44100, 1, 576)
+    bad("flac_bps24", "unsupported", "24-bit samples (STREAMINFO): T26b.",
+        b"fLaC" + flac_block(0, streaminfo(44100, 1, 576, bps=24), last=True), "UnsupportedFormat")
+    bad("flac_no_streaminfo", "rejected", "The first block is PADDING: STREAMINFO must come first.",
+        b"fLaC" + flac_block(1, bytes(8)) + flac_block(0, info, last=True), "InvalidFlac")
+    bad("flac_streaminfo_short", "rejected", "STREAMINFO of 33 bytes.",
+        b"fLaC" + flac_block(0, info[:33], last=True), "InvalidFlac")
+    bad("flac_truncated_metadata", "rejected", "The file ends inside STREAMINFO.",
+        b"fLaC" + flac_block(0, info, last=True)[:20], "Truncated")
+    bad("flac_no_marker", "unsupported", "Frames without fLaC and metadata: FFmpeg's headerless mode, T26b.",
+        b"".join(framed(44100, mono, 576)), "UnsupportedFormat")
+
+    for name, (channels, rate, count, seed, options, digest) in FLAC_FFMPEG.items():
+        fx.append(FlacFixture(name, "ffmpeg", f"FFmpeg's encoder, `{options}`; VORBIS_COMMENT and PADDING "
+                              "blocks.", None,
+                              channels=channels, rate=rate, samples=flac_ffmpeg_input(name), made_by="ffmpeg",
+                              sha256=digest))
+    return fx
+
+
+def chunks(items, size):
+    return [items[i:i + size] for i in range(0, len(items), size)]
+
+
+def flac_pcm_sha256(samples):
+    return hashlib.sha256(b"".join(struct.pack("<h", v) for v in samples)).hexdigest()
+
+
+def render_flac_manifest(fixtures):
+    lines = ["// Generated by zig/testing/fixtures/generate.py from its FLAC fixtures; do not edit.",
+             "// Each entry names flac/<name>.flac; see flac/README.md for the rules and decisions.",
+             ".{"]
+    for f in fixtures:
+        digest = f.sha256 if f.made_by == "ffmpeg" else hashlib.sha256(f.data).hexdigest()
+        lines.append("    .{")
+        lines.append(f'        .name = "{f.name}",')
+        lines.append(f'        .sha256 = "{digest}",')
+        lines.append(f"        .made_by = .{'ffmpeg' if f.made_by == 'ffmpeg' else 'generate'},")
+        # FFmpeg's muxer always starts with fLaC and a valid STREAMINFO.
+        detected = ffmpeg_detect(f.data) if f.data is not None else "flac"
+        lines.append(f"        .detected = {'.' + detected if detected else 'null'},")
+        if f.reject:
+            lines.append(f"        .expected = .{{ .reject = .{f.reject} }},")
+        elif f.group == "damaged":
+            lines.append("        .expected = .damaged,")
+        else:
+            lines.append(f"        .expected = .{{ .accept = .{{ .channels = {f.channels}, .sample_rate = {f.rate}, "
+                         f".frames = {len(f.samples) // f.channels}, .pcm_sha256 = \"{flac_pcm_sha256(f.samples)}\" }} }},")
+        lines.append("    },")
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
+def render_flac_table(fixtures):
+    rows = [TABLE_BEGIN.rstrip("\n"), "| Fixture | Group | Made by | Expected | Rule |", "| --- | --- | --- | --- | --- |"]
+    for f in fixtures:
+        if f.reject:
+            expected = f"`{f.reject}`"
+        elif f.group == "damaged":
+            expected = "FFmpeg's result (flac_vectors.c)"
+        else:
+            expected = f"{f.channels} ch, {f.rate} Hz, {len(f.samples) // f.channels} frames"
+        rows.append(f"| `{f.name}` | {f.group} | {f.made_by} | {expected} | {f.rule} |")
+    rows.append(TABLE_END.rstrip("\n"))
+    return "\n".join(rows) + "\n"
+
+
+def outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures, flac_fixtures):
     files = {WAV_DIR / f"{f.name}.wav": f.data for f in fixtures}
     files[MANIFEST] = render_manifest(
         fixtures, "// Each entry names wav/<name>.wav; see README.md for the rules and decisions.")
@@ -2086,33 +2635,67 @@ def outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures):
     files[CAF_MANIFEST] = render_manifest(
         caf_fixtures, "// Each entry names caf/<name>.caf; see caf/README.md for the rules and decisions.")
     files[CAF_README] = render_readme(CAF_README, render_table(caf_fixtures))
+    files.update({FLAC_DIR / f"{f.name}.flac": f.data for f in flac_fixtures if f.made_by != "ffmpeg"})
+    files[FLAC_MANIFEST] = render_flac_manifest(flac_fixtures).encode()
+    files[FLAC_README] = render_readme(FLAC_README, render_flac_table(flac_fixtures))
     return files
+
+
+def check_ffmpeg_made(flac_fixtures):
+    """FFmpeg-made fixtures are committed, not generated: each must exist
+    with its recorded hash (zig/testing/reference/flac_fixtures.sh)."""
+    problems = []
+    for f in flac_fixtures:
+        if f.made_by != "ffmpeg":
+            continue
+        path = FLAC_DIR / f"{f.name}.flac"
+        if not path.exists():
+            problems.append(f"missing FFmpeg-made fixture: {path.relative_to(HERE)}")
+        elif f.sha256 is None or hashlib.sha256(path.read_bytes()).hexdigest() != f.sha256:
+            problems.append(f"FFmpeg-made fixture differs from its recorded hash: {path.relative_to(HERE)}")
+    return problems
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--check", action="store_true", help="fail if any generated output is missing or stale")
+    parser.add_argument("--flac-input", metavar="NAME",
+                        help="write the s16le input of FFmpeg-made FLAC fixture NAME to stdout and stop")
     args = parser.parse_args()
+    if args.flac_input:
+        sys.stdout.buffer.write(b"".join(struct.pack("<h", v) for v in flac_ffmpeg_input(args.flac_input)))
+        return 0
 
     fixtures = build_fixtures()
     au_fixtures = build_au_fixtures()
     aiff_fixtures = build_aiff_fixtures()
     raw_fixtures = build_raw_fixtures()
     caf_fixtures = build_caf_fixtures()
-    expected = outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures)
+    flac_fixtures = build_flac_fixtures()
+    expected = outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures, flac_fixtures)
     stale = [path for path, content in expected.items() if not path.exists() or path.read_bytes() != content]
+    ffmpeg_made = {FLAC_DIR / f"{f.name}.flac" for f in flac_fixtures if f.made_by == "ffmpeg"}
     extra = sorted((set(WAV_DIR.glob("*.wav")) | set(AU_DIR.glob("*.au")) | set(AIFF_DIR.glob("*.aiff"))
-             | set(RAW_DIR.glob("*.raw")) | set(CAF_DIR.glob("*.caf"))) - set(expected))
+             | set(RAW_DIR.glob("*.raw")) | set(CAF_DIR.glob("*.caf")) | set(FLAC_DIR.glob("*.flac")))
+                   - set(expected) - ffmpeg_made)
+    problems = check_ffmpeg_made(flac_fixtures)
+    counts = (f"{len(fixtures)} WAV, {len(au_fixtures)} AU, {len(aiff_fixtures)} AIFF, {len(raw_fixtures)} raw PCM, "
+              f"{len(caf_fixtures)} CAF and {len(flac_fixtures)} FLAC fixtures")
 
     if args.check:
         for path in stale:
             print(f"stale or missing: {path.relative_to(HERE)}", file=sys.stderr)
         for path in extra:
             print(f"not generated by generate.py: {path.relative_to(HERE)}", file=sys.stderr)
+        for problem in problems:
+            print(problem, file=sys.stderr)
         if stale or extra:
             print("run: python3 zig/testing/fixtures/generate.py", file=sys.stderr)
+        if problems:
+            print("run: zig/testing/reference/flac_fixtures.sh", file=sys.stderr)
+        if stale or extra or problems:
             return 1
-        print(f"{len(fixtures)} WAV, {len(au_fixtures)} AU, {len(aiff_fixtures)} AIFF, {len(raw_fixtures)} raw PCM and {len(caf_fixtures)} CAF fixtures, manifests and README tables are current")
+        print(f"{counts}, manifests and README tables are current")
         return 0
 
     WAV_DIR.mkdir(exist_ok=True)
@@ -2120,12 +2703,15 @@ def main():
     AIFF_DIR.mkdir(exist_ok=True)
     RAW_DIR.mkdir(exist_ok=True)
     CAF_DIR.mkdir(exist_ok=True)
+    FLAC_DIR.mkdir(exist_ok=True)
     for path in extra:
         path.unlink()
     for path in stale:
         path.write_bytes(expected[path])
-    print(f"wrote {len(stale)} file(s), removed {len(extra)}; {len(fixtures)} WAV, {len(au_fixtures)} AU, {len(aiff_fixtures)} AIFF, {len(raw_fixtures)} raw PCM and {len(caf_fixtures)} CAF fixtures")
-    return 0
+    print(f"wrote {len(stale)} file(s), removed {len(extra)}; {counts}")
+    for problem in problems:
+        print(problem, file=sys.stderr)
+    return 1 if problems else 0
 
 
 if __name__ == "__main__":

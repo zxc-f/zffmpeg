@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Original file for this project.
 //! The WAV fixture contract (TODO.md T02), the AU fixture contract (T12a),
-//! the AIFF fixture contract (T22b), the raw PCM contract (T22c) and the CAF
-//! contract (T22d) as typed test data.
+//! the AIFF fixture contract (T22b), the raw PCM contract (T22c), the CAF
+//! contract (T22d) and the FLAC contract (T26a) as typed test data.
 //!
 //! `all` is imported at compile time from fixtures/manifest.zon, `au.all` from
 //! fixtures/au/manifest.zon, `aiff.all`, `raw.all` and `caf.all` from the
-//! manifests in fixtures/aiff, fixtures/raw and fixtures/caf;
+//! manifests in fixtures/aiff, fixtures/raw, fixtures/caf and fixtures/flac;
 //! fixtures/generate.py writes them. `bytes`, `au.bytes` and `aiff.bytes`
 //! embed a fixture file, so a missing file fails the build. The rules,
 //! decisions and error precedence are documented in fixtures/README.md,
@@ -164,7 +164,7 @@ pub const Fixture = struct {
 pub const WriterHeader = enum { riff, rf64, w64 };
 
 /// The formats content probing can choose (T16), by FFmpeg's names.
-pub const Container = enum { wav, w64, au, aiff, caf };
+pub const Container = enum { wav, w64, au, aiff, caf, flac };
 
 /// One tag as bytes: values may hold any byte but NUL.
 pub const Tag = struct {
@@ -373,6 +373,63 @@ pub const caf = struct {
     }
 };
 
+/// The FLAC contract (port.md "FLAC contract"): native FLAC with 16-bit
+/// samples, read only. Decoded samples are recorded by their hash; the
+/// stream, packets and frames FFmpeg gives are in vectors/flac.txt.
+pub const flac = struct {
+    const Flac = @This();
+
+    /// Errors of the FLAC contract, named exactly as the FLAC demuxer's.
+    pub const Failure = enum {
+        InvalidFlac,
+        Truncated,
+        UnsupportedFormat,
+    };
+
+    pub const Stream = struct {
+        channels: u8,
+        sample_rate: u32,
+        /// Samples per channel the decoder gives.
+        frames: u64,
+        /// Lowercase hexadecimal SHA-256 of the decoded samples, interleaved
+        /// s16 little-endian.
+        pcm_sha256: []const u8,
+    };
+
+    pub const Expected = union(enum) {
+        accept: Flac.Stream,
+        reject: Flac.Failure,
+        /// Damaged input: only FFmpeg's result (vectors/flac.txt) defines it.
+        damaged,
+    };
+
+    pub const MadeBy = enum {
+        /// fixtures/generate.py writes the file.
+        generate,
+        /// reference/flac_fixtures.sh made it with FFmpeg's encoder; it is
+        /// committed and generate.py checks its hash.
+        ffmpeg,
+    };
+
+    pub const Fixture = struct {
+        /// The file is fixtures/flac/<name>.flac.
+        name: []const u8,
+        /// Lowercase hexadecimal SHA-256 of the file.
+        sha256: []const u8,
+        made_by: MadeBy,
+        /// The format FFmpeg's content probing picks, or null for none (T16).
+        detected: ?Container,
+        expected: Flac.Expected,
+    };
+
+    pub const all: []const Flac.Fixture = @import("fixtures/flac/manifest.zon");
+
+    /// The bytes of fixtures/flac/<name>.flac, embedded at compile time.
+    pub fn bytes(comptime name: []const u8) []const u8 {
+        return @embedFile("fixtures/flac/" ++ name ++ ".flac");
+    }
+};
+
 /// This file's own declarations: the WAV contract's `all` and `bytes`.
 const wav_contract = @This();
 
@@ -415,11 +472,13 @@ fn expectValidResult(comptime name: []const u8, comptime result: anytype) void {
             if (stream.channels == 0) {
                 @compileError("accepted fixtures have channels: " ++ name);
             }
+            if (@TypeOf(stream) == flac.Stream) return;
             if (stream.samples.len() % stream.channels != 0) {
                 @compileError("samples do not fill whole frames: " ++ name);
             }
         },
-        .reject => {},
+        // Rejections, and FLAC's damaged input, which FFmpeg's result defines.
+        else => {},
     }
 }
 
@@ -446,6 +505,7 @@ test "manifest names are unique and expectations are consistent" {
         expectConsistent(aiff);
         expectConsistent(raw);
         expectConsistent(caf);
+        expectConsistent(flac);
     }
 }
 
@@ -455,6 +515,7 @@ test "every fixture file is present and matches its recorded SHA-256" {
     try expectHashes(aiff);
     try expectHashes(raw);
     try expectHashes(caf);
+    try expectHashes(flac);
 }
 
 test "fixture names do not collide across contracts" {
@@ -470,6 +531,11 @@ test "fixture names do not collide across contracts" {
         expectDistinct(caf, au);
         expectDistinct(caf, aiff);
         expectDistinct(caf, raw);
+        expectDistinct(flac, wav_contract);
+        expectDistinct(flac, au);
+        expectDistinct(flac, aiff);
+        expectDistinct(flac, raw);
+        expectDistinct(flac, caf);
     }
 }
 
