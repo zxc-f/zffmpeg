@@ -13,14 +13,14 @@
 //! format lists it accepts to the negotiation (graph.zig), and runs on
 //! frames once its links are configured.
 //!
-//! An option value FFmpeg would read as an expression (`1/2`, `PI`) is
-//! `Expression` until its evaluator is ported (T25b); libswresample
-//! options the port does not implement are `UnsupportedOption`.
+//! Numeric option values and volume's gain are FFmpeg expressions
+//! (core/eval.zig, T25b); libswresample options the port does not
+//! implement are `UnsupportedOption`.
 
 const std = @import("std");
 const audio = @import("../core/audio.zig");
 const channel_layout = @import("../core/channel_layout.zig");
-const number = @import("../core/number.zig");
+const eval = @import("../core/eval.zig");
 const options = @import("../core/options.zig");
 const samples = @import("../core/samples.zig");
 const time = @import("../core/time.zig");
@@ -41,8 +41,8 @@ pub const CreateError = options.SetError || error{
     UnknownFilter,
     /// A libswresample option the port does not implement.
     UnsupportedOption,
-    /// A value FFmpeg reads as an expression (TODO.md T25b).
-    Expression,
+    /// An expression with `time()`, which reads the clock.
+    UnsupportedFunction,
     OutOfMemory,
 };
 
@@ -85,18 +85,24 @@ pub const Filter = union(Kind) {
     volume: Volume,
     aresample: AResample,
 
-    /// The filter `name` with `opts` set in order; nothing is kept when it
-    /// fails.
-    pub fn create(gpa: std.mem.Allocator, name: []const u8, opts: []const Option) CreateError!Filter {
+    /// The filter `name` with no options set (`avfilter_graph_alloc_filter`).
+    pub fn alloc(name: []const u8) CreateError!Filter {
         const d = find(name) orelse return error.UnknownFilter;
-        var f: Filter = switch (d.kind) {
+        return switch (d.kind) {
             .anull => .anull,
             .aformat => .{ .aformat = .{} },
             .volume => .{ .volume = .{} },
             .aresample => .{ .aresample = .{} },
         };
+    }
+
+    /// The filter `name` with `opts` set in order and initialized
+    /// (`avfilter_init_dict`); nothing is kept when it fails.
+    pub fn create(gpa: std.mem.Allocator, name: []const u8, opts: []const Option, sink: ?diagnostics.Sink) CreateError!Filter {
+        var f = try alloc(name);
         errdefer f.deinit(gpa);
         for (opts) |o| try f.set(gpa, o.name, o.value);
+        try f.init(gpa, sink);
         return f;
     }
 
@@ -104,14 +110,35 @@ pub const Filter = union(Kind) {
         switch (f.*) {
             .anull => return error.UnknownOption,
             .aformat => |*a| try a.set(gpa, name, value),
-            .volume => |*v| try v.set(name, value),
+            .volume => |*v| try v.set(gpa, name, value),
             .aresample => |*a| try a.set(name, value),
         }
+    }
+
+    /// The filter's `init`, once its options are set: volume parses its
+    /// expression.
+    pub fn init(f: *Filter, gpa: std.mem.Allocator, sink: ?diagnostics.Sink) CreateError!void {
+        switch (f.*) {
+            .volume => |*v| try v.init(gpa, sink),
+            else => {},
+        }
+    }
+
+    /// FFmpeg's shorthand: the options a value without a key sets, in
+    /// order (the private class's options, aliases skipped).
+    pub fn shorthand(kind: Kind) []const []const u8 {
+        return switch (kind) {
+            .anull => &.{},
+            .aformat => &.{ "sample_fmts", "sample_rates", "channel_layouts" },
+            .volume => &.{ "volume", "precision", "eval", "replaygain", "replaygain_preamp", "replaygain_noclip" },
+            .aresample => &.{"sample_rate"},
+        };
     }
 
     pub fn deinit(f: *Filter, gpa: std.mem.Allocator) void {
         switch (f.*) {
             .aformat => |*a| a.deinit(gpa),
+            .volume => |*v| v.deinit(gpa),
             else => {},
         }
         f.* = undefined;
@@ -185,24 +212,6 @@ const PositiveInt = struct {
     }
 };
 
-/// A constant as `av_expr_parse` reads one: the text without its white
-/// space, all of it `av_strtod`'s number. Anything else is an expression.
-fn constantValue(text: []const u8) CreateError!f64 {
-    var buffer: [256]u8 = undefined;
-    var len: usize = 0;
-    for (text) |c| {
-        if (std.ascii.isWhitespace(c)) continue;
-        if (len == buffer.len) return error.Expression;
-        buffer[len] = c;
-        len += 1;
-    }
-    const stripped = buffer[0..len];
-    if (stripped.len == 0) return error.InvalidValue;
-    const n = number.avStrtod(stripped);
-    if (n.end != stripped.len) return error.Expression;
-    return n.value;
-}
-
 // aformat -------------------------------------------------------------------
 
 pub const AFormat = struct {
@@ -275,9 +284,10 @@ pub const EvalMode = enum(u8) { once, frame };
 pub const ReplayGain = enum(u8) { drop, ignore, track, album };
 
 pub const Volume = struct {
-    /// The constant gain; NaN is refused when the graph is configured, as
-    /// FFmpeg evaluates it there.
-    volume: f64 = 1.0,
+    /// The `volume` expression, owned; null for FFmpeg's default, "1.0".
+    text: ?[]u8 = null,
+    /// The parsed expression, from `init` until the graph's run takes it.
+    expr: ?eval.Expr = null,
     rest: Rest = .{},
 
     /// The options other than `volume`, a string option FFmpeg evaluates.
@@ -315,22 +325,51 @@ pub const Volume = struct {
         }
     };
 
-    fn set(v: *Volume, name: []const u8, text: []const u8) CreateError!void {
+    /// The expression's constants (`var_names`), in FFmpeg's order.
+    pub const variables = [_][]const u8{ "n", "nb_channels", "nb_consumed_samples", "nb_samples", "pts", "sample_rate", "startpts", "startt", "t", "tb", "volume" };
+
+    fn set(v: *Volume, gpa: std.mem.Allocator, name: []const u8, text: []const u8) CreateError!void {
         if (std.mem.eql(u8, name, "volume")) {
-            v.volume = try constantValue(text);
+            const copy = try gpa.dupe(u8, text);
+            if (v.text) |old| gpa.free(old);
+            v.text = copy;
             return;
         }
         try options.set(Rest, &v.rest, name, text);
     }
+
+    /// `init`: `set_expr`.
+    fn init(v: *Volume, gpa: std.mem.Allocator, sink: ?diagnostics.Sink) CreateError!void {
+        v.expr = eval.Expr.parse(gpa, v.text orelse "1.0", &variables, sink) catch |err| {
+            diagnostics.report(sink, .err, "Error when evaluating the volume expression '{s}'", .{v.text orelse "1.0"});
+            return switch (err) {
+                error.InvalidExpression => error.InvalidValue,
+                error.UnsupportedFunction => error.UnsupportedFunction,
+                error.OutOfMemory => error.OutOfMemory,
+            };
+        };
+    }
+
+    fn deinit(v: *Volume, gpa: std.mem.Allocator) void {
+        if (v.text) |t| gpa.free(t);
+        if (v.expr) |*e| e.deinit();
+    }
 };
 
-/// The volume filter on configured links (`config_output`, `set_volume`).
+/// The volume filter on configured links (`config_output`, `set_volume`,
+/// `filter_frame`). Owns the expression.
 pub const VolumeRun = struct {
     precision: Precision,
+    eval_mode: EvalMode,
     format: SampleFormat,
-    volume: f64,
+    expr: eval.Expr,
+    /// The expression's constants, `Volume.variables`' order.
+    vars: [Volume.variables.len]f64,
+    time_base: time.TimeBase,
+    volume: f64 = 1,
     /// The fixed-point gain, 256 for unity.
     volume_i: i32 = 0,
+    sink: ?diagnostics.Sink,
 
     pub const Error = error{
         /// "Invalid value NaN for volume", evaluated once.
@@ -339,28 +378,89 @@ pub const VolumeRun = struct {
         VolumeOutOfRange,
     };
 
-    pub fn init(v: Volume, format: SampleFormat, sink: ?diagnostics.Sink) Error!VolumeRun {
-        var r: VolumeRun = .{ .precision = v.rest.precision, .format = format, .volume = v.volume };
-        if (std.math.isNan(r.volume)) {
-            if (v.rest.eval == .once) {
-                diagnostics.report(sink, .err, "Invalid value NaN for volume", .{});
-                return error.InvalidVolume;
-            }
-            diagnostics.report(sink, .warning, "Invalid value NaN for volume, setting to 0", .{});
-            r.volume = 0;
-        }
-        if (r.precision == .fixed) {
-            const scaled = r.volume * 256 + 0.5;
-            if (!(scaled > -2147483649.0 and scaled < 2147483648.0)) return error.VolumeOutOfRange;
-            r.volume_i = @intFromFloat(@trunc(scaled));
-            const vi: f64 = @floatFromInt(r.volume_i);
-            r.volume = vi / 256.0;
-        }
+    const Var = enum(u8) { n, nb_channels, nb_consumed_samples, nb_samples, pts, sample_rate, startpts, startt, t, tb, volume };
+
+    /// Takes `v`'s expression when it succeeds; `in` is the input link's
+    /// format.
+    pub fn init(v: *Volume, in: audio.Format, time_base: time.TimeBase, sink: ?diagnostics.Sink) Error!VolumeRun {
+        var r: VolumeRun = .{
+            .precision = v.rest.precision,
+            .eval_mode = v.rest.eval,
+            .format = in.sample_format,
+            .expr = v.expr.?,
+            .vars = @splat(std.math.nan(f64)),
+            .time_base = time_base,
+            .sink = sink,
+        };
+        r.set(.nb_channels, @floatFromInt(in.channelCount()));
+        r.set(.tb, r.timeBase());
+        r.set(.sample_rate, @floatFromInt(in.sample_rate));
+        // On failure the filter keeps the expression.
+        try r.setVolume();
+        v.expr = null;
         return r;
     }
 
+    pub fn deinit(r: *VolumeRun) void {
+        r.expr.deinit();
+        r.* = undefined;
+    }
+
+    fn set(r: *VolumeRun, v: Var, value: f64) void {
+        r.vars[@backingInt(v)] = value;
+    }
+
+    fn get(r: *const VolumeRun, v: Var) f64 {
+        return r.vars[@backingInt(v)];
+    }
+
+    fn timeBase(r: *const VolumeRun) f64 {
+        const num: f64 = @floatFromInt(r.time_base.num);
+        const den: f64 = @floatFromInt(r.time_base.den);
+        return num / den;
+    }
+
+    /// `set_volume`.
+    fn setVolume(r: *VolumeRun) Error!void {
+        var volume = r.expr.eval(&r.vars);
+        if (std.math.isNan(volume)) {
+            if (r.eval_mode == .once) {
+                diagnostics.report(r.sink, .err, "Invalid value NaN for volume", .{});
+                return error.InvalidVolume;
+            }
+            diagnostics.report(r.sink, .warning, "Invalid value NaN for volume, setting to 0", .{});
+            volume = 0;
+        }
+        r.set(.volume, volume);
+        if (r.precision == .fixed) {
+            const scaled = volume * 256 + 0.5;
+            if (!(scaled > -2147483649.0 and scaled < 2147483648.0)) return error.VolumeOutOfRange;
+            r.volume_i = @intFromFloat(@trunc(scaled));
+            const vi: f64 = @floatFromInt(r.volume_i);
+            volume = vi / 256.0;
+        }
+        r.volume = volume;
+    }
+
+    /// `filter_frame` for a frame of `frames` frames at `pts`, the
+    /// `index`th the filter takes: the timing constants, the expression
+    /// again when evaluated per frame, then the samples.
+    pub fn filterFrame(r: *VolumeRun, data: []align(8) u8, frames: u32, pts: ?i64, index: u64) Error!void {
+        const pts_value: f64 = if (pts) |p| @floatFromInt(p) else std.math.nan(f64);
+        if (std.math.isNan(r.get(.startpts))) {
+            r.set(.startpts, pts_value);
+            r.set(.startt, pts_value * r.timeBase());
+        }
+        r.set(.pts, pts_value);
+        r.set(.t, pts_value * r.timeBase());
+        r.set(.n, @floatFromInt(index));
+        if (r.eval_mode == .frame) try r.setVolume();
+        r.apply(data);
+        r.set(.nb_consumed_samples, r.get(.nb_consumed_samples) + @as(f64, @floatFromInt(frames)));
+    }
+
     /// Scales `data`, the frame's samples in `format`, in place.
-    pub fn apply(r: *const VolumeRun, data: []align(8) u8) void {
+    fn apply(r: *const VolumeRun, data: []align(8) u8) void {
         if (r.volume == 1.0 or r.volume_i == 256) return;
         if (r.precision == .fixed and r.volume_i <= 0) {
             // A new frame, left silent.
@@ -712,7 +812,7 @@ const testing = std.testing;
 test "the filters are found by FFmpeg's names" {
     try testing.expectEqual(Kind.volume, find("volume").?.kind);
     try testing.expectEqual(null, find("Volume"));
-    try testing.expectError(error.UnknownFilter, Filter.create(testing.allocator, "atempo", &.{}));
+    try testing.expectError(error.UnknownFilter, Filter.create(testing.allocator, "atempo", &.{}, null));
 }
 
 test "sample formats are set as set_string_fmt sets them" {
@@ -733,7 +833,7 @@ test "aformat takes '|' lists, a backslash escaping" {
         .{ .name = "f", .value = "s16|flt" },
         .{ .name = "sample_rates", .value = "8000|44.1k" },
         .{ .name = "cl", .value = "stereo|3C" },
-    });
+    }, null);
     defer f.deinit(gpa);
     try testing.expectEqualSlices(i32, &.{ 1, 3 }, f.aformat.formatList());
     try testing.expectEqualSlices(i32, &.{ 8000, 44100 }, f.aformat.rates.items);
@@ -746,14 +846,15 @@ test "aformat takes '|' lists, a backslash escaping" {
     try testing.expectError(error.UnknownOption, f.set(gpa, "layouts", "mono"));
 }
 
-test "volume takes a constant and refuses an expression" {
+test "volume takes an expression, parsed when the filter is initialized" {
     const gpa = testing.allocator;
-    var f = try Filter.create(gpa, "volume", &.{ .{ .name = "volume", .value = " -6dB " }, .{ .name = "precision", .value = "fixed" } });
+    var f = try Filter.create(gpa, "volume", &.{ .{ .name = "volume", .value = " -6dB " }, .{ .name = "precision", .value = "fixed" } }, null);
     defer f.deinit(gpa);
-    try testing.expectApproxEqRel(0.501187, f.volume.volume, 1e-5);
+    try testing.expectApproxEqRel(0.501187, f.volume.expr.?.eval(&@as([11]f64, @splat(0))), 1e-5);
     try testing.expectEqual(Precision.fixed, f.volume.rest.precision);
-    try testing.expectError(error.Expression, f.set(gpa, "volume", "1/2"));
-    try testing.expectError(error.InvalidValue, f.set(gpa, "volume", " "));
+    try testing.expectError(error.InvalidValue, Filter.create(gpa, "volume", &.{.{ .name = "volume", .value = "1/" }}, null));
+    try testing.expectError(error.InvalidValue, Filter.create(gpa, "volume", &.{.{ .name = "volume", .value = " " }}, null));
+    try testing.expectError(error.UnsupportedFunction, Filter.create(gpa, "volume", &.{.{ .name = "volume", .value = "time(0)" }}, null));
     try testing.expectError(error.InvalidValue, f.set(gpa, "precision", "half"));
     try testing.expectError(error.UnknownOption, f.set(gpa, "gain", "2"));
 }
@@ -766,7 +867,7 @@ test "aresample's options and libswresample's" {
         .{ .name = "ochl", .value = "mono" },
         .{ .name = "dither_method", .value = "triangular" },
         .{ .name = "filter_size", .value = "16" },
-    });
+    }, null);
     defer f.deinit(gpa);
     try testing.expectEqual(22050, f.aresample.outRate());
     try f.set(gpa, "sample_rate", "48000");
@@ -779,19 +880,31 @@ test "aresample's options and libswresample's" {
     try testing.expectError(error.UnknownOption, f.set(gpa, "triangular", "1"));
 }
 
+fn volumeRun(gpa: std.mem.Allocator, text: []const u8, precision: []const u8, eval_mode: []const u8, format: SampleFormat) !VolumeRun {
+    var f = try Filter.create(gpa, "volume", &.{ .{ .name = "volume", .value = text }, .{ .name = "precision", .value = precision }, .{ .name = "eval", .value = eval_mode } }, null);
+    defer f.deinit(gpa);
+    const in = try audio.Format.init(44100, 2, format);
+    return VolumeRun.init(&f.volume, in, try time.TimeBase.ofSampleRate(44100), null);
+}
+
 test "fixed-point volume rounds the gain and scales as FFmpeg does" {
-    const v: Volume = .{ .volume = 0.5, .rest = .{ .precision = .fixed } };
-    const r = try VolumeRun.init(v, .s16, null);
+    const gpa = testing.allocator;
+    var r = try volumeRun(gpa, "0.5", "fixed", "once", .s16);
+    defer r.deinit();
     try testing.expectEqual(128, r.volume_i);
     var data: [8]u8 align(8) = undefined;
     const values = [_]i16{ 1000, -1000, 3, -3 };
     @memcpy(&data, std.mem.sliceAsBytes(&values));
-    r.apply(&data);
+    try r.filterFrame(&data, 2, 0, 0);
     try testing.expectEqualSlices(i16, &.{ 500, -500, 2, -1 }, std.mem.bytesAsSlice(i16, &data));
-    const nan: Volume = .{ .volume = std.math.nan(f64) };
-    try testing.expectError(error.InvalidVolume, VolumeRun.init(nan, .flt, null));
-    const nan_frame: Volume = .{ .volume = std.math.nan(f64), .rest = .{ .eval = .frame } };
-    try testing.expectEqual(0, (try VolumeRun.init(nan_frame, .flt, null)).volume);
-    const huge: Volume = .{ .volume = 1e10, .rest = .{ .precision = .fixed } };
-    try testing.expectError(error.VolumeOutOfRange, VolumeRun.init(huge, .s16, null));
+    try testing.expectError(error.InvalidVolume, volumeRun(gpa, "nan", "float", "once", .flt));
+    try testing.expectError(error.InvalidVolume, volumeRun(gpa, "t", "float", "once", .flt));
+    var frame = try volumeRun(gpa, "nan", "float", "frame", .flt);
+    defer frame.deinit();
+    try testing.expectEqual(0, frame.volume);
+    try testing.expectError(error.VolumeOutOfRange, volumeRun(gpa, "1e10", "fixed", "once", .s16));
+    // nb_channels and sample_rate are known when the links are configured.
+    var known = try volumeRun(gpa, "nb_channels*sample_rate/88200", "double", "once", .dbl);
+    defer known.deinit();
+    try testing.expectEqual(1, known.volume);
 }

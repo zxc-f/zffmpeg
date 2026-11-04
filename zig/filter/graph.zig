@@ -99,7 +99,7 @@ pub const SendError = stage.SendError || error{
     OutOfMemory,
 };
 
-pub const ReceiveError = filters.ResampleRun.Error || error{NotConfigured};
+pub const ReceiveError = filters.ResampleRun.Error || filters.VolumeRun.Error || error{NotConfigured};
 
 const Node = struct {
     /// The instance's name, owned.
@@ -114,6 +114,8 @@ const Node = struct {
     run: Run = .none,
     /// aresample: the end of its input was flushed.
     ended: bool = false,
+    /// The frames the filter has taken (its input's `frame_count_out`).
+    frames_in: u64 = 0,
 };
 
 const Run = union(enum) {
@@ -182,7 +184,7 @@ pub const Graph = struct {
         errdefer g.deinit();
         try g.addNode("in", .source);
         for (chain) |spec| {
-            var f = try filters.Filter.create(gpa, spec.name, spec.options);
+            var f = try filters.Filter.create(gpa, spec.name, spec.options, opts.diagnostics);
             g.addNode(spec.label orelse spec.name, .{ .filter = f }) catch |err| {
                 f.deinit(gpa);
                 return err;
@@ -218,7 +220,8 @@ pub const Graph = struct {
             }
             switch (n.run) {
                 .resample => |*r| r.deinit(),
-                else => {},
+                .volume => |*v| v.deinit(),
+                .none => {},
             }
         }
         g.nodes.deinit(g.gpa);
@@ -341,7 +344,7 @@ pub const Graph = struct {
         const name = std.fmt.bufPrint(&name_buffer, "auto_aresample_{d}", .{converters.*}) catch unreachable;
         converters.* += 1;
         {
-            var f = try filters.Filter.create(g.gpa, "aresample", g.converter);
+            var f = try filters.Filter.create(g.gpa, "aresample", g.converter, g.diagnostics);
             g.addNode(name, .{ .filter = f }) catch |err| {
                 f.deinit(g.gpa);
                 return err;
@@ -694,8 +697,8 @@ pub const Graph = struct {
             const in = &g.links.items[n.input.?];
             l.time_base = in.time_base;
             switch (n.kind.filter) {
-                .volume => |v| {
-                    const run = try filters.VolumeRun.init(v, in.sample_format, g.diagnostics);
+                .volume => |*v| {
+                    const run = try filters.VolumeRun.init(v, in.format(), in.time_base, g.diagnostics);
                     n.run = .{ .volume = run };
                 },
                 .aresample => |a| {
@@ -791,7 +794,14 @@ pub const Graph = struct {
             .none => return g.pull(upstream),
             .volume => |*v| {
                 const r = try g.pull(upstream);
-                if (r == .frame) v.apply(r.frame.data);
+                if (r == .frame) {
+                    var frame = r.frame;
+                    v.filterFrame(frame.data, frame.frameCount(), frame.pts, n.frames_in) catch |err| {
+                        frame.free(g.gpa);
+                        return err;
+                    };
+                    n.frames_in += 1;
+                }
                 return r;
             },
             .resample => |*r| {
@@ -1073,7 +1083,7 @@ test "fuzz: arbitrary option text never crashes a graph" {
 // through zig/testing/reference/graph_vectors.c, which documents its
 // lines. Every case is run, and the count makes a truncated file fail.
 const vectors = @embedFile("../testing/vectors/graph.txt");
-const case_count = 93;
+const case_count = 109;
 const resample = @import("../resample/resample.zig");
 const native_endian = @import("builtin").cpu.arch.endian();
 
@@ -1193,7 +1203,10 @@ fn runCase(gpa: std.mem.Allocator, lines: []const []const u8) !void {
     }
     const outcome = lines[at];
     var g = Graph.init(gpa, .{ .format = format, .time_base = tb }, chain.items, sink, .{ .converter = converter.items }) catch |err| {
-        if (std.mem.eql(u8, outcome, "X")) return testing.expectEqual(error.Expression, err);
+        if (std.mem.eql(u8, outcome, "X")) {
+            if (err != error.UnsupportedFunction and err != error.UnsupportedSyntax) return err;
+            return;
+        }
         if (std.mem.eql(u8, outcome, "E init")) return;
         return err;
     };

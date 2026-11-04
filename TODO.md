@@ -2155,15 +2155,18 @@ names, not as an empty framework.
       within 2^-50 relative, T24's tolerance (on the vectors, exact);
       results C leaves undefined (NaN or out-of-range doubles converted to
       integers) follow x86 and are not compared; time() is refused.
-    Implementation files and test entry points: core/eval.zig;
-      eval_vectors.c, vectors/eval.txt.
+    Implementation files and test entry points: core/eval.zig,
+      core/options.zig (expressions in option values), filter/filters.zig
+      (volume's expression and variables); eval_vectors.c, vectors/eval.txt,
+      graph_vectors.c (now 109 cases: volume's per-frame variables,
+      expressions in aresample and aformat options).
     Evidence commit / Linux CI run / reference report: pending.
-    Required cases: part 1 passes (200/200, bit-exact); parts 2 and 3 to
-      come.
+    Required cases: part 1 passes (200/200, bit-exact); part 2a passes
+      (options' 136 texts, the 5 expressions among them; 109/109 graphs);
+      the graph text and part 3 to come.
     Optional cases: none
     Fuzz seeds, budget and result: none yet.
-    Remaining work or blocker / next action: part 2, the graph text and
-      volume's expressions.
+    Remaining work or blocker / next action: part 2b, the graph text.
     ```
   - [ ] **T25c — Several inputs and outputs.** Needs T25b. Scheduling with
     several inputs and outputs; amix, pan, channelmap, channelsplit and asplit.

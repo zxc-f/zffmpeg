@@ -10,17 +10,16 @@
 //! `set` sets one from text as FFmpeg's `av_opt_set` does, equal to it on
 //! zig/testing/vectors/options.txt.
 //!
-//! A number is `av_strtod`'s (core/number.zig) after white space is
-//! removed, a named constant of the option, or one of `default`, `min`,
-//! `max`, `none` (0) and `all` (-1); integers round to nearest, ties to
-//! even, as `llrint` does; a value outside the range, or NaN, is refused.
-//! FFmpeg reads any other text as an expression (`16*2`, `PI`); until its
-//! evaluator is ported (T25b) such text is `InvalidValue`. A boolean takes
+//! A number is a named constant of the option, or an expression of FFmpeg's
+//! evaluator (core/eval.zig, T25b) in which the option's constants,
+//! `default`, `max`, `min`, `none` (0) and `all` (-1) are named; integers
+//! round to nearest, ties to even, as `llrint` does; a value outside the
+//! range, or NaN, is refused. A boolean takes
 //! `true`, `y`, `yes`, `enable`, `enabled`, `on` and their negatives,
 //! case-insensitively, or a decimal integer, within the range.
 
 const std = @import("std");
-const number = @import("number.zig");
+const eval = @import("eval.zig");
 
 pub const Kind = enum { int, bool, double, float };
 
@@ -42,7 +41,7 @@ pub const Spec = struct {
 pub const SetError = error{
     /// No option of that name.
     UnknownOption,
-    /// Not a value of the option (or an expression; T25b).
+    /// Not a value of the option.
     InvalidValue,
     /// A number outside the option's range.
     OutOfRange,
@@ -168,33 +167,32 @@ fn boolValue(text: []const u8) ?i64 {
     return if (negative) -value else value;
 }
 
-/// `set_string_number` without expressions: a constant of the option, then
-/// the text without white space as a constant or `av_strtod`'s number.
-fn numberValue(comptime spec: Spec, default: f64, text: []const u8) SetError!f64 {
-    if (constantValue(spec, default, text)) |v| return v;
-    var buffer: [256]u8 = undefined;
-    var len: usize = 0;
-    for (text) |c| {
-        if (std.ascii.isWhitespace(c)) continue;
-        if (len == buffer.len) return error.InvalidValue;
-        buffer[len] = c;
-        len += 1;
-    }
-    const stripped = buffer[0..len];
-    if (constantValue(spec, default, stripped)) |v| return v;
-    const n = number.avStrtod(stripped);
-    if (stripped.len == 0 or n.end != stripped.len or std.math.isNan(n.value)) return error.InvalidValue;
-    return n.value;
-}
+/// The longest value text `set` evaluates; longer is `InvalidValue`.
+pub const max_text = 256;
 
-fn constantValue(comptime spec: Spec, default: f64, name: []const u8) ?f64 {
+/// `set_string_number`: a constant of the option by its exact name, else
+/// `av_expr_parse_and_eval` with the option's constants, `default`, `max`,
+/// `min`, `none` and `all` named; NaN is refused.
+fn numberValue(comptime spec: Spec, default: f64, text: []const u8) SetError!f64 {
     for (spec.constants) |c| {
-        if (std.mem.eql(u8, c.name, name)) return c.value;
+        if (std.mem.eql(u8, c.name, text)) return c.value;
     }
-    if (std.mem.eql(u8, name, "default")) return default;
-    if (std.mem.eql(u8, name, "max")) return spec.max;
-    if (std.mem.eql(u8, name, "min")) return spec.min;
-    if (std.mem.eql(u8, name, "none")) return 0;
-    if (std.mem.eql(u8, name, "all")) return -1;
-    return null;
+    if (text.len > max_text) return error.InvalidValue;
+    const names = comptime n: {
+        var list: [spec.constants.len + 5][]const u8 = undefined;
+        for (spec.constants, 0..) |c, i| list[i] = c.name;
+        for (.{ "default", "max", "min", "none", "all" }, 0..) |name, i| list[spec.constants.len + i] = name;
+        break :n list;
+    };
+    var values: [names.len]f64 = undefined;
+    for (spec.constants, 0..) |c, i| values[i] = c.value;
+    values[spec.constants.len..].* = .{ default, spec.max, spec.min, 0, -1 };
+    // An expression of `max_text` bytes fits in this buffer.
+    var buffer: [48 * 1024]u8 = undefined;
+    var fixed: std.heap.FixedBufferAllocator = .init(&buffer);
+    var e = eval.Expr.parse(fixed.allocator(), text, &names, null) catch return error.InvalidValue;
+    defer e.deinit();
+    const value = e.eval(&values);
+    if (std.math.isNan(value)) return error.InvalidValue;
+    return value;
 }

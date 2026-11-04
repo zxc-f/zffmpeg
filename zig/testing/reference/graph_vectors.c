@@ -25,8 +25,8 @@
 //       a filter of the chain, its options as avfilter_init_dict sets
 //       them, the values in hex
 //   X
-//       a value FFmpeg reads as an expression (TODO.md T25b): the port
-//       refuses it when the filter is created; nothing else follows
+//       a graph the port refuses when it is created (time(), which reads
+//       the clock); nothing else follows
 //   E init | E config
 //       the filter's creation, or the graph's configuration, failed
 //   L <filter> <fmt> <rate> <layout> <tb num> <tb den>
@@ -110,7 +110,7 @@ struct graph_case {
     int64_t first_pts;       /* NOPTS: every frame unset */
     const char *sink_fmts, *sink_rates, *sink_layouts;
     const char *conv;        /* aresample_swr_opts */
-    int expression;          /* a value is an expression (T25b) */
+    int refused;             /* the port refuses the graph (time()) */
     struct filt chain[MAX_CHAIN];
 };
 
@@ -201,7 +201,7 @@ static void run_case(const struct graph_case *c)
         }
         printf("\n");
     }
-    if (c->expression) {
+    if (c->refused) {
         printf("X\n");
         goto done;
     }
@@ -437,8 +437,40 @@ static const struct graph_case cases[] = {
       .chain = { F("volume", { { "volume", "nan" } }) } },
     { "volume_bad_precision", AV_SAMPLE_FMT_FLT, 44100, "mono", 0, 0, SIZES(16), 0,
       .chain = { F("volume", { { "precision", "half" } }) } },
-    { "volume_expression", AV_SAMPLE_FMT_FLT, 44100, "mono", 0, 0, SIZES(16), 0, .expression = 1,
+    { "volume_expression", AV_SAMPLE_FMT_FLT, 44100, "mono", 0, 0, SIZES(16), 0,
       .chain = { F("volume", { { "volume", "1/2" } }) } },
+    { "volume_once_variables", AV_SAMPLE_FMT_FLT, 44100, "stereo", 0, 0, SIZES(16), 0,
+      .chain = { F("volume", { { "volume", "nb_channels/4+sample_rate/88200+tb*0" } }) } },
+    { "volume_once_t", AV_SAMPLE_FMT_FLT, 44100, "mono", 0, 0, SIZES(16), 0,
+      .chain = { F("volume", { { "volume", "t" } }) } },
+    { "volume_frame_n", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(16, 16, 16), 0,
+      .chain = { F("volume", { { "volume", "n/4+0.5" }, { "eval", "frame" } }) } },
+    { "volume_frame_t", AV_SAMPLE_FMT_FLT, 44100, "mono", 0, 0, SIZES(40, 40, 40), 0,
+      .chain = { F("volume", { { "volume", "if(lt(t,0.001),0.25,2)" }, { "eval", "frame" } }) } },
+    { "volume_frame_pts_ms", AV_SAMPLE_FMT_DBL, 44100, "mono", 1, 1000, SIZES(441, 441), 100,
+      .chain = { F("volume", { { "volume", "pts/1000-startpts/1000+startt" }, { "eval", "frame" }, { "precision", "double" } }) } },
+    { "volume_frame_nopts", AV_SAMPLE_FMT_FLT, 44100, "mono", 0, 0, SIZES(16, 16), NOPTS,
+      .chain = { F("volume", { { "volume", "isnan(pts)+isnan(t)*0.25" }, { "eval", "frame" } }) } },
+    { "volume_frame_nan", AV_SAMPLE_FMT_FLT, 44100, "mono", 0, 0, SIZES(16), 0,
+      .chain = { F("volume", { { "volume", "nb_samples" }, { "eval", "frame" } }) } },
+    { "volume_frame_previous", AV_SAMPLE_FMT_FLT, 44100, "mono", 0, 0, SIZES(8, 8, 8), 0,
+      .chain = { F("volume", { { "volume", "if(isnan(volume),0.5,volume*2)" }, { "eval", "frame" } }) } },
+    { "volume_frame_consumed", AV_SAMPLE_FMT_FLT, 44100, "mono", 0, 0, SIZES(8, 8), 0,
+      .chain = { F("volume", { { "volume", "isnan(nb_consumed_samples)*3" }, { "eval", "frame" } }) } },
+    { "volume_frame_fixed", AV_SAMPLE_FMT_S16, 44100, "mono", 0, 0, SIZES(8, 8, 8), 0,
+      .chain = { F("volume", { { "volume", "n+0.5" }, { "eval", "frame" }, { "precision", "fixed" } }) } },
+    { "volume_frame_random", AV_SAMPLE_FMT_FLT, 44100, "mono", 0, 0, SIZES(8, 8, 8), 0,
+      .chain = { F("volume", { { "volume", "random(0)" }, { "eval", "frame" } }) } },
+    { "volume_frame_after_resample", AV_SAMPLE_FMT_S16, 44100, "mono", 0, 0, SIZES(300, 300), 0,
+      .chain = { F("aresample", { { "sample_rate", "48000" } }), F("volume", { { "volume", "0.5+n*0.25" }, { "eval", "frame" } }) } },
+    { "volume_bad_expression", AV_SAMPLE_FMT_FLT, 44100, "mono", 0, 0, SIZES(16), 0,
+      .chain = { F("volume", { { "volume", "1+" } }) } },
+    { "volume_time", AV_SAMPLE_FMT_FLT, 44100, "mono", 0, 0, SIZES(16), 0, .refused = 1,
+      .chain = { F("volume", { { "volume", "time(0)" } }) } },
+    { "aresample_expression", AV_SAMPLE_FMT_S16, 44100, "mono", 0, 0, SIZES(300), 0,
+      .chain = { F("aresample", { { "sample_rate", "44100+3900" }, { "filter_size", "16*2" } }) } },
+    { "aformat_rate_expression", AV_SAMPLE_FMT_S16, 44100, "mono", 0, 0, SIZES(300), 0,
+      .chain = { F("aformat", { { "r", "8000*4|max" } }) } },
     { "volume_unknown_option", AV_SAMPLE_FMT_FLT, 44100, "mono", 0, 0, SIZES(16), 0,
       .chain = { F("volume", { { "gain", "2" } }) } },
 

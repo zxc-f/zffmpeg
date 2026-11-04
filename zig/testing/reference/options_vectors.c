@@ -12,7 +12,7 @@
 //       options, a C99 hex float for double ones
 //   X <name> <text> <value>
 //       the same for a text only FFmpeg's expression evaluator reads
-//       (TODO.md T25b), which the port refuses until then
+//       (TODO.md T25b), which the port evaluates since then
 //
 // See zig/testing/reference/README.md for the build commands.
 

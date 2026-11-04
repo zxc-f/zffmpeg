@@ -1058,8 +1058,8 @@ test "options are set as av_opt_set sets them, on every vector" {
         errdefer std.debug.print("option vector {d}: {s} {s} '{s}'\n", .{ count + 1, kind, name, text });
         var o: Options = .{};
         const result = typed_options.set(Options, &o, name, text);
-        // Refused by FFmpeg, or an expression, which waits for T25b.
-        if (std.mem.eql(u8, want, "E") or kind[0] == 'X') {
+        // Refused by FFmpeg; X marks an expression, evaluated since T25b.
+        if (std.mem.eql(u8, want, "E")) {
             if (result) |_| return error.TestUnexpectedResult else |_| {}
             continue;
         }
