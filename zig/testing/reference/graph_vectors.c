@@ -494,6 +494,9 @@ static const struct graph_case cases[] = {
                  F("aresample", { { "sample_rate", "22050" } }), F("aformat", { { "cl", "mono" } }), F("anull") } },
     { "chain_fixed_after_float", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(100), 0,
       .chain = { F("volume", { { "volume", "0.5" } }), F("volume", { { "volume", "2" }, { "precision", "fixed" } }) } },
+    { "chain_layout_unselectable", AV_SAMPLE_FMT_S16, 44100, "stereo", 0, 0, SIZES(200), 0, .sink_fmts = "s16",
+      .chain = { F("aformat", { { "cl", "mono|5.1" } }), F("volume", { { "volume", "0.5" } }),
+                 F("aresample", { { "sample_rate", "48000" } }) } },
     { "chain_double_rates", AV_SAMPLE_FMT_S16, 44100, "mono", 0, 0, SIZES(300), 0,
       .chain = { F("aresample", { { "sample_rate", "48000" } }), F("aresample", { { "sample_rate", "44100" } }) } },
 };

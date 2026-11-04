@@ -803,7 +803,9 @@ pub fn outputFrames(in_frames: u64, in_rate: u32, out_rate: u32, options: Option
 }
 
 /// `av_rescale`: `a * b / c`, rounded to the nearest, halves away from zero.
-fn rescaleNear(a: i64, b: i64, c: i64) i64 {
+/// `av_rescale`: `a * b / c` rounded to the nearest, halves away from
+/// zero, for `b` and `c` above zero and a result that fits.
+pub fn rescaleNear(a: i64, b: i64, c: i64) i64 {
     const product: i128 = @as(i128, a) * b;
     const half: i128 = @divTrunc(c, 2);
     const rounded = if (product < 0) -@divTrunc(-product + half, c) else @divTrunc(product + half, c);
@@ -821,12 +823,13 @@ fn field(fields: *std.mem.TokenIterator(u8, .scalar)) error{MalformedVector}![]c
     return fields.next() orelse error.MalformedVector;
 }
 
-/// The generator's input (resample_vectors.c): smoothed LCG noise.
-const Signal = struct {
+/// The generator's input: resample_vectors.c's smoothed pseudo-random
+/// signal in [-1, 1), one memory per channel (graph_vectors.c's too).
+pub const Signal = struct {
     state: u64 = 1,
-    memory: [8]f64 = @splat(0),
+    memory: [64]f64 = @splat(0),
 
-    fn next(g: *Signal, channel: usize) f64 {
+    pub fn next(g: *Signal, channel: usize) f64 {
         g.state = g.state *% 6364136223846793005 +% 1442695040888963407;
         const top: i32 = @bitCast(@as(u32, @truncate(g.state >> 32)));
         const top_f: f64 = @floatFromInt(top);
@@ -908,7 +911,7 @@ fn runResample(gpa: std.mem.Allocator, comptime internal: audio.SampleFormat, in
 /// units. The filter's `sin` may differ from the C library's in the last
 /// bit; on the vectors integer and float outputs are exact and double ones
 /// within 2^-52.
-fn tolerance(format: audio.SampleFormat) f64 {
+pub fn tolerance(format: audio.SampleFormat) f64 {
     return switch (format) {
         .u8, .s16, .s32 => 1,
         .flt => std.math.ldexp(@as(f64, 1), -23),

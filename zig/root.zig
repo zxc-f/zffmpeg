@@ -45,6 +45,10 @@
 //!   `format/replay.zig`).
 //! - `convert`: synchronous WAV/Wave64/AU/AIFF conversion and stream copy, with
 //!   every check made before output starts (`format/convert.zig`).
+//! - `filter`: the audio filter graph: a linear chain of anull, aformat,
+//!   volume and aresample between a buffer source and sink, negotiated and
+//!   run as FFmpeg's libavfilter does (`filter/graph.zig`, with
+//!   `filter/filters.zig` and `filter/formats.zig`).
 //! - `file`: file and stream adapters for the WAV and AU paths, with
 //!   borrowed-handle and path variants (`io/file.zig`).
 //!
@@ -74,6 +78,7 @@ pub const codecs = @import("codec/registry.zig");
 pub const formats = @import("format/registry.zig");
 pub const detect = @import("format/detect.zig");
 pub const convert = @import("format/convert.zig");
+pub const filter = @import("filter/graph.zig");
 pub const file = @import("io/file.zig");
 
 test {
@@ -102,6 +107,9 @@ test {
     _ = @import("resample/rematrix.zig");
     _ = @import("resample/resample.zig");
     _ = @import("resample/swr.zig");
+    _ = @import("filter/formats.zig");
+    _ = @import("filter/filters.zig");
+    _ = @import("filter/graph.zig");
     _ = @import("format/registry.zig");
     _ = @import("format/detect.zig");
     _ = @import("format/replay.zig");

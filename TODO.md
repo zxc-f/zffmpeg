@@ -2041,7 +2041,7 @@ names, not as an empty framework.
 
     ```text
     ID / parent: T25a / T25
-    State: implementing
+    State: validating
     Supported behavior and explicit exclusions: a linear chain of audio
       filters between a buffer source (one format: any of the 12 sample
       formats, a rate, a native, custom or unspecified layout, a time base)
@@ -2065,7 +2065,7 @@ names, not as an empty framework.
       value is refused), several inputs or outputs (T25c), other
       libswresample options (async, matrix, mix levels, soxr), a sink frame
       size, commands, the EOF status pts (not in FFmpeg's public API),
-      replay-gain side data, timeline editing.
+      replay-gain side data, timeline editing, empty frames.
     Needs (verified) / lands with / verified after: T14a, T17a, T23a, T24.
     Contract and source provenance: libavfilter/avfiltergraph.c
       (query_formats, reduce_formats, swap_*, pick_formats), formats.c
@@ -2074,8 +2074,8 @@ names, not as an empty framework.
       af_aresample.c; libavutil/opt.c (array, sample format and layout
       options), eval.c (white space, numbers); libswresample/swresample.c
       (swr_next_pts, the unresampled path).
-    Required fixtures / optional corpus: graph_vectors.c's 92 cases
-      (zig/testing/vectors/graph.txt: 84 run, 7 refused by FFmpeg, 1
+    Required fixtures / optional corpus: graph_vectors.c's 93 cases
+      (zig/testing/vectors/graph.txt: 84 run, 8 refused by FFmpeg, 1
       expression); no optional corpus.
     Ownership, state transitions and limits: the graph owns its filters,
       links, negotiation lists and frames; a sent frame is copied during
@@ -2093,14 +2093,22 @@ names, not as an empty framework.
       undefined there); a custom layout with no channel in the mask but LFE
       scores as no channels when layouts are compared (FFmpeg reads a
       pointer's bits).
-    Implementation files and test entry points: graph_vectors.c,
-      vectors/graph.txt.
-    Evidence commit / Linux CI run / reference report: pending.
-    Required cases: passed 0 / failed 0 / missing 92
+    Implementation files and test entry points: filter/formats.zig,
+      filter/filters.zig, filter/graph.zig ("every graph equals FFmpeg's",
+      allocation failure, fuzz), resample/swr.zig (filterFrame,
+      flushFrame), core/audio.zig (FFmpeg's sample format numbers);
+      graph_vectors.c, vectors/graph.txt.
+    Evidence commit / Linux CI run / reference report: part 1 local Linux
+      runs; the record pending.
+    Required cases: passed 93 / failed 0 / missing 0 (local runs), every
+      output byte for byte, resampled ones included.
     Optional cases: none
-    Fuzz seeds, budget and result: none yet.
-    Remaining work or blocker / next action: the negotiation, then the
-      filters and the frame path.
+    Fuzz seeds, budget and result: graph.zig's option-text entry, 7 seeds,
+      run under zig build test in Debug, ReleaseSafe and ReleaseFast;
+      `zig build test --fuzz` stops locally with "corrupted coverage file
+      ... pcs_len was zero" for every entry, so no sustained run.
+    Remaining work or blocker / next action: the local reference job, then
+      T25a's G5 record.
     ```
   - [ ] **T25b — Filtergraph syntax and expressions.** Needs T25a. The
     filtergraph string syntax, the expression subset volume needs, atrim and

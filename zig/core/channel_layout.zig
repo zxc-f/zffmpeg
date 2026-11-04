@@ -740,7 +740,7 @@ fn scanChannels(text: []const u8) ?struct { count: i32, list: []const u8 } {
     return .{ .count = @truncate(number.value), .list = text[pos..list_end] };
 }
 
-const CNumber = struct {
+pub const CNumber = struct {
     /// The value as the function returns it (saturated on overflow).
     value: i64,
     /// Bytes read; 0 when no digits were found.
@@ -789,7 +789,7 @@ fn skipSign(text: []const u8, start: usize) struct { negative: bool, pos: usize 
 }
 
 /// `strtol` with a 64-bit `long`.
-fn strtol(text: []const u8, base: u8) CNumber {
+pub fn strtol(text: []const u8, base: u8) CNumber {
     const sign = skipSign(text, 0);
     const digits = cDigits(text, sign.pos, base);
     if (digits.end == 0) return .{ .value = 0, .end = 0, .overflow = false };

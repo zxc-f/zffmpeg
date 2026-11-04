@@ -8,8 +8,11 @@
 //! internal format, the channel mix before or after the resampler
 //! (`resample_first`), the resampler, the dither, and the output format.
 //!
-//! The input is cut into FFmpeg's decoder frames (`frame_frames` each, the
-//! last one shorter), and each makes one `swr_convert` call with room for
+//! Frames come either as `aresample`'s input frames, each one call
+//! (`filterFrame`, then `flushFrame`, as a filter graph runs it, T25a), or
+//! as a stream that `take` cuts into FFmpeg's decoder frames
+//! (`frame_frames` each, the last one shorter), each making one
+//! `swr_convert` call with room for
 //! `n_in * ratio + 32` frames, more by the delay when there is one; a call
 //! that fills its room is followed by calls of 4096 frames without input
 //! until one gives nothing, and the end of the input by flushing calls of
@@ -55,6 +58,8 @@ pub const Swr = struct {
     dithering: ?dither.Dither,
     /// FFmpeg's decoder frame size for the input: one call per frame.
     frame_frames: u32,
+    /// The largest input frame the buffers hold; `filterFrame` grows them.
+    capacity: u32,
     /// `aresample`'s ratio, `out_rate / in_rate` in double.
     ratio: f64,
     /// The input of the next call, in the internal format: up to
@@ -111,26 +116,7 @@ pub const Swr = struct {
         };
         const in_rate_d: f64 = @floatFromInt(in_format.sample_rate);
         const ratio = out_rate_f / in_rate_d;
-        // filter_frame's room: n_in * ratio + 32, plus at most as much again
-        // or 4096 for the delay.
-        const frames_f: f64 = @floatFromInt(frame_frames);
-        const first: u32 = @intFromFloat(@trunc(frames_f * ratio + 32));
-        const max_room = first + @max(4096, first);
-        const mid_frames = if (resample_first) max_room else frame_frames;
-        const mid_channels = if (resample_first) in_channels else out_channels;
-        const postin_layout = try layoutOf(internal, in_channels, frame_frames);
-        const mid_layout = try layoutOf(internal, mid_channels, mid_frames);
-        const preout_layout = try layoutOf(internal, out_channels, max_room);
-        const out_layout = try layoutOf(out_format.sample_format, out_channels, max_room);
-        const storage = try gpa.alignedAlloc(u8, .@"8", postin_layout.size + mid_layout.size + preout_layout.size + out_layout.size);
-        errdefer gpa.free(storage);
-        var offset: usize = 0;
-        const parts = [_]samples.Layout{ postin_layout, mid_layout, preout_layout, out_layout };
-        var buffers: [4]samples.Buffer = undefined;
-        for (parts, 0..) |layout, i| {
-            buffers[i] = samples.Buffer.init(layout, storage[offset..][0..layout.size]) catch unreachable;
-            offset += layout.size;
-        }
+        const buffers = try Buffers.allocate(gpa, internal, in_channels, out_format, resample_first, ratio, frame_frames);
         // The dither's filter is chosen by the output rate (swri_dither_init).
         const dithering = dither.Dither.initInternal(internal, out_channels, out_format.sample_rate, out_format.sample_format, options.dither);
         return .{
@@ -143,16 +129,114 @@ pub const Swr = struct {
             .resample_first = resample_first,
             .dithering = dithering,
             .frame_frames = frame_frames,
+            .capacity = frame_frames,
             .ratio = ratio,
-            .postin = buffers[0],
-            .mid = buffers[1],
-            .preout = buffers[2],
-            .out = buffers[3],
-            .max_room = max_room,
-            .storage = storage,
+            .postin = buffers.parts[0],
+            .mid = buffers.parts[1],
+            .preout = buffers.parts[2],
+            .out = buffers.parts[3],
+            .max_room = buffers.max_room,
+            .storage = buffers.storage,
         };
     }
 
+    /// The buffers of calls of at most `frames` input frames, in one
+    /// allocation.
+    const Buffers = struct {
+        storage: []align(8) u8,
+        parts: [4]samples.Buffer,
+        max_room: u32,
+
+        fn allocate(gpa: std.mem.Allocator, internal: audio.SampleFormat, in_channels: u32, out_format: audio.Format, resample_first: bool, ratio: f64, frames: u32) Error!Buffers {
+            const out_channels = out_format.channelCount();
+            // filter_frame's room: n_in * ratio + 32, plus at most as much
+            // again or 4096 for the delay.
+            const frames_f: f64 = @floatFromInt(frames);
+            const first_f = @trunc(frames_f * ratio + 32);
+            if (!(first_f < std.math.maxInt(i32) / 2)) return error.UnsupportedFormat;
+            const first: u32 = @intFromFloat(first_f);
+            const max_room = first + @max(4096, first);
+            const mid_frames = if (resample_first) max_room else frames;
+            const mid_channels = if (resample_first) in_channels else out_channels;
+            const parts = [_]samples.Layout{
+                try layoutOf(internal, in_channels, frames),
+                try layoutOf(internal, mid_channels, mid_frames),
+                try layoutOf(internal, out_channels, max_room),
+                try layoutOf(out_format.sample_format, out_channels, max_room),
+            };
+            var total: usize = 0;
+            for (parts) |layout| total = std.math.add(usize, total, layout.size) catch return error.OutOfMemory;
+            const storage = try gpa.alignedAlloc(u8, .@"8", total);
+            var b: Buffers = .{ .storage = storage, .parts = undefined, .max_room = max_room };
+            var offset: usize = 0;
+            for (parts, 0..) |layout, i| {
+                b.parts[i] = samples.Buffer.init(layout, storage[offset..][0..layout.size]) catch unreachable;
+                offset += layout.size;
+            }
+            return b;
+        }
+    };
+
+    /// Grows the buffers for input frames of `frames`, between calls.
+    fn reserve(s: *Swr, frames: u32) Error!void {
+        if (frames <= s.capacity) return;
+        std.debug.assert(s.postin_frames == 0);
+        const b = try Buffers.allocate(s.gpa, s.internal, s.in_format.channelCount(), s.out_format, s.resample_first, s.ratio, frames);
+        s.gpa.free(s.storage);
+        s.storage = b.storage;
+        s.postin = b.parts[0];
+        s.mid = b.parts[1];
+        s.preout = b.parts[2];
+        s.out = b.parts[3];
+        s.max_room = b.max_room;
+        s.capacity = frames;
+    }
+
+    /// `aresample`'s `filter_frame`: one call with the `count` frames of
+    /// `in` (in the input format) and room for `count * ratio + 32` frames,
+    /// more by the delay when there is one. The output, in the output
+    /// format, or null when the call gave nothing; valid until the next
+    /// call. A call that fills its room leaves `more` set: `flushFrame`
+    /// with `final` false then empties the buffers before the next input.
+    /// Do not mix with `take`.
+    pub fn filterFrame(s: *Swr, in: samples.View, count: u32) Error!?samples.View {
+        std.debug.assert(s.postin_frames == 0);
+        try s.reserve(count);
+        if (count > 0) audioconvert.convert(s.postin, in, 0, 0, count);
+        s.postin_frames = count;
+        return s.runInput();
+    }
+
+    /// `aresample`'s `flush_frame`: a call of 4096 frames without input,
+    /// the resampler flushed first when `final` (the end of the input).
+    /// Null when it gave nothing.
+    pub fn flushFrame(s: *Swr, final: bool) resample.Error!?samples.View {
+        const got = try s.call(0, 4096, final);
+        return if (got > 0) s.output(got) else null;
+    }
+
+    /// The call of the input in `postin`, as `filter_frame` makes it.
+    fn runInput(s: *Swr) resample.Error!?samples.View {
+        const n_in = s.postin_frames;
+        const n_in_f: f64 = @floatFromInt(n_in);
+        var room: i64 = @intFromFloat(@trunc(n_in_f * s.ratio + 32));
+        const buffered = s.delay();
+        if (buffered > 0) room += @min(buffered, @max(4096, room));
+        const room_u: u32 = @intCast(@min(room, s.max_room));
+        const got = try s.call(n_in, room_u, false);
+        s.postin_frames = 0;
+        // aresample: more data when the room was filled.
+        s.more = got == room_u;
+        return if (got > 0) s.output(got) else null;
+    }
+
+    /// `swr_get_delay(base)`: the buffered input as samples of `base` per
+    /// second, rounded to the nearest.
+    pub fn delayIn(s: *const Swr, base: i64) i64 {
+        return switch (s.engine) {
+            inline else => |*e| e.delay(base),
+        };
+    }
     /// Lines padded to 8 bytes, so that every plane of the shared, 8-aligned
     /// storage is aligned for its samples.
     fn layoutOf(format: audio.SampleFormat, channels: u32, frames: u32) Error!samples.Layout {
@@ -201,17 +285,7 @@ pub const Swr = struct {
                 s.more = false;
             }
             if (s.callReady() or (s.finished and s.postin_frames > 0)) {
-                const n_in = s.postin_frames;
-                const n_in_f: f64 = @floatFromInt(n_in);
-                var room: i64 = @intFromFloat(@trunc(n_in_f * s.ratio + 32));
-                const buffered = s.delay();
-                if (buffered > 0) room += @min(buffered, @max(4096, room));
-                const room_u: u32 = @intCast(@min(room, s.max_room));
-                const got = try s.call(n_in, room_u, false);
-                s.postin_frames = 0;
-                // aresample: more data when the room was filled.
-                s.more = got == room_u;
-                if (got > 0) return s.output(got);
+                if (try s.runInput()) |out| return out;
                 continue;
             }
             if (s.finished and !s.flushed_out) {
@@ -230,9 +304,7 @@ pub const Swr = struct {
 
     /// `swr_get_delay(out_rate)`.
     fn delay(s: *const Swr) i64 {
-        return switch (s.engine) {
-            inline else => |*e| e.delay(s.out_format.sample_rate),
-        };
+        return s.delayIn(s.out_format.sample_rate);
     }
 
     /// One `swr_convert`: `n_in` frames of `postin` (0 for none), at most

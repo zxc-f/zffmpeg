@@ -107,7 +107,34 @@ pub const SampleFormat = enum {
     pub fn fromName(text: []const u8) ?SampleFormat {
         return std.meta.stringToEnum(SampleFormat, text);
     }
+
+    /// The formats in FFmpeg's `enum AVSampleFormat` order, which its format
+    /// lists follow (TODO.md T25a).
+    pub const ffmpeg_order = [_]SampleFormat{ .u8, .s16, .s32, .flt, .dbl, .u8p, .s16p, .s32p, .fltp, .dblp, .s64, .s64p };
+
+    /// FFmpeg's number for the format (`AV_SAMPLE_FMT_*`).
+    pub fn ffmpegId(format: SampleFormat) u8 {
+        for (ffmpeg_order, 0..) |f, i| {
+            if (f == format) return @intCast(i);
+        }
+        unreachable; // every format is listed
+    }
+
+    /// The format FFmpeg numbers `id`, or `null`.
+    pub fn fromFfmpegId(id: i64) ?SampleFormat {
+        if (id < 0 or id >= ffmpeg_order.len) return null;
+        return ffmpeg_order[@intCast(id)];
+    }
 };
+
+test "FFmpeg numbers the sample formats in its own order" {
+    try std.testing.expectEqual(0, SampleFormat.u8.ffmpegId());
+    try std.testing.expectEqual(3, SampleFormat.flt.ffmpegId());
+    try std.testing.expectEqual(11, SampleFormat.s64p.ffmpegId());
+    for (SampleFormat.ffmpeg_order, 0..) |f, i| try std.testing.expectEqual(f, SampleFormat.fromFfmpegId(@intCast(i)).?);
+    try std.testing.expectEqual(null, SampleFormat.fromFfmpegId(12));
+    try std.testing.expectEqual(null, SampleFormat.fromFfmpegId(-1));
+}
 
 /// A validated description of an audio stream. Build it with `init` or
 /// `initLayout`.

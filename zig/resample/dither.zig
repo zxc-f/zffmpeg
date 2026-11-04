@@ -75,7 +75,12 @@ pub const max_scale: f64 = std.math.maxInt(i32);
 /// takes expressions, which this does not.
 pub fn methodFromOption(text: []const u8) error{InvalidValue}!?Method {
     if (std.meta.stringToEnum(Method, text)) |method| return method;
-    const number = std.fmt.parseInt(u8, text, 10) catch return error.InvalidValue;
+    return methodFromNumber(std.fmt.parseInt(u8, text, 10) catch return error.InvalidValue);
+}
+
+/// The method of FFmpeg's `SwrDitherType` number `number` (0 for none);
+/// numbers of no method are `InvalidValue`.
+pub fn methodFromNumber(number: i64) error{InvalidValue}!?Method {
     return switch (number) {
         0 => null,
         1...3 => @fromBackingInt(@intCast(number - 1)),

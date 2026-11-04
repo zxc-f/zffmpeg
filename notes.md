@@ -256,6 +256,15 @@ port.md's contract table updated, and (after T06) the parser.
 | x86 buffering | swresample.c holds seven input samples back on x86 (`padless`), the reference platform; the port always does. It changes when samples come out, not their values. | `Engine.resample`. |
 | Pipeline (part 2) | A rate change runs `aresample`'s calls exactly (FFmpeg's decoder frame sizes, its room per call, its extra and flushing calls), so that the dither's noise, which follows the calls, equals FFmpeg's. The writers' headers need the output frame count first, so `resample.outputFrames` runs the same engine in a counting mode, without samples or allocation. `av.convert` needs `Request.gpa` for a rate change and refuses one without it, or with `-c copy`. | `swr.zig`, `resample.Counter`, `convert.zig`. |
 
+## Filter graph
+
+| Decision | Current choice and reason | To change it |
+| --- | --- | --- |
+| Graph API (T25a) | Two steps, as libavfilter has them: `Graph.init` creates the filters (option errors are creation errors) and `configure` negotiates once. The graph is a send/receive stage except that `receive` can fail (aresample allocates its output, as FFmpeg's `av_buffersink_get_frame` can fail) and there is no `reset`, which libavfilter graphs do not have. | `filter/graph.zig`. |
+| Frames in the graph | Every frame is owned by the graph: `send` copies, filters allocate their outputs (volume scales in place), and a received frame lives until the next call. Simple and safe first; a frame pool or borrowing can come with a measured need. | `Graph.send`, `filters.Owned`. |
+| Refused where FFmpeg runs | An empty frame (FFmpeg would hand aresample a call without input); a fixed-precision volume whose 256 times does not fit an int (FFmpeg's conversion is undefined); a volume or option value that is not a plain number (an expression, until T25b). A custom layout that keeps no channel in the mask but LFE scores as no channels where FFmpeg reads a pointer's bits. | `filters.zig`, `graph.zig` `layoutScore`. |
+| libswresample options | aresample takes the options the port implements (rates, formats, layouts, dither, T24's resampler); the rest of libswresample's names are `UnsupportedOption` rather than ignored. | `filters.AResample`. |
+
 ## Raw PCM contract
 
 | Decision | Current choice and reason | To change it |
