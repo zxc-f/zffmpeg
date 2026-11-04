@@ -2962,7 +2962,7 @@ names, not as an empty framework.
     Limitations: SILK and hybrid frames (T28b, T28c); mapping family 2;
       no Opus encoder; a seekable input decodes twice (the count ahead).
     ```
-  - [ ] **T28b — SILK.** Needs T28a.
+  - [x] **T28b — SILK.** Needs T28a.
     Done when the SILK-only test vectors decode as FFmpeg's decoder decodes
     them, sample for sample, with `opus_compare` reported (revised: FFmpeg's
     own SILK decoding does not meet `opus_compare` on every vector; notes.md
@@ -2970,7 +2970,7 @@ names, not as an empty framework.
 
     ```text
     ID / parent: T28b / T28
-    State: G3 (part 1 done)
+    State: G5 (verified)
     Plan: part 1, FFmpeg's SILK decoder (opus/silk.c and tab.c's SILK
       tables): LSF and LPC, pitch, LTP, excitation and the stereo unmixing,
       as ff_silk_decode_superframe runs them, against an oracle calling
@@ -2988,7 +2988,32 @@ names, not as an empty framework.
       decoders of 20 generated superframes (narrow, medium and wide band,
       10 to 60 ms, mono and stereo coded, mono and stereo output, LBRR,
       flushes): all 960 equal, range decoder state and every sample, in
-      Debug, ReleaseSafe and ReleaseFast.
+      Debug, ReleaseSafe and ReleaseFast (6c55fc0). Part 2: opusdec's SILK
+      path (libswresample's port at filter_size 16 after the initial
+      silence, flushes on a mode or rate change, the delayed samples
+      drained by a null packet, CELT redundancy frames with their fades
+      and final ranges); a generated fixture, ogg_opus_silk, of SILK
+      packets of every bandwidth and duration between CELT packets; the
+      done-when revised (notes.md "Opus": FFmpeg's own SILK decoding fails
+      opus_compare on vectors 03 and 04 and reads other bits in mono), so
+      opus_rfc_vectors.c records FFmpeg's decoding of the RFC vectors
+      (opus_rfc.txt) and compare.py requires equality (4f2a838). G5 on
+      local Linux runs at 4f2a838: zig fmt, the fixture check (30 Ogg
+      fixtures), zig build test 350/350 in Debug, ReleaseSafe and
+      ReleaseFast (218 steps), the cross builds, and .references/local-ci.sh:
+      every vector check passes (silk.txt, opus.txt, ogg.txt and
+      seek_ogg.txt regenerated for the new fixture, opus_rfc.txt from the
+      optional vectors), the comparison 6039 passed with only the 176
+      known clang 23 inf/NaN failures, zffprobe and the copies 30/30, the
+      Ogg decoding 216/216 (9 pending hybrid, 11 understood), the Ogg
+      seeks 1458/1458 with every Opus packet decoded, and the optional
+      cases 53 passed and 8 skipped: FATE 37/37 and RFC 8251's vectors
+      01 to 04, 07, 08, 09 and 11 equal to FFmpeg's decoding in stereo
+      and mono (opus_compare passing 01, 02, 07, 08, 09 and 11 in stereo,
+      01, 07 and 11 in mono), the 4 vectors with hybrid frames skipped
+      until T28c.
+    Limitations: hybrid frames and SILK in multistream packets (T28c);
+      FFmpeg's SILK quality as is (opus_compare not met on every vector).
     ```
   - [ ] **T28c — Hybrid mode, multistream and trimming.** Needs T28b. Hybrid
     frames, channel mapping families, pre-skip and end trimming at 48 kHz.
