@@ -2862,13 +2862,13 @@ names, not as an empty framework.
   `libavcodec/opus/`, `libavformat/oggparseopus.c`; RFC 6716, RFC 7845 and
   RFC 8251 test vectors; `tests/fate/opus.mak`. The RFC's `opus_compare`
   check is ported natively into the harness.
-  - [ ] **T28a — Range decoder and CELT.** Needs T27a and T27c.
+  - [x] **T28a — Range decoder and CELT.** Needs T27a and T27c.
     Done when the CELT-only test vectors meet `opus_compare` and match the
     reference within tolerance.
 
     ```text
     ID / parent: T28a / T28
-    State: G3 (parts 0 to 3 done)
+    State: G5 (verified)
     Plan: part 0, the corpus: FATE's Opus samples are Matroska rewraps
       (.mka), which the port cannot demux yet, so the RFC 6716/8251 test
       vectors themselves (opus_testvectors-rfc8251, their .bit packet
@@ -2935,7 +2935,29 @@ names, not as an empty framework.
       glibc on 32 to 64 million samples and by libm_vectors.c, so T24's
       resampling and T25b's expressions need no tolerance: their tests,
       compare.py's resampling section and graph.zig's outputs now require
-      equal bytes, and pass.
+      equal bytes, and pass (60db686). Part 4: codec/opusdec.zig
+      (av.opusdec), FFmpeg's OpusHead parsing, packet and multistream
+      handling, channel maps and gain over CELT, with the pre-skip from
+      the decoder's delay; oggdecode, zffprobe and zffmpeg decode Ogg Opus
+      (SILK and hybrid frames UnsupportedOpusMode until T28b, T28c);
+      opus_vectors.c's oracle (opus.txt, 199 frames) and the Opus samples
+      of the 1404 Ogg seeks equal (17 seeks on SILK packets pending); the
+      registry with the Opus decoder; libopus' opus_compare ported into
+      opus-vector-driver (BSD-3-Clause), run by compare.py over the
+      optional RFC 8251 vectors (fe4389f). G5 on local Linux runs at
+      fe4389f: zig fmt, zig build test 350/350 in Debug, ReleaseSafe and
+      ReleaseFast (218 steps), the cross builds, and .references/local-ci.sh:
+      every vector check passes (celt.txt, libm.txt, opus.txt, the
+      regenerated seek vectors), the comparison 6029 passed with only the
+      176 known clang 23 inf/NaN failures, zffprobe 29/29 on the Ogg
+      fixtures, the Ogg decoding 207/207 (9 pending SILK, 10 understood),
+      resampling 56/56 byte for byte, and the optional cases 43 passed and
+      18 skipped: FATE 37/37, and RFC 8251's CELT-only vectors 01, 07 and
+      11 passing opus_compare in stereo and mono (quality 99.9/98.4,
+      96.4/58.6, 99.3/98.4) with every final range equal, the 9 vectors
+      with SILK or hybrid frames skipped until T28b and T28c.
+    Limitations: SILK and hybrid frames (T28b, T28c); mapping family 2;
+      no Opus encoder; a seekable input decodes twice (the count ahead).
     ```
   - [ ] **T28b — SILK.** Needs T28a.
     Done when the SILK-only test vectors meet `opus_compare`.
