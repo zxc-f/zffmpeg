@@ -30,7 +30,8 @@ rematrix as libswresample does, bit-exact (T23c), and its `-ar` resamples as
 FFmpeg's `aresample` does, within a declared tolerance that the comparisons
 have not needed (T24); options take FFmpeg's number syntax (`44.1k`, T17a).
 The library's audio filter graph negotiates and runs chains of `anull`,
-`aformat`, `volume` and `aresample` as libavfilter does (T25a). [TODO.md](TODO.md) holds the completion
+`aformat`, `volume`, `aresample`, `atrim` and `asetpts` as libavfilter does
+(T25a), from filtergraph text with FFmpeg's expressions too (T25b). [TODO.md](TODO.md) holds the completion
 evidence and the roadmap. Development is verified on Linux only. The compiler
 is **Zig 0.17.0**, enforced by the build.
 

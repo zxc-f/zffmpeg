@@ -33,8 +33,9 @@ rematrixing as libswresample mixes, through zffmpeg's output `-ac` and
 descriptors, a diagnostic sink) with metadata; T24, resampling as FFmpeg's
 `aresample` does, through zffmpeg's `-ar`; and T25a, the audio filter
 graph's core (anull, aformat, volume and aresample in a linear chain,
-negotiated as libavfilter negotiates). **Next: T25b (filtergraph syntax and
-expressions). See [Near-term order](#near-term-order).**
+negotiated as libavfilter negotiates); and T25b, FFmpeg's expressions,
+filtergraph text, atrim and asetpts. **Next: T25c (several inputs and
+outputs). See [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
 [How tasks are completed](#how-tasks-are-completed) describes. Tasks and
@@ -2122,7 +2123,7 @@ names, not as an empty framework.
     cases among them, all of which the port equals; `compare.py`'s only
     failures are the 165 known inf and NaN float samples of this machine's
     clang 23 reference build.
-  - [ ] **T25b — Filtergraph syntax and expressions.** Needs T25a. The
+  - [x] **T25b — Filtergraph syntax and expressions.** Needs T25a. The
     filtergraph string syntax, the expression subset volume needs, atrim and
     asetpts.
     Done when parsed graphs and their output match the reference, and syntax
@@ -2130,7 +2131,7 @@ names, not as an empty framework.
 
     ```text
     ID / parent: T25b / T25
-    State: implementing
+    State: verified
     Supported behavior and explicit exclusions: part 1, FFmpeg's expression
       evaluator (av_expr_parse, av_expr_eval) as core/eval.zig: the whole
       grammar, constants, every function but time() (the clock) and
@@ -2165,7 +2166,8 @@ names, not as an empty framework.
       atrim and asetpts); filter/parse.zig and Graph.initText (part 2b);
       core/number.zig parseDuration and options.zig's int64 and duration
       kinds, number_vectors.c's 47 durations (part 3).
-    Evidence commit / Linux CI run / reference report: pending.
+    Evidence commit / Linux CI run / reference report: a02483d, 8887c1e,
+      34a40e5, 9ef0351 / local Linux runs / below.
     Required cases: part 1 passes (200/200, bit-exact); part 2 passes
       (options' 136 texts, the 5 expressions among them; 154/154 graphs,
       the 18 syntax and expression messages the port reports equal to
@@ -2174,9 +2176,21 @@ names, not as an empty framework.
     Optional cases: none
     Fuzz seeds, budget and result: graph.zig's filtergraph-text entry, 4
       seeds, under zig build test; the local fuzzer fails as T25a records.
-    Remaining work or blocker / next action: the local reference job, then
-      T25b's G5 record.
+    Remaining work or blocker / next action: T25c.
     ```
+
+    Evidence (G5, local Linux x86-64 runs with Zig 0.17.0): commits
+    `a02483d` (the evaluator), `8887c1e` (expressions in options and
+    volume), `34a40e5` (filtergraph text) and `9ef0351` (atrim, asetpts,
+    durations). At `9ef0351`: fmt, `generate.py --check`, the example
+    check, Debug and ReleaseSafe builds, `zig build test` with 175/175
+    steps and 252/252 tests in Debug, ReleaseSafe and ReleaseFast, and the
+    three cross builds passed; every vector generator reproduces its file
+    from FFmpeg `5d5a38a` rebuilt with `asetpts`: 200 expressions, 261
+    number and duration texts, 136 option texts and 178 graphs, all of
+    which the port equals; `compare.py`'s only failures are the 165 known
+    inf and NaN float samples of this machine's clang 23 reference
+    build.
   - [ ] **T25c — Several inputs and outputs.** Needs T25b. Scheduling with
     several inputs and outputs; amix, pan, channelmap, channelsplit and asplit.
     Done when outputs match the reference and backpressure between branches is
