@@ -2866,7 +2866,7 @@ names, not as an empty framework.
 
     ```text
     ID / parent: T28a / T28
-    State: G1 (planned)
+    State: G2 (part 0 done)
     Plan: part 0, the corpus: FATE's Opus samples are Matroska rewraps
       (.mka), which the port cannot demux yet, so the RFC 6716/8251 test
       vectors themselves (opus_testvectors-rfc8251, their .bit packet
@@ -2886,6 +2886,18 @@ names, not as an empty framework.
       MDCT and the de-emphasis, bit for bit the reference's where its C
       code allows. Part 4, Opus in av.convert, zffmpeg and zffprobe, and
       compare.py.
+    Evidence so far: part 0: opus_vectors_sync.sh fetches the RFC 8251
+      vectors (archive SHA-256 and each file's in opus_testvectors.txt)
+      into .references/opus-testvectors; build-ffmpeg.sh enables the Opus
+      decoder and FFmpeg's native encoder; ogg_fixtures.sh (was
+      vorbis_fixtures.sh) makes five Opus fixtures (mono, stereo, 32 kb/s,
+      10 ms frames, no phase inversion), 29 Ogg fixtures in all. ogg.txt
+      is unchanged for the old fixtures and equal for the new; with the
+      decoder enabled, seek_vectors.c decodes the Opus packets after a
+      seek, so seek_ogg.txt (1404 seeks) has their samples, which the Ogg
+      seek test leaves out until the decoder lands. Interim, until part 4:
+      compare.py's registry (Opus decoder and encoder) and zffprobe's Opus
+      report (fltp as ffprobe now gives) differ.
     ```
   - [ ] **T28b — SILK.** Needs T28a.
     Done when the SILK-only test vectors meet `opus_compare`.

@@ -185,7 +185,7 @@ The T27d Vorbis vectors come from the reference's `libavformat` and
 ffmpeg program opens an input, sends every packet of its Vorbis stream to
 the decoder and prints each result and each frame received (its sample
 count after libavcodec's discarding, and the MD5 of its float planes).
-`vorbis_fixtures.sh` makes the FFmpeg-encoded fixtures:
+`ogg_fixtures.sh` makes the FFmpeg-encoded Ogg fixtures (Vorbis, and Opus since T28):
 
 ```bash
 clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/vorbis_vectors.c .references/ffmpeg-install/lib/libavformat.a .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o vorbis-vectors

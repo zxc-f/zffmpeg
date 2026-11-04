@@ -33,9 +33,14 @@ port.md's "Ogg contract" says which behavior the port follows.
 | `ogg_page_without_granule` | damaged | yes | An Opus data page whose granule is -1 although packets end on it: FFmpeg's Opus mapping refuses the granule (above 2^62) and reading stops with an error. |
 | `ogg_opus_short_head` | rejected | `INVALIDDATA` | An OpusHead shorter than 19 bytes. |
 | `ogg_no_pages` | rejected | `EOF` | OggS and nothing else: the input ends before a page. |
-| `ogg_vorbis_ffmpeg_44k` | vorbis | yes | FFmpeg's Vorbis encoder, 30000 samples at 44100 Hz; decoded by the T27d oracle. |
-| `ogg_vorbis_ffmpeg_8k` | vorbis | yes | FFmpeg's Vorbis encoder, 6000 samples at 8000 Hz; decoded by the T27d oracle. |
-| `ogg_vorbis_ffmpeg_48k_q8` | vorbis | yes | FFmpeg's Vorbis encoder, 20000 samples at 48000 Hz, `-q:a 8`; decoded by the T27d oracle. |
-| `ogg_vorbis_ffmpeg_22k_short` | vorbis | yes | FFmpeg's Vorbis encoder, 1000 samples at 22050 Hz; decoded by the T27d oracle. |
+| `ogg_vorbis_ffmpeg_44k` | vorbis | yes | FFmpeg's Vorbis encoder, 30000 samples at 44100 Hz, `-c:a vorbis`; decoded by the T27d oracle. |
+| `ogg_vorbis_ffmpeg_8k` | vorbis | yes | FFmpeg's Vorbis encoder, 6000 samples at 8000 Hz, `-c:a vorbis`; decoded by the T27d oracle. |
+| `ogg_vorbis_ffmpeg_48k_q8` | vorbis | yes | FFmpeg's Vorbis encoder, 20000 samples at 48000 Hz, `-c:a vorbis -q:a 8`; decoded by the T27d oracle. |
+| `ogg_vorbis_ffmpeg_22k_short` | vorbis | yes | FFmpeg's Vorbis encoder, 1000 samples at 22050 Hz, `-c:a vorbis`; decoded by the T27d oracle. |
+| `ogg_opus_ffmpeg_stereo` | opus | yes | FFmpeg's Opus encoder, 20000 samples at 48000 Hz, `-c:a opus`; decoded by the T28 oracle. |
+| `ogg_opus_ffmpeg_mono` | opus | yes | FFmpeg's Opus encoder, 15000 samples at 48000 Hz, `-c:a opus`; decoded by the T28 oracle. |
+| `ogg_opus_ffmpeg_32k` | opus | yes | FFmpeg's Opus encoder, 20000 samples at 48000 Hz, `-c:a opus -b:a 32k`; decoded by the T28 oracle. |
+| `ogg_opus_ffmpeg_delay10` | opus | yes | FFmpeg's Opus encoder, 12000 samples at 48000 Hz, `-c:a opus -opus_delay 10`; decoded by the T28 oracle. |
+| `ogg_opus_ffmpeg_no_phase_inv` | opus | yes | FFmpeg's Opus encoder, 12000 samples at 48000 Hz, `-c:a opus -apply_phase_inv 0`; decoded by the T28 oracle. |
 | `ogg_vorbis_bad_setup` | rejected | `UNKNOWN` | A Vorbis setup header without a mode table the parser can find. |
 <!-- END GENERATED FIXTURE TABLE -->

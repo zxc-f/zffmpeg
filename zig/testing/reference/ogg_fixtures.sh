@@ -2,14 +2,15 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 # Original file for this project.
 #
-# Makes the FFmpeg-encoded Vorbis fixtures (TODO.md T27d), the
-# zig/testing/fixtures/ogg/ogg_vorbis_ffmpeg_*.ogg files, with the reference
-# build's native Vorbis encoder (experimental, stereo only) and Ogg muxer:
+# Makes the FFmpeg-encoded Ogg fixtures, the zig/testing/fixtures/ogg/
+# ogg_*_ffmpeg_*.ogg files, with the reference build's native encoders
+# (experimental: Vorbis, stereo only, T27d; Opus, CELT only, T28) and its
+# Ogg muxer:
 #
-#   bash zig/testing/reference/vorbis_fixtures.sh <ffmpeg-install-prefix>
+#   bash zig/testing/reference/ogg_fixtures.sh <ffmpeg-install-prefix>
 #
-# Each input is generate.py's (`--vorbis-input NAME`, s16le), each command
-# adds the encoder options generate.py records, with bit-exact flags (the
+# Each input is generate.py's (`--ogg-input NAME`, s16le), each command
+# adds the encoder and options generate.py records, with bit-exact flags (the
 # Ogg serial derived from the headers) and no metadata. The files are
 # committed and checked against the hashes generate.py records, as the
 # FFmpeg-made FLAC fixtures are (flac_fixtures.sh). After changing one,
@@ -17,7 +18,7 @@
 # generate.py.
 set -euo pipefail
 
-prefix=$(realpath "${1:?usage: vorbis_fixtures.sh <ffmpeg-install-prefix>}")
+prefix=$(realpath "${1:?usage: ogg_fixtures.sh <ffmpeg-install-prefix>}")
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 generate="$root/zig/testing/fixtures/generate.py"
 out="$root/zig/testing/fixtures/ogg"
@@ -32,10 +33,10 @@ for name, (channels, rate, _, _, options, _) in g.OGG_FFMPEG.items():
 PY
 while read -r name channels rate options; do
     # shellcheck disable=SC2086 # the options are words
-    python3 "$generate" --vorbis-input "$name" |
+    python3 "$generate" --ogg-input "$name" |
         "$prefix/bin/ffmpeg" -nostdin -hide_banner -loglevel error -y \
             -f s16le -ar "$rate" -ac "$channels" -i pipe:0 \
             -map_metadata -1 -fflags +bitexact -flags:a +bitexact \
-            -c:a vorbis -strict experimental $options -f ogg "$out/$name.ogg"
+            -strict experimental $options -f ogg "$out/$name.ogg"
     printf '%s %s\n' "$name" "$(sha256sum "$out/$name.ogg" | cut -d' ' -f1)"
 done
