@@ -608,6 +608,25 @@ outputs, whose output bytes the port gives exactly (an FNV-1a hash of each);
 and `compare.py` rematrixes every accepted fixture into six layouts with
 FFmpeg and zffmpeg and compares the samples.
 
+### Resampling
+
+T24 converts the sample rate as libswresample does with its defaults. Its
+first part, [resample/resample.zig](zig/resample/resample.zig), is the
+resampler:
+
+| Case | Behavior |
+| --- | --- |
+| Filter | `build_filter`: a Kaiser-windowed sinc (β 9; cubic and Blackman-Nuttall too) of `ceil(32 / factor)` taps, even, with `factor` the ratio times the 0.97 cutoff, at most 1; 1024 phases, or the ratio's exact count when smaller (`exact_rational`); normalized to sum to one, in the internal format (s16p coefficients times 2^15 through `lrintf`, s32p 2^30, float, double), mirrored for an even phase count, with a last row for interpolation. |
+| Kernels | `resample_common` and `resample_linear` (interpolating between phases by the fraction, libswresample's default) in each internal format's arithmetic, two accumulators for the common one, and `resample_one` for a one-tap filter; the position advances by `dst_incr / src_incr` in phases, from `av_reduce`. |
+| Buffering | `swr_convert`'s input history: the first `filter_length + 1` samples are gathered and reflected before the stream (shorter inputs give no output at all, as in FFmpeg), the input is resampled as far as it reaches and the rest kept (seven samples held back, as on x86), and a flush reflects the last samples after it. `delay` is `swr_get_delay`. Any input chunking gives the same output. |
+| Internal format | `swr_init`'s choice with a rate change: through float unless both sides together take 3 bytes or fewer a sample (u8 to u8 or s16), double for 64-bit input. |
+| Tolerance | The filter's `sin` (and `exp` past a Bessel argument of 15) is Zig's, which differs from the C library's in the last bit for about 3% of arguments (311,579 of 10,004,121 tested), so results may differ from FFmpeg's: at most 1 unit for integer output, 2^-23 for float, 2^-50 for double; on the vectors integer and float output is exact and double within 2^-52. Frame counts and delays are exact. The project owner chose this over porting the C library's `sin`. |
+| Not yet | The pipeline, zffmpeg's `-ar` and FFmpeg's `aresample` timestamps (part 2); timestamp compensation (`async`, `min_comp`), soxr. |
+
+The oracle is [resample_vectors.c](zig/testing/reference/resample_vectors.c):
+96 `swr_convert` runs over 12 rate pairs and 7 format pairs, stereo, and
+inputs shorter than the filter, with their delays and full output.
+
 ## Modern Zig metaprogramming
 
 Use compile-time programming to remove repetitive machinery and enforce real

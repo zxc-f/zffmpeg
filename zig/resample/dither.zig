@@ -221,16 +221,20 @@ comptime {
     }
 }
 
-/// libswresample's internal format for a conversion without resampling
-/// (`swr_init`'s choice). `mixing`: a rematrix mixes channels, rather than
-/// only copying or silencing them (`swri_rematrix_build`, T23c).
+/// libswresample's internal format (`swr_init`'s choice). `mixing`: a
+/// rematrix mixes channels, rather than only copying or silencing them
+/// (`swri_rematrix_build`, T23c); `resampling`: the rates differ (T24).
 pub fn internalFormat(in: audio.SampleFormat, out: audio.SampleFormat, mixing: bool) audio.SampleFormat {
+    return internalFormatResampling(in, out, mixing, false);
+}
+
+pub fn internalFormatResampling(in: audio.SampleFormat, out: audio.SampleFormat, mixing: bool, resampling: bool) audio.SampleFormat {
     const in_bytes = in.bytesPerSample();
     const out_bytes = out.bytesPerSample();
-    if (in_bytes <= 2 and out_bytes <= 2) return .s16p;
+    if (in_bytes <= 2 and out_bytes <= 2 and !resampling) return .s16p;
     if (in_bytes + out_bytes <= 3) return .s16p;
-    if (in_bytes <= 2 and !mixing) return .s16p;
-    if (in.packedForm() == .s32 and out.packedForm() == .s32 and !mixing) return .s32p;
+    if (in_bytes <= 2 and !mixing and !resampling) return .s16p;
+    if (in.packedForm() == .s32 and out.packedForm() == .s32 and !mixing and !resampling) return .s32p;
     if (in_bytes <= 4) return .fltp;
     return .dblp;
 }

@@ -1929,6 +1929,38 @@ names, not as an empty framework.
   (bit-exact for s16 if reachable), delay and drain sample counts match, and
   any input chunking gives identical output.
 
+  ```text
+  ID / parent: T24
+  State: implementing
+  Supported behavior and explicit exclusions: part 1, the resampler
+    (resample/resample.zig): libswresample's filter (Kaiser, cubic,
+    Blackman-Nuttall), phase counts, exact ratios, linear interpolation,
+    the four internal formats, the input history with its initial and final
+    reflections, flushing and delay. Part 2: the pipeline, zffmpeg's -ar and
+    aresample's timestamps. Excluded: timestamp compensation (async,
+    min_comp), soxr.
+  Needs (verified) / lands with / verified after: T23a (verified); T17a
+    lands with it, starting from the resampler's options.
+  Contract and source provenance: port.md "Resampling"; notes.md
+    "Resampling"; resample.c, resample_template.c, resample_dsp.c,
+    swresample.c, rational.c, mathematics.c (Bessel coefficients copied).
+  Required fixtures / optional corpus: 96 swr_convert outputs of the pinned
+    libswresample (resample_vectors.c); no optional corpus.
+  Ownership, state transitions and limits: the engine owns its filter bank
+    and history (allocated); views borrow the caller's samples.
+  Comparison rule and intentional differences: frame counts and delays
+    exact; samples within the declared tolerance (1 unit for integers,
+    2^-23 for float, 2^-50 for double), the project owner's choice.
+  Implementation files and test entry points: resample/resample.zig,
+    resample/dither.zig (internalFormatResampling); resample_vectors.c.
+  Evidence commit / Linux CI run / reference report: part 1 local Linux
+    runs; CI pending.
+  Required cases: part 1 passes; part 2 is missing.
+  Optional cases: none
+  Fuzz seeds, budget and result: none yet.
+  Remaining work or blocker / next action: part 2.
+  ```
+
 - [ ] **T25 — Audio filter graph.** Checked when T25a–T25c are. Reference:
   `libavfilter/avfilter.c`, `avfiltergraph.c`, `graphparser.c`, `formats.c`,
   `buffersrc.c`, `buffersink.c`, `af_*.c`, `trim.c`, `libavutil/eval.c`;

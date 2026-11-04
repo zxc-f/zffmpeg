@@ -238,6 +238,14 @@ port.md's contract table updated, and (after T06) the parser.
 | Command line (part 2) | zffmpeg takes FFmpeg's output `-ac` and `-ch_layout` and nothing else of libswresample's mix (no `clev`, `slev`, `lfe_mix_level`, `rematrix_volume` or matrix encoding, which FFmpeg sets only through filter options); the library's `rematrix.Options` has them. A layout change with `-c copy` is refused (`UnsupportedOperation`), where FFmpeg ignores the option and copies, so that a requested layout is never silently dropped. | `cli/ffmpeg.zig`, `convert.Request.layout`. |
 | Comparison | `compare.py` compares the remixed samples as raw PCM, not whole WAV files, so container differences recorded elsewhere stay out of it; three fixtures whose input FFmpeg reads differently (trailing AU bytes, a layout chunk after the samples) are recorded. It also found that FFmpeg's WAV muxer writes a `fact` count of 1 for an empty non-PCM stream (its sample count is 0 − `INT64_MAX`, truncated to 32 bits) where the port writes 0, a WAV writer difference outside T23c. | `compare_remix`, reference README. |
 
+## Resampling
+
+| Decision | Current choice and reason | To change it |
+| --- | --- | --- |
+| Tolerance (T24) | The project owner chose a declared tolerance over porting glibc's `sin`: Zig's `std.math.sin` differs from glibc's in the last bit for 311,579 of 10,004,121 tested arguments, and glibc has CPU-specific variants, so the filter can differ from FFmpeg's by an ulp. Integer output may differ by 1 unit, float by 2^-23, double by 2^-50; frame counts, delays and chunking stay exact. On the 96 vectors integer and float outputs are exact and double ones within 2^-52. | `resample.tolerance`, port.md "Resampling". |
+| Allocation | The resampler allocates its filter bank (up to millions of coefficients for extreme ratios) and its input history, as libswresample does; the stages so far did not allocate. | `resample.Engine`. |
+| x86 buffering | swresample.c holds seven input samples back on x86 (`padless`), the reference platform; the port always does. It changes when samples come out, not their values. | `Engine.resample`. |
+
 ## Raw PCM contract
 
 | Decision | Current choice and reason | To change it |

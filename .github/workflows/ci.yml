@@ -160,6 +160,14 @@ jobs:
             -lm -pthread -o remix-vectors
           ./remix-vectors | diff -u zig/testing/vectors/remix.txt -
 
+      # The committed T24 oracle must be what this build's libswresample gives.
+      - name: Check the resampling vectors (T24)
+        run: |
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/resample_vectors.c \
+            .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a \
+            -lm -pthread -o resample-vectors
+          ./resample-vectors | diff -u zig/testing/vectors/resample.txt -
+
       # The committed T23a oracle must be what this build's libswresample gives.
       - name: Check the sample conversion and dither vectors (T23a)
         run: |

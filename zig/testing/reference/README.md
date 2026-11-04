@@ -83,7 +83,16 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/remix_vecto
 ./remix-vectors | diff -u zig/testing/vectors/remix.txt -
 ```
 
-The second, `remix_vectors.c`, runs `swr_convert` with a layout change on
+The T24 resampling vectors come from the reference's `libswresample` with
+its default options (`swr_convert` on generated input, drained as FFmpeg's
+`aresample` drains it):
+
+```bash
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/resample_vectors.c .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o resample-vectors
+./resample-vectors | diff -u zig/testing/vectors/resample.txt -
+```
+
+The second T23c generator, `remix_vectors.c`, runs `swr_convert` with a layout change on
 generated input (1792 cases: 25 layout pairs, eight sample formats each
 way, and dithered ones) and prints a hash of each output.
 
