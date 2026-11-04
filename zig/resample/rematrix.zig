@@ -617,6 +617,12 @@ pub const Remix = struct {
     /// rematrix: the same layout, and a volume of 1. An unspecified layout
     /// takes the default for its channel count, as `swr_init` gives it.
     pub fn init(r: *Remix, in: audio.Format, out_layout: Layout, out_format: audio.SampleFormat, options: Options) Error!bool {
+        return r.initFor(in, out_layout, out_format, options, false);
+    }
+
+    /// `init` for a conversion that also changes the rate (T24), which
+    /// changes libswresample's internal format.
+    pub fn initFor(r: *Remix, in: audio.Format, out_layout: Layout, out_format: audio.SampleFormat, options: Options, resampling: bool) Error!bool {
         const in_layout = withDefault(in.layout);
         const out = withDefault(out_layout);
         if (in_layout.eql(&out) and options.rematrix_volume == 1) return false;
@@ -637,7 +643,7 @@ pub const Remix = struct {
                 count += 1;
             }
         }
-        r.internal = dither.internalFormat(in.sample_format, out_format, r.mixing);
+        r.internal = dither.internalFormatResampling(in.sample_format, out_format, r.mixing, resampling);
         r.clip = false;
         if (r.internal == .s16p or r.internal == .s32p) {
             var max_sum: i64 = 0;

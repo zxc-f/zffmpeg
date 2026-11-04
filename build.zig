@@ -452,7 +452,7 @@ const ConvertCase = struct {
     stderr_contains: ?[]const u8 = null,
 };
 
-const zffmpeg_usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout <layout>] -i <input | -> [-c copy|<encoder>] [-ac <channels> | -ch_layout <layout>] [-dither_method <method>] [-dither_scale <scale>] [-f <format>] <output | ->\n";
+const zffmpeg_usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout <layout>] -i <input | -> [-c copy|<encoder>] [-ar <rate>] [-ac <channels> | -ch_layout <layout>] [-dither_method <method>] [-dither_scale <scale>] [-f <format>] <output | ->\n";
 
 // The paired WAV and AU fixtures hold the same samples, so each is the exact
 // expected output of converting the other.
@@ -536,7 +536,7 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "an input option", .args = &.{ "-c", "copy", "-i", "a.wav", "b.wav" }, .exit_code = 1, .stderr_contains = "input options other than -f and the raw PCM ones are not supported; put this after -i <input>: -c\n" },
     .{ .name = "an option after the output", .args = &.{ "-i", "a.wav", "b.wav", "-y" }, .exit_code = 1, .stderr_contains = "options after the output are not supported: -y\n" },
     .{ .name = "no output", .args = &.{ "-i", "a.wav" }, .exit_code = 1, .stderr_contains = "missing output\n" },
-    .{ .name = "an unknown option", .args = &.{ "-i", "a.wav", "-ar", "8000", "b.wav" }, .exit_code = 1, .stderr_contains = "unknown option: -ar\n" },
+    .{ .name = "an unknown option", .args = &.{ "-i", "a.wav", "-vn", "b.wav" }, .exit_code = 1, .stderr_contains = "unknown option: -vn\n" },
     .{ .name = "an unknown encoder", .args = &.{ "-i", "a.wav", "-c", "pcm_dvd", "b.wav" }, .exit_code = 1, .stderr_contains = "unknown encoder: pcm_dvd\n" },
     // T23a: -c:a picks the encoder; the samples convert to its storage.
     .{ .name = "24-bit WAV transcoded to 24 bits", .args = &.{"-i"}, .input = "s24_stereo_48k_extensible", .tail = &.{ "-c:a", "pcm_s24le", "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_s24_stereo, .stderr = "" },
@@ -576,6 +576,9 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "raw PCM from a pipe to raw PCM", .set = .raw, .args = &.{ "-f", "alaw", "-i", "-" }, .stdin_input = "raw_alaw_mono_8k", .tail = &.{ "-c", "copy", "-f", "alaw", "-" }, .exit_code = 0, .stdout = raw_alaw_mono_8k, .stderr = "" },
     .{ .name = "raw parameters for a WAV input", .args = &.{ "-ar", "8000", "-i" }, .input = "mono_8k", .tail = &.{ "-f", "wav", "-" }, .exit_code = 1, .stderr_contains = ": -sample_rate and -ch_layout apply only to raw PCM input\n" },
     .{ .name = "-ac with -ch_layout", .args = &.{ "-ac", "1", "-ch_layout", "mono", "-i", "a.raw", "b.wav" }, .exit_code = 1, .stderr_contains = "given twice: -ch_layout\n" },
+    .{ .name = "an output -ar of 0", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-ar", "0", "-f", "wav", "-" }, .exit_code = 1, .stderr = "zffmpeg: 0: invalid sample rate\n" },
+    .{ .name = "a rate change with -c copy", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-c", "copy", "-ar", "48000", "-f", "wav", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
+    .{ .name = "-ar twice", .args = &.{ "-i", "a.wav", "-ar", "8000", "-ar", "16000", "b.wav" }, .exit_code = 1, .stderr_contains = "given twice: -ar\n" },
     .{ .name = "an output -ac of 0", .args = &.{"-i"}, .input = "extensible_5point1", .tail = &.{ "-ac", "0", "-f", "wav", "-" }, .exit_code = 1, .stderr = "zffmpeg: 0: invalid channel count\n" },
     .{ .name = "output -ac and -ch_layout together", .args = &.{ "-i", "a.wav", "-ac", "2", "-ch_layout", "mono", "b.wav" }, .exit_code = 1, .stderr_contains = "given twice: -ch_layout\n" },
     .{ .name = "a layout change with -c copy", .args = &.{"-i"}, .input = "extensible_5point1", .tail = &.{ "-c", "copy", "-ac", "2", "-f", "wav", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },

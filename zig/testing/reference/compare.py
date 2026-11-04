@@ -1383,6 +1383,82 @@ def compare_ffmpeg_muxer(args, lines, failures, container, title, build):
     ]
 
 
+# Output rates for zffmpeg's resampler (T24), as FFmpeg's output options,
+# with the raw format each output is compared in.
+RESAMPLE_OPTIONS = [
+    (["-ar", "48000"], "s16le"),
+    (["-ar", "8000"], "s16le"),
+    (["-ar", "44100", "-ac", "1"], "s16le"),
+    (["-ar", "96000", "-c:a", "pcm_f32le"], "f32le"),
+    (["-ar", "22050", "-c:a", "pcm_f64le"], "f64le"),
+    (["-ar", "48000", "-dither_method", "triangular"], "s16le"),
+    (["-ar", "32000", "-ch_layout", "5.1"], "s16le"),
+]
+# The declared tolerance (port.md "Resampling"): integers by 1 unit, float by
+# 2^-23, double by 2^-50.
+RESAMPLE_TOLERANCE = {"s16le": ("<h", 1), "f32le": ("<f", 2.0 ** -23), "f64le": ("<d", 2.0 ** -50)}
+
+
+def compare_resample(args, lines, failures):
+    """zffmpeg's output -ar against FFmpeg's (T24): the long generated inputs
+    of the dither section, one per input container, resampled to each rate of
+    RESAMPLE_OPTIONS (with a layout change, float and double output, and
+    dither among them) and written as raw PCM by both. The frame counts must
+    be equal and every sample within the declared tolerance; equal bytes are
+    counted apart."""
+    lines += [
+        "",
+        "## zffmpeg resampling against FFmpeg",
+        "",
+        "| Input | Options | Result |",
+        "| --- | --- | --- |",
+    ]
+    exact = within = total = 0
+    with tempfile.TemporaryDirectory() as tmp:
+        work = pathlib.Path(tmp)
+        for name, container, codec, rate, channels in DITHER_INPUTS:
+            path, input_args, process = dither_source(args.ffmpeg, work, name, container, codec, rate, channels)
+            if process.returncode != 0:
+                failures.append(f"resample {name}: making the input failed: {first_line(text(process.stderr))}")
+                continue
+            for options, raw_format in RESAMPLE_OPTIONS:
+                theirs, ours = work / "ffmpeg.raw", work / "zffmpeg.raw"
+                for stale in (theirs, ours):
+                    stale.unlink(missing_ok=True)
+                process = run(args.ffmpeg, "-v", "error", "-nostdin", "-y", *input_args, "-i", path, *options,
+                              "-bitexact", "-f", raw_format, theirs)
+                code, _, err = zffprobe_raw(args.zffmpeg, "-y", *input_args, "-i", path, *options, "-f", raw_format,
+                                            ours)
+                total += 1
+                label = " ".join(options)
+                if process.returncode != 0 or code != 0:
+                    result = f"**FAIL**: FFmpeg exited {process.returncode}, zffmpeg {code} ({first_line(text(err))})"
+                    failures.append(f"resample {name} {label}: {result}")
+                else:
+                    a, b = theirs.read_bytes(), ours.read_bytes()
+                    fmt, tolerance = RESAMPLE_TOLERANCE[raw_format]
+                    size = struct.calcsize(fmt)
+                    if a == b:
+                        exact += 1
+                        result = "pass (equal bytes)"
+                    elif len(a) != len(b):
+                        result = f"**FAIL**: {len(b) // size} samples, FFmpeg {len(a) // size}"
+                        failures.append(f"resample {name} {label}: {result}")
+                    else:
+                        count = len(a) // size
+                        x = struct.unpack(f"<{count}{fmt[1]}", a)
+                        y = struct.unpack(f"<{count}{fmt[1]}", b)
+                        worst = max(abs(p - q) for p, q in zip(x, y))
+                        if worst <= tolerance:
+                            within += 1
+                            result = f"pass (within the tolerance: {worst:g})"
+                        else:
+                            result = f"**FAIL**: off by {worst:g}, above {tolerance:g}"
+                            failures.append(f"resample {name} {label}: {result}")
+                lines.append(f"| `{name}` | {label} | {result} |")
+    lines += ["", f"Resampled outputs equal to FFmpeg's: {exact}/{total}; within the tolerance: {within}."]
+
+
 # Inputs whose decoded samples FFmpeg reads differently, for reasons other
 # sections record: their remixed outputs differ by that alone.
 KNOWN_REMIX_DIFFERENCES = {
@@ -1711,6 +1787,7 @@ def main():
     compare_zffmpeg(args, lines, failures)
     compare_dither(args, lines, failures)
     compare_remix(args, lines, failures)
+    compare_resample(args, lines, failures)
     compare_ffmpeg_w64(args, lines, failures)
     for container, title, build, _, _ in FORCED_CONTRACTS:
         if container in MUXED_CONTRACTS:

@@ -163,6 +163,15 @@ fn roundEven(comptime F: type, x: anytype) F {
 /// and the input buffer `swr_convert` keeps for it. `format` is s16p, s32p,
 /// fltp or dblp.
 pub fn Engine(comptime format: audio.SampleFormat) type {
+    return EngineIn(format, false);
+}
+
+/// The resampler's positions and buffer counts without its samples: what
+/// `resample` returns and `delay` reports, for any input, at a fraction of
+/// the cost and with no allocation. Its views carry no data.
+pub const Counter = EngineIn(.dblp, true);
+
+fn EngineIn(comptime format: audio.SampleFormat, comptime counting: bool) type {
     return struct {
         const Self = @This();
 
@@ -224,19 +233,25 @@ pub fn Engine(comptime format: audio.SampleFormat) type {
                 if (exact.num <= phase_count) phase_count = @intCast(exact.num);
             }
             const filter_alloc = std.mem.alignForward(i32, filter_length, 8);
-            const elements: usize = @as(usize, @intCast(filter_alloc)) * (@as(usize, @intCast(phase_count)) + 1);
-            const filter = try gpa.alloc(Sample, elements);
-            errdefer gpa.free(filter);
-            @memset(filter, 0);
-            const tab = try gpa.alloc(f64, @intCast(filter_length));
-            defer gpa.free(tab);
-            buildFilter(filter, tab, factor, filter_length, filter_alloc, phase_count, options.filter_type, options.kaiser_beta);
-            const alloc: usize = @intCast(filter_alloc);
-            const last_row = alloc * @as(usize, @intCast(phase_count));
-            // memcpy(bank + alloc * phase_count + 1, bank, alloc - 1), then
-            // the row's first element: the last of row 0.
-            @memmove(filter[last_row + 1 ..][0 .. alloc - 1], filter[0 .. alloc - 1]);
-            filter[last_row] = filter[alloc - 1];
+            var filter: []Sample = &.{};
+            if (!counting) {
+                const elements: usize = @as(usize, @intCast(filter_alloc)) * (@as(usize, @intCast(phase_count)) + 1);
+                filter = try gpa.alloc(Sample, elements);
+                @memset(filter, 0);
+                const tab = gpa.alloc(f64, @intCast(filter_length)) catch |err| {
+                    gpa.free(filter);
+                    return err;
+                };
+                defer gpa.free(tab);
+                buildFilter(filter, tab, factor, filter_length, filter_alloc, phase_count, options.filter_type, options.kaiser_beta);
+                const alloc: usize = @intCast(filter_alloc);
+                const last_row = alloc * @as(usize, @intCast(phase_count));
+                // memcpy(bank + alloc * phase_count + 1, bank, alloc - 1), then
+                // the row's first element: the last of row 0.
+                @memmove(filter[last_row + 1 ..][0 .. alloc - 1], filter[0 .. alloc - 1]);
+                filter[last_row] = filter[alloc - 1];
+            }
+            errdefer if (!counting) gpa.free(filter);
 
             // resample_init refuses a ratio av_reduce cannot keep exact.
             const incr = reduce(out_rate, @as(i64, in_rate) * phase_count, std.math.maxInt(i32) / 2);
@@ -267,8 +282,10 @@ pub fn Engine(comptime format: audio.SampleFormat) type {
         }
 
         pub fn deinit(e: *Self) void {
-            e.gpa.free(e.filter);
-            for (e.history[0..e.channels]) |h| e.gpa.free(h);
+            if (!counting) {
+                e.gpa.free(e.filter);
+                for (e.history[0..e.channels]) |h| e.gpa.free(h);
+            }
             e.* = undefined;
         }
 
@@ -345,6 +362,7 @@ pub fn Engine(comptime format: audio.SampleFormat) type {
             planes: [max_channels][*]Sample = undefined,
 
             pub fn shifted(v: View, channels: u32, n: i64) View {
+                if (counting) return v;
                 var out = v;
                 for (out.planes[0..channels]) |*p| {
                     const step: usize = @intCast(@abs(n));
@@ -367,6 +385,27 @@ pub fn Engine(comptime format: audio.SampleFormat) type {
             const length: usize = @intCast(e.filter_length);
             var dst_index: usize = 0;
             while (dst_index < n) : (dst_index += 1) {
+                if (!counting) e.commonSample(dst, src, dst_index, index, sample_index, length);
+                frac += e.dst_incr_mod;
+                index += e.dst_incr_div;
+                if (frac >= e.src_incr) {
+                    frac -= e.src_incr;
+                    index += 1;
+                }
+                while (index >= e.phase_count) {
+                    sample_index += 1;
+                    index -= e.phase_count;
+                }
+            }
+            if (update) {
+                e.frac = frac;
+                e.index = index;
+            }
+            return sample_index;
+        }
+
+        fn commonSample(e: *Self, dst: [*]Sample, src: [*]const Sample, dst_index: usize, index: i32, sample_index: i32, length: usize) void {
+            {
                 const filter = e.filter[@as(usize, @intCast(e.filter_alloc * index))..];
                 const base: usize = @intCast(sample_index);
                 switch (format) {
@@ -396,6 +435,25 @@ pub fn Engine(comptime format: audio.SampleFormat) type {
                     },
                     else => unreachable,
                 }
+            }
+        }
+
+        /// `resample_linear`: as `resampleCommon`, interpolating between the
+        /// position's phase and the next by the fraction.
+        fn resampleLinear(e: *Self, dst: [*]Sample, src: [*]const Sample, n: i32, update: bool) i32 {
+            var index = e.index;
+            var frac = e.frac;
+            var sample_index: i32 = 0;
+            const inv_src_incr: f64 = 1.0 / @as(f64, @floatFromInt(e.src_incr));
+            while (index >= e.phase_count) {
+                sample_index += 1;
+                index -= e.phase_count;
+            }
+            const length: usize = @intCast(e.filter_length);
+            const alloc: usize = @intCast(e.filter_alloc);
+            var dst_index: usize = 0;
+            while (dst_index < n) : (dst_index += 1) {
+                if (!counting) e.linearSample(dst, src, dst_index, index, frac, sample_index, length, alloc, inv_src_incr);
                 frac += e.dst_incr_mod;
                 index += e.dst_incr_div;
                 if (frac >= e.src_incr) {
@@ -414,21 +472,8 @@ pub fn Engine(comptime format: audio.SampleFormat) type {
             return sample_index;
         }
 
-        /// `resample_linear`: as `resampleCommon`, interpolating between the
-        /// position's phase and the next by the fraction.
-        fn resampleLinear(e: *Self, dst: [*]Sample, src: [*]const Sample, n: i32, update: bool) i32 {
-            var index = e.index;
-            var frac = e.frac;
-            var sample_index: i32 = 0;
-            const inv_src_incr: f64 = 1.0 / @as(f64, @floatFromInt(e.src_incr));
-            while (index >= e.phase_count) {
-                sample_index += 1;
-                index -= e.phase_count;
-            }
-            const length: usize = @intCast(e.filter_length);
-            const alloc: usize = @intCast(e.filter_alloc);
-            var dst_index: usize = 0;
-            while (dst_index < n) : (dst_index += 1) {
+        fn linearSample(e: *Self, dst: [*]Sample, src: [*]const Sample, dst_index: usize, index: i32, frac: i32, sample_index: i32, length: usize, alloc: usize, inv_src_incr: f64) void {
+            {
                 const filter = e.filter[@as(usize, @intCast(e.filter_alloc * index))..];
                 const base: usize = @intCast(sample_index);
                 switch (format) {
@@ -476,22 +521,7 @@ pub fn Engine(comptime format: audio.SampleFormat) type {
                     },
                     else => unreachable,
                 }
-                frac += e.dst_incr_mod;
-                index += e.dst_incr_div;
-                if (frac >= e.src_incr) {
-                    frac -= e.src_incr;
-                    index += 1;
-                }
-                while (index >= e.phase_count) {
-                    sample_index += 1;
-                    index -= e.phase_count;
-                }
             }
-            if (update) {
-                e.frac = frac;
-                e.index = index;
-            }
-            return sample_index;
         }
 
         /// `OUT`: integers shift down by the filter's scale and clip.
@@ -514,13 +544,13 @@ pub fn Engine(comptime format: audio.SampleFormat) type {
                 const new_size: i64 = @divTrunc(src_size * e.src_incr - e.frac + e.dst_incr - 1, e.dst_incr);
                 const dst_size: i32 = @intCast(@max(@min(dst_size_in, new_size), 0));
                 if (dst_size > 0) {
-                    for (0..e.channels) |ch| {
+                    if (!counting) for (0..e.channels) |ch| {
                         var position = index2;
                         for (0..@intCast(dst_size)) |i| {
                             dst.planes[ch][i] = src.planes[ch][@intCast(position >> 32)];
                             position += incr;
                         }
-                    }
+                    };
                     e.index += dst_size * e.dst_incr_div;
                     e.index += @intCast(@divTrunc(e.frac + @as(i64, dst_size) * e.dst_incr_mod, e.src_incr));
                     consumed.* = e.index;
@@ -549,6 +579,7 @@ pub fn Engine(comptime format: audio.SampleFormat) type {
 
         fn historyView(e: *Self, offset: i32) View {
             var v: View = .{};
+            if (counting) return v;
             for (0..e.channels) |ch| v.planes[ch] = e.history[ch].ptr + @as(usize, @intCast(offset));
             return v;
         }
@@ -558,6 +589,10 @@ pub fn Engine(comptime format: audio.SampleFormat) type {
         fn reserve(e: *Self, count: usize) Error!void {
             if (e.capacity >= count) return;
             const new_capacity = count * 2;
+            if (counting) {
+                e.capacity = new_capacity;
+                return;
+            }
             for (e.history[0..e.channels]) |*h| {
                 const grown = try e.gpa.alloc(Sample, new_capacity);
                 @memset(grown, zero);
@@ -571,6 +606,7 @@ pub fn Engine(comptime format: audio.SampleFormat) type {
         const zero: Sample = 0;
 
         fn copyInto(e: *Self, at: i32, from: View, count: i32) void {
+            if (counting) return;
             for (0..e.channels) |ch| {
                 const dst = e.history[ch][@intCast(at)..][0..@intCast(count)];
                 @memcpy(dst, from.planes[ch][0..@intCast(count)]);
@@ -586,7 +622,9 @@ pub fn Engine(comptime format: audio.SampleFormat) type {
             const num = @min(in_count + e.buffer_count, e.filter_length + 1);
             var n = e.buffer_count;
             while (n < num) : (n += 1) {
-                for (0..e.channels) |ch| e.history[ch][@intCast(e.filter_length + n)] = src.planes[ch][@intCast(n - e.buffer_count)];
+                if (!counting) for (0..e.channels) |ch| {
+                    e.history[ch][@intCast(e.filter_length + n)] = src.planes[ch][@intCast(n - e.buffer_count)];
+                };
             }
             if (num < e.filter_length + 1) {
                 e.buffer_count = num;
@@ -595,7 +633,9 @@ pub fn Engine(comptime format: audio.SampleFormat) type {
             }
             var m: i32 = 1;
             while (m <= e.filter_length) : (m += 1) {
-                for (0..e.channels) |ch| e.history[ch][@intCast(e.filter_length - m)] = e.history[ch][@intCast(e.filter_length + m)];
+                if (!counting) for (0..e.channels) |ch| {
+                    e.history[ch][@intCast(e.filter_length - m)] = e.history[ch][@intCast(e.filter_length + m)];
+                };
             }
             const taken = num - e.buffer_count;
             e.buffer_index = e.filter_length;
@@ -655,10 +695,10 @@ pub fn Engine(comptime format: audio.SampleFormat) type {
                 const size = e.buffer_index + e.buffer_count + in_count;
                 if (size > e.capacity and e.buffer_count + in_count <= e.buffer_index) {
                     // Move the history to the start.
-                    for (0..e.channels) |ch| {
+                    if (!counting) for (0..e.channels) |ch| {
                         const h = e.history[ch];
                         std.mem.copyForwards(Sample, h[0..@intCast(e.buffer_count)], h[@intCast(e.buffer_index)..][0..@intCast(e.buffer_count)]);
-                    }
+                    };
                     e.buffer_index = 0;
                 } else {
                     try e.reserve(@intCast(size));
@@ -689,13 +729,13 @@ pub fn Engine(comptime format: audio.SampleFormat) type {
             if (e.flushed) return;
             const reflection = @divTrunc(@min(e.buffer_count, e.filter_length) + 1, 2);
             try e.reserve(@intCast(e.buffer_index + e.buffer_count + reflection));
-            for (0..e.channels) |ch| {
+            if (!counting) for (0..e.channels) |ch| {
                 const h = e.history[ch];
                 var j: i32 = 0;
                 while (j < reflection) : (j += 1) {
                     h[@intCast(e.buffer_index + e.buffer_count + j)] = h[@intCast(e.buffer_index + e.buffer_count - j - 1)];
                 }
-            }
+            };
             e.buffer_count += reflection;
             e.in_constraint = false;
             e.flushed = true;
@@ -713,6 +753,31 @@ pub fn Engine(comptime format: audio.SampleFormat) type {
             return rescaleNear(num, base, den);
         }
     };
+}
+
+/// The frames libswresample gives for `in_frames` input frames, after its
+/// flush: what a known-length writer needs before the first sample. The
+/// count does not depend on how the input is cut into calls.
+pub fn outputFrames(in_frames: u64, in_rate: u32, out_rate: u32, options: Options) Error!u64 {
+    // A counter allocates nothing; the allocator is never used.
+    var counter = try Counter.init(std.mem.Allocator.failing, 1, in_rate, out_rate, options);
+    defer counter.deinit();
+    const view: Counter.View = .{};
+    const most: i32 = std.math.maxInt(i32);
+    var total: u64 = 0;
+    var left = in_frames;
+    while (left > 0) {
+        const n: i32 = @intCast(@min(left, 1 << 24));
+        total += @intCast(try counter.resample(view, most, view, n));
+        left -= @intCast(n);
+    }
+    try counter.flush();
+    while (true) {
+        const got = try counter.resample(view, most, view, 0);
+        if (got <= 0) break;
+        total += @intCast(got);
+    }
+    return total;
 }
 
 /// `av_rescale`: `a * b / c`, rounded to the nearest, halves away from zero.
@@ -861,6 +926,7 @@ fn checkVector(line: []const u8, gpa: std.mem.Allocator) !void {
     defer gpa.free(run.out);
     try std.testing.expectEqual(want_delay, run.delay);
     try std.testing.expectEqual(want_frames, run.frames);
+    try std.testing.expectEqual(want_frames, try outputFrames(frames, in_rate, out_rate, .{}));
     if (want_frames == 0) return;
     var expected_buffer = try gpa.alloc(u8, hex.len / 2);
     defer gpa.free(expected_buffer);

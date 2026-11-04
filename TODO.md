@@ -1952,13 +1952,18 @@ names, not as an empty framework.
     exact; samples within the declared tolerance (1 unit for integers,
     2^-23 for float, 2^-50 for double), the project owner's choice.
   Implementation files and test entry points: resample/resample.zig,
-    resample/dither.zig (internalFormatResampling); resample_vectors.c.
+    resample/swr.zig, resample/dither.zig (internalFormatResampling),
+    resample/rematrix.zig (Remix.initFor), format/convert.zig
+    (Request.sample_rate, Request.gpa, Summary.output_frame_count),
+    cli/ffmpeg.zig; resample_vectors.c, compare.py compare_resample, build.zig
+    cases.
   Evidence commit / Linux CI run / reference report: part 1 local Linux
     runs; CI pending.
-  Required cases: part 1 passes; part 2 is missing.
+  Required cases: parts 1 and 2 pass; T17a's number syntax for -ar is
+    missing.
   Optional cases: none
   Fuzz seeds, budget and result: none yet.
-  Remaining work or blocker / next action: part 2.
+  Remaining work or blocker / next action: T17a, then T24's G5 record.
   ```
 
 - [ ] **T25 — Audio filter graph.** Checked when T25a–T25c are. Reference:

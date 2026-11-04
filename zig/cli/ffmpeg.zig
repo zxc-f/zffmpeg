@@ -7,7 +7,7 @@
 //!
 //!     zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate> | -ar <rate>]
 //!             [-ch_layout <layout> | -ac <channels>] -i <input | -> [-c copy|<encoder>]
-//!             [-ac <channels> | -ch_layout <layout>]
+//!             [-ar <rate>] [-ac <channels> | -ch_layout <layout>]
 //!             [-dither_method <method>] [-dither_scale <scale>] [-f <format>] <output | ->
 //!
 //! The input container is detected from content as FFmpeg's probing would
@@ -44,7 +44,7 @@ const status = @import("status.zig");
 const ExitStatus = status.ExitStatus;
 const printError = status.printError;
 
-const usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout <layout>] -i <input | -> [-c copy|<encoder>] [-ac <channels> | -ch_layout <layout>] [-dither_method <method>] [-dither_scale <scale>] [-f <format>] <output | ->\n";
+const usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout <layout>] -i <input | -> [-c copy|<encoder>] [-ar <rate>] [-ac <channels> | -ch_layout <layout>] [-dither_method <method>] [-dither_scale <scale>] [-f <format>] <output | ->\n";
 const help = usage ++
     \\
     \\Converts one WAV, Wave64, AU, AIFF, CAF (input only) or raw PCM stream
@@ -57,7 +57,8 @@ const help = usage ++
     \\formats u8, s8, s16le, s16be, s24le, s24be, s32le, s32be, f32le, f32be,
     \\f64le, f64be, alaw and mulaw.
     \\After -i, -ac <channels> or -ch_layout <layout> remixes into that layout
-    \\as FFmpeg does (-ac takes the default layout for the count).
+    \\as FFmpeg does (-ac takes the default layout for the count), and -ar
+    \\<rate> resamples as FFmpeg's aresample does.
     \\-c copy keeps the encoded samples and needs the same codec on both sides;
     \\-c <encoder> (such as pcm_s24le) picks the output codec, which the output
     \\must carry. Transcoding converts the sample format as FFmpeg does.
@@ -85,6 +86,8 @@ const Command = struct {
     /// `-ch_layout` or `-ac` after `-i`: the output's layout (T23c).
     output_layout: ?[]const u8,
     output_channels: ?[]const u8,
+    /// `-ar` after `-i`: the output's sample rate (T24).
+    output_rate: ?[]const u8,
     /// The `-f` value after `-i`, if any; resolved by `outputContainer`.
     format: ?[]const u8,
     mode: av.convert.Mode,
@@ -158,6 +161,14 @@ fn run(init: std.process.Init) ExitStatus {
         .ok => |layout| layout,
         .failed => |exit| return exit,
     };
+    const output_rate: ?u32 = if (command.output_rate) |text| rate: {
+        const rate = std.fmt.parseInt(u32, text, 10) catch 0;
+        if (rate == 0) {
+            printError(io, "zffmpeg: {s}: invalid sample rate\n", .{text});
+            return .usage;
+        }
+        break :rate rate;
+    } else null;
     // The input's tags are carried, as FFmpeg's default -map_metadata does
     // (T21c, the project owner's choice).
     var tags: av.metadata.Dictionary = .empty;
@@ -172,6 +183,8 @@ fn run(init: std.process.Init) ExitStatus {
         // command line then leaves as it is; -ac gives a count it may name.
         .guess_layout = command.input_layout == null,
         .layout = output_layout,
+        .sample_rate = output_rate,
+        .gpa = init.gpa,
         .tags = .{ .gpa = init.gpa, .dictionary = &tags },
     });
 }
@@ -188,6 +201,7 @@ fn parse(args: []const [:0]const u8) Parsed {
     var input_channels: ?[]const u8 = null;
     var output_layout: ?[]const u8 = null;
     var output_channels: ?[]const u8 = null;
+    var output_rate: ?[]const u8 = null;
     var format: ?[]const u8 = null;
     var codec_given = false;
     var copy = false;
@@ -222,6 +236,12 @@ fn parse(args: []const [:0]const u8) Parsed {
                 if (input_layout != null or input_channels != null) return .{ .usage = .{ .reason = "given twice", .arg = arg } };
                 if (std.mem.eql(u8, arg, "-ac")) input_channels = args[i] else input_layout = args[i];
             }
+        } else if (input != null and std.mem.eql(u8, arg, "-ar")) {
+            // After -i, the output's sample rate (T24).
+            i += 1;
+            if (i == args.len) return .{ .usage = .{ .reason = "missing value for", .arg = arg } };
+            if (output_rate != null) return .{ .usage = .{ .reason = "given twice", .arg = arg } };
+            output_rate = args[i];
         } else if (input != null and (std.mem.eql(u8, arg, "-ch_layout") or std.mem.eql(u8, arg, "-ac"))) {
             // After -i, the output's layout, which the samples are
             // rematrixed into (T23c).
@@ -283,6 +303,7 @@ fn parse(args: []const [:0]const u8) Parsed {
         .input_channels = input_channels,
         .output_layout = output_layout,
         .output_channels = output_channels,
+        .output_rate = output_rate,
         .format = format,
         .mode = if (copy) .copy else .transcode,
         .encoder = encoder,

@@ -329,6 +329,15 @@ build include the WAV muxer. Its first run, locally on Windows at commit
   s16) rejected before any output: **54/54**.
 - Fixtures whose pipe result equals the file result: **105/105**.
 
+T24 added resampling: the resampler (96 vectors with full output), the
+pipeline and zffmpeg's output `-ar`, with a new section that resamples the
+dither section's 200000-frame inputs (one per input container, 8 of them)
+with seven option sets (to 48, 8, 44.1 with a downmix, 96 to `pcm_f32le`,
+22.05 to `pcm_f64le`, 48 dithered, 32 kHz into 5.1) by FFmpeg and zffmpeg.
+The run, locally on Linux x86-64 as for T23b part 3: 56 of 56 outputs equal
+FFmpeg's byte for byte, frame counts included, though the declared
+tolerance would allow more; every other section as for T23c.
+
 T23c added rematrixing: the matrix (4833 vectors), the kernels (1792
 `swr_convert` vectors) and zffmpeg's output `-ac`/`-ch_layout`, with a new
 section that rematrixes every accepted fixture into six layouts (`-ac 1`,

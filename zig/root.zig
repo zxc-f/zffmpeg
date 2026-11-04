@@ -95,6 +95,7 @@ test {
     _ = @import("resample/dither.zig");
     _ = @import("resample/rematrix.zig");
     _ = @import("resample/resample.zig");
+    _ = @import("resample/swr.zig");
     _ = @import("format/registry.zig");
     _ = @import("format/detect.zig");
     _ = @import("format/replay.zig");

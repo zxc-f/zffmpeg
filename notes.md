@@ -245,6 +245,7 @@ port.md's contract table updated, and (after T06) the parser.
 | Tolerance (T24) | The project owner chose a declared tolerance over porting glibc's `sin`: Zig's `std.math.sin` differs from glibc's in the last bit for 311,579 of 10,004,121 tested arguments, and glibc has CPU-specific variants, so the filter can differ from FFmpeg's by an ulp. Integer output may differ by 1 unit, float by 2^-23, double by 2^-50; frame counts, delays and chunking stay exact. On the 96 vectors integer and float outputs are exact and double ones within 2^-52. | `resample.tolerance`, port.md "Resampling". |
 | Allocation | The resampler allocates its filter bank (up to millions of coefficients for extreme ratios) and its input history, as libswresample does; the stages so far did not allocate. | `resample.Engine`. |
 | x86 buffering | swresample.c holds seven input samples back on x86 (`padless`), the reference platform; the port always does. It changes when samples come out, not their values. | `Engine.resample`. |
+| Pipeline (part 2) | A rate change runs `aresample`'s calls exactly (FFmpeg's decoder frame sizes, its room per call, its extra and flushing calls), so that the dither's noise, which follows the calls, equals FFmpeg's. The writers' headers need the output frame count first, so `resample.outputFrames` runs the same engine in a counting mode, without samples or allocation. `av.convert` needs `Request.gpa` for a rate change and refuses one without it, or with `-c copy`. | `swr.zig`, `resample.Counter`, `convert.zig`. |
 
 ## Raw PCM contract
 

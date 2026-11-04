@@ -64,6 +64,9 @@ const detect = @import("detect.zig");
 const audioconvert = @import("../resample/audioconvert.zig");
 const dither = @import("../resample/dither.zig");
 const rematrix = @import("../resample/rematrix.zig");
+const resample = @import("../resample/resample.zig");
+const swr = @import("../resample/swr.zig");
+const Frame = @import("../core/frame.zig").Frame;
 
 pub const Container = detect.Container;
 
@@ -109,6 +112,14 @@ pub const Request = struct {
     /// it for a PCM encoder. Null keeps the input's layout. With `copy`, a
     /// layout other than the input's is `UnsupportedOperation`.
     layout: ?audio.ChannelLayout = null,
+    /// The output's sample rate (FFmpeg's output `-ar`), for `transcode`
+    /// (T24): the samples are resampled as FFmpeg's `aresample` filter does,
+    /// within the resampler's declared tolerance. Null keeps the input's.
+    /// With `copy`, another rate is `UnsupportedOperation`.
+    sample_rate: ?u32 = null,
+    /// The allocator a rate change needs, for the resampler's filter and
+    /// buffers; a rate change without one is `UnsupportedOperation`.
+    gpa: ?std.mem.Allocator = null,
     /// Carry the input's tags (T21c): `init` puts the tags FFmpeg's command
     /// would carry (`carriedTags`) from those before the input's `data` into
     /// the empty `tags.dictionary`, under FFmpeg's names, and a WAV output
@@ -123,7 +134,7 @@ pub const Request = struct {
 /// Failures before any output exists: the input header, the request and the
 /// output header. `LimitExceeded` can come from the input's or the output's
 /// limits.
-pub const InitError = detect.Error || wav.HeaderError || au.HeaderError || aiff.HeaderError || raw.HeaderError || rematrix.Error || error{
+pub const InitError = detect.Error || wav.HeaderError || au.HeaderError || aiff.HeaderError || raw.HeaderError || rematrix.Error || resample.Error || error{
     /// The request is outside the operation matrix: stream copy into a
     /// container that cannot carry the codec, or transcoding samples, or
     /// into a codec, not stored as s16 (sample-format conversion waits for
@@ -132,7 +143,7 @@ pub const InitError = detect.Error || wav.HeaderError || au.HeaderError || aiff.
 };
 
 /// Failures once output has started: the rest of the input, or the output.
-pub const RunError = detect.Error || std.Io.Writer.Error;
+pub const RunError = detect.Error || std.Io.Writer.Error || resample.Error;
 
 pub const Error = InitError || RunError;
 
@@ -153,6 +164,12 @@ pub const Summary = struct {
     /// The output's layout: the requested one (`Request.layout`), else the
     /// input's. A different one is rematrixed (T23c).
     output_layout: audio.ChannelLayout,
+    /// The output's sample rate (`Request.sample_rate`, else the input's);
+    /// another is resampled (T24).
+    output_rate: u32,
+    /// Sample frames in the output: the input's, or what the resampler
+    /// gives for them (`resample.outputFrames`). Null when the input's are.
+    output_frame_count: ?u64,
     /// Sample frames in the input and the output. The duration is this many
     /// units of `format.timeBase()`, exactly, in both. Null until `run` for an
     /// input of unknown length (raw PCM output only), which `run` counts.
@@ -163,6 +180,7 @@ pub const Summary = struct {
     pub fn outputFormat(s: Summary) audio.Format {
         var format = s.format;
         format.layout = s.output_layout;
+        format.sample_rate = s.output_rate;
         format.sample_format = s.output_codec.storage();
         return format;
     }
@@ -189,8 +207,12 @@ pub const Conversion = struct {
     /// The input's tags, for the output header.
     tags: ?*const metadata.Dictionary,
     dither: dither.Options,
+    /// For a rate change (`Request.gpa`).
+    gpa: ?std.mem.Allocator = null,
     /// Frames read so far: the next packet's timestamp.
     next_pts: i64 = 0,
+    /// Frames written so far (resampled output).
+    output_frames: u64 = 0,
 
     /// One parser per format family; the WAV parser also reads Wave64.
     const Parser = union(enum) {
@@ -247,6 +269,8 @@ pub const Conversion = struct {
                     },
                     // Set below, from the request.
                     .output_layout = undefined,
+                    .output_rate = info.format.sample_rate,
+                    .output_frame_count = frame_count,
                     .frame_count = frame_count,
                 };
             },
@@ -271,16 +295,26 @@ pub const Conversion = struct {
             .unspecified => |count| .default(count),
             .native, .custom => layout,
         } else summary.format.layout;
+        if (request.sample_rate) |rate| summary.output_rate = rate;
+        const resampling = summary.output_rate != summary.format.sample_rate;
         // Any storage converts to any other (T23a); the output must carry
-        // the codec, and copy takes no encoder and keeps the layout.
+        // the codec, and copy takes no encoder and keeps the layout and the
+        // rate; resampling needs an allocator.
         const supported = switch (request.mode) {
             .copy => request.codec == null and request.output.carries(summary.input_codec) and
-                summary.output_layout.eql(&summary.format.layout),
-            .transcode => request.output.carries(summary.output_codec),
+                summary.output_layout.eql(&summary.format.layout) and !resampling,
+            .transcode => request.output.carries(summary.output_codec) and (!resampling or request.gpa != null),
         };
         if (!supported) return error.UnsupportedOperation;
         // A layout libswresample cannot mix fails before any output (T23c).
         if (request.mode == .transcode) _ = try rematrix.needed(summary.format.layout, summary.output_layout);
+        if (summary.output_rate == 0) return error.InvalidFormat;
+        // The resampler's frame count, which the writers' headers need (T24).
+        if (resampling) {
+            if (summary.frame_count) |count| {
+                summary.output_frame_count = try resample.outputFrames(count, summary.format.sample_rate, summary.output_rate, .{});
+            }
+        }
         switch (request.output.family()) {
             .wav => try wav.Writer.check(summary.output_codec, summary.outputFormat(), try knownCount(summary), wavOptions(limits, request.output, tags)),
             .au => try au.Writer.check(summary.output_codec, summary.outputFormat(), try knownCount(summary), limits.au),
@@ -288,12 +322,12 @@ pub const Conversion = struct {
             .raw => try raw.Writer.check(summary.output_codec, summary.outputFormat(), rawOptions(limits)),
             .caf => unreachable, // no muxer: refused above as UnsupportedOperation
         }
-        return .{ .input = input, .limits = limits, .summary = summary, .tags = tags, .dither = request.dither };
+        return .{ .input = input, .limits = limits, .summary = summary, .tags = tags, .dither = request.dither, .gpa = request.gpa };
     }
 
     /// The frame count a writer's header needs up front.
     fn knownCount(summary: Summary) error{UnsupportedStreamingSize}!u64 {
-        return summary.frame_count orelse error.UnsupportedStreamingSize;
+        return summary.output_frame_count orelse error.UnsupportedStreamingSize;
     }
 
     /// Writes the output header, moves every frame, validates the rest of the
@@ -304,25 +338,26 @@ pub const Conversion = struct {
         // `init` checked that every writer but raw PCM's has a known count.
         switch (s.output.family()) {
             .wav => {
-                var writer = wav.Writer.begin(out, s.output_codec, s.outputFormat(), s.frame_count.?, wavOptions(c.limits, s.output, c.tags)) catch |err| return outputFailure(err);
+                var writer = wav.Writer.begin(out, s.output_codec, s.outputFormat(), s.output_frame_count.?, wavOptions(c.limits, s.output, c.tags)) catch |err| return outputFailure(err);
                 try c.transfer(wav.Writer, &writer);
             },
             .au => {
-                var writer = au.Writer.begin(out, s.output_codec, s.outputFormat(), s.frame_count.?, c.limits.au) catch |err| return outputFailure(err);
+                var writer = au.Writer.begin(out, s.output_codec, s.outputFormat(), s.output_frame_count.?, c.limits.au) catch |err| return outputFailure(err);
                 try c.transfer(au.Writer, &writer);
             },
             .aiff => {
-                var writer = aiff.Writer.begin(out, s.output_codec, s.outputFormat(), s.frame_count.?, aiffOptions(c.limits)) catch |err| return outputFailure(err);
+                var writer = aiff.Writer.begin(out, s.output_codec, s.outputFormat(), s.output_frame_count.?, aiffOptions(c.limits)) catch |err| return outputFailure(err);
                 try c.transfer(aiff.Writer, &writer);
             },
             .raw => {
-                var writer = raw.Writer.begin(out, s.output_codec, s.outputFormat(), s.frame_count, rawOptions(c.limits)) catch |err| return outputFailure(err);
+                var writer = raw.Writer.begin(out, s.output_codec, s.outputFormat(), s.output_frame_count, rawOptions(c.limits)) catch |err| return outputFailure(err);
                 try c.transfer(raw.Writer, &writer);
             },
             .caf => unreachable, // no muxer: `init` refused it
         }
         // Every frame was read: an unknown count is now known.
         if (c.summary.frame_count == null) c.summary.frame_count = @intCast(c.next_pts);
+        if (c.summary.output_frame_count == null) c.summary.output_frame_count = c.output_frames;
     }
 
     fn transfer(c: *Conversion, comptime W: type, writer: *W) RunError!void {
@@ -331,7 +366,9 @@ pub const Conversion = struct {
             .copy => while (try c.readPacket(&packet_bytes)) |packet| {
                 writer.writeData(packet.data) catch |err| return outputFailure(err);
             },
-            .transcode => {
+            .transcode => if (c.summary.output_rate != c.summary.format.sample_rate) {
+                try c.transferResampled(W, writer);
+            } else {
                 const s = c.summary;
                 const out_format = s.outputFormat();
                 // A packet holds at most transfer_len samples (1-byte ones),
@@ -395,6 +432,72 @@ pub const Conversion = struct {
         writer.finish() catch |err| return outputFailure(err);
     }
 
+    /// Transcoding with a rate change (T24): decoded frames go through
+    /// libswresample's conversion as FFmpeg's `aresample` runs it
+    /// (resample/swr.zig), each of its calls encoded and written.
+    fn transferResampled(c: *Conversion, comptime W: type, writer: *W) RunError!void {
+        const s = c.summary;
+        // `init` refused a rate change without an allocator.
+        const gpa = c.gpa.?;
+        const out_format = s.outputFormat();
+        var options: swr.Options = .{ .dither = c.dither };
+        // FFmpeg's command line tells libswresample a 24-bit encoder keeps
+        // 24 bits of s32.
+        options.dither.output_sample_bits = if (s.output_codec.bytesPerSample() == 3) 24 else 0;
+        var converter = swr.Swr.init(gpa, s.format, out_format, ffmpegPacketFrames(s.input, s.input_codec, s.format), options) catch |err| switch (err) {
+            // `init` ran the same checks.
+            error.UnsupportedLayout => unreachable,
+            else => |e| return e,
+        };
+        defer converter.deinit();
+        var packet_bytes: [transfer_len]u8 = undefined;
+        var decoded: [2 * transfer_len]u8 = undefined;
+        const out_frame_bytes = out_format.bytesPerFrame();
+        const encoded = try gpa.alloc(u8, converter.max_room * s.output_codec.bytesPerSample() * out_format.channelCount());
+        defer gpa.free(encoded);
+        var decoder: pcm.Decoder = .init(s.input_codec, s.format, &decoded);
+        var encoder: pcm.Encoder = .init(s.output_codec, out_format, encoded);
+        var input_done = false;
+        while (true) {
+            if (!input_done) {
+                if (try c.readPacket(&packet_bytes)) |packet| {
+                    const sent = decoder.send(packet) catch unreachable;
+                    std.debug.assert(sent == .accepted);
+                } else {
+                    decoder.finishInput();
+                    input_done = true;
+                }
+            }
+            switch (decoder.receive()) {
+                .output => |frame| {
+                    const view = frame.view();
+                    const count: u32 = @intCast(frame.frameCount());
+                    var at: u32 = 0;
+                    while (at < count) {
+                        at += converter.take(view, at, count - at);
+                        while (try converter.next()) |out| try c.encodeOut(W, writer, &encoder, out, out_frame_bytes);
+                    }
+                },
+                .need_input => continue,
+                .drained => break,
+            }
+        }
+        converter.finish();
+        while (try converter.next()) |out| try c.encodeOut(W, writer, &encoder, out, out_frame_bytes);
+        encoder.finishInput();
+        try writeAllEncoded(W, writer, &encoder);
+        std.debug.assert(encoder.receive() == .drained);
+    }
+
+    fn encodeOut(c: *Conversion, comptime W: type, writer: *W, encoder: *pcm.Encoder, out: samples_storage.View, frame_bytes: u32) RunError!void {
+        const frames = out.layout.samples;
+        const frame: Frame = .{ .format = c.summary.outputFormat(), .data = out.bytes[0 .. frames * frame_bytes], .pts = @intCast(c.output_frames) };
+        const sent = encoder.send(frame) catch unreachable;
+        std.debug.assert(sent == .accepted);
+        c.output_frames += frames;
+        try writeAllEncoded(W, writer, encoder);
+    }
+
     /// The next packet of whole frames, or `null` at the end of the data. Its
     /// bytes are in `storage`, which holds at least one frame, and stay valid
     /// until the next call.
@@ -444,6 +547,13 @@ fn ffmpegPacketFrames(container: Container, codec: pcm.Codec, format: audio.Form
         // (its bit rate over 80 bytes, over the block size), at most
         // INT_MAX bytes, rounded down to a power of two.
         .wav, .au, .raw => std.math.floorPowerOfTwo(u32, std.math.clamp(format.sample_rate / 10, 1, std.math.maxInt(i32) / block_align)),
+    };
+}
+
+fn writeAllEncoded(comptime W: type, writer: *W, encoder: *pcm.Encoder) std.Io.Writer.Error!void {
+    while (true) switch (encoder.receive()) {
+        .output => |p| writer.writeData(p.data) catch |err| return outputFailure(err),
+        .need_input, .drained => return,
     };
 }
 
@@ -1195,6 +1305,47 @@ test "a requested output layout rematrixes, and only when transcoding" {
     }, .{});
     try std.testing.expect(unmixed.output_layout.eql(&audio.ChannelLayout.default(6)));
     try std.testing.expectEqualSlices(u8, six, raw_out.buffered()[raw_out.buffered().len - six.len ..]);
+}
+
+test "a requested output rate resamples, and only when transcoding with an allocator" {
+    const gpa = std.testing.allocator;
+    // 300 frames of a 44.1 kHz s16 tone, as a plain WAV.
+    var bytes: [44 + 600]u8 = undefined;
+    @memcpy(bytes[0..4], "RIFF");
+    std.mem.writeInt(u32, bytes[4..8], bytes.len - 8, .little);
+    @memcpy(bytes[8..16], "WAVEfmt ");
+    std.mem.writeInt(u32, bytes[16..20], 16, .little);
+    std.mem.writeInt(u16, bytes[20..22], 1, .little);
+    std.mem.writeInt(u16, bytes[22..24], 1, .little);
+    std.mem.writeInt(u32, bytes[24..28], 44100, .little);
+    std.mem.writeInt(u32, bytes[28..32], 88200, .little);
+    std.mem.writeInt(u16, bytes[32..34], 2, .little);
+    std.mem.writeInt(u16, bytes[34..36], 16, .little);
+    @memcpy(bytes[36..40], "data");
+    std.mem.writeInt(u32, bytes[40..44], 600, .little);
+    for (0..300) |i| {
+        const t: f64 = @floatFromInt(i);
+        const v: i16 = @intFromFloat(@round(@sin(t / 7) * 12000));
+        std.mem.writeInt(i16, bytes[44 + 2 * i ..][0..2], v, .little);
+    }
+    const out_buffer = try gpa.alloc(u8, 4096);
+    defer gpa.free(out_buffer);
+    var reader: std.Io.Reader = .fixed(&bytes);
+    var out: std.Io.Writer = .fixed(out_buffer);
+    const summary = try convert(&reader, &out, .{ .output = .wav, .mode = .transcode, .sample_rate = 48000, .gpa = gpa }, .{});
+    const want = try resample.outputFrames(300, 44100, 48000, .{});
+    try std.testing.expectEqual(want, summary.output_frame_count.?);
+    try std.testing.expectEqual(48000, summary.outputFormat().sample_rate);
+    try std.testing.expectEqual(44 + want * 2, out.buffered().len);
+
+    // No allocator, or copy, cannot change the rate.
+    var no_gpa: std.Io.Reader = .fixed(&bytes);
+    var out2: std.Io.Writer = .fixed(out_buffer);
+    try std.testing.expectError(error.UnsupportedOperation, convert(&no_gpa, &out2, .{ .output = .wav, .mode = .transcode, .sample_rate = 48000 }, .{}));
+    var copy: std.Io.Reader = .fixed(&bytes);
+    var out3: std.Io.Writer = .fixed(out_buffer);
+    try std.testing.expectError(error.UnsupportedOperation, convert(&copy, &out3, .{ .output = .wav, .mode = .copy, .sample_rate = 48000, .gpa = gpa }, .{}));
+    try std.testing.expectEqual(0, out3.buffered().len);
 }
 
 test "an error found after samples were written fails the conversion" {
