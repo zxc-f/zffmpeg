@@ -13,8 +13,8 @@
 //! zig/testing/vectors/number.txt.
 //!
 //! Decimal and hexadecimal floats round to nearest as glibc's `strtod`
-//! does. `dB` is `ff_exp10`, `exp2(log2(10) * x)`, with Zig's `exp2`, which
-//! may differ from the C library's in the last bit.
+//! does. `dB` is `ff_exp10`, `exp2(log2(10) * x)`, with glibc's `exp2`
+//! (core/libm.zig, since T28a).
 
 const std = @import("std");
 const libm = @import("libm.zig");

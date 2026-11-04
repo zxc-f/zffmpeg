@@ -14,11 +14,9 @@
 //! kernels, with its input buffering: the first samples reflected before the
 //! stream, the last ones after it when it is flushed.
 //!
-//! The filter is built with `sin` and, past an argument of 15, `exp`; Zig's
-//! differ from the C library's in the last bit for a few percent of
-//! arguments, so float and double results differ from FFmpeg's within a
-//! declared tolerance (port.md "Resampling"; the project owner's choice).
-//! Everything else follows FFmpeg's arithmetic.
+//! The filter is built with `sin` and, past an argument of 15, `exp`, the
+//! glibc ports in core/libm.zig (since T28a; before, Zig's within a
+//! declared tolerance), so the output equals FFmpeg's byte for byte.
 
 const std = @import("std");
 const libm = @import("../core/libm.zig");

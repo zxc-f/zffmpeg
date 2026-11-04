@@ -100,6 +100,10 @@ Design questions, from the guide's "Model values, state and boundaries":
 
 Repository checks, from CLAUDE.md:
 
+- A comment that says the port departs from FFmpeg, does not model or port
+  its behavior, reproduces an FFmpeg quirk, picks a value where FFmpeg's C is
+  undefined, or defers to a task has its notes.md row (CLAUDE.md "Recording
+  differences from FFmpeg in notes.md"); a comment made stale is fixed.
 - A new `.zig` file starts with an `SPDX-License-Identifier` line and a
   provenance comment, then `//!` module docs.
 - A new `av` file with tests is referenced from a `test` block in

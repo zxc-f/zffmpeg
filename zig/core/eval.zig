@@ -14,9 +14,8 @@
 //! a random generator per variable, which persist across evaluations.
 //!
 //! Functions that call the C library (`sin`, `exp`, `pow`, `hypot`, ...)
-//! use Zig's, which may differ from glibc's in the last bit, the tolerance
-//! the project owner chose for the resampler (port.md "Resampling"); the
-//! rest is exact. `time()`, which reads the clock, is refused
+//! use the glibc ports in core/libm.zig (since T28a; notes.md
+//! "Floating-point library"), so results are exact. `time()`, which reads the clock, is refused
 //! (`UnsupportedFunction`), and so are caller-supplied functions, which no
 //! component uses.
 

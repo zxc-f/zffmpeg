@@ -159,7 +159,9 @@ Follow [port.md's document authority](port.md#document-authority): contracts
 govern behavior and TODO.md governs task status and evidence. This file is
 agent guidance; reconcile any disagreement with a contract in the same change.
 Record a scope or policy revision in notes.md and update the affected contract,
-task and fixtures together. Silence in one document does not widen support.
+task and fixtures together, and record every difference from FFmpeg there as
+"Recording differences from FFmpeg in notes.md" below says. Silence in one
+document does not widen support.
 
 - [README.md](README.md): setup, pinned reference clone commands, runnable commands.
 - [zig/README.md](zig/README.md): build graph, version policy, manifest, provenance.
@@ -350,11 +352,35 @@ Makefile feature/dependency entries, and relevant tests before porting behavior.
 Port a small working path at a time. The first path is a bounded RIFF/WAV PCM
 signed 16-bit little-endian reader/decoder/writer, then the zffprobe CLI.
 
+### Recording differences from FFmpeg in notes.md
+
 Match FFmpeg, its bugs and quirks included, even where a specification or the
-codec's own reference library (libopus, libvorbis, ...) behaves otherwise.
-Record every such behavior kept on purpose in [notes.md](notes.md) in the same
-change, in the feature's section: the FFmpeg code, what the other behavior is,
-and the checks that pin it ("Reference behavior" in its port design policy).
+codec's own reference library (libopus, libvorbis, ...) behaves otherwise
+("Reference behavior" in notes.md's port design policy). Every place where the
+port's observable behavior is not FFmpeg's, or is FFmpeg's on purpose against
+the obvious alternative, has a row in [notes.md](notes.md), in the feature's
+section, naming the FFmpeg code, what the port or the alternative does, and
+the checks or recorded differences that pin it. Add or update the row in the
+same commit as any of these:
+
+- a recorded difference in `compare.py` (a `KNOWN_*` table, `FIELD_DIFFERENCES`,
+  an expected rejection FFmpeg accepts, an inline special case);
+- a code comment saying the port departs from, does not model or does not port
+  FFmpeg's behavior, or defers it to a task ("where FFmpeg", "FFmpeg would",
+  "not ported", "not modeled", "until Tnn");
+- an FFmpeg bug or quirk reproduced on purpose;
+- a value chosen where FFmpeg's C is undefined (follow the reference build,
+  notes.md "Undefined C behavior") or reads memory it never wrote;
+- a refusal (`LimitExceeded`, `UnsupportedOperation`, a stricter parse) of
+  input or options FFmpeg accepts;
+- an intentional difference or limitation in a port.md contract or a TODO.md
+  card that changes output, errors or timing against FFmpeg.
+
+When a later task removes a difference, delete or revise its row, the comment
+and the recorded difference together. Before a task reaches G5, check its
+changes: search the changed files for those phrases and the new `compare.py`
+entries, and confirm each has its row. Rows describe the current state, so
+fix a row a change makes stale in the same commit.
 
 For implemented multimedia behavior, use hand-checked vectors and differential
 tests against a recorded FFmpeg revision/configuration. Check decoded content,

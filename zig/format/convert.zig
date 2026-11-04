@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Original file for this project.
-//! Synchronous conversion and stream copy between WAV, Wave64, AU and AIFF
-//! (TODO.md T13a, T21b, T22b).
+//! Synchronous conversion and stream copy between the supported containers
+//! (TODO.md T13a): WAV, Wave64, AU, AIFF, raw PCM, FLAC and Ogg, CAF as
+//! input only, FLAC and Ogg inputs decoded.
 //!
 //! The operation matrix (TODO.md T13), where WAV stands for WAV or Wave64 on
 //! either side:
@@ -11,14 +12,15 @@
 //! | into the same family | yes                          | yes                                                 |
 //! | between families     | yes, through the PCM kernels | the codecs both carry, else `UnsupportedOperation` |
 //!
-//! Transcoding needs samples stored as s16 and writes the output container's
-//! s16 codec. Stream copy needs the output to carry the input's codec: WAV and
+//! Transcoding converts between every sample format (T23a), to the output
+//! container's default codec or the requested one. Stream copy needs the output to carry the input's codec: WAV and
 //! AU share A-law and µ-law, AU and AIFF the big-endian integer and float
 //! encodings, and WAV and AIFF u8, s16le (`sowt`), A-law and µ-law.
 //!
-//! A rate change cannot be requested yet (TODO.md T24); a channel layout can
-//! (`Request.layout`, T23c), and the samples are rematrixed into it as
-//! libswresample mixes them. Otherwise the output has the input's rate and
+//! A rate (`Request.sample_rate`, T24) and a channel layout
+//! (`Request.layout`, T23c) can be requested, and the samples are resampled
+//! and rematrixed as libswresample does; with `copy` either is
+//! `UnsupportedOperation`. Otherwise the output has the input's rate and
 //! layout.
 //!
 //! `Conversion.init` reads the input up to its first sample and makes every
@@ -153,9 +155,8 @@ pub const Request = struct {
 /// limits.
 pub const InitError = detect.Error || wav.HeaderError || au.HeaderError || aiff.HeaderError || raw.HeaderError || rematrix.Error || resample.Error || error{
     /// The request is outside the operation matrix: stream copy into a
-    /// container that cannot carry the codec, or transcoding samples, or
-    /// into a codec, not stored as s16 (sample-format conversion waits for
-    /// TODO.md T23a).
+    /// container that cannot carry the codec, or with another rate or
+    /// layout, or a combination the inputs and outputs do not support.
     UnsupportedOperation,
     /// The FLAC encoder refuses its options (T26c), as FFmpeg's
     /// `avcodec_open2` does.

@@ -136,11 +136,10 @@ pub const Implementation = struct {
     /// FFmpeg's decoder or encoder name; for PCM and FLAC, the codec's name.
     name: []const u8,
     codec: Codec,
-    /// Runs as a send/receive stage (`pcm.Decoder` or `pcm.Encoder`), which
-    /// takes the codecs stored as s16 until T23a; the others decode and
-    /// encode through the `pcm.decode` and `pcm.encode` kernels only, and
-    /// FLAC's decoder and encoder have their own APIs (codec/flacdec.zig,
-    /// codec/flacenc.zig).
+    /// Marks the codecs stored as s16, T16's send/receive stages. Since T23a
+    /// `pcm.Decoder` and `pcm.Encoder` take every PCM codec and nothing reads
+    /// this flag; FLAC's, Vorbis' and Opus' decoders and FLAC's encoder have
+    /// their own APIs.
     stage: bool,
 };
 
