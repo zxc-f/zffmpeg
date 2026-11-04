@@ -1122,12 +1122,23 @@ names, not as an empty framework.
 - [ ] **T18 — Bit readers, writers and checksums.** Checked when T18a–T18d
   are. Each piece lands with its first consumer. Reference: `libavcodec/get_bits.h`, `put_bits.h`, `golomb.h`, `vlc.c`,
   `libavutil/crc.c`.
-  - [ ] **T18a — FLAC bit reading and checksums.** Lands with T26a.
+  - [x] **T18a — FLAC bit reading and checksums.** Lands with T26a.
     An MSB-first reader over slices with checked over-read and explicit padding
     rules, unary and Rice codes, and the CRC-8 and CRC-16 FLAC uses
     (`std.hash.crc` where its parameters match).
     Done when exhaustive and round-trip vectors pass, over-reads are rejected
     in ReleaseFast, and checksums equal reference values.
+    Evidence: [codec/bits.zig](zig/codec/bits.zig) (`av.bits`), commit
+    `2d02129`, local Linux runs as T26a's. Every width from 0 to 32 bits at
+    every bit offset of a pattern, the slice cut at every length, equals a
+    bit-by-bit reference, zeros past the end included; Rice codes round-trip
+    for every parameter 0 to 30; FFmpeg's invalid-residual and escape cases
+    of `get_ur_golomb_jpegls`; the CRC check values (`0xf4`, and `0xfee8`,
+    whose byte-swapped form FFmpeg keeps) and zero checks. Over-reads touch
+    no memory past the slice in any mode: they read zeros and saturate the
+    count 8 bits past the end, FFmpeg's checked reader, so decoders refuse
+    them (`flacdec.zig`'s overread case runs in ReleaseFast too). The
+    T26a fixtures decode through it bit-exactly.
   - [ ] **T18b — Bit writer.** Lands with T26c.
     Done when round-trip vectors against T18a pass, including flush and
     padding rules.
@@ -1167,7 +1178,7 @@ names, not as an empty framework.
     implemented, and `compare.py` fails on a missing fixture or one that
     differs from `generate.py`. The reference build now enables the AU demuxer
     and the `pcm_s16be` decoder.
-  - [ ] **T19b — Frame and packet hashes.** Needs T19a. Lands with T26a.
+  - [x] **T19b — Frame and packet hashes.** Needs T19a. Lands with T26a.
     FFmpeg's `framecrc` (Adler-32), `framemd5` and `streamhash` output compared
     with the same hashes from Zig (the test driver, later
     `zffmpeg -f framecrc`), plus normalized `ffprobe -of json` metadata.
@@ -1179,6 +1190,22 @@ names, not as an empty framework.
     checksums alone do not prove equal media.
     Done when the seed vectors (empty input, `abc`, a split update and separate
     packets) pass and FLAC and the PCM paths compare through it in CI.
+    Evidence: [format/framehash.zig](zig/format/framehash.zig)
+    (`av.framehash`) and [hash_driver.zig](zig/testing/hash_driver.zig),
+    commit `5df9fbf`, local Linux runs as T26a's. The seed vectors pass (the
+    empty input `0x00000000`, `abc` `0x024a0126` from 0 against `0x024d0127`
+    from 1, a split update, a separate packet from 0), and the three
+    muxers' text for hand-made packets byte for byte. `compare.py`'s hash
+    section sets the driver's text beside the ffmpeg program's
+    (`-fflags +bitexact`): every FLAC fixture copied and decoded in
+    framecrc, framemd5 and streamhash, every accepted WAV, AU, AIFF and CAF
+    stream copied and decoded in streamhash: **399/424** equal, 14
+    understood differences listed (the ffmpeg program's own timestamps for
+    a packet without one, known container differences, s64 without a raw
+    format), and 11 float decodes that differ only at this machine's
+    clang 23 inf and NaN samples. Metadata is compared field by field
+    against ffprobe's default writer, normalized to zffprobe's keys,
+    rather than `-of json`. `zffmpeg -f framecrc` waits for T53.
   - [ ] **T19c — Optional corpus and coverage report.** Needs T19b. Start with
     the first optional sample. An optional FATE sample sync on Linux with
     recorded provenance, and a report of required cases (passed, failed,
@@ -2277,7 +2304,7 @@ names, not as an empty framework.
   Required fixtures are generated with Python (verbatim, constant and fixed
   subframes) or made with the reference build's native FLAC encoder, with
   their commands recorded.
-  - [ ] **T26a — FLAC demux and a first decoding subset.** Needs T13b, T14a,
+  - [x] **T26a — FLAC demux and a first decoding subset.** Needs T13b, T14a,
     T16 and T19a. Lands with T18a and T19b. Native FLAC container, STREAMINFO,
     frame headers with CRC-8 and CRC-16, constant, verbatim, fixed and LPC
     subframes at 16 bits, and stereo decorrelation.
@@ -2286,41 +2313,84 @@ names, not as an empty framework.
 
     ```text
     ID / parent: T26a / T26
-    State: G0 (contract, fixtures and oracle)
+    State: verified
     Supported behavior and explicit exclusions: native FLAC (fLaC,
       STREAMINFO first, other metadata blocks skipped) with 16-bit samples
       and fixed block sizes; packets as FFmpeg's demuxer and parser give
       them (1024-byte reads, header scoring, junk packets, libavformat's
-      timestamps); constant, verbatim, fixed and LPC subframes, wasted bits,
-      Rice and Rice2 residuals with escapes, every channel assignment,
-      decoded to s16 bit for bit, with FFmpeg's per-packet decoding errors.
-      Excluded until T26b: other bit depths, variable block sizes,
+      timestamps and find_stream_info's read-ahead); constant, verbatim,
+      fixed and LPC subframes, wasted bits, Rice and Rice2 residuals with
+      escapes, every channel assignment, decoded to s16 bit for bit, with
+      FFmpeg's per-packet decoding errors and packet remainders; FLAC in
+      detection, zffprobe (from STREAMINFO) and as an av.convert and
+      zffmpeg input to every PCM output. Excluded until T26b: other bit
+      depths, variable block sizes, mid-stream rate or channel changes,
       headerless input, tags, pictures, seek tables, cue sheets, MD5
-      checks, seeking.
+      checks, seeking; no encoder or muxer (T26c).
     Needs (verified) / lands with / verified after: T13b, T14a, T16, T19a /
       T18a, T19b.
     Contract and source provenance: port.md "FLAC contract";
       zig/testing/fixtures/flac/README.md; libavformat/flacdec.c,
-      rawdec.c, demux.c (parse_packet, compute_pkt_fields),
-      libavcodec/flac_parser.c, parser.c, flac.c, flacdec.c, flacdsp.c,
+      rawdec.c, demux.c (parse_packet, compute_pkt_fields,
+      update_initial_timestamps, update_initial_durations,
+      avformat_find_stream_info, av_read_frame), libavcodec/flac_parser.c,
+      parser.c, flac.c, flacdata.c, flacdec.c, flacdsp.c, decode.c,
       get_bits.h, golomb.h, libavutil/crc.c, adler32.c.
     Required fixtures / optional corpus: 31 FLAC fixtures (26 from
-      generate.py, 5 from FFmpeg's encoder), vectors/flac.txt from
-      flac_vectors.c; no optional corpus.
-    Ownership, state transitions and limits: to be recorded with the
-      demuxer (part 2).
+      generate.py's own FLAC writer, 5 from FFmpeg's encoder through
+      flac_fixtures.sh, committed and checked by hash), vectors/flac.txt
+      from flac_vectors.c; no optional corpus.
+    Ownership, state transitions and limits: the demuxer owns its parser's
+      buffer (about ten frames, FFmpeg's ring size recorded for its junk
+      check) and the packets it read ahead; a returned packet and a decoded
+      frame are borrowed until the next call; the decoder owns one
+      max-blocksize buffer per channel; a decoding failure ends only its
+      packet. A conversion's FLAC input is freed by Conversion.deinit.
     Comparison rule and intentional differences: the stream, every packet
       (size, pts, dts, duration, flags, Adler-32) and every decoded frame
-      or error exact; decoded samples equal the encoded ones.
-    Implementation files and test entry points: to come (parts 1-4).
-    Evidence commit / Linux CI run / reference report: to come.
-    Required cases: to come.
+      or error exact; decoded samples equal the encoded ones. Intentional:
+      metadata cut short is Truncated where FFmpeg may open the file; a
+      SEEKTABLE, CUESHEET or PICTURE before STREAMINFO is InvalidFlac; a
+      conversion whose decoded count differs from STREAMINFO's fails
+      (FrameCountMismatch) where FFmpeg rewrites its header; the parser's
+      reads are 1024 bytes, not cut where FFmpeg's I/O buffer ends, and a
+      16-byte header's subframe byte at the buffered end reads 0, not
+      FFmpeg's stale ring byte.
+    Implementation files and test entry points: codec/flac.zig (frame
+      header, STREAMINFO, layouts), codec/flac_parser.zig, codec/flacdec.zig
+      ("every refusal of a frame", the LPC paths), format/flac.zig ("every
+      fixture's packets equal FFmpeg's", "every fixture decodes as FFmpeg
+      decodes it", allocation failure, fuzz entry), format/detect.zig,
+      format/convert.zig (FLAC conversion tests), codec/registry.zig,
+      format/registry.zig, cli/status.zig; 5 zffprobe and 4 zffmpeg FLAC
+      process cases in build.zig; compare.py's FLAC section.
+    Evidence commit / Linux CI run / reference report: 07c1755, 2d02129,
+      835d6af, ab3edcd, 5df9fbf, ca62ed8 / local Linux runs / below.
+    Required cases: passed 31 / failed 0 / missing 0.
     Optional cases: none
-    Fuzz seeds, budget and result: to come.
-    Remaining work or blocker / next action: part 1, T18a's bit reader and
-      CRCs; part 2, the demuxer and parser; part 3, the decoder and T19b's
-      hashes; part 4, detection, zffprobe and zffmpeg.
+    Fuzz seeds, budget and result: the demuxer-and-decoder entry (four
+      fixture seeds) and detection's entry with a FLAC seed run under zig
+      build test; the local fuzzer's runner crashes at start, as T25a
+      records, so no sustained run.
+    Remaining work or blocker / next action: T26b (needs T52a).
     ```
+
+    Evidence (G5, local Linux x86-64 runs with Zig 0.17.0): commits
+    `07c1755` (contract, fixtures, oracle), `2d02129` (T18a), `835d6af`
+    (demuxer and parser), `ab3edcd` (decoder), `5df9fbf` (T19b) and
+    `ca62ed8` (detection, zffprobe, zffmpeg). Local CI at the part-5 tree:
+    fmt, `generate.py --check`, the example check, Debug and ReleaseSafe
+    builds, `zig build test` with 185/185 steps and 288/288 tests in Debug,
+    ReleaseSafe and ReleaseFast (289 at `ca62ed8`, with the fuzz entry), and
+    the three cross builds passed; every vector generator, `flac_vectors.c`
+    included, reproduces its file from FFmpeg `5d5a38a` rebuilt with the
+    FLAC components. `compare.py`: FLAC fixtures **31/31** (detection,
+    zffprobe against ffprobe on the 26 both read, the contract's status on
+    the 5 refused, zffmpeg's WAV byte-identical to the ffmpeg program's on
+    25, the one understood difference listed); detection 310/310; the
+    registry equal with its listed differences; its only failures the 165
+    known inf and NaN samples of this machine's clang 23 build and the 11
+    float streamhash decodes of the same samples.
   - [ ] **T26b — Complete FLAC decoding and seeking.** Needs T17b, T26a and
     T52a. Bit depths 4–32, variable block sizes, SEEKTABLE, VORBIS_COMMENT and
     PICTURE blocks, MD5 verification, and seeking by seek table and frame scan.

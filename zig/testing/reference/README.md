@@ -408,6 +408,25 @@ build include the WAV muxer. Its first run, locally on Windows at commit
   s16) rejected before any output: **54/54**.
 - Fixtures whose pipe result equals the file result: **105/105**.
 
+T26a added FLAC, with T19b's hash comparison, and the reference build's
+FLAC components and hash muxers. The run, locally on Linux x86-64 as for
+T23b part 3 at the part-5 tree of `ca62ed8`, reported:
+
+- FLAC fixtures matching the contract and FFmpeg: **31/31**: FFmpeg's
+  probe picks `flac` for every one (raw FLAC's 13 is logged as a low
+  score), zffprobe's report equals ffprobe's fields on the 26 both read,
+  the 5 refused give the contract's status (FFmpeg reads `flac_bps24` and
+  the headerless `flac_no_marker`, which wait for T26b), and zffmpeg's WAV
+  equals the ffmpeg program's `-bitexact` one byte for byte on 25, the
+  damaged `flac_junk_between_frames` being the listed difference.
+- Hash texts equal to the ffmpeg program's: **399/424**, 14 understood
+  differences, and 11 float streamhash decodes differing only at the inf
+  and NaN samples this compiler's FFmpeg converts to 0, as the 165 known
+  failures elsewhere; nothing else failed.
+- Registries equal to `ffmpeg -codecs` and `-formats` with the listed
+  differences (the FLAC encoder and muxer, T26c; the hash muxers, which
+  `av.framehash` writes); detection **310/310**; pipes **310/310**.
+
 T24 added resampling: the resampler (96 vectors with full output), the
 pipeline and zffmpeg's output `-ar`, with a new section that resamples the
 dither section's 200000-frame inputs (one per input container, 8 of them)
