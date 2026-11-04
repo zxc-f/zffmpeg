@@ -25,6 +25,8 @@
 
 const std = @import("std");
 const flac = @import("../codec/flac.zig");
+/// The decoder for the demuxer's packets.
+pub const decoder = @import("../codec/flacdec.zig");
 const flac_parser = @import("../codec/flac_parser.zig");
 const packet = @import("../core/packet.zig");
 const time = @import("../core/time.zig");
@@ -43,6 +45,8 @@ pub const Error = error{
 /// The stream STREAMINFO describes.
 pub const Info = struct {
     stream_info: flac.StreamInfo,
+    /// The STREAMINFO block's bytes, FFmpeg's extradata for the stream.
+    extradata: [flac.streaminfo_size]u8,
     layout: channel_layout.Layout,
     /// 1 / the sample rate.
     time_base: time.TimeBase,
@@ -91,6 +95,7 @@ pub fn readHeader(reader: *std.Io.Reader) Error!Info {
     // FFmpeg reads input without fLaC as frames: its headerless mode.
     if (!std.mem.eql(u8, &marker, "fLaC")) return error.UnsupportedFormat;
     var info: ?flac.StreamInfo = null;
+    var extradata: [flac.streaminfo_size]u8 = undefined;
     while (true) {
         var block: [4]u8 = undefined;
         try readExact(reader, &block);
@@ -100,9 +105,8 @@ pub fn readHeader(reader: *std.Io.Reader) Error!Info {
         if (block_type == metadata_streaminfo) {
             // STREAMINFO comes once, with 34 bytes.
             if (info != null or size != flac.streaminfo_size) return error.InvalidFlac;
-            var body: [flac.streaminfo_size]u8 = undefined;
-            try readExact(reader, &body);
-            info = flac.StreamInfo.parse(&body);
+            try readExact(reader, &extradata);
+            info = flac.StreamInfo.parse(&extradata);
         } else {
             // STREAMINFO must come first. FFmpeg also accepts SEEKTABLE,
             // CUESHEET and PICTURE before it, which it reads and T26b will.
@@ -121,6 +125,7 @@ pub fn readHeader(reader: *std.Io.Reader) Error!Info {
     if (si.bps != 16 or si.sample_rate == 0) return error.UnsupportedFormat;
     return .{
         .stream_info = si,
+        .extradata = extradata,
         .layout = flac.channelLayout(si.channels),
         .time_base = time.TimeBase.ofSampleRate(si.sample_rate) catch return error.UnsupportedFormat,
         .duration = if (si.samples > 0) si.samples else null,
@@ -489,7 +494,7 @@ test "the demuxer's packets do not depend on the reader's buffer" {
     try testing.expectEqual(std.mem.count(u8, whole.items, "\n"), count);
 }
 
-const flacdec = @import("../codec/flacdec.zig");
+const flacdec = decoder;
 
 /// The `P`, `D` and `X` lines of flac_vectors.c for `bytes`, and the SHA-256
 /// and count of every decoded sample.

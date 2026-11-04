@@ -238,5 +238,6 @@ jobs:
             --writer zig-out/bin/write-driver \
             --zffmpeg zig-out/bin/zffmpeg \
             --registry zig-out/bin/registry-dump \
+            --hasher zig-out/bin/hash-driver \
             --report reference-report.md
           cat reference-report.md >> "$GITHUB_STEP_SUMMARY"

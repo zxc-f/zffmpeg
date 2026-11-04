@@ -718,8 +718,17 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "av", .module = av }},
         }),
     });
+    const hash_driver = b.addExecutable(.{
+        .name = "hash-driver",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("zig/testing/hash_driver.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "av", .module = av }},
+        }),
+    });
     const test_tools = b.step("test-tools", "Install the test tools that compare.py runs");
-    for ([_]*std.Build.Step.Compile{ write_driver, registry_dump }) |tool| {
+    for ([_]*std.Build.Step.Compile{ write_driver, registry_dump, hash_driver }) |tool| {
         test_tools.dependOn(&b.addInstallArtifact(tool, .{}).step);
         test_step.dependOn(&tool.step);
     }

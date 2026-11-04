@@ -495,11 +495,17 @@ test "a constant frame decodes, and a verbatim one with wasted bits" {
     w.put(6, 1);
     w.put(1, 1);
     w.put(3, 0b001); // three wasted bits: unary 2, then the 1
-    for (0..16) |i| w.signed(13, @as(i64, @intCast(i)) - 8);
+    for (0..16) |i| {
+        const value: i64 = @intCast(i);
+        w.signed(13, value - 8);
+    }
     const verbatim = w.finish();
     d.send(verbatim, null);
     const v = (try d.receive()).?;
-    for (v.samples, 0..) |s, i| try testing.expectEqual((@as(i16, @intCast(i)) - 8) * 8, s);
+    for (v.samples, 0..) |s, i| {
+        const index: i16 = @intCast(i);
+        try testing.expectEqual((index - 8) * 8, s);
+    }
 }
 
 test "two frames in one packet: the second has no timestamp" {

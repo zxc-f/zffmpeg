@@ -1571,6 +1571,81 @@ def compare_pipes(args, lines, failures):
     ]
 
 
+# Fixtures whose hash text differs from the ffmpeg program's for an
+# understood reason, by (fixture, mode): (reason).
+KNOWN_HASH_DIFFERENCES = {
+    ("flac_rate_streaminfo", "copy"): "its one packet has no timestamp, which the ffmpeg program makes 0",
+    ("flac_rate_streaminfo", "decode"): "its one frame has no timestamp, which the ffmpeg program drops",
+    ("au_trailing_bytes_after_data", "copy"): "FFmpeg reads the bytes after the declared data",
+    ("au_trailing_bytes_after_data", "decode"): "FFmpeg decodes the bytes after the declared data",
+    ("aiff_chan_after_ssnd", "copy"): "CHAN after SSND is not read",
+    ("aiff_chan_after_ssnd", "decode"): "CHAN after SSND is not read",
+    ("caf_chan_after_data", "copy"): "`chan` after `data` is not read",
+    ("caf_chan_after_data", "decode"): "`chan` after `data` is not read",
+    ("caf_chunks_around_data", "copy"): "FFmpeg keeps a `kuki` chunk as the stream's extradata",
+    # The driver copies through the codec's raw format, and FFmpeg has none
+    # for s64; the decoded stream is still compared.
+    ("s64_mono_8k_extensible", "copy"): "the hash driver has no raw format to copy s64 into",
+    ("caf_s64be_mono", "copy"): "the hash driver has no raw format to copy s64 into",
+    ("caf_s64le_mono", "copy"): "the hash driver has no raw format to copy s64 into",
+}
+
+
+def compare_hashes(args, lines, failures):
+    """FFmpeg's framecrc, framemd5 and streamhash text from the ffmpeg program
+    against the hash driver's for the same input (T19b): every FLAC fixture
+    FFmpeg reads, its packets copied and its frames decoded to pcm_s16le, in
+    all three; and every accepted WAV, AU, AIFF and CAF fixture's stream,
+    copied and decoded, in streamhash, the one whose text does not depend on
+    FFmpeg's PCM packet sizes."""
+    cases = []
+    for fixture in generate.build_flac_fixtures():
+        if fixture.reject is None:
+            cases.append((FIXTURES / "flac" / f"{fixture.name}.flac", ("framecrc", "framemd5", "streamhash")))
+    for fixture in generate.build_fixtures():
+        if fixture.accept is not None:
+            cases.append((FIXTURES / "wav" / f"{fixture.name}.wav", ("streamhash",)))
+    for directory, _, build, _, _ in FORCED_CONTRACTS:
+        for fixture in build():
+            if fixture.accept is not None:
+                cases.append((FIXTURES / directory / f"{fixture.name}.{directory}", ("streamhash",)))
+    same = known = total = 0
+    for path, kinds in cases:
+        for kind in kinds:
+            for mode in ("copy", "decode"):
+                codec = ["-c", "copy"] if mode == "copy" else ["-c:a", "pcm_s16le"]
+                theirs = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", str(path), "-fflags", "+bitexact",
+                             *codec, "-f", kind, "-")
+                ours = run(args.hasher, kind, mode, str(path))
+                total += 1
+                # Both refusing the input agrees too (an input only a forced
+                # format opens).
+                if (ours.returncode == 0) == (theirs.returncode == 0) and ours.stdout == theirs.stdout:
+                    same += 1
+                    continue
+                reason = KNOWN_HASH_DIFFERENCES.get((path.stem, mode))
+                if reason is not None:
+                    known += 1
+                    continue
+                if ours.returncode != 0:
+                    failures.append(f"{path.name}: the hash driver failed ({kind}, {mode}): {first_line(text(ours.stderr))}")
+                elif theirs.returncode != 0:
+                    failures.append(f"{path.name}: ffmpeg failed ({kind}, {mode}): {first_line(text(theirs.stderr))}")
+                else:
+                    failures.append(f"{path.name}: the {kind} text differs from ffmpeg's ({mode})")
+    lines += [
+        "",
+        "## Frame and stream hashes",
+        "",
+        f"Hash texts equal to the ffmpeg program's with `-fflags +bitexact`: {same}/{total}; "
+        f"understood differences: {known}.",
+        "",
+        "| Fixture | Mode | Understood difference |",
+        "| --- | --- | --- |",
+    ]
+    lines += [f"| `{name}` | {mode} | {reason} |" for (name, mode), reason in KNOWN_HASH_DIFFERENCES.items()]
+
+
 def compare_unknown_length(args, lines, failures):
     """The fixtures whose result changes with the parser's `unknown_length` option (T21b).
 
@@ -1730,6 +1805,7 @@ def main():
     parser.add_argument("--writer", required=True, help="the write driver (zig build test-tools)")
     parser.add_argument("--zffmpeg", required=True)
     parser.add_argument("--registry", required=True, help="the registry dump (zig build test-tools)")
+    parser.add_argument("--hasher", required=True, help="the hash driver (zig build test-tools)")
     parser.add_argument("--report", help="also write the Markdown report to this file")
     args = parser.parse_args()
 
@@ -1794,6 +1870,7 @@ def main():
             compare_ffmpeg_muxer(args, lines, failures, container, title, build)
 
     compare_pipes(args, lines, failures)
+    compare_hashes(args, lines, failures)
 
     if NOT_IMPLEMENTED:
         lines += ["", "## Not implemented", ""]

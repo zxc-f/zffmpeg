@@ -35,6 +35,12 @@
 //!   FFmpeg's raw demuxers and muxers (`format/raw.zig`).
 //! - `caf`: bounded Apple CAF reading for linear PCM, A-law and µ-law
 //!   (`format/caf.zig`).
+//! - `flac`: native FLAC with 16-bit samples, read as FFmpeg's demuxer,
+//!   parser and decoder read it: packets with libavformat's timestamps and
+//!   their decoding to s16 (`format/flac.zig`, `codec/flac.zig`,
+//!   `codec/flac_parser.zig`, `codec/flacdec.zig`).
+//! - `framehash`: FFmpeg's framecrc, framemd5 and streamhash muxers' text
+//!   for one audio stream (`format/framehash.zig`).
 //! - `audioconvert`: sample format conversion between every format, packed
 //!   or planar, as libswresample converts (`resample/audioconvert.zig`).
 //! - `dither`: libswresample's dithered conversion, every method, noise
@@ -78,6 +84,8 @@ pub const au = @import("format/au.zig");
 pub const aiff = @import("format/aiff.zig");
 pub const raw = @import("format/raw.zig");
 pub const caf = @import("format/caf.zig");
+pub const flac = @import("format/flac.zig");
+pub const framehash = @import("format/framehash.zig");
 pub const audioconvert = @import("resample/audioconvert.zig");
 pub const dither = @import("resample/dither.zig");
 pub const codecs = @import("codec/registry.zig");
@@ -113,6 +121,7 @@ test {
     _ = @import("format/raw.zig");
     _ = @import("format/caf.zig");
     _ = @import("format/flac.zig");
+    _ = @import("format/framehash.zig");
     _ = @import("format/mov_chan.zig");
     _ = @import("resample/audioconvert.zig");
     _ = @import("resample/dither.zig");

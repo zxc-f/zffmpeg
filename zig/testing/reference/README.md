@@ -123,6 +123,19 @@ FLAC encoder; `flac_fixtures.sh` remakes them and prints their hashes, which
 bash zig/testing/reference/flac_fixtures.sh .references/ffmpeg-install
 ```
 
+The T19b hash comparison runs the ffmpeg program's `framecrc`, `framemd5`
+and `streamhash` muxers (`-fflags +bitexact`) beside `hash-driver`, which
+`zig build test-tools` installs: every FLAC fixture's packets copied and
+frames decoded to pcm_s16le in all three, and every accepted WAV, AU, AIFF
+and CAF fixture's stream in `streamhash`; `compare.py`'s
+`KNOWN_HASH_DIFFERENCES` lists the understood differences. By hand:
+
+```bash
+zig build test-tools
+./zig-out/bin/hash-driver framecrc copy zig/testing/fixtures/flac/flac_mid_side.flac
+.references/ffmpeg-install/bin/ffmpeg -i zig/testing/fixtures/flac/flac_mid_side.flac -fflags +bitexact -c copy -f framecrc -
+```
+
 The T25c multi-graph vectors come from the reference's `libavfilter`:
 `multigraph_vectors.c` builds graphs of several sources and sinks from
 filtergraph text with labels, runs a script of frames, closes and reads,
