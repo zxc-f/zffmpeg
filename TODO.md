@@ -29,8 +29,10 @@ CAF demux), are verified, and so is T23: T23a, sample format conversion
 with libswresample's dither, T23b, FFmpeg's channel layouts in every
 container (1 to 64 channels, Apple's `chan` in AIFF and CAF), and T23c,
 rematrixing as libswresample mixes, through zffmpeg's output `-ac` and
-`-ch_layout`. **Next: T24 (resampling), with T17a (typed options), which
-starts from its options. See [Near-term order](#near-term-order).**
+`-ch_layout`; T17, options (FFmpeg's number syntax, typed option
+descriptors, a diagnostic sink) with metadata; and T24, resampling as
+FFmpeg's `aresample` does, through zffmpeg's `-ar`. **Next: T25a (the audio
+filter graph's core). See [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
 [How tasks are completed](#how-tasks-are-completed) describes. Tasks and
@@ -1026,9 +1028,9 @@ names, not as an empty framework.
   project owner's choice), FFmpeg's extension hint is ported too: a
   probe-less demuxer whose extension matches the file name scores 50.
 
-- [ ] **T17 — Options, metadata and diagnostics.** Checked when T17a and T17b
-  are.
-  - [ ] **T17a — Typed options and diagnostics.** Needs T16. Start with the
+- [x] **T17 — Options, metadata and diagnostics.** Checked when T17a and T17b
+  are (verified: T17b at `f494ee7`, T17a at `4851367`).
+  - [x] **T17a — Typed options and diagnostics.** Needs T16. Start with the
     first component that has options (T24).
     Reference: `libavutil/opt.c`, `log.c`, `parseutils.c`.
     Per-component options with range, default, unit and help metadata derived
@@ -1041,33 +1043,50 @@ names, not as an empty framework.
 
     ```text
     ID / parent: T17a / T17
-    State: implementing
+    State: verified
     Supported behavior and explicit exclusions: part 1, FFmpeg's number
       syntax (core/number.zig): av_strtod (C's strtod or strtoul for 0x, SI
       prefixes, binary with i, dB, B) and fftools' parse_number, for
-      zffmpeg's -ar and -ac. Excluded so far: typed option descriptors, the
-      diagnostic sink, durations and sizes (no option takes them),
-      expressions (T25b).
+      zffmpeg's -ar and -ac. Part 2: typed option descriptors
+      (core/options.zig: option_specs checked at compile time, av_opt_set's
+      setting), first for the resampler's options, and an explicit
+      diagnostic sink (core/diagnostics.zig) for the dither fallback and the
+      guessed layout, the tools giving none. Excluded: durations and sizes
+      (no option takes them), expressions (T25b), a -loglevel.
     Needs (verified) / lands with / verified after: T16 (verified); lands
       with T24.
     Contract and source provenance: port.md "Options and numbers";
       notes.md "Options and numbers"; eval.c (av_strtod, si_prefixes),
       cmdutils.c (parse_number).
     Required fixtures / optional corpus: 107 texts, 214 vectors of the pinned
-      libavutil (number_vectors.c); no optional corpus.
+      libavutil (number_vectors.c); 136 option texts (options_vectors.c); no
+      optional corpus.
     Ownership, state transitions and limits: values; no allocation.
     Comparison rule and intentional differences: exact; dB within Zig's
-      exp2; -ac 0 a usage error after -i too.
+      exp2; -ac 0 a usage error after -i too; expressions refused until
+      T25b; the tools print no warnings (the project owner's choice).
     Implementation files and test entry points: core/number.zig,
-      cli/ffmpeg.zig, cli/status.zig; number_vectors.c, build.zig cases.
-    Evidence commit / Linux CI run / reference report: part 1 local Linux
-      runs; CI pending.
-    Required cases: part 1 passes; the descriptors and the sink are missing.
+      core/options.zig, core/diagnostics.zig, resample/resample.zig
+      (Options.option_specs), resample/dither.zig, format/convert.zig,
+      cli/ffmpeg.zig, cli/status.zig; number_vectors.c, options_vectors.c,
+      build.zig cases.
+    Evidence commit / Linux CI run / reference report: 8894249, 4851367 /
+      local Linux runs / below.
+    Required cases: passed all / failed 0 / missing 0
     Optional cases: none
-    Fuzz seeds, budget and result: none yet.
-    Remaining work or blocker / next action: the descriptors and the
-      diagnostic sink.
+    Fuzz seeds, budget and result: none.
+    Remaining work or blocker / next action: T25a.
     ```
+
+    Evidence (G5, local Linux x86-64 runs with Zig 0.17.0): commits
+    `8894249` (the number syntax) and `4851367` (the descriptors and the
+    sink). At `4851367`: fmt, `generate.py --check`, the example check,
+    Debug and ReleaseSafe builds, `zig build test` with 175/175 steps and
+    229/229 tests in Debug, ReleaseSafe and ReleaseFast, and the three cross
+    builds passed; the vector generators reproduce their files from FFmpeg
+    `5d5a38a`, the 214 number and 136 option vectors among them, all of
+    which the port equals; `compare.py`'s only failures are the 165 known
+    inf and NaN float samples of this machine's clang 23 reference build.
   - [x] **T17b — Metadata dictionary.** Needs T14a. Start with T21c.
     Reference: `libavutil/dict.c`.
     Container and stream tags with ordered, case-insensitive keys, an explicit
@@ -1948,7 +1967,7 @@ names, not as an empty framework.
     compiler's FFmpeg converts to 0 where the CI's clang 18 build and the
     port give -32768; every other section passed.
 
-- [ ] **T24 — Resampling.** Needs T17a and T23a.
+- [x] **T24 — Resampling.** Needs T17a and T23a.
   Reference: `libswresample/resample.c`, `resample_dsp.c` (soxr is external
   and excluded).
   The polyphase windowed-sinc resampler with swresample's defaults (filter
@@ -1961,7 +1980,7 @@ names, not as an empty framework.
 
   ```text
   ID / parent: T24
-  State: implementing
+  State: verified
   Supported behavior and explicit exclusions: part 1, the resampler
     (resample/resample.zig): libswresample's filter (Kaiser, cubic,
     Blackman-Nuttall), phase counts, exact ratios, linear interpolation,
@@ -1987,14 +2006,26 @@ names, not as an empty framework.
     (Request.sample_rate, Request.gpa, Summary.output_frame_count),
     cli/ffmpeg.zig; resample_vectors.c, compare.py compare_resample, build.zig
     cases.
-  Evidence commit / Linux CI run / reference report: part 1 local Linux
-    runs; CI pending.
-  Required cases: parts 1 and 2 pass, -ar in FFmpeg's number syntax
-    (T17a part 1).
+  Evidence commit / Linux CI run / reference report: 5e68bf2, 08820d7 /
+    local Linux runs / below.
+  Required cases: passed all / failed 0 / missing 0
   Optional cases: none
-  Fuzz seeds, budget and result: none yet.
-  Remaining work or blocker / next action: T17a, then T24's G5 record.
+  Fuzz seeds, budget and result: none; the conversion fuzz test unchanged.
+  Remaining work or blocker / next action: T25a.
   ```
+
+  Evidence (G5, local Linux x86-64 runs with Zig 0.17.0): commits
+  `5e68bf2` (the resampler) and `08820d7` (the pipeline and `-ar`), with
+  T17a's `-ar` syntax at `8894249`. At `4851367`: `zig build test` with
+  175/175 steps and 229/229 tests in Debug, ReleaseSafe and ReleaseFast;
+  the 96 resampling vectors give FFmpeg's frame counts and delays exactly
+  and its samples exactly for integer and float output, double within
+  2^-52, inside the declared tolerance; output is the same for any input
+  chunking. `compare.py` resampled the dither section's 200000-frame
+  inputs, one per input container, with seven option sets (rates up and
+  down, a downmix, float and double output, dither, an upmix to 5.1): 56
+  of 56 outputs equal FFmpeg's byte for byte; its only failures are the 165
+  known inf and NaN samples of this machine's clang 23 reference build.
 
 - [ ] **T25 — Audio filter graph.** Checked when T25a–T25c are. Reference:
   `libavfilter/avfilter.c`, `avfiltergraph.c`, `graphparser.c`, `formats.c`,

@@ -26,7 +26,9 @@ noise shaping included, bit-exact with FFmpeg's (T23a). Every container
 carries 1 to 64 channels with FFmpeg's channel layouts, Apple's layout chunk
 in AIFF and CAF included, and `zffmpeg` names an unspecified layout as
 FFmpeg's command line does (T23b); its output `-ac` and `-ch_layout`
-rematrix as libswresample does, bit-exact (T23c). [TODO.md](TODO.md) holds the completion
+rematrix as libswresample does, bit-exact (T23c), and its `-ar` resamples as
+FFmpeg's `aresample` does, within a declared tolerance that the comparisons
+have not needed (T24); options take FFmpeg's number syntax (`44.1k`, T17a). [TODO.md](TODO.md) holds the completion
 evidence and the roadmap. Development is verified on Linux only. The compiler
 is **Zig 0.17.0**, enforced by the build.
 
