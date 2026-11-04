@@ -27,7 +27,9 @@ for every sample format), `packet`, `frame`, `stage` (the send/receive
 contract), `metadata` (the tag dictionary), `number`, `options` and
 `diagnostics` (FFmpeg's number syntax, typed options, a log sink),
 `eval` (FFmpeg's expressions), `filter` (the audio filter graph: anull,
-aformat, volume, aresample, atrim, asetpts, from filtergraph text too), `wav`
+aformat, volume, aresample, atrim, asetpts, asplit, channelsplit,
+channelmap, pan, amix, from filtergraph text, several inputs and outputs),
+`wav`
 (also Wave64), `au`,
 `aiff` and `raw` (bounded parsers and writers), `caf` (a bounded parser),
 `codecs` and `formats`
@@ -49,8 +51,9 @@ encodings, T22b AIFF, T22c raw PCM, T22d CAF) and T23a (sample format
 conversion and dither), T23b (channel layouts) and T23c (rematrixing) are
 verified, completing T23, and so are T17 (T17a: number syntax, typed
 options, a diagnostic sink), T24 (resampling) and T25a (the audio filter
-graph's core) and T25b (expressions, filtergraph text, atrim and asetpts);
-T25c (several inputs and outputs) is next, and
+graph's core), T25b (expressions, filtergraph text, atrim and asetpts)
+and T25c (several inputs and outputs on libavfilter's scheduler), completing
+T25; T26a (FLAC, with T18a and T19b) is next, and
 TODO.md lays out the roadmap through T64.
  When the state changes, update the current-state statements in
 README.md, port.md ("Status and scope"), the TODO.md introduction and this file
