@@ -2544,8 +2544,8 @@ names, not as an empty framework.
       format/registry.zig, codec/registry.zig, cli/ffmpeg.zig; 6 zffmpeg
       process cases in build.zig; compare.py's FLAC output and FATE
       sections.
-    Evidence commit / Linux CI run / reference report: 94c4c6f and the
-      part-4 commit / local Linux runs / below.
+    Evidence commit / Linux CI run / reference report: 94c4c6f, fb6fe52 /
+      local Linux runs / below.
     Required cases: encoder vectors passed 84 / failed 0; FLAC output
       passed 300 / failed 0.
     Optional cases: FATE FLAC passed 17 / failed 0 / skipped 0 (the 10
@@ -2556,8 +2556,8 @@ names, not as an empty framework.
     ```
 
     Evidence (G5, local Linux x86-64 runs with Zig 0.17.0): commits
-    `94c4c6f` (contract, oracle, T18b, LPC analysis, encoder) and the
-    part-4 commit that records this (muxer, pipeline, zffmpeg, compare.py,
+    `94c4c6f` (contract, oracle, T18b, LPC analysis, encoder) and `fb6fe52`
+    (muxer, pipeline, zffmpeg, compare.py,
     and the SSE2 autocorrelation order found by an s64 ramp, now the
     oracle's `ramp32` cases). Local CI on that tree: fmt,
     `generate.py --check`, the example check, Debug and ReleaseSafe
