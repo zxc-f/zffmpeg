@@ -48,7 +48,10 @@ writer, which completes T26; and T19c, the optional FATE corpus with
 recorded provenance and the comparison's coverage summary, which completes
 T19; and T27a, the Ogg demuxer with FFmpeg's FLAC, Opus and Vorbis
 mappings, without decoding, on libavformat's generic layer, in zffprobe, as
-a framecrc stream copy and seeking as FFmpeg does. **Next: T27b (Ogg mux). See
+a framecrc stream copy and seeking as FFmpeg does; and T27b, FFmpeg's Ogg
+muxer, with FLAC encoded into Ogg by zffmpeg byte for byte as the ffmpeg
+program writes it. **Next: T27c (FFT and MDCT), which lands with T27d
+(Vorbis decoder). See
 [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
@@ -2638,14 +2641,12 @@ names, not as an empty framework.
       from Ogg; other mappings are streams without a codec; no muxer
       (T27b).
     ```
-  - [ ] **T27b — Ogg mux.** Needs T27a.
+  - [x] **T27b — Ogg mux.** Needs T27a.
     Done when FFmpeg demuxes our output to identical packets and timestamps.
 
     ```text
     ID / parent: T27b / T27
-    State: G4 (the muxer equals FFmpeg's on every oracle case, and
-      zffmpeg's Ogg output the ffmpeg program's; local CI and the docs
-      remain)
+    State: G5 (verified)
     Plan: part 1, the muxer: oggenc.c for FLAC, Opus and Vorbis streams
       under -fflags +bitexact (headers, serials, lacing, page_duration,
       the page list, end of stream), with an oracle muxing generated
@@ -2674,8 +2675,18 @@ names, not as an empty framework.
       seconds of mono, an FFmpeg-made FLAC) times 6 option sets as .ogg
       and .oga files and pipes, byte for byte the ffmpeg program's with
       -bitexact and decoded by FFmpeg as the same conversion to FLAC, and
-      .opus refused before output; 4 zffmpeg process runs. Part 3 (stream
-      copy) moved to T53 (notes.md "Ogg output scope").
+      .opus refused before output; 4 zffmpeg process runs (d8e1288 is
+      part 2's commit). Part 3 (stream copy) moved to T53 (notes.md "Ogg
+      output scope"). G5 on local Linux runs at part 2 with the docs
+      change: zig fmt, zig build test 328/328 in Debug, ReleaseSafe and
+      ReleaseFast with 205/205 build steps, the cross builds, and
+      .references/local-ci.sh (reference rebuilt with the ogg, oga and
+      opus muxers): every vector check, oggmux.txt included, passes; the
+      comparison 5813 passed with the 176 known clang 23 inf/NaN
+      failures, the registries 85/85 and the Ogg output 145/145; 17/17
+      optional FATE cases.
+    Limitations: FLAC is the only codec zffmpeg writes into Ogg; no stream
+      copy into Ogg (T53); one stream per output.
     ```
   - [ ] **T27c — FFT and MDCT.** Needs T01. Lands with T27d. A native transform
     module for the sizes the audio codecs need.
