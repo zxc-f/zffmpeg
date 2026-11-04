@@ -19,13 +19,14 @@ length (T22a), AIFF and AIFF-C with every PCM encoding of FFmpeg's table
 with conversion between every sample format and libswresample's dither
 (T23a), FFmpeg's channel layouts, 1 to 64 channels, in every container
 (T23b), rematrixing between them (T23c) and resampling (T24), with
-FFmpeg's option syntax (T17a). The `av`
+FFmpeg's option syntax (T17a), and an audio filter graph (T25a). The `av`
 module (rooted at `zig/root.zig`) exports `pcm` (the PCM encodings,
 kernels and decoder/encoder stages), `audio`, `channel_layout` (FFmpeg's
 channel layouts), `time`, `samples` (decoded sample storage
 for every sample format), `packet`, `frame`, `stage` (the send/receive
 contract), `metadata` (the tag dictionary), `number`, `options` and
-`diagnostics` (FFmpeg's number syntax, typed options, a log sink), `wav`
+`diagnostics` (FFmpeg's number syntax, typed options, a log sink),
+`filter` (the audio filter graph: anull, aformat, volume, aresample), `wav`
 (also Wave64), `au`,
 `aiff` and `raw` (bounded parsers and writers), `caf` (a bounded parser),
 `codecs` and `formats`
@@ -46,8 +47,8 @@ tags), T16 (codec and format registries and probing) and T22 (T22a AU
 encodings, T22b AIFF, T22c raw PCM, T22d CAF) and T23a (sample format
 conversion and dither), T23b (channel layouts) and T23c (rematrixing) are
 verified, completing T23, and so are T17 (T17a: number syntax, typed
-options, a diagnostic sink) and T24 (resampling); T25a (the audio filter
-graph's core) is next, and
+options, a diagnostic sink), T24 (resampling) and T25a (the audio filter
+graph's core); T25b (filtergraph syntax and expressions) is next, and
 TODO.md lays out the roadmap through T64.
  When the state changes, update the current-state statements in
 README.md, port.md ("Status and scope"), the TODO.md introduction and this file

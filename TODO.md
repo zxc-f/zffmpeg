@@ -30,9 +30,11 @@ with libswresample's dither, T23b, FFmpeg's channel layouts in every
 container (1 to 64 channels, Apple's `chan` in AIFF and CAF), and T23c,
 rematrixing as libswresample mixes, through zffmpeg's output `-ac` and
 `-ch_layout`; T17, options (FFmpeg's number syntax, typed option
-descriptors, a diagnostic sink) with metadata; and T24, resampling as
-FFmpeg's `aresample` does, through zffmpeg's `-ar`. **Next: T25a (the audio
-filter graph's core). See [Near-term order](#near-term-order).**
+descriptors, a diagnostic sink) with metadata; T24, resampling as FFmpeg's
+`aresample` does, through zffmpeg's `-ar`; and T25a, the audio filter
+graph's core (anull, aformat, volume and aresample in a linear chain,
+negotiated as libavfilter negotiates). **Next: T25b (filtergraph syntax and
+expressions). See [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
 [How tasks are completed](#how-tasks-are-completed) describes. Tasks and
@@ -2031,7 +2033,7 @@ names, not as an empty framework.
   `libavfilter/avfilter.c`, `avfiltergraph.c`, `graphparser.c`, `formats.c`,
   `buffersrc.c`, `buffersink.c`, `af_*.c`, `trim.c`, `libavutil/eval.c`;
   `tests/fate/filter-audio.mak`.
-  - [ ] **T25a — Graph core and linear chains.** Needs T14a, T17a, T23a and
+  - [x] **T25a — Graph core and linear chains.** Needs T14a, T17a, T23a and
     T24. Filter descriptors and options, format negotiation that inserts
     conversions where FFmpeg does, buffer source and sink, timestamps and EOF;
     the anull, aformat, aresample and volume (constant gain) filters.
@@ -2041,7 +2043,7 @@ names, not as an empty framework.
 
     ```text
     ID / parent: T25a / T25
-    State: validating
+    State: verified
     Supported behavior and explicit exclusions: a linear chain of audio
       filters between a buffer source (one format: any of the 12 sample
       formats, a rate, a native, custom or unspecified layout, a time base)
@@ -2098,18 +2100,28 @@ names, not as an empty framework.
       allocation failure, fuzz), resample/swr.zig (filterFrame,
       flushFrame), core/audio.zig (FFmpeg's sample format numbers);
       graph_vectors.c, vectors/graph.txt.
-    Evidence commit / Linux CI run / reference report: part 1 local Linux
-      runs; the record pending.
-    Required cases: passed 93 / failed 0 / missing 0 (local runs), every
-      output byte for byte, resampled ones included.
+    Evidence commit / Linux CI run / reference report: f22f2dd, adc8bf9 /
+      local Linux runs / below.
+    Required cases: passed 93 / failed 0 / missing 0, every output byte
+      for byte, resampled ones included.
     Optional cases: none
     Fuzz seeds, budget and result: graph.zig's option-text entry, 7 seeds,
       run under zig build test in Debug, ReleaseSafe and ReleaseFast;
       `zig build test --fuzz` stops locally with "corrupted coverage file
       ... pcs_len was zero" for every entry, so no sustained run.
-    Remaining work or blocker / next action: the local reference job, then
-      T25a's G5 record.
+    Remaining work or blocker / next action: T25b.
     ```
+
+    Evidence (G5, local Linux x86-64 runs with Zig 0.17.0): commits
+    `f22f2dd` (the contract, the oracle and the reference build's `volume`)
+    and `adc8bf9` (the graph). At `adc8bf9`: fmt, `generate.py --check`,
+    the example check, Debug and ReleaseSafe builds, `zig build test` with
+    175/175 steps and 245/245 tests in Debug, ReleaseSafe and ReleaseFast,
+    and the three cross builds passed; every vector generator reproduces
+    its file from FFmpeg `5d5a38a` rebuilt with `volume`, graph.txt's 93
+    cases among them, all of which the port equals; `compare.py`'s only
+    failures are the 165 known inf and NaN float samples of this machine's
+    clang 23 reference build.
   - [ ] **T25b — Filtergraph syntax and expressions.** Needs T25a. The
     filtergraph string syntax, the expression subset volume needs, atrim and
     asetpts.
