@@ -141,6 +141,7 @@ test {
     _ = @import("format/caf.zig");
     _ = @import("format/flac.zig");
     _ = @import("format/flacmux.zig");
+    _ = @import("format/vorbiscomment.zig");
     _ = @import("format/framehash.zig");
     _ = @import("format/seek.zig");
     _ = @import("format/mov_chan.zig");
