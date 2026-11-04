@@ -248,6 +248,17 @@ bash zig/testing/reference/opus_vectors_sync.sh
 ./zig-out/bin/opus-vector-driver .references/opus-testvectors/testvector01.bit 2 .references/opus-testvectors/testvector01.dec
 ```
 
+Since T28b compare.py requires each vector's decoding to equal FFmpeg's,
+whose digests `opus_rfc_vectors.c` prints (stereo and mono, after a null
+packet drains the decoder) into `opus_rfc.txt`; opus_compare's verdict and
+the final ranges are reported beside it, as FFmpeg's SILK decoding fails
+opus_compare on some vectors:
+
+```bash
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/opus_rfc_vectors.c .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o opus-rfc-vectors
+LC_ALL=C ./opus-rfc-vectors .references/opus-testvectors/testvector*.bit | diff -u zig/testing/vectors/opus_rfc.txt -
+```
+
 The T18c VLC vectors come from the reference's `libavcodec`:
 `vlc_vectors.c` builds decoding tables with `ff_vlc_init_sparse` (its
 prototype and the `VLC` struct restated, as `vlc.h` is not installed) for

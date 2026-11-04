@@ -55,7 +55,10 @@ LSB-first reader and VLC tables, and T27d, the Vorbis decoder bit for bit
 FFmpeg's, with Ogg Vorbis and Ogg FLAC decoded by zffmpeg, which completes
 T27; and T28a, the Opus range decoder, packet parsing and CELT bit for bit
 FFmpeg's, with Ogg Opus of CELT frames decoded by zffmpeg and RFC 8251's
-CELT-only test vectors passing opus_compare. **Next: T28b (SILK). See
+CELT-only test vectors passing opus_compare; and T28b, SILK bit for bit
+FFmpeg's with its resampling, RFC 8251's vectors without hybrid frames
+decoded as FFmpeg decodes them. **Next: T28c (hybrid frames, multistream
+and trimming). See
 [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
@@ -2960,7 +2963,10 @@ names, not as an empty framework.
       no Opus encoder; a seekable input decodes twice (the count ahead).
     ```
   - [ ] **T28b — SILK.** Needs T28a.
-    Done when the SILK-only test vectors meet `opus_compare`.
+    Done when the SILK-only test vectors decode as FFmpeg's decoder decodes
+    them, sample for sample, with `opus_compare` reported (revised: FFmpeg's
+    own SILK decoding does not meet `opus_compare` on every vector; notes.md
+    "Opus").
 
     ```text
     ID / parent: T28b / T28

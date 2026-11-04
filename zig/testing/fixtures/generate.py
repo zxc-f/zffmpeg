@@ -2983,6 +2983,18 @@ def opus_packet(config, count_code, frames=None, size=40, fill=0x55):
     return body + bytes([fill] * (size - len(body)))
 
 
+def opus_random_packet(config, stereo, seed, size, count_code=0, frames=None):
+    """A packet of `config` with random bytes after its TOC byte (any bytes
+    decode): a 32-bit LCG from `seed`, its high bytes."""
+    toc = (config << 3) | (4 if stereo else 0) | count_code
+    body = bytearray([toc]) + (bytes([frames]) if count_code == 3 else b"")
+    state = seed
+    while len(body) < size:
+        state = (state * 1103515245 + 12345) & 0xFFFFFFFF
+        body.append(state >> 24)
+    return bytes(body)
+
+
 def opus_duration(packet):
     toc = packet[0]
     config, code = toc >> 3, toc & 3
@@ -3145,6 +3157,20 @@ def build_ogg_fixtures():
        "configurations of 2.5 to 60 ms.", b"".join(ogg_opus_stream(0x2003, [
            opus_packet(0, 0), opus_packet(1, 1), opus_packet(3, 2), opus_packet(16, 3, frames=3),
            opus_packet(13, 0), opus_packet(19, 3, frames=6), opus_packet(31, 0), opus_packet(31, 0)])))
+    silk = [
+        # (config, stereo, size, count code, frames): narrow, medium and wide band,
+        # 10 to 60 ms, mono and stereo, a CELT packet between (the resampler
+        # flushed), rate changes and frames large enough for redundancy.
+        (0, False, 30, 0, None), (1, True, 60, 0, None), (6, False, 90, 0, None), (11, True, 200, 0, None),
+        (9, False, 120, 1, None), (31, True, 80, 0, None), (9, True, 150, 0, None), (4, False, 40, 0, None),
+        (5, True, 170, 0, None), (1, False, 90, 3, 3), (3, True, 160, 0, None), (10, False, 100, 0, None),
+        (31, False, 60, 0, None), (8, True, 70, 0, None), (2, False, 140, 0, None), (7, True, 190, 0, None),
+    ]
+    silk_ps = [opus_random_packet(c, st, 0x5000 + i, size, code, frames) for i, (c, st, size, code, frames) in
+               enumerate(silk)]
+    ok("ogg_opus_silk", "Opus SILK packets of random bytes (any bytes decode): narrow, medium and wide band, 10 to "
+       "60 ms, mono and stereo, frame count codes 0, 1 and 3, CELT packets between and frames large enough to "
+       "carry redundancy (T28b).", b"".join(ogg_opus_stream(0x2004, silk_ps)))
     ok("ogg_vorbis_stereo", "Vorbis: identification, comment and a setup header whose mode table (a short and a "
        "long mode) the parser reads; packet durations from the block sizes, four packets to a page.",
        b"".join(ogg_vorbis_stream(0x3001, vorbis_ps)))

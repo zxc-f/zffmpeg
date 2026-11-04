@@ -28,10 +28,18 @@ const float_dsp = @import("float_dsp.zig");
 const vorbis_data = @import("vorbis_data.zig");
 const channel_layout = @import("../core/channel_layout.zig");
 const libm = @import("../core/libm.zig");
+const silk = @import("silk.zig");
+const resample = @import("../resample/resample.zig");
+
+const Resampler = resample.Engine(.fltp);
 
 pub const sample_rate = 48000;
 /// The most samples a packet decodes to (120 ms).
 pub const max_frame = opus.max_packet_duration;
+/// The most samples a packet's frame holds: its duration and the
+/// resampler's delayed samples (opus_decode_packet's
+/// `coded_samples + delayed_samples`), with room to spare.
+pub const max_output = max_frame + 1024;
 
 pub const HeadError = error{
     /// FFmpeg's AVERROR_INVALIDDATA: a short head, no channels, counts or
@@ -47,8 +55,10 @@ pub const DecodeError = error{
     /// FFmpeg's AVERROR_INVALIDDATA for the packet: it does not parse, or a
     /// stream's sample count differs from the first's.
     InvalidData,
-    /// A SILK or hybrid frame (T28b, T28c).
+    /// A hybrid frame, or a SILK frame in a multistream packet, whose
+    /// streams' delays differ (T28c).
     UnsupportedMode,
+    OutOfMemory,
 };
 
 /// `ChannelMap`: where an output channel's samples come from.
@@ -151,17 +161,102 @@ pub const Head = struct {
 const mono = 0x4; // AV_CH_FRONT_CENTER
 const stereo = 0x3; // AV_CH_FRONT_LEFT | AV_CH_FRONT_RIGHT
 
-/// One of the packet's streams: its CELT decoder and output.
+/// dec.c's silk_frame_duration_ms: a SILK configuration's frame length.
+const silk_frame_duration_ms = [16]u32{ 10, 20, 40, 60, 10, 20, 40, 60, 10, 20, 40, 60, 10, 20, 10, 20 };
+
+/// dec.c's silk_resample_delay: the silence fed to a new resampler, by
+/// bandwidth.
+const silk_resample_delay = [5]i32{ 4, 8, 11, 11, 11 };
+
+/// get_silk_samplerate.
+fn silkSamplerate(config: u5) u32 {
+    return if (config < 4) 8000 else if (config < 8) 12000 else 16000;
+}
+
+/// One of the packet's streams (`OpusStreamContext`): its SILK and CELT
+/// decoders, the resampler from the SILK rate and its delayed samples,
+/// and the stream's output for the packet.
 const Stream = struct {
     output_channels: u32,
     celt: *celt.Decoder,
+    silk: silk.Decoder,
+    /// libswresample, initialized at `swr_rate` while present.
+    swr: ?Resampler = null,
+    swr_rate: u32 = 0,
+    silk_samplerate: u32 = 0,
+    /// Samples the resampler still owes.
+    delayed_samples: u32 = 0,
+    /// The redundancy frame's fade still to apply at the next output.
+    redundancy_idx: u32 = 0,
     packet: opus.Packet = undefined,
     /// The range decoder's state after the last frame, libopus'
     /// OPUS_GET_FINAL_RANGE (0 for a frame of at most a byte, which
     /// libopus conceals).
     final_range: u32 = 0,
-    out: [2][max_frame]f32 = undefined,
+    silk_buf: [2][960]f32 = undefined,
+    redundancy_buf: [2][960]f32 = undefined,
+    /// The packet's output, `cur_out` an offset into it.
+    out: [2][max_output]f32 = undefined,
+    cur_out: u32 = 0,
+
+    fn deinit(s: *Stream, gpa: std.mem.Allocator) void {
+        if (s.swr) |*r| r.deinit();
+        s.celt.deinit();
+        gpa.destroy(s.celt);
+    }
+
+    /// swr_close.
+    fn closeResampler(s: *Stream) void {
+        if (s.swr) |*r| r.deinit();
+        s.swr = null;
+    }
+
+    fn view(s: *Stream, buffer: *[2][max_output]f32, at: u32) Resampler.View {
+        _ = s;
+        var v: Resampler.View = .{};
+        v.planes[0] = buffer[0][at..].ptr;
+        v.planes[1] = buffer[1][at..].ptr;
+        return v;
+    }
+
+    /// opus_init_resample: the resampler at the SILK rate, with the
+    /// initial silence for the packet's bandwidth.
+    fn initResample(s: *Stream, gpa: std.mem.Allocator) DecodeError!void {
+        s.swr = Resampler.init(gpa, s.output_channels, s.silk_samplerate, sample_rate, .{ .filter_size = 16 }) catch return error.OutOfMemory;
+        s.swr_rate = s.silk_samplerate;
+        var zeros: [16]f32 = @splat(0);
+        var in: Resampler.View = .{};
+        in.planes[0] = &zeros;
+        in.planes[1] = &zeros;
+        _ = s.swr.?.resample(s.view(&s.out, 0), 0, in, silk_resample_delay[@backingInt(s.packet.bandwidth)]) catch return error.OutOfMemory;
+    }
+
+    /// opus_flush_resample: the delayed samples drained into the output.
+    fn flushResample(s: *Stream, nb_samples: u32) DecodeError!void {
+        const r = &s.swr.?;
+        r.flush() catch return error.OutOfMemory;
+        var none: Resampler.View = .{};
+        none.planes[0] = &s.silk_buf[0];
+        none.planes[1] = &s.silk_buf[1];
+        const got = r.resample(s.view(&s.out, s.cur_out), @intCast(nb_samples), none, 0) catch return error.OutOfMemory;
+        // FFmpeg's AVERROR_BUG otherwise.
+        if (got != nb_samples) return error.InvalidData;
+        if (s.redundancy_idx != 0) {
+            const idx = s.redundancy_idx;
+            for (0..s.output_channels) |c| fade(s.out[c][s.cur_out..], s.out[c][s.cur_out..], s.redundancy_buf[c][120 + idx ..], tab.celt_window2[idx..], 120 - idx);
+            s.redundancy_idx = 0;
+        }
+        s.cur_out += nb_samples;
+    }
 };
+
+/// opus_fade: `in1` faded into `in2` under `window`, in double precision
+/// where the C is.
+fn fade(out: []f32, in1: []const f32, in2: []const f32, window: []const f32, len: u32) void {
+    for (0..len) |i| {
+        out[i] = @floatCast(@as(f64, in2[i] * window[i]) + @as(f64, in1[i]) * (1.0 - @as(f64, window[i])));
+    }
+}
 
 pub const Decoder = struct {
     gpa: std.mem.Allocator,
@@ -180,10 +275,7 @@ pub const Decoder = struct {
         const streams = try gpa.alloc(Stream, head.streams);
         var made: usize = 0;
         errdefer {
-            for (streams[0..made]) |*s| {
-                s.celt.deinit();
-                gpa.destroy(s.celt);
-            }
+            for (streams[0..made]) |*s| s.deinit(gpa);
             gpa.free(streams);
         }
         for (streams, 0..) |*s, i| {
@@ -195,17 +287,14 @@ pub const Decoder = struct {
                 // Lengths and channel counts here are always valid.
                 else => unreachable,
             };
-            s.* = .{ .output_channels = output_channels, .celt = c };
+            s.* = .{ .output_channels = output_channels, .celt = c, .silk = silk.Decoder.init(output_channels) catch unreachable };
             made += 1;
         }
         return .{ .gpa = gpa, .head = head, .streams = streams, .gain = gain };
     }
 
     pub fn deinit(d: *Decoder) void {
-        for (d.streams) |*s| {
-            s.celt.deinit();
-            d.gpa.destroy(s.celt);
-        }
+        for (d.streams) |*s| s.deinit(d.gpa);
         d.gpa.free(d.streams);
         d.* = undefined;
     }
@@ -222,33 +311,47 @@ pub const Decoder = struct {
 
     /// opus_decode_flush.
     pub fn flush(d: *Decoder) void {
-        for (d.streams) |*s| s.celt.flush();
+        for (d.streams) |*s| {
+            s.delayed_samples = 0;
+            s.closeResampler();
+            s.silk.flush();
+            s.celt.flush();
+        }
     }
 
     /// opus_decode_packet: `buf` decoded into `out[0 .. channels]`, each
-    /// at least `max_frame` samples; the samples per channel (FFmpeg's
-    /// frame). The decoder delays nothing without SILK, so the end needs
-    /// no flush.
-    pub fn decodePacket(d: *Decoder, buf_in: []const u8, out: [][]f32) DecodeError!u32 {
+    /// at least `max_output` samples, or, for a null `buf` (the end), the
+    /// samples the resampler still owes; the samples per channel (FFmpeg's
+    /// frame, none when 0).
+    pub fn decodePacket(d: *Decoder, buf_in: ?[]const u8, out: [][]f32) DecodeError!u32 {
         std.debug.assert(out.len == d.head.channels);
-        var buf = buf_in;
         const nb = d.streams.len;
-        d.streams[0].packet = opus.parsePacket(buf, nb > 1) orelse return error.InvalidData;
-        const first = d.streams[0].packet;
-        const coded_samples = first.frame_count * first.frame_duration;
-        var decoded: u32 = std.math.maxInt(u32);
-        for (d.streams, 0..) |*s, i| {
-            if (i != 0) {
-                s.packet = opus.parsePacket(buf, i != nb - 1) orelse return error.InvalidData;
-                if (s.packet.frame_count * s.packet.frame_duration != coded_samples) return error.InvalidData;
-            }
-            const n = try decodeSubpacket(s, buf);
-            decoded = @min(decoded, n);
-            buf = buf[@min(s.packet.packet_size, buf.len)..];
+        var delayed: u32 = 0;
+        for (d.streams) |*s| delayed = @max(delayed, s.delayed_samples);
+        var coded_samples: u32 = 0;
+        if (buf_in) |b| {
+            d.streams[0].packet = opus.parsePacket(b, nb > 1) orelse return error.InvalidData;
+            const first = d.streams[0].packet;
+            coded_samples = first.frame_count * first.frame_duration;
+            d.streams[0].silk_samplerate = silkSamplerate(first.config);
         }
-        // The streams all decode their packets' durations: nothing to
-        // keep for the next packet.
-        for (d.streams) |*s| std.debug.assert(s.packet.frame_count * s.packet.frame_duration == decoded);
+        if (coded_samples + delayed == 0) return 0;
+
+        var decoded: u32 = std.math.maxInt(u32);
+        var buf = buf_in;
+        for (d.streams, 0..) |*s, i| {
+            if (i != 0) if (buf) |b| {
+                s.packet = opus.parsePacket(b, i != nb - 1) orelse return error.InvalidData;
+                if (s.packet.frame_count * s.packet.frame_duration != coded_samples) return error.InvalidData;
+                s.silk_samplerate = silkSamplerate(s.packet.config);
+            };
+            // Streams whose delays could differ keep FFmpeg's sync
+            // buffers, which T28c ports.
+            if (nb > 1 and buf != null and s.packet.mode != .celt) return error.UnsupportedMode;
+            const n = try d.decodeSubpacket(s, buf);
+            decoded = @min(decoded, n);
+            if (buf) |b| buf = b[@min(s.packet.packet_size, b.len)..];
+        }
 
         for (out, 0..) |plane, i| {
             const map = d.head.maps[i];
@@ -266,43 +369,133 @@ pub const Decoder = struct {
         }
         return decoded;
     }
-};
 
-/// opus_decode_subpacket without the resampler: each frame of the
-/// stream's packet in turn; a frame CELT refuses is silence.
-fn decodeSubpacket(s: *Stream, buf: []const u8) DecodeError!u32 {
-    const pkt = &s.packet;
-    var at: u32 = 0;
-    for (0..pkt.frame_count) |i| {
-        const outs = [2][]f32{ s.out[0][at..], s.out[1][at..] };
-        const samples = decodeFrame(s, buf, pkt.frame_offset[i], pkt.frame_size[i], outs) catch |err| switch (err) {
-            error.UnsupportedMode => return error.UnsupportedMode,
-            error.InvalidData => blk: {
-                for (outs[0..s.output_channels]) |o| @memset(o[0..pkt.frame_duration], 0);
-                break :blk pkt.frame_duration;
-            },
-        };
-        at += samples;
+    /// opus_decode_subpacket: the resampler flushed when the mode or the
+    /// SILK rate changes (or at the end), then each frame of the stream's
+    /// packet; a frame that fails to decode is silence.
+    fn decodeSubpacket(d: *Decoder, s: *Stream, buf: ?[]const u8) DecodeError!u32 {
+        s.cur_out = 0;
+        var output_samples: u32 = 0;
+        var flush_needed = false;
+        if (s.swr != null) {
+            flush_needed = if (buf != null) s.packet.mode == .celt or s.swr_rate != s.silk_samplerate else s.delayed_samples != 0;
+        }
+        if (buf == null and !flush_needed) return 0;
+        if (flush_needed) {
+            try s.flushResample(s.delayed_samples);
+            s.closeResampler();
+            output_samples += s.delayed_samples;
+            s.delayed_samples = 0;
+            if (buf == null) return output_samples;
+        }
+        const pkt = &s.packet;
+        for (0..pkt.frame_count) |i| {
+            const samples = d.decodeFrame(s, buf.?, pkt.frame_offset[i], pkt.frame_size[i]) catch |err| switch (err) {
+                error.UnsupportedMode, error.OutOfMemory => |e| return e,
+                error.InvalidData => blk: {
+                    for (0..s.output_channels) |c| @memset(s.out[c][s.cur_out..][0..pkt.frame_duration], 0);
+                    break :blk pkt.frame_duration;
+                },
+            };
+            output_samples += samples;
+            s.cur_out += samples;
+        }
+        return output_samples;
     }
-    return at;
-}
 
-/// opus_decode_frame for a CELT frame.
-fn decodeFrame(s: *Stream, buf: []const u8, offset: i32, size: i32, outs: [2][]f32) DecodeError!u32 {
-    const pkt = &s.packet;
-    if (pkt.mode != .celt) return error.UnsupportedMode;
-    // ff_opus_rc_dec_init refuses a negative size; the packet's padding
-    // past its end reads as zeros.
-    if (size < 0 or offset < 0) return error.InvalidData;
-    const start: usize = @intCast(offset);
-    const end = start + @as(usize, @intCast(size));
-    // ff_opus_parse_packet keeps every frame inside the packet.
-    if (end > buf.len) return error.InvalidData;
-    const data = buf[start..end];
-    var rc = opus_rc.RangeDecoder.init(data) catch return error.InvalidData;
-    rc.initRaw(data, @intCast(size));
-    s.celt.decodeFrame(&rc, outs, @as(u32, @intFromBool(pkt.stereo)) + 1, pkt.frame_duration, 0, tab.celt_band_end[@backingInt(pkt.bandwidth)]) catch
-        return error.InvalidData;
-    s.final_range = if (size <= 1) 0 else rc.range;
-    return pkt.frame_duration;
-}
+    /// opus_decode_frame: SILK at its rate, resampled, then the CELT
+    /// redundancy frame and its fade, or a CELT frame.
+    fn decodeFrame(d: *Decoder, s: *Stream, buf: []const u8, offset: i32, size_in: i32) DecodeError!u32 {
+        const pkt = &s.packet;
+        if (pkt.mode == .hybrid) return error.UnsupportedMode;
+        var samples: u32 = pkt.frame_duration;
+        const delayed_samples = s.delayed_samples;
+        // ff_opus_rc_dec_init refuses a negative size; the packet's padding
+        // past its end reads as zeros.
+        if (size_in < 0 or offset < 0) return error.InvalidData;
+        const start: usize = @intCast(offset);
+        // ff_opus_parse_packet keeps every frame inside the packet.
+        if (start + @as(usize, @intCast(size_in)) > buf.len) return error.InvalidData;
+        var size: i32 = size_in;
+        const data = buf[start..][0..@intCast(size)];
+        var rc = opus_rc.RangeDecoder.init(data) catch return error.InvalidData;
+
+        // The SILK frame.
+        if (pkt.mode == .silk) {
+            if (s.swr == null) try s.initResample(d.gpa);
+            const bw = @min(@backingInt(pkt.bandwidth), 2);
+            const n = s.silk.decodeSuperframe(&rc, .{ &s.silk_buf[0], &s.silk_buf[1] }, bw, @as(u32, @intFromBool(pkt.stereo)) + 1, silk_frame_duration_ms[pkt.config]) catch
+                return error.InvalidData;
+            var in: Resampler.View = .{};
+            in.planes[0] = &s.silk_buf[0];
+            in.planes[1] = &s.silk_buf[1];
+            const got = s.swr.?.resample(s.view(&s.out, s.cur_out), @intCast(pkt.frame_duration), in, @intCast(n)) catch return error.OutOfMemory;
+            samples = @intCast(got);
+            s.delayed_samples += pkt.frame_duration - samples;
+        } else s.silk.flush();
+
+        // The redundancy information.
+        const consumed = rc.tell();
+        var redundancy = false;
+        var redundancy_pos = false;
+        var redundancy_size: i32 = 0;
+        var redundant_rng: u32 = 0;
+        if (pkt.mode == .silk and consumed + 17 <= @as(u32, @intCast(size)) * 8) redundancy = true;
+        if (redundancy) {
+            redundancy_pos = rc.log(1) != 0;
+            redundancy_size = size - @as(i32, @intCast((consumed + 7) / 8));
+            size -= redundancy_size;
+            if (size < 0) return error.InvalidData;
+            if (redundancy_pos) {
+                redundant_rng = try d.decodeRedundancy(s, data[@intCast(size)..][0..@intCast(redundancy_size)]);
+                s.celt.flush();
+            }
+        }
+
+        // The CELT frame.
+        if (pkt.mode == .celt) {
+            rc.initRaw(data[0..@intCast(size)], @intCast(size));
+            const outs = [2][]f32{ s.out[0][s.cur_out..], s.out[1][s.cur_out..] };
+            s.celt.decodeFrame(&rc, outs, @as(u32, @intFromBool(pkt.stereo)) + 1, pkt.frame_duration, 0, tab.celt_band_end[@backingInt(pkt.bandwidth)]) catch
+                return error.InvalidData;
+        } else s.celt.flush();
+
+        if (s.redundancy_idx != 0) {
+            const idx = s.redundancy_idx;
+            for (0..s.output_channels) |c| fade(s.out[c][s.cur_out..], s.out[c][s.cur_out..], s.redundancy_buf[c][120 + idx ..], tab.celt_window2[idx..], 120 - idx);
+            s.redundancy_idx = 0;
+        }
+        if (redundancy) {
+            if (!redundancy_pos) {
+                s.celt.flush();
+                redundant_rng = try d.decodeRedundancy(s, data[@intCast(size)..][0..@intCast(redundancy_size)]);
+                for (0..s.output_channels) |c| {
+                    const at = s.cur_out + samples + delayed_samples - 120;
+                    fade(s.out[c][at..], s.out[c][at..], s.redundancy_buf[c][120..], &tab.celt_window2, 120 - delayed_samples);
+                    if (delayed_samples != 0) s.redundancy_idx = 120 - delayed_samples;
+                }
+            } else {
+                for (0..s.output_channels) |c| {
+                    const at = s.cur_out + delayed_samples;
+                    @memcpy(s.out[c][at..][0..120], s.redundancy_buf[c][0..120]);
+                    fade(s.out[c][at + 120 ..], s.redundancy_buf[c][120..], s.out[c][at + 120 ..], &tab.celt_window2, 120);
+                }
+            }
+        }
+        // libopus' rangeFinal: the frame's, the redundancy frame's mixed in.
+        s.final_range = if (size_in <= 1) 0 else rc.range ^ redundant_rng;
+        return samples;
+    }
+
+    /// opus_decode_redundancy: a 5 ms CELT frame of the packet's bandwidth;
+    /// its range decoder's final state.
+    fn decodeRedundancy(d: *Decoder, s: *Stream, data: []const u8) DecodeError!u32 {
+        _ = d;
+        var rrc = opus_rc.RangeDecoder.init(data) catch return error.InvalidData;
+        rrc.initRaw(data, @intCast(data.len));
+        const outs = [2][]f32{ &s.redundancy_buf[0], &s.redundancy_buf[1] };
+        s.celt.decodeFrame(&rrc, outs, @as(u32, @intFromBool(s.packet.stereo)) + 1, 240, 0, tab.celt_band_end[@backingInt(s.packet.bandwidth)]) catch
+            return error.InvalidData;
+        return rrc.range;
+    }
+};

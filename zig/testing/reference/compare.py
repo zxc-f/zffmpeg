@@ -2107,7 +2107,7 @@ FATE_VORBIS = ["1.0.1-test_small", "1.0-test_small", "beta3-test_small", "beta4-
 # Ogg fixtures FFmpeg decodes and the port does not yet: zffmpeg must
 # refuse them with UnsupportedOpusMode, before any output.
 PENDING_OGG_DECODE = {
-    "ogg_opus_frame_counts": "SILK and hybrid frames (T28b, T28c)",
+    "ogg_opus_frame_counts": "its hybrid frame (T28c)",
 }
 
 
@@ -2116,6 +2116,10 @@ PENDING_OGG_DECODE = {
 KNOWN_OGG_DECODE_DIFFERENCES = {
     ("ogg_chained_opus", "-f ogg"): "the same samples; the first page's granule differs: the chain's timestamps "
                                     "restart and the program's muxing fixes them up (mux_fixup_ts, T53)",
+    ("ogg_opus_silk", "-f ogg"): "the same packets and samples; their timestamps differ: the program's decoded "
+                                 "frames keep the Opus packets' timestamps, with gaps where the SILK resampler "
+                                 "delays samples, and the Ogg muxer's granules follow them (the program's "
+                                 "timestamps, T53)",
     ("ogg_page_without_granule", None): "the demuxer fails mid-stream (a granule above 2^62): the ffmpeg program "
                                         "ends the input there and exits 0, zffmpeg fails (port.md: a late parse "
                                         "error stays a failure), before any output from a file",
@@ -2123,13 +2127,20 @@ KNOWN_OGG_DECODE_DIFFERENCES = {
 
 
 def compare_opus_vectors(args, lines, failures):
-    """RFC 6716's test vectors as updated by RFC 8251 (T28a, optional): each
-    `.bit` decoded by av.opusdec into stereo and into mono, every packet's
-    final range equal to the encoder's, and opus_compare's quality against
-    the references (mono against testvectorNN.dec or testvectorNNm.dec, as
-    libopus' run_vectors.sh accepts either). Vectors with SILK or hybrid
-    frames wait for T28b and T28c and are reported as skipped."""
+    """RFC 6716's test vectors as updated by RFC 8251 (T28, optional): each
+    `.bit` decoded by av.opusdec into stereo and into mono must equal
+    FFmpeg's decoding (vectors/opus_rfc.txt, printed by
+    opus_rfc_vectors.c), sample for sample. opus_compare's verdict and the
+    packets whose final range differs from the encoder's are reported
+    beside it: FFmpeg's SILK path, resampled by libswresample, fails
+    opus_compare on some vectors, and its mono SILK decoding reads other
+    bits than libopus' (notes.md "Opus"). Vectors with hybrid frames wait
+    for T28c and are reported as skipped."""
     folder = pathlib.Path(args.opus_vectors)
+    ffmpeg = {}
+    for line in (HERE.parent / "vectors" / "opus_rfc.txt").read_text().splitlines():
+        _, name, channels, samples, md5 = line.split()
+        ffmpeg[(name, int(channels))] = (samples, md5)
     rows = []
     passed = failed = skipped = 0
     reasons = set()
@@ -2144,27 +2155,33 @@ def compare_opus_vectors(args, lines, failures):
                 rows.append(f"| {name} | {label} | skipped: missing |")
                 continue
             p = run(args.opus_vector_driver, bit, str(channels), *refs[label])
-            out = text(p.stdout).strip()
-            if p.returncode == 0:
-                passed += 1
-                rows.append(f"| {name} | {label} | pass: {out} |")
-            elif p.returncode == 3:
+            out = text(p.stdout).split()
+            if p.returncode == 3:
                 skipped += 1
-                reasons.add("SILK and hybrid frames (T28b, T28c)")
-                rows.append(f"| {name} | {label} | skipped: SILK or hybrid frames (T28b, T28c) |")
+                reasons.add("hybrid frames (T28c)")
+                rows.append(f"| {name} | {label} | skipped: hybrid frames (T28c) |")
+                continue
+            fields = dict(zip(out[0::2], out[1::2])) if p.returncode == 0 else {}
+            theirs = ffmpeg.get((name, channels))
+            note = (f"opus_compare {fields.get('opus_compare')} ({fields.get('quality')}), "
+                    f"{fields.get('range-mismatches')} final ranges differ")
+            if theirs and fields.get("md5") == theirs[1] and fields.get("samples") == theirs[0]:
+                passed += 1
+                rows.append(f"| {name} | {label} | pass: equal to FFmpeg's; {note} |")
             else:
                 failed += 1
-                why = out or first_line(text(p.stderr))
+                why = (f"differs from FFmpeg's ({note})" if p.returncode == 0
+                       else first_line(text(p.stderr)) or f"exit {p.returncode}")
                 rows.append(f"| {name} | {label} | **FAIL**: {why} |")
                 failures.append(f"Opus test vector {name} {label}: {why}")
-    record("RFC 8251 Opus test vectors (T28a)", passed, passed + failed + skipped, optional=True, skipped=skipped,
+    record("RFC 8251 Opus test vectors (T28)", passed, passed + failed + skipped, optional=True, skipped=skipped,
            reasons=sorted(reasons))
     lines += [
         "",
-        "## RFC 8251 Opus test vectors (T28a)",
+        "## RFC 8251 Opus test vectors (T28)",
         "",
-        f"Test vectors decoded by av.opusdec, final ranges equal to the encoder's and opus_compare passing "
-        f"(optional): {passed} passed, {failed} failed, {skipped} skipped.",
+        f"Test vectors decoded by av.opusdec equal to FFmpeg's decoding (optional): {passed} passed, "
+        f"{failed} failed, {skipped} skipped; opus_compare and the final ranges as reported.",
         "",
         "| Vector | Output | Result |",
         "| --- | --- | --- |",

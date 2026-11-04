@@ -28,6 +28,11 @@
         .expected = .accept,
     },
     .{
+        .name = "ogg_opus_silk",
+        .sha256 = "e69f06863abe28f42af6e88c3b50aca59062c20fc1e21027fc4e61180734bd6d",
+        .expected = .accept,
+    },
+    .{
         .name = "ogg_vorbis_stereo",
         .sha256 = "b3d4d010868fe7885cd03e9dd87f923ad0576734674fca52e68a807ce0a2ab95",
         .expected = .accept,

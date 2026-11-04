@@ -1651,14 +1651,15 @@ fn opusAfterSeek(gpa: std.mem.Allocator, info: *const StreamInfo, p: demux.Packe
     var dec = opusdec.Decoder.init(gpa, info.extradata.items, true) catch return out.appendSlice(gpa, "D none\n");
     defer dec.deinit();
     const channels = dec.channels();
-    const storage = try gpa.alloc(f32, @as(usize, channels) * opusdec.max_frame);
+    const storage = try gpa.alloc(f32, @as(usize, channels) * opusdec.max_output);
     defer gpa.free(storage);
     var planes: [255][]f32 = undefined;
-    for (0..channels) |c| planes[c] = storage[c * opusdec.max_frame ..][0..opusdec.max_frame];
+    for (0..channels) |c| planes[c] = storage[c * opusdec.max_output ..][0..opusdec.max_output];
     const n = dec.decodePacket(p.data, planes[0..channels]) catch |err| switch (err) {
-        // SILK and hybrid frames decode with T28b and T28c.
-        error.UnsupportedMode => return out.appendSlice(gpa, "D pending\n"),
+        // No seek of the fixtures lands on a hybrid packet (T28c).
+        error.UnsupportedMode => return error.UnsupportedMode,
         error.InvalidData => return out.appendSlice(gpa, "D none\n"),
+        error.OutOfMemory => return error.OutOfMemory,
     };
     // avcodec_open2 starts the skip at avctx->delay, the pre-skip, and a
     // flush keeps it.
@@ -1683,7 +1684,6 @@ fn opusAfterSeek(gpa: std.mem.Allocator, info: *const StreamInfo, p: demux.Packe
 test "every Ogg fixture seeks as FFmpeg seeks it (vectors/seek_ogg.txt)" {
     const gpa = testing.allocator;
     var compared: usize = 0;
-    var pending_modes: usize = 0;
     inline for (fixtures.ogg.all) |fixture| {
         const block_text = seekBlock(fixture.name) orelse return error.MissingVector;
         var lines = std.mem.splitScalar(u8, block_text, '\n');
@@ -1734,14 +1734,6 @@ test "every Ogg fixture seeks as FFmpeg seeks it (vectors/seek_ogg.txt)" {
                     error.SeekFailed, error.InvalidRange => try actual.appendSlice(gpa, "-1"),
                     else => return err,
                 }
-                // Pending T28b and T28c: a SILK or hybrid packet's samples.
-                if (std.mem.endsWith(u8, actual.items, "D pending\n")) {
-                    const at = std.mem.lastIndexOf(u8, expected.items, "\nD ") orelse 0;
-                    const start = if (at == 0 and std.mem.startsWith(u8, expected.items, "D ")) 0 else at + 1;
-                    expected.shrinkRetainingCapacity(start);
-                    try expected.appendSlice(gpa, "D pending\n");
-                    pending_modes += 1;
-                }
                 const want = if (std.mem.eql(u8, ret, "0")) expected.items else ret;
                 testing.expectEqualStrings(want, actual.items) catch |err| {
                     std.debug.print("fixture {s}: {s}\n", .{ fixture.name, k_line });
@@ -1752,9 +1744,7 @@ test "every Ogg fixture seeks as FFmpeg seeks it (vectors/seek_ogg.txt)" {
         }
     }
     // Every seek of the fixtures FFmpeg opens.
-    try testing.expectEqual(1404, compared);
-    // ogg_opus_frame_counts' SILK and hybrid packets (T28b, T28c).
-    try testing.expectEqual(17, pending_modes);
+    try testing.expectEqual(1458, compared);
 }
 
 test "a demuxer that cannot seek fails a seek instead of repositioning" {
@@ -1930,12 +1920,13 @@ test "every Ogg fixture's Opus stream decodes as FFmpeg's decoder decodes it (ve
                 };
             }
         } else |err| switch (err) {
-            // Its SILK and hybrid packets decode with T28b and T28c.
+            // Its hybrid packet decodes with T28c.
             error.UnsupportedMode => try testing.expectEqualStrings("ogg_opus_frame_counts", fixture.name),
             else => return err,
         }
     }
-    try testing.expectEqual(199, frames);
+    // ogg_opus_frame_counts' frames before its hybrid packet included.
+    try testing.expectEqual(214, frames);
 }
 
 /// opus_vectors.c's lines for one file: the input opened as the ffmpeg
@@ -1961,10 +1952,10 @@ fn decodeOpusFixture(gpa: std.mem.Allocator, bytes: []const u8, out: *std.ArrayL
     defer dec.deinit();
     try out.appendSlice(gpa, "O ok\n");
     const channels = dec.channels();
-    const storage = try gpa.alloc(f32, @as(usize, channels) * opusdec.max_frame);
+    const storage = try gpa.alloc(f32, @as(usize, channels) * opusdec.max_output);
     defer gpa.free(storage);
     var planes: [255][]f32 = undefined;
-    for (0..channels) |c| planes[c] = storage[c * opusdec.max_frame ..][0..opusdec.max_frame];
+    for (0..channels) |c| planes[c] = storage[c * opusdec.max_output ..][0..opusdec.max_output];
     var discard: Discard = .{ .skip = dec.head.pre_skip };
     var line: [96]u8 = undefined;
     // A read error ends the oracle's av_read_frame loop.
@@ -1976,20 +1967,37 @@ fn decodeOpusFixture(gpa: std.mem.Allocator, bytes: []const u8, out: *std.ArrayL
                 continue;
             },
             error.UnsupportedMode => return error.UnsupportedMode,
+            error.OutOfMemory => return error.OutOfMemory,
         };
         try out.appendSlice(gpa, try std.fmt.bufPrint(&line, "P {d} 0\n", .{p.data.len}));
+        if (n == 0) continue;
         const kept = discard.apply(n, p.skip) orelse continue;
-        var md5: std.crypto.hash.Md5 = .init(.{});
-        for (planes[0..channels]) |plane| {
-            for (plane[kept[0]..kept[1]]) |v| {
-                var le: [4]u8 = undefined;
-                std.mem.writeInt(u32, &le, @bitCast(v), .little);
-                md5.update(&le);
-            }
-        }
-        var digest: [16]u8 = undefined;
-        md5.final(&digest);
-        try out.appendSlice(gpa, try std.fmt.bufPrint(&line, "D {d} {x}\n", .{ kept[1] - kept[0], digest }));
+        try appendOpusFrame(gpa, planes[0..channels], kept, out);
         frames.* += 1;
     }
+    // The null packet at the end: the samples the resampler owes.
+    const n = try dec.decodePacket(null, planes[0..channels]);
+    if (n != 0) {
+        if (discard.apply(n, null)) |kept| {
+            try appendOpusFrame(gpa, planes[0..channels], kept, out);
+            frames.* += 1;
+        }
+    }
+}
+
+/// A `D` line: the kept samples' count and the MD5 of the planes, one
+/// after another.
+fn appendOpusFrame(gpa: std.mem.Allocator, planes: []const []f32, kept: [2]u32, out: *std.ArrayList(u8)) !void {
+    var md5: std.crypto.hash.Md5 = .init(.{});
+    for (planes) |plane| {
+        for (plane[kept[0]..kept[1]]) |v| {
+            var le: [4]u8 = undefined;
+            std.mem.writeInt(u32, &le, @bitCast(v), .little);
+            md5.update(&le);
+        }
+    }
+    var digest: [16]u8 = undefined;
+    md5.final(&digest);
+    var line: [96]u8 = undefined;
+    try out.appendSlice(gpa, try std.fmt.bufPrint(&line, "D {d} {x}\n", .{ kept[1] - kept[0], digest }));
 }

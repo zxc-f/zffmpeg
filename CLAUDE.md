@@ -28,7 +28,7 @@ seeked on libavformat's generic layer (T27a), and FFmpeg's Ogg muxer with
 FLAC encoded into Ogg (T27b), and FFmpeg's float FFT and MDCT (T27c), the
 LSB-first reader and VLC tables (T18c) and the Vorbis decoder, with Ogg
 decoded in zffmpeg (T27d), and the Opus decoder for CELT frames, with
-Ogg Opus decoded (T28a). The `av`
+Ogg Opus decoded (T28a), and SILK frames (T28b). The `av`
 module (rooted at `zig/root.zig`) exports `pcm` (the PCM encodings,
 kernels and decoder/encoder stages), `audio`, `channel_layout` (FFmpeg's
 channel layouts), `time`, `samples` (decoded sample storage
@@ -46,7 +46,7 @@ metadata blocks and seeking), `flacenc` and `flacmux` (FFmpeg's FLAC
 encoder, packet for packet, and its muxer as a PCM writer), `ogg`
 (FFmpeg's Ogg demuxer and mappings), `oggmux` (its Ogg muxer), `oggdecode` (an Ogg stream decoded), `tx` (FFmpeg's float FFT
 and MDCT), `vlc` (VLC tables), `vorbis` (the Vorbis decoder), `opusdec` (the Opus
-decoder, CELT frames), `demux` (libavformat's generic layer:
+decoder, CELT and SILK frames), `demux` (libavformat's generic layer:
 timestamps, the stream-info read-ahead, timings and seeking),
 `bits` (an MSB-first bit reader and writer and FLAC's CRCs), `framehash` (FFmpeg's
 framecrc, framemd5 and streamhash text), `rational` (FFmpeg's rational
@@ -60,7 +60,7 @@ stream-copy pipeline) and `file` (file and pipe adapters). Two tools sit on it:
 converts and stream-copies between them (CAF as input only; Ogg Vorbis, Opus
 and FLAC decoded as input, FLAC written as output), carrying tags,
 with `-c:a`, FFmpeg's dither options and its FLAC encoder options. Tests cover 129 WAV,
-41 AU, 57 AIFF, 25 raw PCM, 58 CAF, 56 FLAC and 29 Ogg fixtures, process runs of both tools, and a CI comparison against a
+41 AU, 57 AIFF, 25 raw PCM, 58 CAF, 56 FLAC and 30 Ogg fixtures, process runs of both tools, and a CI comparison against a
 pinned FFmpeg build that also reads every `zffmpeg` output. Verification is
 Linux-only during development; Windows and ARM wait for T62–T63. T13, T14a
 (packets, frames and stages), T17b (the metadata dictionary), T20a (decoded
@@ -82,7 +82,8 @@ and the comparison's coverage summary), completing T19, and T27a (Ogg
 demux, with libavformat's generic layer and Ogg seeking), T27b (Ogg
 mux, FLAC into Ogg), T27c (FFT and MDCT), T18c (VLC tables) and T27d
 (Vorbis decoding), completing T27, and T28a (the range decoder, CELT and
-Ogg Opus decoding); T28b (SILK) is next,
+Ogg Opus decoding) and T28b (SILK); T28c (hybrid frames, multistream and
+trimming) is next,
 and TODO.md lays out the roadmap through T64.
  When the state changes, update the current-state statements in
 README.md, port.md ("Status and scope"), the TODO.md introduction and this file

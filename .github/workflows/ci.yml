@@ -373,6 +373,19 @@ jobs:
         continue-on-error: true
         run: bash zig/testing/reference/opus_vectors_sync.sh
 
+      # FFmpeg's decoding of the optional RFC 8251 vectors, which compare.py
+      # compares with the port's, must be what opus_rfc.txt records (T28b).
+      - name: Check FFmpeg's decoding of the Opus test vectors (T28b)
+        run: |
+          if [ ! -e .references/opus-testvectors/testvector01.bit ]; then
+            echo "::notice::Opus test vectors missing: their digests are not checked"
+            exit 0
+          fi
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/opus_rfc_vectors.c \
+            .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a \
+            .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o opus-rfc-vectors
+          LC_ALL=C ./opus-rfc-vectors .references/opus-testvectors/testvector*.bit | diff -u zig/testing/vectors/opus_rfc.txt -
+
       - name: Compare with the reference (T10)
         run: |
           python3 zig/testing/reference/compare.py \

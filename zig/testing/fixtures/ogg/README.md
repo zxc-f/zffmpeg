@@ -19,6 +19,7 @@ port.md's "Ogg contract" says which behavior the port follows.
 | `ogg_opus_stereo` | accepted | yes | Opus: OpusHead (pre-skip 312) and OpusTags, then 20 ms CELT packets four to a page; the EOS page's granule ends the stream exactly. |
 | `ogg_opus_end_trim` | accepted | yes | Opus whose EOS granule falls inside the last packet: FFmpeg trims its end (skip-samples side data). |
 | `ogg_opus_frame_counts` | accepted | yes | Opus TOC frame counts 1, 2 (codes 1 and 2) and code 3 with a count byte, and configurations of 2.5 to 60 ms. |
+| `ogg_opus_silk` | accepted | yes | Opus SILK packets of random bytes (any bytes decode): narrow, medium and wide band, 10 to 60 ms, mono and stereo, frame count codes 0, 1 and 3, CELT packets between and frames large enough to carry redundancy (T28b). |
 | `ogg_vorbis_stereo` | accepted | yes | Vorbis: identification, comment and a setup header whose mode table (a short and a long mode) the parser reads; packet durations from the block sizes, four packets to a page. |
 | `ogg_vorbis_granule_zero` | accepted | yes | Vorbis data pages whose granule is 0: FFmpeg drops their timestamps (trac ticket 3710). |
 | `ogg_multiplexed` | accepted | yes | Two logical streams, FLAC and Opus, their BOS pages first, then pages interleaved. |

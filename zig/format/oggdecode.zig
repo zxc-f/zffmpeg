@@ -5,7 +5,7 @@
 // the pinned reference revision describe the behavior, restated here.
 //! An Ogg stream decoded as the ffmpeg program decodes it (TODO.md T27d):
 //! the demuxer through libavformat's generic layer, FFmpeg's Vorbis, Opus
-//! (CELT frames, T28a) or FLAC decoder, and libavcodec's discarding of the
+//! (CELT and SILK frames, T28a and T28b) or FLAC decoder, and libavcodec's discarding of the
 //! samples a decoder or the demuxer asks to skip, delivered as packed
 //! little-endian samples (Vorbis' and Opus' planar floats interleaved as
 //! f32le).
@@ -39,8 +39,8 @@ pub const ReadError = ogg.Error || error{
     /// More than two thirds of the decodes failed: the ffmpeg program's
     /// `-max_error_rate` (2/3), which fails the decoding.
     DecodeErrorRate,
-    /// An Opus SILK or hybrid frame, which FFmpeg decodes and the port
-    /// does not yet (T28b, T28c).
+    /// An Opus hybrid frame, or SILK in a multistream packet, which FFmpeg
+    /// decodes and the port does not yet (T28c).
     UnsupportedOpusMode,
 };
 
@@ -199,15 +199,15 @@ pub const DecodedReader = struct {
                 } };
                 const dec = &r.decoder.opus;
                 const n = dec.channels();
-                r.plane_storage = try r.gpa.alloc(f32, @as(usize, opusdec.max_frame) * n);
-                for (0..n) |c| r.planes[c] = r.plane_storage[c * opusdec.max_frame ..][0..opusdec.max_frame];
+                r.plane_storage = try r.gpa.alloc(f32, @as(usize, opusdec.max_output) * n);
+                for (0..n) |c| r.planes[c] = r.plane_storage[c * opusdec.max_output ..][0..opusdec.max_output];
                 r.pending = .{ .planes = .{ 0, 0 } };
                 // avcodec_open2 starts the skip at avctx->delay, the
                 // pre-skip.
                 r.discard.skip = dec.head.pre_skip;
                 const format = audio.Format.initLayout(opusdec.sample_rate, dec.head.layout, .flt) catch return error.UnsupportedFormat;
                 r.bits = 32;
-                r.max_frame = opusdec.max_frame;
+                r.max_frame = opusdec.max_output;
                 return .{ .stream = .opus, .codec = .f32le, .format = format, .frame_count = r.expected, .bits = 32 };
             },
             .vorbis => {
@@ -338,6 +338,22 @@ pub const DecodedReader = struct {
             }
             const p = try layer.next() orelse {
                 r.ended = true;
+                // The end: the samples Opus' resampler still owes, as the
+                // ffmpeg program drains a decoder with a null packet.
+                switch (r.decoder) {
+                    .opus => |*dec| {
+                        const n = dec.decodePacket(null, r.planes[0..r.channels]) catch |err| switch (err) {
+                            error.OutOfMemory => return error.OutOfMemory,
+                            error.InvalidData, error.UnsupportedMode => return false,
+                        };
+                        if (n == 0) return false;
+                        const kept = r.discard.apply(n, null) orelse return false;
+                        r.frames_decoded += 1;
+                        r.pending = .{ .planes = kept };
+                        return true;
+                    },
+                    else => {},
+                }
                 return false;
             };
             if (p.stream != r.stream) continue;
@@ -372,10 +388,12 @@ pub const DecodedReader = struct {
                             continue;
                         },
                         error.UnsupportedMode => {
-                            diagnostics.report(r.sink, .err, "Opus SILK and hybrid frames are not decoded yet", .{});
+                            diagnostics.report(r.sink, .err, "Opus hybrid frames and multistream SILK are not decoded yet", .{});
                             return error.UnsupportedOpusMode;
                         },
+                        error.OutOfMemory => return error.OutOfMemory,
                     };
+                    if (n == 0) continue;
                     const kept = r.discard.apply(n, p.skip) orelse continue;
                     r.frames_decoded += 1;
                     r.pending = .{ .planes = kept };
