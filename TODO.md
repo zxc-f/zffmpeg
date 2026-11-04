@@ -946,7 +946,7 @@ names, not as an empty framework.
     failure and cancellation, and copying an owning value never clones it
     implicitly.
 
-- [ ] **T15 — Rational arithmetic and timestamps.** Needs T05. Start with the
+- [x] **T15 — Rational arithmetic and timestamps.** Needs T05. Start with the
   first consumer that needs more than `TimeBase` and `rescale` (T52a, T27a,
   T33a or T36a).
   Reference: `libavutil/rational.c`, `libavutil/mathematics.c`
@@ -959,6 +959,20 @@ names, not as an empty framework.
   and wrap handling do not authorize guessing durations for malformed streams.
   Done when vectors from an exact rational oracle, including `i64` extremes,
   missing values and negative timestamps, pass in every build mode.
+  Evidence: [core/rational.zig](zig/core/rational.zig) (`av.rational`),
+  local Linux runs with Zig 0.17.0, landing as T52a's first part (its first
+  consumer). `rational_vectors.c` prints 55299 vectors from the pinned
+  libavutil (clean under UBSan; the inputs avoid what its C leaves
+  undefined): `av_gcd`, `av_reduce` with three bounds, `av_mul_q`,
+  `av_div_q`, `av_add_q`, `av_sub_q`, `av_cmp_q` (0/0 and x/0 included),
+  `av_nearer_q`, `av_d2q` (NaN, infinities, past `INT_MAX`),
+  `av_rescale_rnd` with every rounding and `AV_ROUND_PASS_MINMAX` over the
+  `int64_t` extremes and all three of its paths, `av_compare_ts`,
+  `av_compare_mod` with 33-bit and other moduli, `av_rescale_delta` over
+  runs of audio frames from a missing `last`, `av_add_stable`, and the
+  saturating sums; all equal in Debug, ReleaseSafe and ReleaseFast.
+  Float-to-rational conversion for CLI input is `fromFloat`; per-stream
+  wrap detection belongs to T52c.
 
 - [x] **T16 — Codec and format descriptors, registries and probing.** Needs
   T13b. Start with the first subtask that adds a third format (T22b, T22d or

@@ -105,6 +105,19 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/resample_ve
 ./resample-vectors | diff -u zig/testing/vectors/resample.txt -
 ```
 
+The T15 rational vectors come from the reference's `libavutil`: its
+rational arithmetic (`av_reduce`, `av_mul_q` and the others, `av_cmp_q`,
+`av_nearer_q`, `av_d2q`) and timestamp helpers (`av_gcd`, `av_rescale_rnd`
+with every rounding, `av_compare_ts`, `av_compare_mod`, `av_rescale_delta`,
+`av_add_stable`, the saturating sums) over values up to the `int64_t`
+extremes; the inputs avoid the ones its C leaves undefined, and the
+generator runs clean under UBSan:
+
+```bash
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/rational_vectors.c .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o rational-vectors
+./rational-vectors | diff -u zig/testing/vectors/rational.txt -
+```
+
 The T26a FLAC vectors come from the reference's `libavformat` and
 `libavcodec`: `flac_vectors.c` opens each FLAC fixture as the ffmpeg program
 opens an input, then prints the stream, every packet `av_read_frame` returns

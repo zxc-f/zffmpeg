@@ -13,6 +13,10 @@
 //!   (`core/channel_layout.zig`).
 //! - `time`: time bases and FFmpeg-compatible timestamp rescaling
 //!   (`core/time.zig`).
+//! - `rational`: FFmpeg's rational arithmetic and timestamp helpers with its
+//!   exact results: reduction, `av_d2q`, `av_rescale_rnd`,
+//!   `av_compare_ts`, `av_compare_mod`, `av_rescale_delta`,
+//!   `av_add_stable` (`core/rational.zig`).
 //! - `samples`: decoded sample storage for every sample format, packed or
 //!   planar: buffer sizes, plane offsets, silence and copying
 //!   (`core/samples.zig`).
@@ -69,6 +73,7 @@ pub const pcm = @import("codec/pcm.zig");
 pub const audio = @import("core/audio.zig");
 pub const channel_layout = @import("core/channel_layout.zig");
 pub const time = @import("core/time.zig");
+pub const rational = @import("core/rational.zig");
 pub const samples = @import("core/samples.zig");
 pub const packet = @import("core/packet.zig");
 pub const frame = @import("core/frame.zig");
@@ -115,6 +120,7 @@ test {
     _ = @import("core/options.zig");
     _ = @import("core/diagnostics.zig");
     _ = @import("core/eval.zig");
+    _ = @import("core/rational.zig");
     _ = @import("format/wav.zig");
     _ = @import("format/au.zig");
     _ = @import("format/aiff.zig");
