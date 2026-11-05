@@ -710,7 +710,7 @@ test "planes other than one per channel of max_output samples are refused before
     try testing.expectEqual(960, try dec.decodePacket(&packet, &planes));
 }
 
-const sweep = @import("../testing/sweep.zig");
+const hostile = @import("../testing/hostile.zig");
 
 /// An Ogg Opus fixture's packets (the OpusHead first, then OpusTags and
 /// the audio); free with `deinit`.
@@ -721,7 +721,7 @@ const TestStream = struct {
     fn init(gpa: std.mem.Allocator, file: []const u8, count: usize) !TestStream {
         var t: TestStream = .{ .count = count };
         errdefer t.deinit(gpa);
-        try sweep.oggPackets(gpa, file, t.packets[0..count]);
+        try hostile.oggPackets(gpa, file, t.packets[0..count]);
         return t;
     }
 
@@ -768,7 +768,7 @@ test "the Opus decoder frees everything under every allocation and remap failure
     const gpa = testing.allocator;
     // Bounded for Debug: the three-stream fixture with remaps failing only
     // (which reaches every allocation the other pass makes).
-    const cases = [_]struct { file: []const u8, count: usize, remaps: sweep.Remaps }{
+    const cases = [_]struct { file: []const u8, count: usize, remaps: hostile.Remaps }{
         .{ .file = fixture_hybrid, .count = 12, .remaps = .both },
         .{ .file = fixture_silk, .count = 12, .remaps = .both },
         .{ .file = fixture_mapped, .count = 6, .remaps = .both },
@@ -777,7 +777,7 @@ test "the Opus decoder frees everything under every allocation and remap failure
     for (cases) |case| {
         var t = try TestStream.init(gpa, case.file, case.count);
         defer t.deinit(gpa);
-        try sweep.checkAllocationFailuresWith(gpa, case.remaps, &t, decodeUnderFailures);
+        try hostile.checkAllocationFailuresWith(gpa, case.remaps, &t, decodeUnderFailures);
     }
 }
 
@@ -823,7 +823,7 @@ fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
 /// packet i (a null packet or a flush) where given, and the null packet
 /// at the end.
 fn fuzzSeed(gpa: std.mem.Allocator, t: *const TestStream, phase_inv: bool, actions: []const u8) ![]u8 {
-    var s: sweep.Seed = .{};
+    var s: hostile.Seed = .{};
     errdefer s.deinit(gpa);
     try s.slice(gpa, t.head());
     try s.value(gpa, @intFromBool(phase_inv));

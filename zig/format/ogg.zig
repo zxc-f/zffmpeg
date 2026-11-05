@@ -2292,11 +2292,8 @@ test "the Ogg demuxer and the generic layer free everything under every allocati
         .{ "ogg_chained_opus", 4000 },
         .{ "ogg_packet_spanning_pages", 600 },
         .{ "ogg_opus_empty_first_packet", 5000 },
-        // Opening an encoded Vorbis stream runs the decoder's setup
-        // (ogg_vorbis_ffmpeg_22k_short), whose VLC tables free invalid
-        // memory after a failed allocation (vorbis.zig parseCodebooks,
-        // vlc.zig): left out until that is fixed. These synthetic setup
-        // headers are refused before any codebook.
+        // These synthetic setup headers are refused before any codebook;
+        // the encoded stream below runs the decoder's whole setup.
         .{ "ogg_vorbis_granule_zero", 500 },
         .{ "ogg_page_without_granule", 3000 },
     }) |case| {
@@ -2318,6 +2315,14 @@ fn exerciseFragmented(gpa: std.mem.Allocator, bytes: []const u8) error{OutOfMemo
     };
     defer d.deinit();
     return hostile.runTestPlan(Demuxer, gpa, d, .{});
+}
+
+test "opening encoded Vorbis frees everything under every allocation failure" {
+    // Opening runs the Vorbis decoder's setup (codebooks, VLC tables) during
+    // the read-ahead; a failed shrink in Vlc.init used to free the wrong
+    // length here. One sweep, without a seek, bounds the time in Debug.
+    const bytes = fixtures.ogg.bytes("ogg_vorbis_ffmpeg_22k_short");
+    try hostile.checkAll(exercise, .{ bytes, false, hostile.TestPlan{} });
 }
 
 test "the Ogg demuxer from a pipe of one-byte reads frees everything under every allocation failure" {

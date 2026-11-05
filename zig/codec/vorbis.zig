@@ -1301,7 +1301,7 @@ fn readyFloor1List(list: []Floor1Entry) bool {
 }
 
 const testing = std.testing;
-const sweep = @import("../testing/sweep.zig");
+const hostile = @import("../testing/hostile.zig");
 
 test "len2vlc assigns Vorbis' codewords and refuses incomplete and overfull trees" {
     var codes: [4]u32 = undefined;
@@ -1355,7 +1355,7 @@ test "planes that an in-stream identification header outgrows are refused before
     // of 1024 samples; headers, then two audio packets.
     var packets: [4]std.ArrayList(u8) = @splat(.empty);
     defer for (&packets) |*p| p.deinit(gpa);
-    try sweep.oggPackets(gpa, @embedFile("../testing/fixtures/ogg/ogg_vorbis_ffmpeg_22k_short.ogg"), &packets);
+    try hostile.oggPackets(gpa, @embedFile("../testing/fixtures/ogg/ogg_vorbis_ffmpeg_22k_short.ogg"), &packets);
     const id = packets[0].items;
     const setup = packets[2].items;
     const audio = packets[3].items;
@@ -1415,8 +1415,8 @@ const TestStream = struct {
     fn init(gpa: std.mem.Allocator, file: []const u8, count: usize) !TestStream {
         var t: TestStream = .{ .count = count, .extradata = &.{} };
         errdefer for (&t.packets) |*p| p.deinit(gpa);
-        try sweep.oggPackets(gpa, file, t.packets[0..count]);
-        t.extradata = try sweep.xiphExtradata(gpa, .{ t.packets[0].items, t.packets[1].items, t.packets[2].items });
+        try hostile.oggPackets(gpa, file, t.packets[0..count]);
+        t.extradata = try hostile.xiphExtradata(gpa, .{ t.packets[0].items, t.packets[1].items, t.packets[2].items });
         return t;
     }
 
@@ -1496,7 +1496,7 @@ test "the Vorbis decoder frees everything under every allocation and remap failu
     defer t.deinit(gpa);
     // Remaps failing only, bounded for Debug: that pass reaches every
     // allocation the other makes; vlc.zig sweeps the tables' shrink both ways.
-    try sweep.checkAllocationFailuresWith(gpa, .fail, &t, decodeUnderFailures);
+    try hostile.checkAllocationFailuresWith(gpa, .fail, &t, decodeUnderFailures);
 }
 
 /// The fuzz entry's input: the extradata, then up to 32 steps, each an
@@ -1544,7 +1544,7 @@ fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
 /// A `fuzzOne` input: `t`'s extradata, then its audio packets with the
 /// `flush` flags, then `more` packets as they are.
 fn fuzzSeed(gpa: std.mem.Allocator, extradata: []const u8, audio: []const std.ArrayList(u8), flush: []const bool, more: []const []const u8) ![]u8 {
-    var s: sweep.Seed = .{};
+    var s: hostile.Seed = .{};
     errdefer s.deinit(gpa);
     try s.slice(gpa, extradata);
     for (audio, 0..) |p, i| {

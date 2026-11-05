@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Original file for this project.
-//! Hostile-input helpers for the demuxers' tests (TODO.md G3):
+//! Hostile-input helpers for the demuxers' and decoders' tests (TODO.md G3):
 //! allocation-failure injection, the seed encoding of their bounded fuzz
 //! entries, and a deterministic mutation smoke run over those seeds.
 //!
@@ -28,6 +28,11 @@
 //! `TestPlan` and `runTestPlan` are what those sweeps and entries do with
 //! an opened demuxer: the generic layer's read-ahead, the packets, and a
 //! seek after the first (`drawTestPlan` draws one from a fuzz input).
+//!
+//! The codecs' tests use the same sweep with a context argument
+//! (`checkAllocationFailures`, both remap modes or only failing ones),
+//! `Seed` to build a corpus entry at run time, and `oggPackets` and
+//! `xiphExtradata` to cut decoder seeds out of the Ogg fixtures.
 
 const std = @import("std");
 const demux = @import("../format/demux.zig");
@@ -111,36 +116,78 @@ pub fn runTestPlan(comptime Source: type, gpa: std.mem.Allocator, src: *Source, 
 }
 
 /// Runs `test_fn(gpa, extra_args...)` failing each allocation in turn,
-/// every resize failing; prints the failed allocation's stack when its
-/// error is swallowed or memory leaks. A result besides the error is
+/// every resize and remap failing too (`checkAllocationFailuresWith`'s
+/// `.fail`), on `std.testing.allocator`. A result besides the error is
 /// ignored.
 pub fn checkAll(comptime test_fn: anytype, extra_args: anytype) !void {
-    const no_resize: std.testing.FailingAllocator.Config = .{ .resize_fail_index = 0 };
-    const needed = needed: {
-        var failing: std.testing.FailingAllocator = .init(std.testing.allocator, no_resize);
-        _ = try @call(.auto, test_fn, .{failing.allocator()} ++ extra_args);
-        break :needed failing.alloc_index;
+    const Run = struct {
+        fn run(gpa: std.mem.Allocator, args: @TypeOf(extra_args)) anyerror!void {
+            _ = try @call(.auto, test_fn, .{gpa} ++ args);
+        }
     };
-    for (0..needed) |fail_index| {
-        var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{
-            .fail_index = fail_index,
-            .resize_fail_index = 0,
-        });
-        const result = @call(.auto, test_fn, .{failing.allocator()} ++ extra_args);
-        if (result) |_| {
-            if (!failing.has_induced_failure) return error.NondeterministicMemoryUsage;
-        } else |err| if (err != error.OutOfMemory) return err;
-        const swallowed = if (result) |_| true else |_| false;
-        if (swallowed or failing.allocated_bytes != failing.freed_bytes) {
-            std.debug.print("fail_index {d}/{d}: {s}; {d} bytes allocated, {d} freed; the failed allocation:\n{f}", .{
-                fail_index,
-                needed,
-                if (swallowed) "OutOfMemory swallowed" else "leak",
-                failing.allocated_bytes,
-                failing.freed_bytes,
-                std.debug.FormatStackTrace{ .stack_trace = failing.getStackTrace() },
+    return checkAllocationFailuresWith(std.testing.allocator, .fail, extra_args, Run.run);
+}
+
+/// Whether remaps and resizes succeed or fail in a sweep. Failing them
+/// reaches every allocation the succeeding pass makes, and the copies a
+/// failed remap falls back to, so `.fail` alone bounds a slow sweep.
+pub const Remaps = enum { both, fail };
+
+/// Runs `run(gpa, context)` once to count its allocations, then once with
+/// each allocation failing in turn; `run` must then fail with
+/// `OutOfMemory` and free everything. Both passes are made with remaps and
+/// resizes succeeding, then failing (`resize_fail_index = 0`). Any other
+/// error from `run` fails the check.
+pub fn checkAllocationFailures(
+    backing: std.mem.Allocator,
+    context: anytype,
+    comptime run: fn (std.mem.Allocator, @TypeOf(context)) anyerror!void,
+) !void {
+    return checkAllocationFailuresWith(backing, .both, context, run);
+}
+
+/// `checkAllocationFailures` with remaps and resizes as `remaps` says. On
+/// a leak or a swallowed `OutOfMemory` it prints the failed allocation's
+/// stack.
+pub fn checkAllocationFailuresWith(
+    backing: std.mem.Allocator,
+    remaps: Remaps,
+    context: anytype,
+    comptime run: fn (std.mem.Allocator, @TypeOf(context)) anyerror!void,
+) !void {
+    const modes: []const usize = switch (remaps) {
+        .both => &.{ std.math.maxInt(usize), 0 },
+        .fail => &.{0},
+    };
+    for (modes) |resize_fail_index| {
+        const needed = needed: {
+            var failing: std.testing.FailingAllocator = .init(backing, .{ .resize_fail_index = resize_fail_index });
+            try run(failing.allocator(), context);
+            if (failing.allocated_bytes != failing.freed_bytes) return error.MemoryLeakDetected;
+            break :needed failing.alloc_index;
+        };
+        for (0..needed) |fail_index| {
+            var failing: std.testing.FailingAllocator = .init(backing, .{
+                .fail_index = fail_index,
+                .resize_fail_index = resize_fail_index,
             });
-            return if (swallowed) error.SwallowedOutOfMemoryError else error.MemoryLeakDetected;
+            const result = run(failing.allocator(), context);
+            if (result) |_| {
+                if (!failing.has_induced_failure) return error.NondeterministicMemoryUsage;
+            } else |err| if (err != error.OutOfMemory) return err;
+            const swallowed = if (result) |_| true else |_| false;
+            if (swallowed or failing.allocated_bytes != failing.freed_bytes) {
+                std.debug.print("fail_index {d}/{d}, resize_fail_index {d}: {s}; {d} bytes allocated, {d} freed; the failed allocation:\n{f}", .{
+                    fail_index,
+                    needed,
+                    resize_fail_index,
+                    if (swallowed) "OutOfMemory swallowed" else "leak",
+                    failing.allocated_bytes,
+                    failing.freed_bytes,
+                    std.debug.FormatStackTrace{ .stack_trace = failing.getStackTrace() },
+                });
+                return if (swallowed) error.SwallowedOutOfMemoryError else error.MemoryLeakDetected;
+            }
         }
     }
 }
@@ -264,4 +311,73 @@ test checkAll {
             gpa.free(owned);
         }
     }.run, .{100});
+}
+
+/// A `std.testing.Smith` input as `Smith` reads it without the fuzzer:
+/// a value is 8 bytes little-endian (out of range reads as the range's
+/// minimum), a slice is a 4-byte little-endian length then its bytes, an
+/// end-of-stream flag is one byte.
+pub const Seed = struct {
+    bytes: std.ArrayList(u8) = .empty,
+
+    pub fn deinit(s: *Seed, gpa: std.mem.Allocator) void {
+        s.bytes.deinit(gpa);
+    }
+
+    pub fn value(s: *Seed, gpa: std.mem.Allocator, v: u64) !void {
+        var b: [8]u8 = undefined;
+        std.mem.writeInt(u64, &b, v, .little);
+        try s.bytes.appendSlice(gpa, &b);
+    }
+
+    pub fn slice(s: *Seed, gpa: std.mem.Allocator, data: []const u8) !void {
+        var b: [4]u8 = undefined;
+        std.mem.writeInt(u32, &b, @intCast(data.len), .little);
+        try s.bytes.appendSlice(gpa, &b);
+        try s.bytes.appendSlice(gpa, data);
+    }
+
+    pub fn eos(s: *Seed, gpa: std.mem.Allocator, end: bool) !void {
+        try s.bytes.append(gpa, @intFromBool(end));
+    }
+
+    pub fn toOwnedSlice(s: *Seed, gpa: std.mem.Allocator) ![]u8 {
+        return s.bytes.toOwnedSlice(gpa);
+    }
+};
+
+/// The first `out.len` packets of an Ogg file's single logical stream,
+/// each its pages' segments joined (no CRC or sequence check).
+pub fn oggPackets(gpa: std.mem.Allocator, file: []const u8, out: []std.ArrayList(u8)) !void {
+    var count: usize = 0;
+    var pos: usize = 0;
+    while (count < out.len) {
+        if (file.len - pos < 27 or !std.mem.eql(u8, file[pos..][0..4], "OggS")) return error.TestUnexpectedResult;
+        const segments = file[pos + 26];
+        var body = pos + 27 + segments;
+        for (file[pos + 27 ..][0..segments]) |len| {
+            try out[count].appendSlice(gpa, file[body..][0..len]);
+            body += len;
+            if (len < 255) {
+                count += 1;
+                if (count == out.len) return;
+            }
+        }
+        pos = body;
+    }
+}
+
+/// Xiph lacing of a Vorbis stream's three header packets, as Ogg's
+/// extradata carries them.
+pub fn xiphExtradata(gpa: std.mem.Allocator, headers: [3][]const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    try out.append(gpa, 2);
+    for (headers[0..2]) |h| {
+        var n = h.len;
+        while (n >= 255) : (n -= 255) try out.append(gpa, 255);
+        try out.append(gpa, @intCast(n));
+    }
+    for (headers) |h| try out.appendSlice(gpa, h);
+    return out.toOwnedSlice(gpa);
 }

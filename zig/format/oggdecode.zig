@@ -526,7 +526,7 @@ test "a decoder that refuses the headers fails opening without freeing its unset
     }
 }
 
-const sweep = @import("../testing/sweep.zig");
+const hostile = @import("../testing/hostile.zig");
 
 const SweepInput = struct { bytes: []const u8, seekable: bool };
 
@@ -551,7 +551,7 @@ test "an Ogg stream decoded frees everything under every allocation and remap fa
     // Debug: a full Vorbis sweep with the counting pass takes 600 runs of
     // its setup. The decoders' own sweeps (vorbis.zig, opusdec.zig) cover
     // their headers and packets.
-    const Case = struct { name: []const u8, seekable: bool, remaps: sweep.Remaps };
+    const Case = struct { name: []const u8, seekable: bool, remaps: hostile.Remaps };
     const cases = [_]Case{
         .{ .name = "ogg_flac_stereo", .seekable = false, .remaps = .both },
         .{ .name = "ogg_flac_stereo", .seekable = true, .remaps = .both },
@@ -561,7 +561,7 @@ test "an Ogg stream decoded frees everything under every allocation and remap fa
     };
     inline for (cases) |case| {
         const input: SweepInput = .{ .bytes = fixtures.ogg.bytes(case.name), .seekable = case.seekable };
-        try sweep.checkAllocationFailuresWith(testing.allocator, case.remaps, input, decodeUnderFailures);
+        try hostile.checkAllocationFailuresWith(testing.allocator, case.remaps, input, decodeUnderFailures);
     }
 }
 
@@ -588,7 +588,7 @@ fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
 }
 
 fn fuzzSeed(gpa: std.mem.Allocator, bytes: []const u8, seekable: bool, uncounted: bool) ![]u8 {
-    var s: sweep.Seed = .{};
+    var s: hostile.Seed = .{};
     errdefer s.deinit(gpa);
     try s.value(gpa, @intFromBool(seekable));
     try s.value(gpa, @intFromBool(uncounted));

@@ -263,7 +263,7 @@ pub fn lookup(table: []const Elem, r: *bits.LsbReader, nb_bits: u5, max_depth: u
 }
 
 const testing = std.testing;
-const sweep = @import("../testing/sweep.zig");
+const hostile = @import("../testing/hostile.zig");
 const vectors = @embedFile("../testing/vectors/vlc.txt");
 
 /// vlc_vectors.c's generator.
@@ -429,7 +429,7 @@ fn buildUnderFailures(gpa: std.mem.Allocator, nb_bits: u5) !void {
 }
 
 test "Vlc.init frees everything under every allocation and remap failure" {
-    for ([_]u5{ 3, 6, 9 }) |nb_bits| try sweep.checkAllocationFailures(testing.allocator, nb_bits, buildUnderFailures);
+    for ([_]u5{ 3, 6, 9 }) |nb_bits| try hostile.checkAllocationFailures(testing.allocator, nb_bits, buildUnderFailures);
 }
 
 /// The fuzz entry's input: the first level's bits (1 to 11; Vorbis uses 8
@@ -501,7 +501,7 @@ fn fuzzSeed(gpa: std.mem.Allocator, nb_bits: u5, le: bool, symbols: bool, count:
     var lens: [256]u8 = undefined;
     var g: Generator = .{ .state = seed };
     const n = g.lengths(&lens, count, max_len);
-    var s: sweep.Seed = .{};
+    var s: hostile.Seed = .{};
     errdefer s.deinit(gpa);
     try s.value(gpa, nb_bits);
     try s.value(gpa, @intFromBool(le));
