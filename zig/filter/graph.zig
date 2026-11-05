@@ -1329,13 +1329,13 @@ fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
 
 test "fuzz: arbitrary option text never crashes a graph" {
     try std.testing.fuzz({}, fuzzOne, .{ .corpus = &.{
-        "\x00s16|flt",
-        "\x028000|44100",
-        "\x02stereo|5.1",
-        "\x030.5",
-        "\x05-1",
-        "\x07FL+FR+LFE",
-        "\x0911",
+        hostile.fuzzSeed("\x00s16|flt", &.{}),
+        hostile.fuzzSeed("\x028000|44100", &.{}),
+        hostile.fuzzSeed("\x02stereo|5.1", &.{}),
+        hostile.fuzzSeed("\x030.5", &.{}),
+        hostile.fuzzSeed("\x05-1", &.{}),
+        hostile.fuzzSeed("\x07FL+FR+LFE", &.{}),
+        hostile.fuzzSeed("\x0911", &.{}),
     } });
 }
 
@@ -1356,11 +1356,11 @@ fn fuzzText(context: void, smith: *std.testing.Smith) anyerror!void {
 
 test "fuzz: arbitrary filtergraph text never crashes a graph" {
     try std.testing.fuzz({}, fuzzText, .{ .corpus = &.{
-        "volume=0.5:fixed,aformat=s16p|flt:44100:mono",
-        "aresample=48000:osf=s16p, volume@a='if(lt(t,1),n,2)':eval=frame",
-        "[a]anull[b];volume",
-        "sws_flags=x;volume=1\\,5",
-        "atrim=0.001:duration=2ms,asetpts=N/SR/TB",
+        hostile.fuzzSeed("volume=0.5:fixed,aformat=s16p|flt:44100:mono", &.{}),
+        hostile.fuzzSeed("aresample=48000:osf=s16p, volume@a='if(lt(t,1),n,2)':eval=frame", &.{}),
+        hostile.fuzzSeed("[a]anull[b];volume", &.{}),
+        hostile.fuzzSeed("sws_flags=x;volume=1\\,5", &.{}),
+        hostile.fuzzSeed("atrim=0.001:duration=2ms,asetpts=N/SR/TB", &.{}),
     } });
 }
 
@@ -1879,3 +1879,5 @@ test "every graph of several inputs and outputs equals FFmpeg's" {
     }
     try testing.expectEqual(multi_case_count, count);
 }
+
+const hostile = @import("../testing/hostile.zig");
