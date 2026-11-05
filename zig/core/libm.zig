@@ -13,7 +13,7 @@
 //! library"): single-precision `exp2f`, `sinf` and `cosf` here, and in
 //! libm/ the double functions FFmpeg's code paths here call: `sin`, `cos`,
 //! `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `exp2`, `log`, `pow`,
-//! `hypot`, `sinh`, `cosh` and `tanh`. Zig's `@exp2` and `@sin`
+//! `hypot`, `sinh`, `cosh`, `tanh` and `ldexp`. Zig's `@exp2` and `@sin`
 //! follow musl's older code and differ from glibc in the last bit for about
 //! one float in 12,000 and for 1579 of CELT's rotation angles.
 //!
@@ -43,6 +43,9 @@ pub const atan2 = @import("libm/atan2.zig").atan2;
 pub const log = @import("libm/log.zig").log;
 pub const pow = @import("libm/pow.zig").pow;
 pub const hypot = @import("libm/hypot.zig").hypot;
+/// Exact apart from one rounding (libm/ldexp.zig: std.math.ldexp
+/// mis-scales a zero); checked against glibc's in its tests.
+pub const ldexp = @import("libm/ldexp.zig").ldexp;
 /// Correctly rounded since glibc 2.44 (CORE-MATH); earlier releases differ.
 pub const sinh = @import("libm/hyperbolic.zig").sinh;
 pub const cosh = @import("libm/hyperbolic.zig").cosh;
@@ -146,6 +149,10 @@ fn expectLine(line: []const u8, head: []const u8, md5: *Md5) !void {
     var text: [128]u8 = undefined;
     const got = try std.fmt.bufPrint(&text, "{s} {x}", .{ head, digest });
     try testing.expectEqualStrings(line, got);
+}
+
+test {
+    _ = @import("libm/ldexp.zig");
 }
 
 test "exp2f, sinf and cosf return glibc's results (vectors/libm.txt)" {

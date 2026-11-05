@@ -35,7 +35,9 @@ const channel_layout = @import("../core/channel_layout.zig");
 
 pub const Error = error{
     /// FFmpeg's AVERROR_INVALIDDATA (and the -1 and EINVAL its header
-    /// splitting and VLC building return): the stream is refused.
+    /// splitting and VLC building return): the stream is refused. Also
+    /// `decodePacket`'s answer to planes that do not fit the current
+    /// headers, where FFmpeg allocates the frame itself.
     InvalidData,
     OutOfMemory,
 };
@@ -116,12 +118,16 @@ fn len2vlc(lens: []const u8, codes: []u32) bool {
     return true;
 }
 
-/// vorbisfloat2float.
+/// vorbisfloat2float. FFmpeg calls ldexpf; for |mant| < 2^21 and these
+/// exponents (-788 to 235) the double product is exact, so rounding it
+/// once to f32 is ldexpf's correctly rounded result (checked against
+/// glibc's ldexpf for every 32-bit value). std.math.ldexp would scale a
+/// zero mantissa to about 2^84.
 fn vorbisFloat(val: u32) f32 {
     var mant: f32 = @floatFromInt(val & 0x1fffff);
     const exp: i32 = @intCast((val & 0x7fe00000) >> 21);
     if (val & 0x80000000 != 0) mant = -mant;
-    return std.math.ldexp(mant, exp - 20 - 768);
+    return @floatCast(libm.ldexp(mant, exp - 20 - 768));
 }
 
 const Codebook = struct {
@@ -657,7 +663,10 @@ pub const Decoder = struct {
     /// samples), returning the frame's sample count, or null for a packet
     /// that gives no frame (a header packet in the stream, or a decode
     /// that returned no samples). The first frame's count becomes
-    /// `skip_samples`, which libavcodec discards.
+    /// `skip_samples`, which libavcodec discards. An identification header
+    /// in the stream can change `channels` and `blocksize` (a null return):
+    /// planes that no longer fit (`planesFit`) are `InvalidData`, before
+    /// anything is written.
     pub fn decodePacket(d: *Decoder, packet: []const u8, planes: []const []f32) Error!?u32 {
         if (packet.len == 0) return null;
         if (packet[0] == 1 and packet.len > 7) {
@@ -690,10 +699,13 @@ pub const Decoder = struct {
             return null;
         }
         if (d.channel_residues.len == 0 or !d.have_setup) return error.InvalidData; // before valid headers
-        std.debug.assert(planes.len == d.channels);
+        // An identification header in the stream can change the channels
+        // and blocksizes after the caller sized its planes; FFmpeg
+        // allocates each frame at the current size. Checked before any
+        // write, as safety checks are off in ReleaseFast.
+        if (!d.planesFit(planes)) return error.InvalidData;
         var floor_ptr: [255][]f32 = undefined;
         for (planes, 0..) |plane, i| {
-            std.debug.assert(plane.len >= d.blocksize[1] / 2);
             const ch = if (d.channels > 8) i else data.channel_layout_offsets[d.channels - 1][i];
             floor_ptr[ch] = plane;
         }
@@ -705,6 +717,14 @@ pub const Decoder = struct {
             d.skip_samples = len;
         }
         return len;
+    }
+
+    /// Whether `planes` is one plane per channel, each holding
+    /// blocksize[1] / 2 samples, for the current headers.
+    pub fn planesFit(d: *const Decoder, planes: []const []f32) bool {
+        if (planes.len != d.channels) return false;
+        for (planes) |plane| if (plane.len < d.blocksize[1] / 2) return false;
+        return true;
     }
 
     /// vorbis_decode_flush: the overlap and the first-frame state cleared.
@@ -1305,4 +1325,104 @@ test "nth root and ilog as FFmpeg computes them" {
     try testing.expectEqual(4, ilog(8));
     try testing.expectEqual(1431655766, inverse[3]);
     try testing.expectEqual(10, fastdiv(31, 3));
+}
+
+test "vorbisFloat is FFmpeg's ldexpf: a zero mantissa is a signed zero, subnormal ties round to even" {
+    const Case = struct { val: u32, want: u32 };
+    // Expected bits from ldexp in double, rounded once to float (Python's
+    // math.ldexp and struct), as glibc's ldexpf gives them.
+    const cases = [_]Case{
+        .{ .val = 0x7fe00000, .want = 0x00000000 }, // mantissa 0, largest exponent
+        .{ .val = 0xffe00000, .want = 0x80000000 }, // the same, negative: -0.0
+        .{ .val = (619 << 21) | 0x080000, .want = 0x00000000 }, // 2^-150: tie, to even 0
+        .{ .val = (619 << 21) | 0x180000, .want = 0x00000002 }, // 3 * 2^-150: tie, to even 2
+        .{ .val = (619 << 21) | 0x080001, .want = 0x00000001 }, // past the tie
+        .{ .val = (639 << 21) | 0x080000, .want = 0x00080000 }, // 2^-130, exact
+        .{ .val = 0x60000001, .want = 0x35800000 },
+        .{ .val = 0xe1103039, .want = 0xc38181c8 },
+        .{ .val = 0x629fffff, .want = 0x49fffff8 },
+        .{ .val = 0x7fffffff, .want = 0x7f800000 }, // overflow: inf, refused by the caller
+        .{ .val = 0x80000003, .want = 0x80000000 }, // underflow keeps the sign
+    };
+    for (cases) |c| {
+        const got: u32 = @bitCast(vorbisFloat(c.val));
+        try testing.expectEqual(c.want, got);
+    }
+}
+
+/// The first `out.len` packets of an Ogg file's single logical stream, each
+/// its pages' segments joined into `gpa` memory (no CRC or sequence check).
+fn testOggPackets(gpa: std.mem.Allocator, file: []const u8, out: []std.ArrayList(u8)) !void {
+    var count: usize = 0;
+    var pos: usize = 0;
+    while (count < out.len) {
+        if (file.len - pos < 27 or !std.mem.eql(u8, file[pos..][0..4], "OggS")) return error.TestUnexpectedResult;
+        const segments = file[pos + 26];
+        var body = pos + 27 + segments;
+        for (file[pos + 27 ..][0..segments]) |len| {
+            try out[count].appendSlice(gpa, file[body..][0..len]);
+            body += len;
+            if (len < 255) {
+                count += 1;
+                if (count == out.len) return;
+            }
+        }
+        pos = body;
+    }
+}
+
+test "planes that an in-stream identification header outgrows are refused before any write" {
+    const gpa = testing.allocator;
+    // FFmpeg's encoder's stereo stream: blocksizes 2048 and 2048, so planes
+    // of 1024 samples; headers, then two audio packets.
+    var packets: [4]std.ArrayList(u8) = @splat(.empty);
+    defer for (&packets) |*p| p.deinit(gpa);
+    try testOggPackets(gpa, @embedFile("../testing/fixtures/ogg/ogg_vorbis_ffmpeg_22k_short.ogg"), &packets);
+    const id = packets[0].items;
+    const setup = packets[2].items;
+    const audio = packets[3].items;
+    try testing.expectEqual(30, id.len);
+    var extradata: std.ArrayList(u8) = .empty;
+    defer extradata.deinit(gpa);
+    try extradata.appendSlice(gpa, &.{ 2, 30, 7 });
+    try extradata.appendSlice(gpa, id);
+    try extradata.appendSlice(gpa, &.{ 3, 'v', 'o', 'r', 'b', 'i', 's' }); // the comment header, unread
+    try extradata.appendSlice(gpa, setup);
+
+    var d = try Decoder.init(gpa, extradata.items);
+    defer d.deinit();
+    try testing.expectEqual(2, d.channels);
+    try testing.expectEqual(2048, d.blocksize[1]);
+    const sentinel: f32 = 7.0;
+    // Room for two planes of 4096 and a guard the decoder must not touch.
+    const storage = try gpa.alloc(f32, 3 * 4096);
+    defer gpa.free(storage);
+    var planes: [2][]f32 = .{ storage[0..1024], storage[1024..2048] };
+
+    // The caller's own mistakes: a plane missing, a plane too short.
+    @memset(storage, sentinel);
+    try testing.expectError(error.InvalidData, d.decodePacket(audio, planes[0..1]));
+    const short = [2][]f32{ storage[0..1023], storage[1024..2047] };
+    try testing.expectError(error.InvalidData, d.decodePacket(audio, &short));
+    for (storage) |v| try testing.expectEqual(sentinel, v);
+    _ = try d.decodePacket(audio, &planes);
+
+    // blocksize_1 raised to 8192 by an identification header in the
+    // stream: a frame is now 4096 samples a plane.
+    var bigger: [30]u8 = id[0..30].*;
+    bigger[28] = (bigger[28] & 0x0f) | 13 << 4;
+    try testing.expectEqual(null, try d.decodePacket(&bigger, &planes));
+    try testing.expectEqual(null, try d.decodePacket(setup, &planes));
+    try testing.expectEqual(8192, d.blocksize[1]);
+    try testing.expect(!d.planesFit(&planes));
+    @memset(storage, sentinel);
+    try testing.expectError(error.InvalidData, d.decodePacket(audio, &planes));
+    for (storage) |v| try testing.expectEqual(sentinel, v);
+    planes = .{ storage[0..4096], storage[4096..8192] };
+    try testing.expect(d.planesFit(&planes));
+    _ = try d.decodePacket(audio, &planes);
+    for (storage[8192..]) |v| try testing.expectEqual(sentinel, v);
+    // A channel count change is the plane count check above: this setup's
+    // coupling fields are sized by the channel count, so it parses only
+    // with two.
 }

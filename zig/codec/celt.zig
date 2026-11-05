@@ -210,6 +210,10 @@ pub const Decoder = struct {
             960 => 3,
             else => return error.InvalidData,
         };
+        // An internal invariant, not a public contract: celt is not exported
+        // from root.zig, and its one caller, opusdec, passes its own buffers
+        // or the rest of the planes it checked, whose frame (decoded and
+        // delayed samples) it bounds by max_output first.
         for (output[0..d.output_channels]) |o| std.debug.assert(o.len >= frame_size);
 
         d.silence = false;

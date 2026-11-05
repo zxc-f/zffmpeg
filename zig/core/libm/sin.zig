@@ -18,6 +18,10 @@
 
 const std = @import("std");
 const tab = @import("sincostab.zig").sincostab;
+/// k_rem_pio2.c's scalbn. Its q0 stays in [-21, 2] at the first call, so
+/// std.math.ldexp's zero bug (n > 53) was never reached here; the shared
+/// helper is glibc's, bit for bit.
+const ldexp = @import("ldexp.zig").ldexp;
 
 fn f(b: u64) f64 {
     return @bitCast(b);
@@ -291,7 +295,7 @@ fn kernelRemPio2(x: []const f64, y: *[2]f64, e0: i32, prec: usize, ipio2: []cons
             iq[@intCast(i)] = truncI32(z - two24 * fw);
             z = q[@intCast(j - 1)] + fw;
         }
-        z = std.math.ldexp(z, q0);
+        z = ldexp(z, q0);
         z -= 8.0 * @floor(z * 0.125);
         n = truncI32(z);
         z -= @floatFromInt(n);
@@ -328,7 +332,7 @@ fn kernelRemPio2(x: []const f64, y: *[2]f64, e0: i32, prec: usize, ipio2: []cons
             }
             if (ih == 2) {
                 z = 1.0 - z;
-                if (carry) z -= std.math.ldexp(@as(f64, 1.0), q0);
+                if (carry) z -= ldexp(1.0, q0);
             }
         }
         // Recompute with more terms when needed.
@@ -364,7 +368,7 @@ fn kernelRemPio2(x: []const f64, y: *[2]f64, e0: i32, prec: usize, ipio2: []cons
         }
     } else {
         // Break z into 24 bits if necessary.
-        z = std.math.ldexp(z, -q0);
+        z = ldexp(z, -q0);
         if (z >= two24) {
             const fw: f64 = @floatFromInt(truncI32(twon24 * z));
             iq[@intCast(jz)] = truncI32(z - two24 * fw);
@@ -378,7 +382,7 @@ fn kernelRemPio2(x: []const f64, y: *[2]f64, e0: i32, prec: usize, ipio2: []cons
     std.debug.assert(jz >= 0);
 
     // The integer chunks as floating point.
-    var fw = std.math.ldexp(@as(f64, 1.0), q0);
+    var fw = ldexp(1.0, q0);
     i = jz;
     while (i >= 0) : (i -= 1) {
         q[@intCast(i)] = fw * @as(f64, @floatFromInt(iq[@intCast(i)]));

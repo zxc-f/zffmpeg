@@ -54,7 +54,9 @@ pub const DecodeError = error{
     /// FFmpeg's AVERROR_INVALIDDATA for the packet: it does not parse, or a
     /// stream's sample count differs from the first's; or its AVERROR_BUG,
     /// where the delays of the resampler, the hybrid CELT samples and the
-    /// sync buffers disagree.
+    /// sync buffers disagree. Also `decodePacket`'s answer to output
+    /// planes that are not one per channel of `max_output` samples, where
+    /// FFmpeg allocates the frame itself.
     InvalidData,
     OutOfMemory,
 };
@@ -385,10 +387,14 @@ pub const Decoder = struct {
     /// at least `max_output` samples, or, for a null `buf` (the end), the
     /// samples the resamplers still owe; the samples per channel (FFmpeg's
     /// frame, none when 0). Each stream's samples past the fewest any
-    /// stream decoded wait in its sync buffer for the next packet.
+    /// stream decoded wait in its sync buffer for the next packet. Other
+    /// planes are `InvalidData`, before anything is written or decoded.
     pub fn decodePacket(d: *Decoder, buf_in: ?[]const u8, out: [][]f32) DecodeError!u32 {
-        std.debug.assert(out.len == d.head.channels);
-        for (out) |plane| std.debug.assert(plane.len >= max_output);
+        // The caller's planes, checked before any write: safety checks are
+        // off in ReleaseFast, and every write below (CELT's included) stays
+        // within max_output.
+        if (out.len != d.head.channels) return error.InvalidData;
+        for (out) |plane| if (plane.len < max_output) return error.InvalidData;
         const nb = d.streams.len;
         var delayed: u32 = 0;
         for (d.streams) |*s| delayed = @max(delayed, s.delayed_samples + s.syncLen());
@@ -679,4 +685,27 @@ test "the streams of a multistream packet decode with every mode side by side" {
     // Every sample is decoded once, whatever the delays.
     try testing.expect(total <= 4 * 960);
     try testing.expect(total > 3 * 960);
+}
+
+test "planes other than one per channel of max_output samples are refused before any write" {
+    const head = [_]u8{ 'O', 'p', 'u', 's', 'H', 'e', 'a', 'd', 1, 2, 0, 0, 0x80, 0xbb, 0, 0, 0, 0, 0 };
+    var dec = try Decoder.init(testing.allocator, &head, true);
+    defer dec.deinit();
+    const storage = try testing.allocator.alloc(f32, 3 * max_output);
+    defer testing.allocator.free(storage);
+    @memset(storage, 7.0);
+    // A 20 ms stereo CELT packet (configuration 31) of arbitrary bytes.
+    var packet: [60]u8 = undefined;
+    packet[0] = 31 << 3 | 4;
+    for (packet[1..], 1..) |*b, i| b.* = @truncate(i *% 0x9d);
+    var one = [1][]f32{storage[0..max_output]};
+    try testing.expectError(error.InvalidData, dec.decodePacket(&packet, &one));
+    var three = [3][]f32{ storage[0..max_output], storage[max_output..][0..max_output], storage[2 * max_output ..] };
+    try testing.expectError(error.InvalidData, dec.decodePacket(&packet, &three));
+    var short = [2][]f32{ storage[0 .. max_output - 1], storage[max_output..][0 .. max_output - 1] };
+    try testing.expectError(error.InvalidData, dec.decodePacket(&packet, &short));
+    try testing.expectError(error.InvalidData, dec.decodePacket(null, &short));
+    for (storage) |v| try testing.expectEqual(7.0, v);
+    var planes = [2][]f32{ storage[0..max_output], storage[max_output..][0..max_output] };
+    try testing.expectEqual(960, try dec.decodePacket(&packet, &planes));
 }
