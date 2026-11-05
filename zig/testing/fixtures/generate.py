@@ -2064,7 +2064,8 @@ def ffmpeg_probe_round(buf):
     # flacdec.c's flac_probe and raw_flac_probe (T26a), on the padded buffer.
     padded = head + bytes(32)
     if len(head) and (struct.unpack(">H", padded[:2])[0] & 0xFFFE) == 0xFFF8:
-        if ((padded[2] & 0xF0) != 0 and (padded[2] & 0x0F) != 0x0F and (padded[3] & 0xF0) < (8 + 2) << 4
+        # The channel bound is FLAC_MAX_CHANNELS + FLAC_CHMODE_MID_SIDE: codes 0 to 10 pass.
+        if ((padded[2] & 0xF0) != 0 and (padded[2] & 0x0F) != 0x0F and (padded[3] & 0xF0) < (8 + 3) << 4
                 and (padded[3] & 0x06) != 0x06 and (padded[3] & 0x01) == 0):
             scores["flac"] = 50 // 4 + 1
     elif len(head) >= 4 + 4 + 13 and head[:4] == b"fLaC":
@@ -2849,6 +2850,9 @@ def build_flac_fixtures():
     ok("flac_headerless", "Frames without fLaC or metadata: FFmpeg's headerless mode.", 44100, mono,
        framed(44100, mono, 576))
     fx[-1].data = b"".join(framed(44100, mono, 576))
+    ok("flac_headerless_mid_side", "Headerless mid/side frames: raw_flac_probe accepts channel code 10.", 44100,
+       stereo, framed(44100, stereo, 576, assignment="mid_side"))
+    fx[-1].data = b"".join(framed(44100, stereo, 576, assignment="mid_side"))
     first = flac_signal(576, 1, seed=24)
     second = flac_signal(576, 2, seed=25)
     fx.append(FlacFixture("flac_channel_change", "damaged", "Mono, then a stereo frame: FFmpeg follows the change.",

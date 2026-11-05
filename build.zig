@@ -317,6 +317,20 @@ const w64_alaw_report =
     \\
 ;
 
+// As the pinned ffprobe reports it: no STREAMINFO, so no duration.
+const flac_headerless_mid_side_report =
+    \\format=flac
+    \\codec=flac
+    \\sample_fmt=s16
+    \\channels=2
+    \\channel_layout=stereo
+    \\sample_rate=44100
+    \\nb_samples=N/A
+    \\duration_num=N/A
+    \\duration_den=N/A
+    \\
+;
+
 /// T09: valid, empty, malformed, unsupported, I/O, resource-limit and usage
 /// cases, each checking stdout, stderr and the exit status. T12c adds the same
 /// for AU, including a pipe, and a non-AU magic that detection sends to WAV.
@@ -442,6 +456,10 @@ const probe_cases = [_]ProbeCase{
     .{ .name = "FLAC below 4 bits", .set = .flac, .fixture = "flac_bps3", .exit_code = 2, .stderr_contains = ": InvalidFlac\n" },
     .{ .name = "FLAC without STREAMINFO first", .set = .flac, .fixture = "flac_no_streaminfo", .exit_code = 2, .stderr_contains = ": InvalidFlac\n" },
     .{ .name = "a truncated FLAC header from a pipe", .set = .flac, .args = &.{"-"}, .stdin_fixture = "flac_truncated_metadata", .exit_code = 2, .stderr = "zffprobe: -: Truncated\n" },
+    // Review fix M5: raw_flac_probe detects a headerless stream whose first
+    // frame is mid/side (channel code 10), from a file and from a pipe.
+    .{ .name = "headerless mid/side FLAC", .set = .flac, .fixture = "flac_headerless_mid_side", .exit_code = 0, .stdout = flac_headerless_mid_side_report, .stderr = "" },
+    .{ .name = "headerless mid/side FLAC from a pipe", .set = .flac, .args = &.{"-"}, .stdin_fixture = "flac_headerless_mid_side", .exit_code = 0, .stdout = flac_headerless_mid_side_report, .stderr = "" },
     // T27a: Ogg's first known stream; without a decoder, no sample format
     // or layout; a file's duration from the demuxer's scans, a pipe's none.
     .{ .name = "Ogg Opus", .set = .ogg, .fixture = "ogg_opus_stereo", .exit_code = 0, .stdout = "format=ogg\ncodec=opus\nsample_fmt=fltp\nchannels=2\nchannel_layout=stereo\nsample_rate=48000\nnb_samples=11520\nduration_num=11520\nduration_den=48000\n", .stderr = "" },

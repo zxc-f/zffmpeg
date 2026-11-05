@@ -146,6 +146,11 @@ pub const raw_packet_size = 1024;
 /// The most bytes `probeScore` reads.
 pub const probe_bytes = 4 + 4 + 13;
 
+/// raw_flac_probe's channel bound, `FLAC_MAX_CHANNELS + FLAC_CHMODE_MID_SIDE`:
+/// a code at or above it is refused. The C refuses only codes 11 to 15; a
+/// mid/side frame's code 10 passes. `@as` widens the `u2` tag before the sum.
+const probe_channel_code_limit: u8 = flac.max_channels + @as(u8, @backingInt(flac.ChannelMode.mid_side));
+
 /// FFmpeg's content probe (flac_probe, raw_flac_probe), for the first bytes
 /// of a stream: `fLaC` and a plausible STREAMINFO score 100, other `fLaC`
 /// input 50, and a frame header at the start 13.
@@ -156,7 +161,7 @@ pub fn probeScore(head: []const u8) u8 {
     if (head.len > 0 and std.mem.readInt(u16, padded[0..2], .big) & 0xfffe == 0xfff8) {
         if (padded[2] & 0xf0 == 0) return 0; // block size code
         if (padded[2] & 0x0f == 0x0f) return 0; // sample rate code
-        if (padded[3] & 0xf0 >= (flac.max_channels + 2) << 4) return 0; // channel mode
+        if (padded[3] & 0xf0 >= probe_channel_code_limit << 4) return 0; // channel mode
         if (padded[3] & 0x06 == 0x06) return 0; // sample size code
         if (padded[3] & 0x01 == 0x01) return 0; // reserved bit
         return 50 / 4 + 1;
@@ -1214,8 +1219,21 @@ test "the probe scores FFmpeg's way" {
     try testing.expectEqual(100, probeScore(fixtures.flac.bytes("flac_constant_mono_8k")));
     try testing.expectEqual(50, probeScore(fixtures.flac.bytes("flac_no_streaminfo")));
     try testing.expectEqual(13, probeScore(fixtures.flac.bytes("flac_headerless")));
+    try testing.expectEqual(13, probeScore(fixtures.flac.bytes("flac_headerless_mid_side")));
     try testing.expectEqual(0, probeScore("RIFF"));
     try testing.expectEqual(0, probeScore(""));
+}
+
+test "a frame header's channel code decides the headerless probe as FFmpeg's" {
+    // raw_flac_probe accepts codes up to FLAC_MAX_CHANNELS + FLAC_CHMODE_MID_SIDE.
+    try testing.expectEqual(13, probeScore(&.{ 0xff, 0xf8, 0xc9, 0x18 })); // 2 channels
+    try testing.expectEqual(13, probeScore(&.{ 0xff, 0xf8, 0xc9, 0x88 })); // left/side
+    try testing.expectEqual(13, probeScore(&.{ 0xff, 0xf8, 0xc9, 0x98 })); // right/side
+    try testing.expectEqual(13, probeScore(&.{ 0xff, 0xf8, 0xc9, 0xa8 })); // mid/side
+    try testing.expectEqual(0, probeScore(&.{ 0xff, 0xf8, 0xc9, 0xb8 })); // reserved code 11
+    try testing.expectEqual(0, probeScore(&.{ 0xff, 0xf8, 0xc9, 0xf8 })); // reserved code 15
+    // The variable-blocksize sync code; the probe reads only these four bytes.
+    try testing.expectEqual(13, probeScore(&.{ 0xff, 0xf9, 0xc9, 0xa8 }));
 }
 
 test "a failing reader reports IoFailure" {
@@ -1635,7 +1653,7 @@ test "every FLAC fixture seeks as FFmpeg seeks it (vectors/seek_flac.txt)" {
         }
     }
     // Every seek of the 50 fixtures FFmpeg opens, flac_picture aside.
-    try testing.expectEqual(2692, compared);
+    try testing.expectEqual(2746, compared);
 }
 
 /// Hand-made FLAC for the tests below: a STREAMINFO of 16-sample blocks,

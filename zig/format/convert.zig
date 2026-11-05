@@ -1084,9 +1084,14 @@ fn outputFailure(err: WriterError) RunError {
 }
 
 /// Converts one stream: `Conversion.init`, then `run`.
+/// Probing past its first 2048 bytes (FFmpeg's retries) allocates from
+/// `request.input.gpa`, or else from `request.gpa`, as zffmpeg's does.
 pub fn convert(reader: *std.Io.Reader, out: *std.Io.Writer, request: Request, limits: Limits) Error!Summary {
+    var input = request.input;
+    if (input.gpa == null) input.gpa = request.gpa;
     var source: detect.Input = undefined;
-    try source.open(reader, request.input);
+    try source.open(reader, input);
+    defer source.deinit();
 
     var conversion: Conversion = try .init(&source, request, limits);
     defer conversion.deinit();
@@ -2051,6 +2056,28 @@ test "every accepted FLAC fixture converts to the samples it encodes" {
             }
         }
     }
+}
+
+test "convert frees a probe buffer grown past its first 2048 bytes" {
+    // A headerless stream scores 13, so probing reads a second round into
+    // an allocated buffer, which the testing allocator checks is freed.
+    const gpa = std.testing.allocator;
+    const bytes = fixtures.flac.bytes("flac_headerless_mid_side");
+    try std.testing.expect(bytes.len > detect.probe_len);
+    const sources = [_]detect.Source{ .{}, .{ .gpa = gpa } };
+    for (sources) |input| {
+        var reader: std.Io.Reader = .fixed(bytes);
+        var out: std.Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        const summary = try convert(&reader, &out.writer, .{ .output = .s16le, .mode = .transcode, .input = input, .gpa = gpa }, .{});
+        try std.testing.expectEqual(Container.flac, summary.input);
+        try std.testing.expectEqual(1152, summary.frame_count);
+        try std.testing.expectEqual(1152 * 2 * 2, out.written().len);
+    }
+    // Without any allocator the second round cannot be read.
+    var reader: std.Io.Reader = .fixed(bytes);
+    var sink: std.Io.Writer = .failing;
+    try std.testing.expectError(error.OutOfMemory, convert(&reader, &sink, .{ .output = .s16le, .mode = .transcode }, .{}));
 }
 
 test "FLAC input: no copy, an allocator needed, the frame count checked" {

@@ -140,6 +140,7 @@ escaping to a 5-bit raw sample size.
 | `flac_streaminfo_rate0` | accepted | generate.py | 1 ch, 22050 Hz, 576 frames | STREAMINFO's rate is 0: the frames give it. |
 | `flac_no_total` | accepted | generate.py | 1 ch, 44100 Hz, 576 frames | STREAMINFO without a sample count. |
 | `flac_headerless` | accepted | generate.py | 1 ch, 44100 Hz, 576 frames | Frames without fLaC or metadata: FFmpeg's headerless mode. |
+| `flac_headerless_mid_side` | accepted | generate.py | 2 ch, 44100 Hz, 1152 frames | Headerless mid/side frames: raw_flac_probe accepts channel code 10. |
 | `flac_channel_change` | damaged | generate.py | FFmpeg's result (flac_vectors.c) | Mono, then a stereo frame: FFmpeg follows the change. |
 | `flac_rate_change` | damaged | generate.py | FFmpeg's result (flac_vectors.c) | 44.1 kHz, then a 48 kHz frame: FFmpeg follows the change. |
 | `flac_bps24` | accepted | generate.py | 1 ch, 44100 Hz, 0 frames | 24-bit STREAMINFO and no frames: an empty stream. |

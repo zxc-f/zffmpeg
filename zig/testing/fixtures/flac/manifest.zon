@@ -316,6 +316,13 @@
         .expected = .{ .accept = .{ .channels = 1, .sample_rate = 44100, .frames = 576, .pcm_sha256 = "686c4b856911f222f45905be7477199abdb9b5d3faa8ec4920bdb25914f51c78" } },
     },
     .{
+        .name = "flac_headerless_mid_side",
+        .sha256 = "0bb000b18eeba31a7fe9350ffbf306607b964784f83743c3a62e477c05519f3d",
+        .made_by = .generate,
+        .detected = .flac,
+        .expected = .{ .accept = .{ .channels = 2, .sample_rate = 44100, .frames = 1152, .pcm_sha256 = "f131e7234e1c11bab2b279ea317477b48f2182a208d9484b25a89588b0fc5824" } },
+    },
+    .{
         .name = "flac_channel_change",
         .sha256 = "ac3d67ba05a7bf2b86d4c05814a51a8e3f6a8764205cea4fee5086e3a9cc30fb",
         .made_by = .generate,

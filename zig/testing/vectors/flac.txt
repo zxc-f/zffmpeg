@@ -258,6 +258,14 @@ S flac 44100 1 mono 16 1/44100 N N s16
 P 1027 0 0 576 0x1 0x420dfdf7
 D 576 0 0x1d8622a5
 R EOF
+F flac_headerless_mid_side
+O ok
+S flac 44100 2 stereo 16 1/44100 N 0 s16
+P 2057 0 0 576 0x1 0xbbb90eec
+D 576 0 0x471c6ba4
+P 2057 576 576 576 0x1 0x5a7e16c3
+D 576 576 0x667a8045
+R EOF
 F flac_junk_between_frames
 O ok
 S flac 44100 1 mono 16 1/44100 576 N s16

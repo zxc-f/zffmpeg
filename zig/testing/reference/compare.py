@@ -1799,6 +1799,7 @@ KNOWN_FLAC_CONVERSION_DIFFERENCES = {
                       "no sample count for the WAV header written first; FFmpeg rewrites its header"),
     "flac_headerless": (3, "UnsupportedStreamingSize", True,
                         "no STREAMINFO, so no sample count for the WAV header written first, as above"),
+    "flac_headerless_mid_side": (3, "UnsupportedStreamingSize", True, "headerless, as above"),
     "flac_streaminfo_rate0": (3, "UnsupportedStreamingSize", True,
                               "no sample count in STREAMINFO without a rate, as above"),
     "flac_channel_change": (3, "UnsupportedFormat", False,

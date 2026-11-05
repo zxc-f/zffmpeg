@@ -559,7 +559,9 @@ fn expectDetection(comptime detected: ?fixtures.Container, bytes: []const u8, di
     var buffer: [1]u8 = undefined;
     var source: std.testing.Reader = .init(&buffer, &.{.{ .buffer = bytes }});
     source.artificial_limit = .limited(1);
-    const got = probe(&source.interface, .{});
+    // A headerless FLAC stream scores 13: probing reads a second round,
+    // which allocates.
+    const got = probeWith(&source.interface, .{}, .{ .source = .{ .gpa = std.testing.allocator } });
     if (detected == null) return std.testing.expectError(error.UnknownFormat, got);
     if (comptime detected.? == .mp3) {
         // FFmpeg's MP3 probe claims a few tiny files of other formats
