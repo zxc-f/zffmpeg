@@ -1055,7 +1055,12 @@ fn writeUtf8(pb: *bits.BitWriter, value: u32) void {
     }
     const bytes = (log2(value) + 4) / 5;
     var shift: u32 = (bytes - 1) * 6;
-    const lead: u32 = (256 - (@as(u32, 256) >> @intCast(bytes))) | (value >> @intCast(shift));
+    // From 2^31 (7 bytes) the C shifts a uint32_t by 36, which is
+    // undefined; the reference build's 32-bit `shr` takes the count mod
+    // 32, so the lead byte gets `value >> 4` (notes.md "Frame numbers from
+    // 2^31").
+    const lead_shift: u5 = @truncate(shift);
+    const lead: u32 = (256 - (@as(u32, 256) >> @intCast(bytes))) | (value >> lead_shift);
     pb.bits(8, lead & 0xff);
     while (shift >= 6) {
         shift -= 6;
@@ -1551,6 +1556,53 @@ test "FFmpeg's option text sets the encoder's options" {
     try testing.expect(resolved.strict_experimental and resolved.exact_rice_parameters);
     try testing.expectEqual(null, resolved.max_prediction_order);
     try testing.expectEqual(null, (AvOptions{}).toOptions().ch_mode);
+}
+
+test "frame numbers are coded as PUT_UTF8 codes them, past 2^31 as the reference build" {
+    const cases = [_]struct { value: u32, bytes: []const u8 }{
+        .{ .value = 0, .bytes = &.{0x00} },
+        .{ .value = 0x7f, .bytes = &.{0x7f} },
+        .{ .value = 0x80, .bytes = &.{ 0xc2, 0x80 } },
+        .{ .value = 0x7ff, .bytes = &.{ 0xdf, 0xbf } },
+        .{ .value = 0x800, .bytes = &.{ 0xe0, 0xa0, 0x80 } },
+        .{ .value = 0xffff, .bytes = &.{ 0xef, 0xbf, 0xbf } },
+        .{ .value = 0x10000, .bytes = &.{ 0xf0, 0x90, 0x80, 0x80 } },
+        .{ .value = 0x3ffffff, .bytes = &.{ 0xfb, 0xbf, 0xbf, 0xbf, 0xbf } },
+        .{ .value = 0x4000000, .bytes = &.{ 0xfc, 0x84, 0x80, 0x80, 0x80, 0x80 } },
+        .{ .value = 0x7fffffff, .bytes = &.{ 0xfd, 0xbf, 0xbf, 0xbf, 0xbf, 0xbf } },
+        // 7 bytes: the lead byte is 0xfe | (value >> 4) & 0xff, as the
+        // reference build's `shr esi, cl` with cl = 36 computes it.
+        .{ .value = 0x80000000, .bytes = &.{ 0xfe, 0x82, 0x80, 0x80, 0x80, 0x80, 0x80 } },
+        .{ .value = 0x80000010, .bytes = &.{ 0xff, 0x82, 0x80, 0x80, 0x80, 0x80, 0x90 } },
+        .{ .value = 0xffffffff, .bytes = &.{ 0xff, 0x83, 0xbf, 0xbf, 0xbf, 0xbf, 0xbf } },
+    };
+    for (cases) |case| {
+        var storage: [8]u8 = undefined;
+        var pb: bits.BitWriter = .init(&storage);
+        writeUtf8(&pb, case.value);
+        try testing.expect(!pb.overflow);
+        try testing.expectEqualSlices(u8, case.bytes, pb.written());
+        try testing.expectEqual(case.bytes.len, utf8Length(case.value));
+    }
+}
+
+test "the encoder codes frame numbers 2^31 and up, and wraps after 2^32 - 1" {
+    const e = try Encoder.init(testing.allocator, .{ .sample_format = .s16, .channels = 1, .sample_rate = 44100, .frame_size = 16 }, .{});
+    defer e.deinit();
+    const samples: [16]i16 = @splat(3);
+    const cases = [_]struct { count: u32, number: []const u8 }{
+        .{ .count = 0x7fffffff, .number = &.{ 0xfd, 0xbf, 0xbf, 0xbf, 0xbf, 0xbf } },
+        .{ .count = 0x80000000, .number = &.{ 0xfe, 0x82, 0x80, 0x80, 0x80, 0x80, 0x80 } },
+        .{ .count = 0xffffffff, .number = &.{ 0xff, 0x83, 0xbf, 0xbf, 0xbf, 0xbf, 0xbf } },
+    };
+    for (cases) |case| {
+        e.frame_count = case.count;
+        const packet = try e.encode(.{ .s16 = &samples }, samples.len, 0);
+        // The sync code and the four codes take 4 bytes; the number follows.
+        try testing.expectEqualSlices(u8, case.number, packet.data[4..][0..case.number.len]);
+    }
+    // FFmpeg's uint32_t frame_count wraps.
+    try testing.expectEqual(0, e.frame_count);
 }
 
 test "frames the encoder refuses, and every allocation failure" {
