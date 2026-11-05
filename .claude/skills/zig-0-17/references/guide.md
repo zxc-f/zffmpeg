@@ -28,7 +28,7 @@ this guide and [CLAUDE.md](../../../../CLAUDE.md) differ, CLAUDE.md wins.
 - [Allocators and containers](#allocators-and-containers)
 - [Builtins agents still copy](#builtins-agents-still-copy): type construction, reflection, integers, errors and control flow, other deletions
 - [Model values, state and boundaries](#model-values-state-and-boundaries): typed statuses, error domains, state payloads, empty results, reuse, error assertions, captures
-- [Hostile input](#hostile-input): initialization order, buffer sizing, ReleaseFast checks, input-derived integers, std pitfalls, work bounds, cleanup, tests
+- [Hostile input](#hostile-input): initialization order, buffer sizing, ReleaseFast checks, input-derived integers, C's numeric conversions, errors the C ignores, std pitfalls, work bounds, cleanup, tests
 - [Shape the port as Zig, not as C](#shape-the-port-as-zig-not-as-c): one implementation per FFmpeg function, shared data paths, typed state, derived dispatch
 - [Formatting](#formatting)
 - [Types, literals, and declarations](#types-literals-and-declarations)
@@ -401,8 +401,11 @@ A child's `cwd` changes how relative paths in its `argv` resolve, including
 descriptor with its access mode, while Windows reopens the file with the
 access that stream needs. A write-only file as stdin therefore fails to read
 only on POSIX. A pipe whose read end the parent closes makes the child's
-writes fail on every platform; on POSIX the default SIGPIPE ends the child
-first, because Zig programs do not ignore it.
+writes fail on every platform. A Zig 0.17 child that runs on
+`std.Io.Threaded` (the `Io` in `std.process.Init`) installs a do-nothing
+SIGPIPE handler, so its write returns `error.BrokenPipe` instead of the
+signal ending it; zffmpeg reports that as status 4. A non-Zig child keeps
+the default and is ended by SIGPIPE.
 
 `std.time.timestamp()` and `std.time.Timer` are not media clocks. PCM duration
 is an integer sample count and a sample rate. `Io` has clocks for timeouts.
@@ -837,14 +840,58 @@ elsewhere. Two sources of truth for one format will disagree on damaged input.
   `+%` / `-%` / `*%` with the comment that rule asks for. This is not a size:
   sizes, offsets and allocation counts still use `std.math.add`/`mul`.
 
+### C's numeric conversions: model the reference build
+
+FFmpeg's C has no case for NaN, infinity or overflow in its float-to-integer
+conversions; its output is whatever instruction the reference build
+(Clang, Linux x86-64) emits. Zig's `@trunc`/`@intFromFloat` into an
+integer is illegal behavior there (a panic in Debug, an arbitrary,
+compiler-dependent value in ReleaseFast), so it is never a port of a C
+conversion of an unproven value:
+
+- `lrint`/`lrintf`/`llrint`, `int x = double`, `int16_t x = double` and
+  `rint` go through `core/cconv.zig` (`lrintf`, `lrint`, `lrintfInt`,
+  `cvttsd2si32`, `rint`), which checks NaN and the range and returns the
+  reference build's value. Add a function there, with its instruction named,
+  rather than a local copy.
+- Read the parameter types of the C function that receives the result.
+  `av_clip_int16(int)` and `av_clip_uint8(int)` take an `int`, so
+  `av_clip_int16(lrintf(x))` narrows the 64-bit `long` to its low 32 bits
+  before clipping: 65536.0 to s16 is -32768, not 32767. Clipping the wide
+  value is a different function. An `int` accumulator (`int sum`) wraps
+  where an `i64` would not; keep C's width.
+- `@round` rounds ties away from zero and, without SSE4.1, is a
+  compiler-rt call per value; C's `rint`/`lrint` round ties to even. Use
+  `cconv`, never `@round` plus a fix-up.
+- `std.math.clamp` (`@min`/`@max`) returns the non-NaN operand; C's
+  `FFMIN`/`FFMAX` are comparisons, and `FFMAX(FFMIN(NaN, hi), lo)` is `lo`.
+  Port the comparison, not the helper's name.
+- Constants follow the C expression and its precedence:
+  `FLAC_MAX_CHANNELS + FLAC_CHMODE_MID_SIDE << 4` is `(8 + 3) << 4`. Derive
+  them from the same named enums, not a recomputed literal.
+- Prove a property against the C, not against a second Zig model: compile
+  the C expression with FFmpeg's flags (`config.mak`) and compare over every
+  input when the domain allows it (all 2^32 floats take seconds), or over
+  vectors the pinned library prints.
+
+### Errors the C ignores
+
+`try` propagates; the C often does not. Before `try`ing a call in a ported
+loop, read what FFmpeg does with that return value: `avformat_find_stream_info`
+ends its read-ahead on a read error (`eof_reached = 1`, break) and still opens
+the file, so a `try` there refuses input FFmpeg accepts. Only `OutOfMemory`
+and the errors FFmpeg itself propagates leave such a loop.
+
 ### std pitfalls verified on 0.17.0
 
 | API | Pitfall | Use |
 | --- | --- | --- |
 | `std.Io.Reader.discardShort` / `discardAll` | `r.seek + n` is unchecked (`lib/std/Io/Reader.zig`): a skip near `maxInt(usize)` panics in safe builds and wraps backward in ReleaseFast. | `zig/io/skip.zig`'s `discardShort` / `discardAll` (`u64` lengths, steps of at most 1 GiB) for every untrusted length. |
-| `std.math.ldexp` | Wrong for a zero mantissa (`ldexp(0, n)` returns a large value or inf once `n` exceeds the mantissa width) and rounds subnormal ties up. | `libm.ldexp` (`zig/core/libm/ldexp.zig`, glibc's `__scalbn`); compute in f64 and `@floatCast` once where the C rounds once. |
+| `std.math.ldexp` | Wrong for a zero mantissa (`ldexp(0, n)` returns a large value or inf once `n` exceeds the mantissa width) and rounds some subnormal ties up, in f32 and f64 (`ldexp(2.0, -1076)` is 2^-1074, not 0). | `libm.ldexp` (`zig/core/libm/ldexp.zig`, glibc's `__scalbn`); compute in f64 and `@floatCast` once where the C rounds once. |
 | `std.fs.path.extension(".ogg")` | Returns `""` for a name that is only an extension; FFmpeg's `av_match_ext` uses `strrchr('.')`. | Match FFmpeg's rule explicitly where extensions decide behavior. |
 | `Run.expectStdOutMatch("")` | Matches every output: `find(stdout, "")` is never null. | Assert real content, a size or a hash. |
+| `ArrayList.toOwnedSlice`, `shrinkAndFree` | Can fail or allocate: `toOwnedSlice` allocates and copies when `remap` fails. A free-then-`try toOwnedSlice` replacement leaves a dangling owner. | Bind the result first; test with `FailingAllocator`'s `resize_fail_index`. |
+| `std.math.clamp`, `@min`, `@max` | Return the non-NaN operand. | C's `FFMIN`/`FFMAX` as comparisons where NaN can reach them. |
 
 When a std function's behavior matters to bit-exactness or safety, read its
 source in `lib/std` before using it on input.
@@ -864,8 +911,14 @@ source in `lib/std` before using it on input.
 
 ### Cleanup on every path
 
-- Replacing an owned field frees the old value first (a second SEEKTABLE
-  block must not leak the first).
+- Replacing an owned field: build the replacement in a local, then free the
+  old value and assign. A second SEEKTABLE block must not leak the first,
+  but freeing first and then assigning `try make()` leaves a freed owner in
+  the field when `make` fails, which `deinit` frees again (Ogg's metadata
+  update did this: `toOwnedSlice` allocates after a failed remap).
+- One owner, one cleanup per path: never both an `errdefer` and a `defer`
+  (or a `deinit` in the caller) for the same value. A branch that takes
+  ownership of a parsed packet must not leave the outer `errdefer` armed.
 - Save/restore pairs give each buffer one owner. If `restore` frees a
   snapshot, the caller's `errdefer` must not free it again.
 - Test failure cleanup with `std.testing.allocator` and a writer or seeker
@@ -875,6 +928,13 @@ source in `lib/std` before using it on input.
 
 - A fuzz entry covers non-default limits too (unknown length, tag collection,
   seeking), not only `.{}`; the defaults hide the paths that opt in.
+- Every parser, demuxer or decoder of untrusted bytes lands with a bounded
+  `std.testing.fuzz` entry and a `std.testing.checkAllAllocationFailures`
+  sweep in the same change (TODO.md G3), with remap failures enabled
+  (`resize_fail_index`), destroying the object after every failure. Feed
+  inputs that reach the replacement paths: two comment packets, a second
+  metadata block, a seek, a reconfiguring header. Valid fixtures alone
+  never free an owner twice.
 - A path that only one tool reaches needs that tool's process case:
   zffprobe never builds a decoder, so a decoder refusal needs a
   `convert_cases` entry, not only a `probe_cases` one.
@@ -884,6 +944,11 @@ source in `lib/std` before using it on input.
   records (an error name, a shifted timestamp with everything else equal); a
   table keyed only by fixture name counts any failure, including a crash of
   our own tool, as understood.
+- An oracle vector set covers the inputs C leaves unspecified when the port
+  picks the reference build's value: NaN, ±inf, products past 2^31 and 2^63,
+  ties, options at their extremes (`dither_scale` 1000, a pan gain of 1e5).
+  A conversion that only ever sees in-range samples cannot catch a wrong
+  narrowing.
 
 ## Shape the port as Zig, not as C
 

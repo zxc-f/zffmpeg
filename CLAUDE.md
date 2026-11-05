@@ -410,6 +410,12 @@ these are the project rules around them:
 - A recorded difference in compare.py asserts the difference it records, for
   example the error name, or equality of everything but the recorded field.
   A fixture listed there must still fail when our side crashes.
+- Float-to-integer conversions and C's `lrint`/`lrintf`/`rint` go through
+  `zig/core/cconv.zig`, which returns the reference build's result for NaN,
+  infinities and overflow; a bare `@trunc` or `@intFromFloat` on an
+  unproven value is a panic in Debug and undefined in ReleaseFast. The
+  skill's "C's numeric conversions" section has the rules (the review of
+  2026-11-05).
 - An open design question goes in notes.md's "Open questions" section. It
   states the current behavior and the evidence that would settle it. Until
   it is answered, the code takes the safe option: refuse with a recorded
