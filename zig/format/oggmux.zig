@@ -333,6 +333,32 @@ fn streamTags(gpa: std.mem.Allocator, stream_tags: ?*const metadata.Dictionary, 
     return vorbiscomment.toNative(gpa, &merged);
 }
 
+/// What `Muxer.init` refuses in a stream's tags (`TagsTooLong`), merged
+/// as it merges them, for a caller that checks a request before it
+/// creates any output.
+pub fn checkTags(gpa: std.mem.Allocator, codec: Codec, stream_tags: ?*const metadata.Dictionary, format_tags: ?*const metadata.Dictionary) InitError!void {
+    var tags = try streamTags(gpa, stream_tags, format_tags);
+    defer tags.deinit(gpa);
+    try checkCommentLength(codec, vorbiscomment.length(vendor, &tags));
+}
+
+/// The comment header's bounds for a comment of `length` bytes: past
+/// INT_MAX with the codec's prefix and framing bit, FFmpeg's
+/// ogg_write_vorbiscomment fails (ENOMEM). FLAC's metadata block length
+/// has 24 bits: FFmpeg's bytestream_put_be24 keeps the low 24 bits of a
+/// longer comment and writes a header that misstates it; the port refuses
+/// it (notes.md "Ogg FLAC comment over 16 MiB": whether to write FFmpeg's
+/// bytes instead is open).
+fn checkCommentLength(codec: Codec, length: u64) InitError!void {
+    const extra: u64 = switch (codec) {
+        .flac => 4,
+        .opus => 8,
+        .vorbis => 7 + 1,
+    };
+    if (extra + length > std.math.maxInt(i32)) return error.TagsTooLong;
+    if (codec == .flac and length > std.math.maxInt(u24)) return error.TagsTooLong;
+}
+
 /// ogg_write_vorbiscomment: `offset` bytes for the caller's prefix, the
 /// comment, and Vorbis' framing bit.
 fn comment(gpa: std.mem.Allocator, offset: usize, tags: *const metadata.Dictionary, framing_bit: bool) InitError![]u8 {
@@ -359,6 +385,7 @@ fn buildHeaders(gpa: std.mem.Allocator, s: *StreamState, params: Stream, tags: *
             @memcpy(first[0..9], "\x7fFLAC\x01\x00\x00\x01");
             @memcpy(first[9..17], "fLaC\x00\x00\x00\x22");
             @memcpy(first[17..51], extradata[0..flac_streaminfo_size]);
+            try checkCommentLength(.flac, vorbiscomment.length(vendor, tags));
             const second = try comment(gpa, 4, tags, false);
             s.header[1] = second;
             // The last metadata block, a VORBIS_COMMENT.
@@ -565,4 +592,39 @@ test "every case muxes as FFmpeg's Ogg muxer does (vectors/oggmux.txt)" {
         cases += 1;
     }
     try testing.expectEqual(28, cases);
+}
+
+test "an Ogg FLAC comment block past 24 bits of length is refused before any output" {
+    const gpa = testing.allocator;
+    const streaminfo: [flac_streaminfo_size]u8 = @splat(0);
+    // The block: the vendor's length and bytes, the count, and one entry,
+    // its length and `X=` before the value.
+    const fixed = 4 + vendor.len + 4 + 4 + "X=".len;
+    for ([_]bool{ false, true }) |over| {
+        const value = try gpa.alloc(u8, std.math.maxInt(u24) - fixed + @intFromBool(over));
+        defer gpa.free(value);
+        @memset(value, 'a');
+        var tags: metadata.Dictionary = .empty;
+        defer tags.deinit(gpa);
+        try tags.put(gpa, "X", value, .replace);
+        var storage: [64]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&storage);
+        const streams = [_]Stream{.{ .codec = .flac, .sample_rate = 44100, .extradata = &streaminfo, .tags = &tags }};
+        if (over) {
+            try testing.expectError(error.TagsTooLong, checkTags(gpa, .flac, &tags, null));
+            try testing.expectError(error.TagsTooLong, Muxer.init(gpa, &w, &streams, .{}));
+            // Opus' and Vorbis' comment packets have no 24-bit bound.
+            try checkTags(gpa, .opus, &tags, null);
+            try checkTags(gpa, .vorbis, null, &tags);
+        } else {
+            try checkTags(gpa, .flac, &tags, null);
+            var m = try Muxer.init(gpa, &w, &streams, .{});
+            defer m.deinit();
+            const block = m.streams[0].header[1];
+            try testing.expectEqual(0x84, block[0]);
+            try testing.expectEqual(std.math.maxInt(u24), std.mem.readInt(u24, block[1..4], .big));
+            try testing.expectEqual(std.math.maxInt(u24), block.len - 4);
+        }
+        try testing.expectEqual(0, w.end);
+    }
 }

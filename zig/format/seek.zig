@@ -408,7 +408,10 @@ pub fn Search(
             var no_change: u32 = 0;
             while (pos_min < pos_limit) {
                 var pos: i64 = switch (no_change) {
-                    0 => rational.rescale(target_ts - ts_min, pos_max - pos_min, ts_max - ts_min) + pos_min - (pos_max - pos_limit),
+                    // Timestamps far apart overflow int64_t here; the
+                    // reference build wraps (notes.md "Follow the reference
+                    // build"), and av_rescale takes the wrapped values.
+                    0 => rational.rescale(target_ts -% ts_min, pos_max -% pos_min, ts_max -% ts_min) +% pos_min -% (pos_max -% pos_limit),
                     1 => (pos_min + pos_limit) >> 1,
                     else => pos_min,
                 };

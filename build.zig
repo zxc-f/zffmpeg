@@ -704,6 +704,10 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "Ogg Opus from a pipe to raw PCM", .set = .ogg, .args = &.{ "-i", "-" }, .stdin_input = "ogg_opus_ffmpeg_mono", .tail = &.{ "-f", "f32le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stderr = "" },
     .{ .name = "Ogg Opus with hybrid frames to WAV", .set = .ogg, .args = &.{"-i"}, .input = "ogg_opus_frame_counts", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt ", .stderr = "" },
     .{ .name = "MP3 is not decoded yet", .set = .mp3, .args = &.{"-i"}, .input = "mp3_mpeg1_l3_stereo", .tail = &.{ "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
+    // A decoder that refuses the headers fails cleanly, before any output,
+    // from a file (after the counting pass) and from a pipe.
+    .{ .name = "Ogg Vorbis whose setup header the decoder refuses", .set = .ogg, .args = &.{"-i"}, .input = "ogg_vorbis_stereo", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stdout = "", .stderr_contains = ": InvalidVorbis\n" },
+    .{ .name = "Ogg Vorbis from a pipe whose setup header the decoder refuses", .set = .ogg, .args = &.{ "-i", "-" }, .stdin_input = "ogg_vorbis_stereo", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 2, .stdout = "", .stderr_contains = ": InvalidVorbis\n" },
     .{ .name = "Ogg FLAC whose frames all fail to decode", .set = .ogg, .args = &.{"-i"}, .input = "ogg_lost_continued_page", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stdout = "", .stderr_contains = ": DecodeErrorRate\n" },
     // T27b: FLAC encoded into Ogg; compare.py checks the bytes against FFmpeg's.
     .{ .name = "FLAC into Ogg on standard output", .set = .flac, .args = &.{"-i"}, .input = "flac_ffmpeg_level5_stereo", .tail = &.{ "-f", "ogg", "-" }, .exit_code = 0, .stdout_contains = "OggS\x00\x02", .stderr = "" },

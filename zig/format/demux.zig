@@ -156,6 +156,38 @@ const Held = struct {
     }
 };
 
+/// A `PacketList`: packets taken from the front in constant time, so
+/// draining millions of held packets stays linear.
+const HeldQueue = std.Deque(Held);
+
+fn freeQueue(q: *HeldQueue, gpa: std.mem.Allocator) void {
+    while (q.popFront()) |h| {
+        var held = h;
+        held.deinit(gpa);
+    }
+}
+
+/// get_next_pkt's walk: the read-ahead's packets, then from its tail on
+/// into the parser's queue.
+const HeldIterator = struct {
+    queues: [2]*const HeldQueue,
+    queue: usize = 0,
+    index: usize = 0,
+
+    fn next(it: *HeldIterator) ?*Held {
+        while (it.queue < it.queues.len) {
+            const q = it.queues[it.queue];
+            if (it.index < q.len) {
+                defer it.index += 1;
+                return q.atPtr(it.index);
+            }
+            it.queue += 1;
+            it.index = 0;
+        }
+        return null;
+    }
+};
+
 /// `FFStream`'s timing state.
 const StreamState = struct {
     cur_dts: i64 = relative_ts_base,
@@ -224,9 +256,9 @@ pub fn Layer(comptime Source: type) type {
         src: *Source,
         states: std.ArrayList(StreamState) = .empty,
         /// avformat_find_stream_info's packets, returned first.
-        packet_buffer: std.ArrayList(Held) = .empty,
+        packet_buffer: HeldQueue = .empty,
         /// The parser's output (FLAC streams), before it is returned.
-        parse_queue: std.ArrayList(Held) = .empty,
+        parse_queue: HeldQueue = .empty,
         /// The packet returned last.
         current: ?Held = null,
         eof: bool = false,
@@ -243,8 +275,8 @@ pub fn Layer(comptime Source: type) type {
         }
 
         pub fn deinit(l: *Self) void {
-            for (l.packet_buffer.items) |*h| h.deinit(l.gpa);
-            for (l.parse_queue.items) |*h| h.deinit(l.gpa);
+            freeQueue(&l.packet_buffer, l.gpa);
+            freeQueue(&l.parse_queue, l.gpa);
             l.packet_buffer.deinit(l.gpa);
             l.parse_queue.deinit(l.gpa);
             if (l.current) |*h| h.deinit(l.gpa);
@@ -270,9 +302,9 @@ pub fn Layer(comptime Source: type) type {
         }
 
         /// The packets compute_pkt_fields' look-backs reach: the
-        /// read-ahead's, else the parser's.
-        fn heldList(l: *Self) []Held {
-            return if (l.packet_buffer.items.len > 0) l.packet_buffer.items else l.parse_queue.items;
+        /// read-ahead's, then the parser's, as get_next_pkt walks them.
+        fn held(l: *const Self) HeldIterator {
+            return .{ .queues = .{ &l.packet_buffer, &l.parse_queue } };
         }
 
         /// avformat_find_stream_info's read-ahead.
@@ -294,9 +326,12 @@ pub fn Layer(comptime Source: type) type {
                 }
                 if (all) break;
                 if (read_size >= probesize) break;
-                const h = try l.readFrameInternal() orelse break;
-                try l.packet_buffer.append(l.gpa, h);
-                const pkt = &l.packet_buffer.items[l.packet_buffer.items.len - 1];
+                var h = try l.readFrameInternal() orelse break;
+                l.packet_buffer.pushBack(l.gpa, h) catch |err| {
+                    h.deinit(l.gpa);
+                    return err;
+                };
+                const pkt = l.packet_buffer.atPtr(l.packet_buffer.len - 1);
                 const s = try l.state(pkt.stream);
                 const setup = l.src.setup(pkt.stream);
                 read_size += pkt.data.len;
@@ -459,9 +494,7 @@ pub fn Layer(comptime Source: type) type {
         pub fn next(l: *Self) Error!?Packet {
             if (l.current) |*h| h.deinit(l.gpa);
             l.current = null;
-            const h = if (l.packet_buffer.items.len > 0)
-                l.packet_buffer.orderedRemove(0)
-            else
+            const h = l.packet_buffer.popFront() orelse
                 try l.readFrameInternal() orelse return null;
             l.current = h;
             // av_read_frame's return_packet indexes every keyframe again,
@@ -497,7 +530,7 @@ pub fn Layer(comptime Source: type) type {
 
         /// read_frame_internal's packet, before its skip samples.
         fn nextParsed(l: *Self) Error!?Held {
-            while (l.parse_queue.items.len == 0) {
+            while (l.parse_queue.len == 0) {
                 if (l.eof) return null;
                 const raw = l.src.next() catch |err| {
                     // The parsers flushed (nothing for complete frames),
@@ -505,7 +538,7 @@ pub fn Layer(comptime Source: type) type {
                     // packet, which goes first.
                     if (err == error.OutOfMemory) return err;
                     try l.flushParsers();
-                    if (l.parse_queue.items.len > 0) break;
+                    if (l.parse_queue.len > 0) break;
                     return err;
                 } orelse {
                     l.eof = true;
@@ -529,8 +562,7 @@ pub fn Layer(comptime Source: type) type {
                 if (h.flags & key_flag != 0 and h.dts != nopts) try l.addIndexEntry(h.stream, h.pos, h.dts);
                 return h;
             }
-            if (l.parse_queue.items.len == 0) return null;
-            return l.parse_queue.orderedRemove(0);
+            return l.parse_queue.popFront();
         }
 
         /// av_add_index_entry for a keyframe: a relative timestamp is
@@ -606,7 +638,7 @@ pub fn Layer(comptime Source: type) type {
                     h.duration = rational.rescaleQRnd(p.parser.duration, .{ .num = 1, .den = @intCast(ctx.sample_rate) }, setup.time_base, .{ .mode = .down });
                 }
                 try l.computePktFields(&h, setup);
-                try l.parse_queue.append(l.gpa, h);
+                try l.parse_queue.pushBack(l.gpa, h);
             }
         }
 
@@ -617,7 +649,9 @@ pub fn Layer(comptime Source: type) type {
         fn injectSkip(l: *Self, h: *Held) Error!void {
             const s = try l.state(h.stream);
             const setup = l.src.setup(h.stream);
-            var discard_padding: i64 = 0;
+            // An int in FFmpeg; the int64_t arithmetic below wraps as the
+            // reference build's does (notes.md "Follow the reference build").
+            var discard_padding: i32 = 0;
             if (setup.first_discard_sample != 0 and h.pts != nopts) {
                 const rate = l.sampleRate(h.stream, s);
                 const pts = h.pts - if (isRelative(h.pts)) relative_ts_base else 0;
@@ -625,9 +659,9 @@ pub fn Layer(comptime Source: type) type {
                 // decoder.
                 const sample = rational.rescale(pts, setup.time_base.num * @as(i64, rate), setup.time_base.den);
                 const duration = @max(0, rational.rescale(h.duration, setup.time_base.num * @as(i64, rate), setup.time_base.den));
-                const end_sample = sample + duration;
+                const end_sample = sample +% duration;
                 if (duration > 0 and end_sample >= setup.first_discard_sample and sample < setup.last_discard_sample)
-                    discard_padding = @min(end_sample - setup.first_discard_sample, duration);
+                    discard_padding = @truncate(@min(end_sample -% setup.first_discard_sample, duration));
             }
             if (s.seek_discard) {
                 const rate = l.sampleRate(h.stream, s);
@@ -637,7 +671,7 @@ pub fn Layer(comptime Source: type) type {
                     const in_priming = h.pts != nopts and start != nopts and h.pts < start;
                     var skip: i64 = 0;
                     // ts_to_samples: the priming ends at the start time.
-                    if (in_priming) skip = rational.rescale(start - h.pts, setup.time_base.num * @as(i64, rate), setup.time_base.den);
+                    if (in_priming) skip = rational.rescale(start -% h.pts, setup.time_base.num * @as(i64, rate), setup.time_base.den);
                     if (first) {
                         if (setup.initial_padding > 0) skip = setup.initial_padding;
                     } else if (!(s.seek_to_start and h.pts != nopts and !in_priming)) {
@@ -650,12 +684,14 @@ pub fn Layer(comptime Source: type) type {
             if (setup.start_skip_samples != 0 and (h.pts == 0 or h.pts == relative_ts_base)) s.skip_samples = setup.start_skip_samples;
             s.skip_samples = @max(0, s.skip_samples);
             if (s.skip_samples == 0 and discard_padding == 0) return;
-            var padding: u32 = @truncate(@as(u64, @bitCast(discard_padding)));
+            var padding: u32 = @bitCast(discard_padding);
             if (h.skip) |kept| {
-                // FFmpeg reads the demuxer's count as an int.
+                // FFmpeg reads the demuxer's count as an int, and compares
+                // the padding with the demuxer's as unsigned (an int against
+                // AV_RL32's uint32_t).
                 const demuxer_skip: i32 = @bitCast(kept[0]);
                 s.skip_samples = @max(s.skip_samples, demuxer_skip);
-                padding = @intCast(@max(discard_padding, kept[1]));
+                padding = @max(padding, kept[1]);
             }
             h.skip = .{ @truncate(@as(u64, @bitCast(s.skip_samples))), padding };
             s.skip_samples = 0;
@@ -702,7 +738,7 @@ pub fn Layer(comptime Source: type) type {
             }
             h.flags &= 2; // DISCARD and CORRUPT pass; the key flag is set below
             try l.computePktFields(h, setup);
-            try l.parse_queue.append(l.gpa, h.*);
+            try l.parse_queue.pushBack(l.gpa, h.*);
         }
 
         /// compute_pkt_fields for a stream without reordering
@@ -726,7 +762,7 @@ pub fn Layer(comptime Source: type) type {
                     pkt.duration = rational.rescaleRnd(1, frame * setup.time_base.den, @as(i64, ctx.sample_rate) * setup.time_base.num, .down);
                 }
             };
-            if (pkt.duration > 0 and l.heldList().len > 0) l.updateInitialDurations(pkt.stream, s, pkt.duration);
+            if (pkt.duration > 0 and (l.packet_buffer.len > 0 or l.parse_queue.len > 0)) l.updateInitialDurations(pkt.stream, s, pkt.duration);
             const presentation_delayed = pkt.dts != nopts and pkt.pts != nopts and pkt.pts > pkt.dts;
             if (presentation_delayed) {
                 if (pkt.dts == nopts) pkt.dts = s.last_ip_pts;
@@ -766,14 +802,16 @@ pub fn Layer(comptime Source: type) type {
             var pts = pts_in;
             if (isRelative(pts)) pts +%= shift;
             const start = l.src.startTime(stream);
-            for (l.heldList()) |*h| {
+            var it = l.held();
+            while (it.next()) |h| {
                 if (h.stream != stream) continue;
                 if (isRelative(h.pts)) h.pts +%= shift;
                 if (isRelative(h.dts)) h.dts +%= shift;
                 if (start.* == nopts and h.pts != nopts) start.* = h.pts;
             }
             // update_dts_from_pts with no delay: a dts from the pts.
-            for (l.heldList()) |*h| {
+            it = l.held();
+            while (it.next()) |h| {
                 if (h.stream == stream and h.pts != nopts and h.dts == nopts) h.dts = h.pts;
             }
             if (start.* == nopts) start.* = pts;
@@ -782,29 +820,23 @@ pub fn Layer(comptime Source: type) type {
         /// update_initial_durations: the held packets without timestamps
         /// get them, counted back from the first.
         fn updateInitialDurations(l: *Self, stream: usize, s: *StreamState, duration: i64) void {
-            const list = l.heldList();
             var cur_dts: i64 = relative_ts_base;
-            var start_index: usize = 0;
             if (s.first_dts != nopts) {
                 if (s.update_initial_durations_done) return;
                 s.update_initial_durations_done = true;
                 cur_dts = s.first_dts;
-                var found: ?usize = null;
-                for (list, 0..) |*h, idx| {
+                var scan = l.held();
+                const first = while (scan.next()) |h| {
                     if (h.stream != stream) continue;
-                    if (h.pts != h.dts or h.dts != nopts or h.duration != 0) {
-                        found = idx;
-                        break;
-                    }
+                    if (h.pts != h.dts or h.dts != nopts or h.duration != 0) break h;
                     cur_dts -%= duration;
-                }
-                const f = found orelse return;
-                if (list[f].dts != s.first_dts) return;
+                } else return;
+                if (first.dts != s.first_dts) return;
                 s.first_dts = cur_dts;
-                start_index = 0;
             } else if (s.cur_dts != relative_ts_base) return;
             var reached_end = true;
-            for (list[start_index..]) |*h| {
+            var it = l.held();
+            while (it.next()) |h| {
                 if (h.stream != stream) continue;
                 if ((h.pts == h.dts or h.pts == nopts) and
                     (h.dts == nopts or h.dts == s.first_dts or h.dts == relative_ts_base) and
@@ -845,10 +877,8 @@ pub fn Layer(comptime Source: type) type {
         /// ff_read_frame_flush: the held packets dropped and each
         /// stream's running timestamp unknown (relative before any).
         pub fn flush(l: *Self) void {
-            for (l.packet_buffer.items) |*h| h.deinit(l.gpa);
-            for (l.parse_queue.items) |*h| h.deinit(l.gpa);
-            l.packet_buffer.clearRetainingCapacity();
-            l.parse_queue.clearRetainingCapacity();
+            freeQueue(&l.packet_buffer, l.gpa);
+            freeQueue(&l.parse_queue, l.gpa);
             for (l.states.items) |*s| {
                 // The parsers closed; the codec context stays.
                 if (s.mpa) |*p| p.deinit(l.gpa);
@@ -1066,4 +1096,35 @@ fn flacFrameHeader(data: []const u8) ?flac.FrameInfo {
 
 fn validFlacFrame(data: []const u8) bool {
     return flacFrameHeader(data) != null;
+}
+
+test "packets held across the read-ahead and the parser's queue get their timestamps as one list" {
+    const gpa = std.testing.allocator;
+    const mp3 = @import("mp3.zig");
+    const fixtures = @import("../testing/fixtures.zig");
+    // 70000 bytes of junk before mp3_mpeg1_l3_stereo: the read-ahead
+    // stops with the first frames' packets, none with a timestamp yet,
+    // split between its buffer and the parser's queue.
+    const frames = fixtures.mp3.bytes("mp3_mpeg1_l3_stereo");
+    const junk = 70000;
+    const bytes = try gpa.alloc(u8, junk + frames.len);
+    defer gpa.free(bytes);
+    for (bytes[0..junk], 0..) |*b, i| b.* = @intCast(i % 7);
+    @memcpy(bytes[junk..], frames);
+    var reader: std.Io.Reader = .fixed(bytes);
+    const d = try mp3.Demuxer.initSeekable(gpa, &reader, .fixed(&reader), .{});
+    defer d.deinit();
+    var layer = Layer(mp3.Demuxer).init(gpa, d);
+    defer layer.deinit();
+    try layer.findStreamInfo();
+    // `ffmpeg -i <bytes> -c copy -f framecrc`: 24 packets, the first
+    // holding the junk, each 368640 ticks of 1/14112000 from 0.
+    var count: i64 = 0;
+    while (try layer.next()) |p| : (count += 1) {
+        if (count == 0) try std.testing.expectEqual(70418, p.data.len);
+        try std.testing.expectEqual(count * 368640, p.pts);
+        try std.testing.expectEqual(count * 368640, p.dts);
+        try std.testing.expectEqual(368640, p.duration);
+    }
+    try std.testing.expectEqual(24, count);
 }

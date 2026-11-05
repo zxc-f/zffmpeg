@@ -248,7 +248,11 @@ const OpusState = struct {
 /// `struct ogg_stream`: a logical stream's page and packet state.
 const Stream = struct {
     serial: u32,
+    /// The stream's bytes; their length is FFmpeg's `bufpos`.
     buf: std.ArrayList(u8) = .empty,
+    /// FFmpeg's `bufsize`, the capacity it grows (`bufferSize`), kept
+    /// for its limit; `buf` itself grows as an ArrayList does.
+    bufsize: u32 = max_page_size,
     pstart: usize = 0,
     psize: usize = 0,
     pflags: u32 = 0,
@@ -477,14 +481,19 @@ pub const Demuxer = struct {
             copy.opus = .{};
             copy.vorbis = .{};
         }
+        // A stream's buffer and side data move to the snapshot only once
+        // its copy exists; a failure gives the moved ones back.
         var done: usize = 0;
         errdefer for (d.streams.items[0..done], saved[0..done]) |*os, *copy| {
             os.buf.deinit(d.gpa);
             os.buf = copy.buf;
+            os.new_metadata = copy.new_metadata;
+            os.new_extradata = copy.new_extradata;
         };
-        for (d.streams.items) |*os| {
-            os.buf = .empty;
-            try os.buf.appendSlice(d.gpa, saved[done].buf.items);
+        for (d.streams.items, saved) |*os, *copy| {
+            var buf: std.ArrayList(u8) = .empty;
+            try buf.appendSlice(d.gpa, copy.buf.items);
+            os.buf = buf;
             os.new_metadata = null;
             os.new_extradata = null;
             done += 1;
@@ -492,7 +501,8 @@ pub const Demuxer = struct {
         return .{ .pos = d.src.pos, .curidx = d.curidx, .streams = saved };
     }
 
-    /// ogg_restore: the saved state back, the source where it was.
+    /// ogg_restore: the saved state back, the source where it was. It
+    /// takes the snapshot whether or not the seek back fails.
     fn restore(d: *Demuxer, snap: Snapshot) Error!void {
         defer d.gpa.free(snap.streams);
         // Streams a scan added are dropped (FFmpeg keeps their AVStream).
@@ -556,8 +566,10 @@ pub const Demuxer = struct {
         var streams_left: i32 = 0;
         {
             const snap = try d.save();
-            errdefer d.gpa.free(snap.streams);
-            try d.src.seekTo(end);
+            d.src.seekTo(end) catch |err| {
+                d.restore(snap) catch {}; // the seek's error is the one reported
+                return err;
+            };
             d.page_pos = -1;
             while (true) {
                 var i: i32 = -1;
@@ -578,8 +590,10 @@ pub const Demuxer = struct {
             try d.restore(snap);
         }
         const snap = try d.save();
-        errdefer d.gpa.free(snap.streams);
-        try d.src.seekTo(d.data_offset);
+        d.src.seekTo(d.data_offset) catch |err| {
+            d.restore(snap) catch {}; // the seek's error is the one reported
+            return err;
+        };
         d.reset();
         while (streams_left > 0) {
             var i: i32 = -1;
@@ -758,6 +772,12 @@ pub const Demuxer = struct {
         if (got < nsegs) return error.EndOfStream;
         var size: usize = 0;
         for (segments[0..nsegs]) |s| size += s;
+        // buf_realloc, for a known stream before the body is read (and
+        // before its CRC is checked); a new stream's buffer holds a page.
+        if (d.findStream(serial)) |known| {
+            const os = &d.streams.items[known];
+            os.bufsize = try bufferSize(os.bufsize, os.buf.items.len, size);
+        }
         const body = d.page[0..size];
         got = try d.src.read(body);
         if (got < size) return error.EndOfStream;
@@ -1258,7 +1278,15 @@ pub const Demuxer = struct {
                 v.eos_page_duration += os.pduration;
             } else {
                 const skip = v.eos_page_duration +% os.pduration -% (@as(i64, @bitCast(os.granule)) -% v.last_page_granule);
-                if (skip > 0) os.end_trimming = @intCast(skip);
+                if (skip > 0) {
+                    // `os->end_trimming = skip`: an int64_t stored in an
+                    // int keeps its low 32 bits in the reference build (a
+                    // granule far below the last page's gives a skip near
+                    // 2^63), and the side data writes those bits as they are
+                    // (notes.md "Undefined C behavior").
+                    const wide: u64 = @intCast(skip);
+                    os.end_trimming = @truncate(wide);
+                }
             }
         } else v.last_page_granule = @bitCast(os.granule);
 
@@ -1292,7 +1320,11 @@ pub const Demuxer = struct {
             try fixupHeaders(d.gpa, v, &extradata);
             v.deinit(d.gpa);
             if (os.new_extradata) |b| d.gpa.free(b);
+            os.new_extradata = null;
             os.new_extradata = try extradata.toOwnedSlice(d.gpa);
+            // av_vorbis_parse_free leaves the parser NULL: when the new
+            // headers do not parse, the stream's later packets fail.
+            v.vp = null;
             v.vp = VorbisParser.init(id, setup_header) orelse return error.InvalidOgg;
             v.bos_page_pos = -1;
         }
@@ -1357,6 +1389,28 @@ pub const Demuxer = struct {
         }
     }
 };
+
+/// buf_realloc's capacity for a page of `size` bytes after `bufpos`:
+/// doubled when it does not fit. Past `(UINT_MAX - padding) / 2`, or when
+/// av_realloc's `max_alloc_size` (INT_MAX) refuses the doubled size plus
+/// AV_INPUT_BUFFER_PADDING_SIZE, FFmpeg fails with ENOMEM, so a stream's
+/// buffer stops at 65307 * 2^15 bytes (notes.md "Stream buffer limit").
+fn bufferSize(bufsize: u32, bufpos: usize, size: usize) error{OutOfMemory}!u32 {
+    const padding = 64;
+    if (bufpos <= bufsize and bufsize - bufpos >= size) return bufsize;
+    if (bufsize > (std.math.maxInt(u32) - padding) / 2) return error.OutOfMemory;
+    if (2 * @as(u64, bufsize) + padding > std.math.maxInt(i32)) return error.OutOfMemory;
+    return 2 * bufsize;
+}
+
+test bufferSize {
+    try testing.expectEqual(max_page_size, try bufferSize(max_page_size, 0, max_page_size));
+    try testing.expectEqual(2 * max_page_size, try bufferSize(max_page_size, 1, max_page_size));
+    const largest = max_page_size << 15; // 2139979776
+    try testing.expectEqual(largest, try bufferSize(max_page_size << 14, (max_page_size << 14) - 10, 11));
+    try testing.expectEqual(largest, try bufferSize(largest, largest - 255, 255));
+    try testing.expectError(error.OutOfMemory, bufferSize(largest, largest - 255, 256));
+}
 
 fn keepPacket(gpa: std.mem.Allocator, slot: *?[]u8, p: []const u8) Error!void {
     const copy = try gpa.dupe(u8, p);
@@ -1743,6 +1797,186 @@ test "every Ogg fixture seeks as FFmpeg seeks it (vectors/seek_ogg.txt)" {
     }
     // Every seek of the fixtures FFmpeg opens.
     try testing.expectEqual(1620, compared);
+}
+
+/// Appends an Ogg page of `body` laced as `lacing`, its CRC computed.
+fn appendTestPage(gpa: std.mem.Allocator, out: *std.ArrayList(u8), flags: u8, granule: u64, serial: u32, sequence: u32, lacing: []const u8, body: []const u8) !void {
+    const start = out.items.len;
+    var head: [27]u8 = undefined;
+    @memcpy(head[0..4], "OggS");
+    head[4] = 0;
+    head[5] = flags;
+    std.mem.writeInt(u64, head[6..14], granule, .little);
+    std.mem.writeInt(u32, head[14..18], serial, .little);
+    std.mem.writeInt(u32, head[18..22], sequence, .little);
+    @memset(head[22..26], 0);
+    head[26] = @intCast(lacing.len);
+    try out.appendSlice(gpa, &head);
+    try out.appendSlice(gpa, lacing);
+    try out.appendSlice(gpa, body);
+    var crc: Crc = .init();
+    crc.update(out.items[start..]);
+    std.mem.writeInt(u32, out.items[start + 22 ..][0..4], crc.final(), .little);
+}
+
+/// `bytes` up to the page at `at`, then that page split after its first
+/// packet: the first part with `granule`, the rest as the original page.
+fn splitFirstPacket(gpa: std.mem.Allocator, bytes: []const u8, at: usize, granule: u64) !std.ArrayList(u8) {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    try out.appendSlice(gpa, bytes[0..at]);
+    const page = bytes[at..];
+    const serial = std.mem.readInt(u32, page[14..18], .little);
+    const sequence = std.mem.readInt(u32, page[18..22], .little);
+    const lacing = page[27..][0..page[26]];
+    const body = page[27 + lacing.len ..];
+    var k: usize = 0;
+    while (lacing[k] == 255) k += 1;
+    k += 1;
+    var first: usize = 0;
+    for (lacing[0..k]) |v| first += v;
+    try appendTestPage(gpa, &out, 0, granule, serial, sequence, lacing[0..k], body[0..first]);
+    try appendTestPage(gpa, &out, page[5], std.mem.readInt(u64, page[6..14], .little), serial, sequence + 1, lacing[k..], body[first..]);
+    return out;
+}
+
+test "a Vorbis granule that falls before the EOS page keeps the end trimming's low 32 bits" {
+    const gpa = testing.allocator;
+    // ogg_vorbis_ffmpeg_22k_short's one data page (at 3391, EOS, granule
+    // 1000) split after its first packet, whose page says granule
+    // 0x7fffffffffffff00: the EOS page's skip is then about 2^63.
+    var bytes = try splitFirstPacket(gpa, fixtures.ogg.bytes("ogg_vorbis_ffmpeg_22k_short"), 3391, 0x7fffffffffffff00);
+    defer bytes.deinit(gpa);
+    var reader: std.Io.Reader = .fixed(bytes.items);
+    const d = try Demuxer.initSeekable(gpa, &reader, .fixed(&reader));
+    defer d.deinit();
+    var layer = demux.Layer(Demuxer).init(gpa, d);
+    defer layer.deinit();
+    try layer.findStreamInfo();
+    // ffprobe -show_packets on the same bytes: pts -1024 and
+    // 281474976710401, the second with discard_padding 4294967064.
+    const first = (try layer.next()).?;
+    try testing.expectEqual(-1024, first.pts);
+    try testing.expectEqual(null, first.skip);
+    const last = (try layer.next()).?;
+    try testing.expectEqual(281474976710401, last.pts);
+    try testing.expectEqual(.{ 0, 4294967064 }, last.skip.?);
+    try testing.expectEqual(null, try layer.next());
+}
+
+/// Appends the lacing values of one `len`-byte packet.
+fn appendLacing(gpa: std.mem.Allocator, lacing: *std.ArrayList(u8), len: usize) !void {
+    try lacing.appendNTimes(gpa, 255, len / 255);
+    try lacing.append(gpa, @intCast(len % 255));
+}
+
+/// The length of the first packet of the page at `bytes`.
+fn firstPacketLen(bytes: []const u8) usize {
+    var len: usize = 0;
+    for (bytes[27..][0..bytes[26]]) |v| {
+        len += v;
+        if (v < 255) break;
+    }
+    return len;
+}
+
+test "in-stream Vorbis headers the parser refuses leave the stream without a parser" {
+    const gpa = testing.allocator;
+    // ogg_vorbis_ffmpeg_22k_short: its identification page, its comment
+    // and setup page, and its data page, not marked EOS; then in-stream
+    // headers (the identification and comment again, a setup header that
+    // does not parse) and the first two data packets again, on an EOS page.
+    const src = fixtures.ogg.bytes("ogg_vorbis_ffmpeg_22k_short");
+    const data_page = 3391;
+    const serial = std.mem.readInt(u32, src[14..18], .little);
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(gpa);
+    try bytes.appendSlice(gpa, src[0..data_page]);
+    const data = src[data_page..];
+    const data_lacing = data[27..][0..data[26]];
+    try appendTestPage(gpa, &bytes, 0, 1000, serial, 2, data_lacing, data[27 + data_lacing.len ..]);
+    const ident = src[28..58];
+    const comment = src[58 + 27 + src[58 + 26] ..][0..firstPacketLen(src[58..])];
+    const bad_setup = "\x05vorbis\xff\xff\xff\xff\xff\xff\xff\xff";
+    var lacing: std.ArrayList(u8) = .empty;
+    defer lacing.deinit(gpa);
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(gpa);
+    for ([_][]const u8{ ident, comment, bad_setup }) |p| {
+        try appendLacing(gpa, &lacing, p.len);
+        try body.appendSlice(gpa, p);
+    }
+    try appendTestPage(gpa, &bytes, 0, 0, serial, 3, lacing.items, body.items);
+    // The data page's first two packets: lacing up to the second end.
+    var two: usize = 0;
+    var ends: u32 = 0;
+    var size: usize = 0;
+    while (ends < 2) : (two += 1) {
+        size += data_lacing[two];
+        if (data_lacing[two] < 255) ends += 1;
+    }
+    try appendTestPage(gpa, &bytes, 4, 1512, serial, 4, data_lacing[0..two], data[27 + data_lacing.len ..][0..size]);
+
+    var reader: std.Io.Reader = .fixed(bytes.items);
+    const d = try Demuxer.init(gpa, &reader);
+    defer d.deinit();
+    // ffprobe: the first data page's two packets, then "Failed to
+    // re-initialize Vorbis parser" on the setup header. FFmpeg's parser
+    // is then NULL, so each later packet fails too.
+    try testing.expect(try d.next() != null);
+    try testing.expect(try d.next() != null);
+    try testing.expectError(error.InvalidOgg, d.next());
+    try testing.expectError(error.InvalidOgg, d.next());
+    try testing.expectError(error.InvalidOgg, d.next());
+    try testing.expectEqual(null, try d.next());
+}
+
+/// A fixed reader's seeker whose seeks fail from the `fail_at`th on
+/// (counted from 1).
+const FailingSeeker = struct {
+    reader: *std.Io.Reader,
+    fail_at: u32,
+    seeks: u32 = 0,
+
+    fn seeker(f: *FailingSeeker) seek.Seeker {
+        return .{ .context = f, .vtable = &vtable };
+    }
+
+    const vtable: seek.Seeker.VTable = .{ .seekTo = seekTo, .position = position, .size = size };
+
+    fn seekTo(context: *anyopaque, offset: u64) error{IoFailure}!void {
+        const f: *FailingSeeker = @ptrCast(@alignCast(context));
+        f.seeks += 1;
+        if (f.seeks >= f.fail_at) return error.IoFailure;
+        return seek.Seeker.fixed(f.reader).seekTo(offset);
+    }
+
+    fn position(context: *anyopaque) u64 {
+        const f: *FailingSeeker = @ptrCast(@alignCast(context));
+        return seek.Seeker.fixed(f.reader).position();
+    }
+
+    fn size(context: *anyopaque) ?u64 {
+        const f: *FailingSeeker = @ptrCast(@alignCast(context));
+        return seek.Seeker.fixed(f.reader).size();
+    }
+};
+
+test "a seek failing in the length scan fails opening, the saved state freed once" {
+    const gpa = testing.allocator;
+    const bytes = fixtures.ogg.bytes("ogg_vorbis_ffmpeg_8k");
+    // The scan seeks four times: to the end's pages, back, to the data's
+    // start and back. Each one fails in turn, then none.
+    var fail_at: u32 = 1;
+    while (true) : (fail_at += 1) {
+        var reader: std.Io.Reader = .fixed(bytes);
+        var failing: FailingSeeker = .{ .reader = &reader, .fail_at = fail_at };
+        if (Demuxer.initSeekable(gpa, &reader, failing.seeker())) |d| {
+            d.deinit();
+            break;
+        } else |err| try testing.expectEqual(error.IoFailure, err);
+    }
+    try testing.expectEqual(5, fail_at);
 }
 
 test "a demuxer that cannot seek fails a seek instead of repositioning" {

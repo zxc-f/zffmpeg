@@ -378,15 +378,34 @@ fn checkExtensions(comptime extensions: []const []const u8, comptime name: []con
     }
 }
 
+/// FFmpeg's `av_match_ext`'s extension: the text after the name's last
+/// dot, `strrchr` over the whole name, so a name that is only `.ogg` has
+/// `ogg` (where `std.fs.path.extension` gives none) and `take.ogg/` has
+/// none; null without a dot or with nothing after it.
+fn fileExtension(file_name: []const u8) ?[]const u8 {
+    const dot = std.mem.findScalarLast(u8, file_name, '.') orelse return null;
+    const extension = file_name[dot + 1 ..];
+    return if (extension.len == 0) null else extension;
+}
+
 /// Whether `file_name`'s extension is one of `extensions`, as FFmpeg's
-/// `av_match_ext`: the text after the last dot, without regard to case.
+/// `av_match_ext`, without regard to case.
 pub fn matchesExtension(file_name: []const u8, extensions: []const []const u8) bool {
-    const extension = std.fs.path.extension(file_name);
-    if (extension.len < 2) return false;
+    const extension = fileExtension(file_name) orelse return false;
     for (extensions) |candidate| {
-        if (std.ascii.eqlIgnoreCase(candidate, extension[1..])) return true;
+        if (std.ascii.eqlIgnoreCase(candidate, extension)) return true;
     }
     return false;
+}
+
+/// The muxer for `file_name`'s extension as `av_guess_format` finds it
+/// (`av_match_ext`, so `fileExtension`'s rule).
+pub fn muxerForFileName(file_name: []const u8) ?Container {
+    for (&formats) |*format| {
+        const muxer = format.muxer orelse continue;
+        if (matchesExtension(file_name, muxer.extensions)) return format.container;
+    }
+    return null;
 }
 
 test "formats are found by name, with a demuxer or a muxer" {
@@ -430,6 +449,17 @@ test "extensions match as FFmpeg's av_match_ext does" {
     try std.testing.expect(!matchesExtension("take.al.wav", &.{"al"}));
     try std.testing.expect(!matchesExtension("al", &.{"al"}));
     try std.testing.expect(!matchesExtension("take.", &.{"al"}));
+    // A name that is only a dot and the extension, alone or after a
+    // directory, still has it.
+    try std.testing.expect(matchesExtension(".ogg", &.{"ogg"}));
+    try std.testing.expect(matchesExtension("dir" ++ std.fs.path.sep_str ++ ".OGG", &.{"ogg"}));
+    // The last dot of the whole name, a directory's included.
+    try std.testing.expect(!matchesExtension("dir.ogg" ++ std.fs.path.sep_str ++ "take", &.{"ogg"}));
+    try std.testing.expect(!matchesExtension("take.ogg" ++ std.fs.path.sep_str, &.{"ogg"}));
+    try std.testing.expectEqual(Container.au, muxerForFileName(".au"));
+    try std.testing.expectEqual(Container.aiff, muxerForFileName("dir" ++ std.fs.path.sep_str ++ "take.AIFC"));
+    try std.testing.expectEqual(null, muxerForFileName("take.mp3"));
+    try std.testing.expectEqual(null, muxerForFileName("take"));
 }
 
 test "the default codecs are FFmpeg's and each muxer carries them" {

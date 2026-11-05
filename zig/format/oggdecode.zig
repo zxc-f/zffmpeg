@@ -189,11 +189,15 @@ pub const DecodedReader = struct {
         r.expected = counted;
         switch (info.codec.?) {
             .opus => {
-                r.decoder = .{ .opus = opusdec.Decoder.init(r.gpa, info.extradata.items, true) catch |err| return switch (err) {
+                // Initialized into a local first: assigning the union in
+                // place sets its tag before the payload exists, so a
+                // failed init would leave `deinit` freeing garbage.
+                const opus = opusdec.Decoder.init(r.gpa, info.extradata.items, true) catch |err| return switch (err) {
                     error.OutOfMemory => error.OutOfMemory,
                     error.InvalidData => error.InvalidOpus,
                     error.UnsupportedFormat => error.UnsupportedFormat,
-                } };
+                };
+                r.decoder = .{ .opus = opus };
                 const dec = &r.decoder.opus;
                 const n = dec.channels();
                 r.plane_storage = try r.gpa.alloc(f32, @as(usize, opusdec.max_output) * n);
@@ -208,10 +212,11 @@ pub const DecodedReader = struct {
                 return .{ .stream = .opus, .codec = .f32le, .format = format, .frame_count = r.expected, .bits = 32 };
             },
             .vorbis => {
-                r.decoder = .{ .vorbis = vorbis.Decoder.init(r.gpa, info.extradata.items) catch |err| return switch (err) {
+                const decoder = vorbis.Decoder.init(r.gpa, info.extradata.items) catch |err| return switch (err) {
                     error.OutOfMemory => error.OutOfMemory,
                     error.InvalidData => error.InvalidVorbis,
-                } };
+                };
+                r.decoder = .{ .vorbis = decoder };
                 const dec = &r.decoder.vorbis;
                 const capacity = dec.blocksize[1] / 2;
                 r.plane_storage = try r.gpa.alloc(f32, @as(usize, capacity) * dec.channels);
@@ -226,10 +231,11 @@ pub const DecodedReader = struct {
                 const e = info.extradata.items;
                 if (e.len < flac.streaminfo_size) return error.UnsupportedFormat;
                 const si = flac.StreamInfo.parse(e[0..flac.streaminfo_size]);
-                r.decoder = .{ .flac = flacdec.Decoder.init(r.gpa, si) catch |err| return switch (err) {
+                const decoder = flacdec.Decoder.init(r.gpa, si) catch |err| return switch (err) {
                     error.OutOfMemory => error.OutOfMemory,
                     error.InvalidData => error.UnsupportedFormat,
-                } };
+                };
+                r.decoder = .{ .flac = decoder };
                 if (si.channels > flac.max_channels or si.sample_rate == 0) return error.UnsupportedFormat;
                 const storage: audio.SampleFormat = if (si.bps > 16) .s32 else .s16;
                 const format = audio.Format.initLayout(si.sample_rate, flac.channelLayout(si.channels), storage) catch return error.UnsupportedFormat;
@@ -415,3 +421,104 @@ pub const DecodedReader = struct {
         }
     }
 };
+
+const testing = std.testing;
+const fixtures = @import("../testing/fixtures.zig");
+
+/// Every sample `r` decodes, as `readData` gives them.
+fn decodeAll(r: *DecodedReader, out: *std.ArrayList(u8)) !DecodedReader.Header {
+    const header = try r.readHeader();
+    var scratch: [4096]u8 = undefined;
+    while (true) {
+        const got = try r.readData(&scratch);
+        if (got.len == 0) break;
+        try out.appendSlice(testing.allocator, got);
+    }
+    try r.finish();
+    return header;
+}
+
+/// The samples FFmpeg's decoder keeps for `name`: the sum of the `D`
+/// lines of its block in `vectors` (vectors/vorbis.txt, vectors/opus.txt).
+fn vectorSamples(vectors: []const u8, name: []const u8) !u64 {
+    var lines = std.mem.splitScalar(u8, vectors, '\n');
+    var in_block = false;
+    var total: u64 = 0;
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "F ")) {
+            if (in_block) break;
+            in_block = std.mem.eql(u8, line[2..], name);
+        } else if (in_block and std.mem.startsWith(u8, line, "D ")) {
+            var fields = std.mem.splitScalar(u8, line[2..], ' ');
+            total += try std.fmt.parseInt(u64, fields.next().?, 10);
+        }
+    }
+    if (!in_block and total == 0) return error.MissingVector;
+    return total;
+}
+
+test "a non-seekable input decodes to the seekable decoding's samples, FFmpeg's count" {
+    const gpa = testing.allocator;
+    const cases = [_]struct { name: []const u8, bytes: []const u8, vectors: ?[]const u8 }{
+        .{ .name = "ogg_vorbis_ffmpeg_22k_short", .bytes = fixtures.ogg.bytes("ogg_vorbis_ffmpeg_22k_short"), .vectors = @embedFile("../testing/vectors/vorbis.txt") },
+        .{ .name = "ogg_opus_ffmpeg_mono", .bytes = fixtures.ogg.bytes("ogg_opus_ffmpeg_mono"), .vectors = @embedFile("../testing/vectors/opus.txt") },
+        .{ .name = "ogg_flac_stereo", .bytes = fixtures.ogg.bytes("ogg_flac_stereo"), .vectors = null },
+    };
+    for (cases) |case| {
+        var streamed: std.ArrayList(u8) = .empty;
+        defer streamed.deinit(gpa);
+        var stream_reader: std.Io.Reader = .fixed(case.bytes);
+        var r = DecodedReader.init(gpa, &stream_reader, null, null);
+        defer r.deinit();
+        const header = try decodeAll(&r, &streamed);
+        // Without seeking there is no count ahead.
+        try testing.expectEqual(null, header.frame_count);
+
+        var seeked: std.ArrayList(u8) = .empty;
+        defer seeked.deinit(gpa);
+        var file_reader: std.Io.Reader = .fixed(case.bytes);
+        var s = DecodedReader.init(gpa, &file_reader, .fixed(&file_reader), null);
+        defer s.deinit();
+        const seeked_header = try decodeAll(&s, &seeked);
+
+        try testing.expect(streamed.items.len > 0);
+        try testing.expectEqualSlices(u8, seeked.items, streamed.items);
+        try testing.expectEqual(seeked_header.frame_count, r.delivered);
+        if (case.vectors) |vectors| try testing.expectEqual(try vectorSamples(vectors, case.name), r.delivered);
+    }
+}
+
+test "a decoder that refuses the headers fails opening without freeing its unset state" {
+    const gpa = testing.allocator;
+    // The mono Opus fixture whose OpusHead says mapping family 2
+    // (ambisonics; one stream, none coupled, channel 0 from stream 0),
+    // which the port refuses (notes.md "Mapping families").
+    const mono = fixtures.ogg.bytes("ogg_opus_ffmpeg_mono");
+    const old_page = 27 + 1 + 19;
+    try testing.expectEqual(19, mono[27]);
+    const fam2 = try gpa.alloc(u8, mono.len + 3);
+    defer gpa.free(fam2);
+    @memcpy(fam2[0..27], mono[0..27]);
+    fam2[27] = 22;
+    @memcpy(fam2[28..][0..19], mono[28..][0..19]);
+    fam2[28 + 18] = 2;
+    fam2[28 + 19 ..][0..3].* = .{ 1, 0, 0 };
+    @memcpy(fam2[old_page + 3 ..], mono[old_page..]);
+    @memset(fam2[22..26], 0);
+    var crc: ogg.Crc = .init();
+    crc.update(fam2[0 .. old_page + 3]);
+    std.mem.writeInt(u32, fam2[22..26], crc.final(), .little);
+
+    const cases = [_]struct { bytes: []const u8, err: Error }{
+        .{ .bytes = fixtures.ogg.bytes("ogg_vorbis_stereo"), .err = error.InvalidVorbis },
+        .{ .bytes = fam2, .err = error.UnsupportedFormat },
+    };
+    for (cases) |case| {
+        for ([_]bool{ false, true }) |seekable| {
+            var reader: std.Io.Reader = .fixed(case.bytes);
+            var r = DecodedReader.init(gpa, &reader, if (seekable) .fixed(&reader) else null, null);
+            defer r.deinit();
+            try testing.expectError(case.err, r.readHeader());
+        }
+    }
+}
