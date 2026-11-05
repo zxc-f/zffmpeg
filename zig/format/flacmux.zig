@@ -171,7 +171,12 @@ pub const Writer = struct {
     /// size (Ogg's comment packet has no 24-bit bound).
     pub fn check(gpa: std.mem.Allocator, codec: pcm.Codec, format: audio.Format, bits_per_raw_sample: u8, options: WriteOptions) (HeaderError || error{OutOfMemory})!void {
         try flacenc.Encoder.validate(try encoderParams(codec, format, bits_per_raw_sample, 0), options.encoder);
-        if (options.container != .flac) return;
+        switch (options.container) {
+            .flac => {},
+            // The Ogg muxer's comment header, from the stream's tags and the
+            // format's, as `begin` will build it.
+            .ogg => |o| return oggmux.checkTags(gpa, .flac, o.stream_tags, options.tags),
+        }
         var tags = muxerTags(gpa, options.tags, format.layout) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             // The tags came from a dictionary, which holds no NUL.
@@ -439,6 +444,22 @@ test "a stream shorter than 16 samples is refused, as FFmpeg's encoder refuses i
     try testing.expectEqual(0, out.buffered().len);
     try testing.expectError(error.UnsupportedFormat, Writer.check(gpa, .s24le, .{ .sample_rate = 8000, .layout = .mono, .sample_format = .s32 }, 24, .{}));
     try testing.expectError(error.UnsupportedFormat, Writer.check(gpa, .s16le, .{ .sample_rate = 8000, .layout = .{ .unspecified = 9 }, .sample_format = .s16 }, 16, .{}));
+}
+
+test "an Ogg comment block past 24 bits of length is refused by check, before any output" {
+    const gpa = testing.allocator;
+    // Well past the bound, whatever the vendor and keys add.
+    const value = try gpa.alloc(u8, 1 << 24);
+    defer gpa.free(value);
+    @memset(value, 'a');
+    var tags: metadata.Dictionary = .empty;
+    defer tags.deinit(gpa);
+    try tags.put(gpa, "X", value, .replace);
+    const format: audio.Format = .{ .sample_rate = 8000, .layout = .mono, .sample_format = .s16 };
+    // The stream's tags and the format's both enter the comment header.
+    try testing.expectError(error.TagsTooLong, Writer.check(gpa, .s16le, format, 16, .{ .container = .{ .ogg = .{ .stream_tags = &tags } } }));
+    try testing.expectError(error.TagsTooLong, Writer.check(gpa, .s16le, format, 16, .{ .tags = &tags, .container = .{ .ogg = .{} } }));
+    try Writer.check(gpa, .s16le, format, 16, .{ .container = .{ .ogg = .{} } });
 }
 
 test "a header the output refuses fails once, and deinit frees each part once" {

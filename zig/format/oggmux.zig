@@ -336,7 +336,7 @@ fn streamTags(gpa: std.mem.Allocator, stream_tags: ?*const metadata.Dictionary, 
 /// What `Muxer.init` refuses in a stream's tags (`TagsTooLong`), merged
 /// as it merges them, for a caller that checks a request before it
 /// creates any output.
-pub fn checkTags(gpa: std.mem.Allocator, codec: Codec, stream_tags: ?*const metadata.Dictionary, format_tags: ?*const metadata.Dictionary) InitError!void {
+pub fn checkTags(gpa: std.mem.Allocator, codec: Codec, stream_tags: ?*const metadata.Dictionary, format_tags: ?*const metadata.Dictionary) error{ TagsTooLong, OutOfMemory }!void {
     var tags = try streamTags(gpa, stream_tags, format_tags);
     defer tags.deinit(gpa);
     try checkCommentLength(codec, vorbiscomment.length(vendor, &tags));
@@ -349,7 +349,7 @@ pub fn checkTags(gpa: std.mem.Allocator, codec: Codec, stream_tags: ?*const meta
 /// longer comment and writes a header that misstates it; the port refuses
 /// it (notes.md "Ogg FLAC comment over 16 MiB": whether to write FFmpeg's
 /// bytes instead is open).
-fn checkCommentLength(codec: Codec, length: u64) InitError!void {
+fn checkCommentLength(codec: Codec, length: u64) error{TagsTooLong}!void {
     const extra: u64 = switch (codec) {
         .flac => 4,
         .opus => 8,

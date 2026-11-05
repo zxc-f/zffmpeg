@@ -64,6 +64,7 @@ const raw = @import("raw.zig");
 const caf = @import("caf.zig");
 const flac = @import("flac.zig");
 const flacmux = @import("flacmux.zig");
+const oggmux = @import("oggmux.zig");
 const oggdecode = @import("oggdecode.zig");
 const mp3 = @import("mp3.zig");
 const flacenc = @import("../codec/flacenc.zig");
@@ -475,6 +476,12 @@ pub const Conversion = struct {
                 .ogg => |*reader| try carryStreamTags(request.gpa.?, &stream_tags, reader.streamTags()),
                 .wav, .au, .aiff, .caf, .flac, .raw => {},
             }
+            // The comment header holds the stream tags too, so its bound
+            // is checked again with them, before any output exists.
+            oggmux.checkTags(request.gpa.?, .flac, &stream_tags, tags) catch |err| return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                error.TagsTooLong => error.LimitExceeded,
+            };
         }
         return .{
             .input = input,
