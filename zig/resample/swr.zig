@@ -85,52 +85,36 @@ pub const Swr = struct {
     /// `frame_frames`.
     pub fn init(gpa: std.mem.Allocator, in_format: audio.Format, out_format: audio.Format, frame_frames: u32, options: Options) Error!Swr {
         std.debug.assert(frame_frames > 0);
-        const in_channels = in_format.channelCount();
-        const out_channels = out_format.channelCount();
-        var remix: ?*rematrix.Remix = null;
+        // Owned once the layouts differ.
+        var remix: ?*rematrix.Remix = try gpa.create(rematrix.Remix);
         errdefer if (remix) |r| gpa.destroy(r);
-        const resampling = in_format.sample_rate != out_format.sample_rate;
-        const r = try gpa.create(rematrix.Remix);
-        const mixes = r.initFor(in_format, out_format.layout, out_format.sample_format, .{}, resampling) catch |err| {
-            gpa.destroy(r);
-            return err;
-        };
-        if (mixes) remix = r else gpa.destroy(r);
-        const mixing = if (remix) |m| m.mixing else false;
-        const internal = if (remix) |m| m.internal else dither.internalFormatResampling(in_format.sample_format, out_format.sample_format, mixing, resampling);
-        // swr_init: RSC * out / in - RSC < out_rate / in_rate - 1, RSC 1,
-        // the channel quotient in integers.
-        const quotient: i64 = @divTrunc(out_channels, in_channels);
-        const in_rate_f: f32 = @floatFromInt(in_format.sample_rate);
-        const out_rate_f: f64 = @floatFromInt(out_format.sample_rate);
-        const rate_ratio: f32 = @floatCast(out_rate_f / in_rate_f);
-        const lhs: f32 = @floatFromInt(quotient - 1);
-        const resample_first = lhs < rate_ratio - 1.0;
-        const engine_channels = if (resample_first) in_channels else out_channels;
-        var engine: Engines = switch (internal) {
-            inline .s16p, .s32p, .fltp, .dblp => |f| @unionInit(Engines, @tagName(f), try resample.Engine(f).init(gpa, engine_channels, in_format.sample_rate, out_format.sample_rate, options.resampler)),
+        const shape = try Shape.init(remix.?, in_format, out_format);
+        if (!shape.mixes) {
+            gpa.destroy(remix.?);
+            remix = null;
+        }
+        var engine: Engines = switch (shape.internal) {
+            inline .s16p, .s32p, .fltp, .dblp => |f| @unionInit(Engines, @tagName(f), try resample.Engine(f).init(gpa, shape.engine_channels, in_format.sample_rate, out_format.sample_rate, options.resampler)),
             else => unreachable,
         };
         errdefer switch (engine) {
             inline else => |*e| e.deinit(),
         };
-        const in_rate_d: f64 = @floatFromInt(in_format.sample_rate);
-        const ratio = out_rate_f / in_rate_d;
-        const buffers = try Buffers.allocate(gpa, internal, in_channels, out_format, resample_first, ratio, frame_frames);
+        const buffers = try Buffers.allocate(gpa, shape.internal, in_format.channelCount(), out_format, shape.resample_first, shape.ratio, frame_frames);
         // The dither's filter is chosen by the output rate (swri_dither_init).
-        const dithering = dither.Dither.initInternal(internal, out_channels, out_format.sample_rate, out_format.sample_format, options.dither);
+        const dithering = dither.Dither.initInternal(shape.internal, out_format.channelCount(), out_format.sample_rate, out_format.sample_format, options.dither);
         return .{
             .gpa = gpa,
             .in_format = in_format,
             .out_format = out_format,
-            .internal = internal,
+            .internal = shape.internal,
             .remix = remix,
             .engine = engine,
-            .resample_first = resample_first,
+            .resample_first = shape.resample_first,
             .dithering = dithering,
             .frame_frames = frame_frames,
             .capacity = frame_frames,
-            .ratio = ratio,
+            .ratio = shape.ratio,
             .postin = buffers.parts[0],
             .mid = buffers.parts[1],
             .preout = buffers.parts[2],
@@ -140,6 +124,89 @@ pub const Swr = struct {
         };
     }
 
+    /// What `init` refuses, without allocating or building the filter: the
+    /// mix, the resampler's filter size and ratio, and the buffers of calls
+    /// of `frame_frames` input frames. A conversion checks it before it
+    /// creates its output (port.md "CLI policy").
+    pub fn check(in_format: audio.Format, out_format: audio.Format, frame_frames: u32, options: Options) Error!void {
+        std.debug.assert(frame_frames > 0);
+        var remix: rematrix.Remix = undefined;
+        const shape = try Shape.init(&remix, in_format, out_format);
+        // The counter runs `resample_init`'s checks without the filter.
+        var counter = try resample.Counter.init(std.mem.Allocator.failing, shape.engine_channels, in_format.sample_rate, out_format.sample_rate, options.resampler);
+        counter.deinit();
+        _ = try Buffers.plan(shape.internal, in_format.channelCount(), out_format, shape.resample_first, shape.ratio, frame_frames);
+    }
+
+    /// The frames of the first output `take` and `next` give for a stream
+    /// of `total` input frames, or null when they give none, counted on the
+    /// resampler's counter without samples (the mix and the formats change
+    /// no count). A FLAC output's block size is this first output (the
+    /// ffmpeg program opens its encoder with the first frame), which a
+    /// conversion checks before it creates its output.
+    pub fn firstOutputFrames(in_rate: u32, out_rate: u32, frame_frames: u32, total: u64, options: Options) Error!?u32 {
+        std.debug.assert(frame_frames > 0);
+        var counter = try resample.Counter.init(std.mem.Allocator.failing, 1, in_rate, out_rate, options.resampler);
+        defer counter.deinit();
+        const out_rate_f: f64 = @floatFromInt(out_rate);
+        const in_rate_f: f64 = @floatFromInt(in_rate);
+        const ratio = out_rate_f / in_rate_f;
+        const max_room = try Buffers.maxRoom(ratio, frame_frames);
+        const view: resample.Counter.View = .{};
+        // `next`: one call per whole frame, then the last, shorter one. A
+        // call that gives nothing did not fill its room (at least 32), so
+        // no call without input follows it.
+        var left = total;
+        while (left > 0) {
+            const n_in: u32 = @intCast(@min(left, frame_frames));
+            left -= n_in;
+            const room = callRoom(n_in, ratio, counter.delay(out_rate), max_room);
+            const got = try counter.resample(view, @intCast(room), view, @intCast(n_in));
+            if (got > 0) return @intCast(got);
+        }
+        // The first flushing call.
+        try counter.flush();
+        const got = try counter.resample(view, 4096, view, 0);
+        return if (got > 0) @intCast(got) else null;
+    }
+
+    /// `init`'s choices that follow from the formats: the mix, set up in
+    /// `remix` when `mixes`, the internal format, and the resampler's place
+    /// and channels.
+    const Shape = struct {
+        mixes: bool,
+        internal: audio.SampleFormat,
+        resample_first: bool,
+        engine_channels: u32,
+        /// `aresample`'s ratio, `out_rate / in_rate` in double.
+        ratio: f64,
+
+        fn init(remix: *rematrix.Remix, in_format: audio.Format, out_format: audio.Format) Error!Shape {
+            const in_channels = in_format.channelCount();
+            const out_channels = out_format.channelCount();
+            const resampling = in_format.sample_rate != out_format.sample_rate;
+            const mixes = try remix.initFor(in_format, out_format.layout, out_format.sample_format, .{}, resampling);
+            const mixing = mixes and remix.mixing;
+            const internal = if (mixes) remix.internal else dither.internalFormatResampling(in_format.sample_format, out_format.sample_format, mixing, resampling);
+            // swr_init: RSC * out / in - RSC < out_rate / in_rate - 1, RSC 1,
+            // the channel quotient in integers.
+            const quotient: i64 = @divTrunc(out_channels, in_channels);
+            const in_rate_f: f32 = @floatFromInt(in_format.sample_rate);
+            const out_rate_f: f64 = @floatFromInt(out_format.sample_rate);
+            const rate_ratio: f32 = @floatCast(out_rate_f / in_rate_f);
+            const lhs: f32 = @floatFromInt(quotient - 1);
+            const resample_first = lhs < rate_ratio - 1.0;
+            const in_rate_d: f64 = @floatFromInt(in_format.sample_rate);
+            return .{
+                .mixes = mixes,
+                .internal = internal,
+                .resample_first = resample_first,
+                .engine_channels = if (resample_first) in_channels else out_channels,
+                .ratio = out_rate_f / in_rate_d,
+            };
+        }
+    };
+
     /// The buffers of calls of at most `frames` input frames, in one
     /// allocation.
     const Buffers = struct {
@@ -147,15 +214,26 @@ pub const Swr = struct {
         parts: [4]samples.Buffer,
         max_room: u32,
 
-        fn allocate(gpa: std.mem.Allocator, internal: audio.SampleFormat, in_channels: u32, out_format: audio.Format, resample_first: bool, ratio: f64, frames: u32) Error!Buffers {
-            const out_channels = out_format.channelCount();
-            // filter_frame's room: n_in * ratio + 32, plus at most as much
-            // again or 4096 for the delay.
+        /// The buffers' layouts and their total size, without allocating.
+        const Plan = struct {
+            parts: [4]samples.Layout,
+            total: usize,
+            max_room: u32,
+        };
+
+        /// filter_frame's room: n_in * ratio + 32, plus at most as much
+        /// again or 4096 for the delay.
+        fn maxRoom(ratio: f64, frames: u32) Error!u32 {
             const frames_f: f64 = @floatFromInt(frames);
             const first_f = @trunc(frames_f * ratio + 32);
             if (!(first_f < std.math.maxInt(i32) / 2)) return error.UnsupportedFormat;
-            const first: u32 = @intFromFloat(first_f);
-            const max_room = first + @max(4096, first);
+            const first: u32 = @trunc(first_f);
+            return first + @max(4096, first);
+        }
+
+        fn plan(internal: audio.SampleFormat, in_channels: u32, out_format: audio.Format, resample_first: bool, ratio: f64, frames: u32) Error!Plan {
+            const out_channels = out_format.channelCount();
+            const max_room = try maxRoom(ratio, frames);
             const mid_frames = if (resample_first) max_room else frames;
             const mid_channels = if (resample_first) in_channels else out_channels;
             const parts = [_]samples.Layout{
@@ -166,10 +244,15 @@ pub const Swr = struct {
             };
             var total: usize = 0;
             for (parts) |layout| total = std.math.add(usize, total, layout.size) catch return error.OutOfMemory;
-            const storage = try gpa.alignedAlloc(u8, .@"8", total);
-            var b: Buffers = .{ .storage = storage, .parts = undefined, .max_room = max_room };
+            return .{ .parts = parts, .total = total, .max_room = max_room };
+        }
+
+        fn allocate(gpa: std.mem.Allocator, internal: audio.SampleFormat, in_channels: u32, out_format: audio.Format, resample_first: bool, ratio: f64, frames: u32) Error!Buffers {
+            const p = try plan(internal, in_channels, out_format, resample_first, ratio, frames);
+            const storage = try gpa.alignedAlloc(u8, .@"8", p.total);
+            var b: Buffers = .{ .storage = storage, .parts = undefined, .max_room = p.max_room };
             var offset: usize = 0;
-            for (parts, 0..) |layout, i| {
+            for (p.parts, 0..) |layout, i| {
                 b.parts[i] = samples.Buffer.init(layout, storage[offset..][0..layout.size]) catch unreachable;
                 offset += layout.size;
             }
@@ -218,16 +301,22 @@ pub const Swr = struct {
     /// The call of the input in `postin`, as `filter_frame` makes it.
     fn runInput(s: *Swr) resample.Error!?samples.View {
         const n_in = s.postin_frames;
-        const n_in_f: f64 = @floatFromInt(n_in);
-        var room: i64 = @intFromFloat(@trunc(n_in_f * s.ratio + 32));
-        const buffered = s.delay();
-        if (buffered > 0) room += @min(buffered, @max(4096, room));
-        const room_u: u32 = @intCast(@min(room, s.max_room));
+        const room_u = callRoom(n_in, s.ratio, s.delay(), s.max_room);
         const got = try s.call(n_in, room_u, false);
         s.postin_frames = 0;
         // aresample: more data when the room was filled.
         s.more = got == room_u;
         return if (got > 0) s.output(got) else null;
+    }
+
+    /// `filter_frame`'s room for a call of `n_in` frames: `n_in` × `ratio`
+    /// + 32, more by the `buffered` delay when there is one, within the
+    /// buffers' `max_room`.
+    fn callRoom(n_in: u32, ratio: f64, buffered: i64, max_room: u32) u32 {
+        const n_in_f: f64 = @floatFromInt(n_in);
+        var room: i64 = @trunc(n_in_f * ratio + 32);
+        if (buffered > 0) room += @min(buffered, @max(4096, room));
+        return @intCast(@min(room, max_room));
     }
 
     /// `swr_get_delay(base)`: the buffered input as samples of `base` per
@@ -394,4 +483,66 @@ test "a resampled stream equals the resampler's own output, frames as FFmpeg cut
     swr.finish();
     while (try swr.next()) |out| total += out.layout.samples;
     try std.testing.expectEqual(try resample.outputFrames(input.len, 44100, 48000, .{}), total);
+}
+
+/// The first output of a real `Swr` on silence, `total` frames given as a
+/// decoder would, `chunk` at a time.
+fn firstOutputOf(gpa: std.mem.Allocator, in_format: audio.Format, out_format: audio.Format, frame_frames: u32, total: u32, chunk: u32) !?u32 {
+    var swr = try Swr.init(gpa, in_format, out_format, frame_frames, .{});
+    defer swr.deinit();
+    const layout = try samples.Layout.init(in_format.sample_format, in_format.channelCount(), @max(chunk, 1), .{ .line = 1 });
+    const bytes = try gpa.alloc(u8, layout.size);
+    defer gpa.free(bytes);
+    @memset(bytes, 0);
+    const view = try samples.View.init(layout, bytes);
+    var given: u32 = 0;
+    while (given < total) {
+        const n = @min(chunk, total - given);
+        var at: u32 = 0;
+        while (at < n) {
+            at += swr.take(view, at, n - at);
+            if (try swr.next()) |out| return out.layout.samples;
+        }
+        given += n;
+    }
+    swr.finish();
+    return if (try swr.next()) |out| out.layout.samples else null;
+}
+
+test "firstOutputFrames counts the first output a stream gives" {
+    const gpa = std.testing.allocator;
+    const cases = [_]struct { in: u32, out: u32, frame_frames: u32, total: u32 }{
+        .{ .in = 44100, .out = 48000, .frame_frames = 4096, .total = 10_000 },
+        .{ .in = 48000, .out = 44100, .frame_frames = 1152, .total = 5000 },
+        .{ .in = 100, .out = 48000, .frame_frames = 2048, .total = 2000 },
+        .{ .in = 1, .out = 8000, .frame_frames = 1, .total = 50 },
+        .{ .in = 8000, .out = 48000, .frame_frames = 16, .total = 20 },
+        .{ .in = 8000, .out = 48000, .frame_frames = 4096, .total = 3 },
+        .{ .in = 48000, .out = 8000, .frame_frames = 4096, .total = 0 },
+    };
+    for (cases) |case| {
+        const in_format = try audio.Format.init(case.in, 2, .s16);
+        const out_format = try audio.Format.init(case.out, 2, .s16);
+        const counted = try Swr.firstOutputFrames(case.in, case.out, case.frame_frames, case.total, .{});
+        for ([_]u32{ 1, 333, 8192 }) |chunk| {
+            try std.testing.expectEqual(counted, try firstOutputOf(gpa, in_format, out_format, case.frame_frames, case.total, chunk));
+        }
+    }
+}
+
+test "check refuses what init refuses, without allocating" {
+    const gpa = std.testing.allocator;
+    // A call's room past the buffers' bound: 1 Hz in frames of 4096 to
+    // 100 kHz s32 (the review's M15).
+    const in_format = try audio.Format.init(1, 1, .u8);
+    const out_format = try audio.Format.init(100_000, 1, .s32);
+    try std.testing.expectError(error.UnsupportedFormat, Swr.check(in_format, out_format, 4096, .{}));
+    try std.testing.expectError(error.UnsupportedFormat, Swr.init(gpa, in_format, out_format, 4096, .{}));
+    // A filter libswresample refuses.
+    const options: Options = .{ .resampler = .{ .filter_size = std.math.maxInt(i32) } };
+    const high = try audio.Format.init(48000, 1, .s16);
+    const low = try audio.Format.init(8000, 1, .s16);
+    try std.testing.expectError(error.UnsupportedFormat, Swr.check(high, low, 1024, options));
+    try std.testing.expectError(error.UnsupportedFormat, Swr.init(gpa, high, low, 1024, options));
+    try Swr.check(try audio.Format.init(44100, 2, .s16), try audio.Format.init(48000, 6, .flt), 4096, .{});
 }

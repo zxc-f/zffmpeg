@@ -396,6 +396,7 @@ fn EngineIn(comptime format: audio.SampleFormat, comptime counting: bool) type {
         /// `resample_common`: one output sample per position, the filter of
         /// its phase over the input; returns the input samples passed.
         fn resampleCommon(e: *Self, dst: [*]Sample, src: [*]const Sample, n: i32, update: bool) i32 {
+            if (counting) return e.advance(n, update);
             var index = e.index;
             var frac = e.frac;
             var sample_index: i32 = 0;
@@ -423,6 +424,28 @@ fn EngineIn(comptime format: audio.SampleFormat, comptime counting: bool) type {
                 e.index = index;
             }
             return sample_index;
+        }
+
+        /// The kernels' position arithmetic for `n` outputs, in closed
+        /// form, for the counter: each output moves the position by
+        /// `dst_incr` in units of 1 / (`phase_count` × `src_incr`) of an
+        /// input sample, which is what their per-output steps of `frac` and
+        /// `index` add up to (`frac` stays below `src_incr`, so one carry per
+        /// step is enough). So counting costs the same for any `n` (H4: a
+        /// header declaring a huge length). Returns the input samples passed,
+        /// as the kernels do.
+        fn advance(e: *Self, n: i32, update: bool) i32 {
+            std.debug.assert(counting);
+            std.debug.assert(n >= 0 and e.index >= 0 and e.frac >= 0 and e.frac < e.src_incr);
+            // `index` < `phase_count` <= 2^24 here, `src_incr` and `dst_incr`
+            // are at most 2^30 (`init`) and `n` below 2^31: under 2^62.
+            const position: i64 = @as(i64, e.index) * e.src_incr + e.frac + @as(i64, n) * e.dst_incr;
+            const whole = @divTrunc(position, e.src_incr);
+            if (update) {
+                e.frac = @intCast(@rem(position, e.src_incr));
+                e.index = @intCast(@rem(whole, e.phase_count));
+            }
+            return @intCast(@divTrunc(whole, e.phase_count));
         }
 
         fn commonSample(e: *Self, dst: [*]Sample, src: [*]const Sample, dst_index: usize, index: i32, sample_index: i32, length: usize) void {
@@ -462,6 +485,7 @@ fn EngineIn(comptime format: audio.SampleFormat, comptime counting: bool) type {
         /// `resample_linear`: as `resampleCommon`, interpolating between the
         /// position's phase and the next by the fraction.
         fn resampleLinear(e: *Self, dst: [*]Sample, src: [*]const Sample, n: i32, update: bool) i32 {
+            if (counting) return e.advance(n, update);
             var index = e.index;
             var frac = e.frac;
             var sample_index: i32 = 0;
@@ -779,8 +803,60 @@ fn EngineIn(comptime format: audio.SampleFormat, comptime counting: bool) type {
 /// The frames libswresample gives for `in_frames` input frames, after its
 /// flush: what a known-length writer needs before the first sample. The
 /// count does not depend on how the input is cut into calls.
-pub fn outputFrames(in_frames: u64, in_rate: u32, out_rate: u32, options: Options) Error!u64 {
+///
+/// The cost does not grow with `in_frames`, so a header declaring a huge
+/// length costs nothing (H4): the counter steps in closed form (`advance`),
+/// and past the stream's start (`settled` frames) the count repeats with
+/// the position's period: every `period.in` input frames bring the position
+/// back to the same phase and fraction, `period.out` outputs later. Only
+/// the start and one period are counted. A count past 2^64 is
+/// `LimitExceeded`.
+pub fn outputFrames(in_frames: u64, in_rate: u32, out_rate: u32, options: Options) (Error || error{LimitExceeded})!u64 {
     // A counter allocates nothing; the allocator is never used.
+    var counter = try Counter.init(std.mem.Allocator.failing, 1, in_rate, out_rate, options);
+    defer counter.deinit();
+    const p = period(&counter);
+    const start = settled(&counter);
+    if (in_frames >= start + p.in) {
+        const periods = (in_frames - start) / p.in;
+        const head = try countFrames(in_frames - periods * p.in, in_rate, out_rate, options, count_chunk);
+        const rest = std.math.mul(u64, periods, p.out) catch return error.LimitExceeded;
+        return std.math.add(u64, head, rest) catch error.LimitExceeded;
+    }
+    return countFrames(in_frames, in_rate, out_rate, options, count_chunk);
+}
+
+/// The input frames per counting call.
+const count_chunk = 1 << 24;
+
+/// The position's period: `in` input frames move it by `in` × `phase_count`
+/// × `src_incr` units, a whole number of output steps (`dst_incr` units
+/// each) exactly when `in` is a multiple of `dst_incr` / gcd, which makes
+/// `out` = `phase_count` × `src_incr` / gcd outputs: `out_rate` / `in_rate`
+/// per input frame, since `resample_init` keeps that ratio exact. `out` is
+/// at most `out_rate`.
+fn period(counter: *const Counter) struct { in: u64, out: u64 } {
+    const phases: u64 = @intCast(counter.phase_count);
+    const src_incr: u64 = @intCast(counter.src_incr);
+    const unit = phases * src_incr;
+    const step: u64 = @intCast(counter.dst_incr);
+    const gcd = std.math.gcd(unit, step);
+    return .{ .in = step / gcd, .out = unit / gcd };
+}
+
+/// Input frames past which the count is periodic: the reflected start has
+/// been consumed and the input buffer at the flush holds at least a filter
+/// length (its reflection is then always half a filter). Generous; the
+/// tests check the period from here on against the stepped count.
+fn settled(counter: *const Counter) u64 {
+    const length: u64 = @intCast(counter.filter_length);
+    return 4 * length + 64;
+}
+
+/// The count stepped call by call, `chunk` input frames a call, then the
+/// flush. Its calls cost the same whatever their size, so this takes
+/// `in_frames` / `chunk` calls plus one per 2^31 - 1 outputs.
+fn countFrames(in_frames: u64, in_rate: u32, out_rate: u32, options: Options, chunk: u32) Error!u64 {
     var counter = try Counter.init(std.mem.Allocator.failing, 1, in_rate, out_rate, options);
     defer counter.deinit();
     const view: Counter.View = .{};
@@ -788,7 +864,7 @@ pub fn outputFrames(in_frames: u64, in_rate: u32, out_rate: u32, options: Option
     var total: u64 = 0;
     var left = in_frames;
     while (left > 0) {
-        const n: i32 = @intCast(@min(left, 1 << 24));
+        const n: i32 = @intCast(@min(left, chunk));
         total += @intCast(try counter.resample(view, most, view, n));
         left -= @intCast(n);
     }
@@ -986,6 +1062,141 @@ test "any input chunking gives the same output" {
             try std.testing.expectEqualSlices(f32, reference[0..total], out[0..total]);
         }
     }
+}
+
+/// The output frames of the engine itself, on zeros: its per-output
+/// position steps, the oracle of the counter's closed form. The input comes
+/// in calls of `chunk` frames and the output in calls of at most 4096, so a
+/// call's room runs out as `swr.zig`'s do.
+fn engineFrames(gpa: std.mem.Allocator, in_frames: u32, in_rate: u32, out_rate: u32, options: Options, chunk: u32) !u64 {
+    const E = Engine(.dblp);
+    var engine = try E.init(gpa, 1, in_rate, out_rate, options);
+    defer engine.deinit();
+    const input = try gpa.alloc(f64, @max(in_frames, 1));
+    defer gpa.free(input);
+    @memset(input, 0);
+    var output: [4096]f64 = undefined;
+    var out_view: E.View = .{};
+    out_view.planes[0] = &output;
+    var total: u64 = 0;
+    var at: u32 = 0;
+    while (at < in_frames) {
+        const n = @min(chunk, in_frames - at);
+        var in_view: E.View = .{};
+        in_view.planes[0] = input[at..].ptr;
+        var got = try engine.resample(out_view, output.len, in_view, @intCast(n));
+        total += @intCast(got);
+        // A full room leaves input buffered: drain it before the next call.
+        while (got == output.len) {
+            got = try engine.resample(out_view, output.len, in_view, 0);
+            total += @intCast(got);
+        }
+        at += n;
+    }
+    try engine.flush();
+    while (true) {
+        var in_view: E.View = .{};
+        in_view.planes[0] = input.ptr;
+        const got = try engine.resample(out_view, output.len, in_view, 0);
+        if (got <= 0) break;
+        total += @intCast(got);
+    }
+    return total;
+}
+
+/// Rate pairs and options of the counting tests: the conversions' defaults
+/// (`convert.zig` and `swr.zig` pass `.{}`), libswresample's other phase,
+/// interpolation and cutoff settings, filters of one and few taps, and
+/// ratios whose period is one input frame or many.
+const counting_cases = [_]struct { in: u32, out: u32, options: Options = .{} }{
+    .{ .in = 44100, .out = 48000 },
+    .{ .in = 48000, .out = 44100 },
+    .{ .in = 8000, .out = 48000 },
+    .{ .in = 48000, .out = 8000 },
+    .{ .in = 1, .out = 48000 },
+    .{ .in = 100, .out = 48000 },
+    .{ .in = 22050, .out = 44100 },
+    .{ .in = 44100, .out = 22050 },
+    .{ .in = 44099, .out = 48000 },
+    .{ .in = 7, .out = 3 },
+    .{ .in = 3, .out = 7 },
+    .{ .in = 44100, .out = 48000, .options = .{ .linear_interp = false } },
+    .{ .in = 44100, .out = 48000, .options = .{ .exact_rational = false } },
+    .{ .in = 44099, .out = 48000, .options = .{ .exact_rational = false, .phase_shift = 4 } },
+    .{ .in = 48000, .out = 11025, .options = .{ .phase_shift = 0 } },
+    .{ .in = 8000, .out = 44100, .options = .{ .filter_size = 1 } },
+    .{ .in = 8000, .out = 16000, .options = .{ .filter_size = 1, .phase_shift = 0 } },
+    .{ .in = 16000, .out = 8000, .options = .{ .filter_size = 1, .phase_shift = 0 } },
+    .{ .in = 44100, .out = 32000, .options = .{ .filter_size = 2, .cutoff = 0.8 } },
+    .{ .in = 32000, .out = 44100, .options = .{ .filter_size = 8, .linear_interp = false, .phase_shift = 3 } },
+};
+
+test "the counter's closed form counts what the engine's steps give" {
+    const gpa = std.testing.allocator;
+    for (counting_cases) |case| {
+        var frames: u32 = 0;
+        while (frames < 400) : (frames += if (frames < 80) 1 else 37) {
+            const counted = try countFrames(frames, case.in, case.out, case.options, count_chunk);
+            // Keep the engine's work small in Debug.
+            if (counted > 20_000) continue;
+            for ([_]u32{ 1, 13, 4096 }) |chunk| {
+                const stepped = try engineFrames(gpa, frames, case.in, case.out, case.options, chunk);
+                std.testing.expectEqual(stepped, counted) catch |err| {
+                    std.debug.print("{d} -> {d} Hz, {d} frames in calls of {d}\n", .{ case.in, case.out, frames, chunk });
+                    return err;
+                };
+            }
+        }
+    }
+}
+
+test "outputFrames' period gives the stepped count, from the start to huge lengths" {
+    for (counting_cases) |case| {
+        var counter = try Counter.init(std.mem.Allocator.failing, 1, case.in, case.out, case.options);
+        defer counter.deinit();
+        const p = period(&counter);
+        const start = settled(&counter);
+        const lengths = [_]u64{
+            0,                    1,                       start - 1,                 start,
+            start + 1,            start + p.in - 1,        start + p.in,              start + p.in + 1,
+            start + 2 * p.in + 5, start + 3 * p.in,        2 * start + 7 * p.in + 3,  (1 << 24) + 1,
+            (1 << 25) + 3,        5 * start + 1000 * p.in, 3 * (1 << 24) + 17 * p.in,
+        };
+        for (lengths) |length| {
+            const stepped = try countFrames(length, case.in, case.out, case.options, count_chunk);
+            std.testing.expectEqual(stepped, try outputFrames(length, case.in, case.out, case.options)) catch |err| {
+                std.debug.print("{d} -> {d} Hz, {d} frames\n", .{ case.in, case.out, length });
+                return err;
+            };
+            // The count does not depend on the calls' sizes either.
+            if (length < 200_000) try std.testing.expectEqual(stepped, try countFrames(length, case.in, case.out, case.options, 997));
+        }
+        // Every length through three periods past the start, when short.
+        if (start + 3 * p.in < 4000) {
+            var length: u64 = 0;
+            while (length < start + 3 * p.in) : (length += 1) {
+                try std.testing.expectEqual(try countFrames(length, case.in, case.out, case.options, count_chunk), try outputFrames(length, case.in, case.out, case.options));
+            }
+        }
+    }
+}
+
+test "outputFrames of a huge declared length returns at once" {
+    // The review's H4 headers: 2^32 - 256 bytes of 8 kHz u8, and 2^28
+    // frames at 1 Hz, each hours of stepping per output before. The count
+    // is the ratio's, give or take the filter's edges.
+    const cases = [_]struct { frames: u64, in: u32, out: u32 }{
+        .{ .frames = 0xFFFF_FF00, .in = 8000, .out = 48000 },
+        .{ .frames = 1 << 28, .in = 1, .out = 48000 },
+        .{ .frames = 1 << 62, .in = 48000, .out = 44100 },
+    };
+    for (cases) |case| {
+        const count = try outputFrames(case.frames, case.in, case.out, .{});
+        const frames: i128 = case.frames;
+        const ratio_count = @divTrunc(frames * case.out, case.in);
+        try std.testing.expect(@abs(count - ratio_count) < 100);
+    }
+    try std.testing.expectError(error.LimitExceeded, outputFrames(1 << 62, 1, 48000, .{}));
 }
 
 const option_vectors = @embedFile("../testing/vectors/options.txt");

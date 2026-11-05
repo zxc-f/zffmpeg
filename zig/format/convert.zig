@@ -67,6 +67,7 @@ const flacmux = @import("flacmux.zig");
 const oggdecode = @import("oggdecode.zig");
 const mp3 = @import("mp3.zig");
 const flacenc = @import("../codec/flacenc.zig");
+const flac_codec = @import("../codec/flac.zig");
 const seek = @import("seek.zig");
 const codecs = @import("../codec/registry.zig");
 /// FLAC's block size limit, the dither's call size for a headerless input.
@@ -283,7 +284,7 @@ pub const Conversion = struct {
             // copy yet. The demuxer reads the input from its start, through the seekable
             // reader when the input can seek (its durations), else after
             // detection's replay.
-            .ogg => .{ .ogg = if (source.source.seeker) |sk|
+            .ogg => .{ .ogg = if (try rewound(source)) |sk|
                 .init(request.gpa orelse return error.UnsupportedOperation, source.replay.source, sk, request.diagnostics)
             else
                 .init(request.gpa orelse return error.UnsupportedOperation, source.reader(), null, request.diagnostics) },
@@ -293,7 +294,7 @@ pub const Conversion = struct {
             // refused, before any output.
             .mp3 => {
                 const gpa = request.gpa orelse return error.UnsupportedOperation;
-                const d = if (source.source.seeker) |sk|
+                const d = if (try rewound(source)) |sk|
                     try mp3.Demuxer.initSeekable(gpa, source.replay.source, sk, .{})
                 else
                     try mp3.Demuxer.init(gpa, source.reader(), .{});
@@ -439,6 +440,7 @@ pub const Conversion = struct {
             .ogg => |*reader| reader.max_frame,
             else => ffmpegPacketFrames(summary.input, summary.input_codec, summary.format),
         };
+        if (resampling) try checkResampling(summary, packet_frames);
         // Raw PCM has no header to hold STREAMINFO's count, nor has FLAC
         // before its encoder's final STREAMINFO, so a FLAC stream that
         // decodes to another count converts as FFmpeg converts it; the
@@ -458,6 +460,8 @@ pub const Conversion = struct {
             .wav, .au, .aiff, .caf, .raw => {},
         }
         var stream_tags: metadata.Dictionary = .empty;
+        // Only an Ogg output, which needs `gpa`, holds any.
+        errdefer if (request.gpa) |gpa| stream_tags.deinit(gpa);
         if (request.output.family() == .ogg) {
             // The ffmpeg program's set_encoder_id under -bitexact.
             stream_tags.put(request.gpa.?, "encoder", "Lavc flac", .replace) catch |err| return switch (err) {
@@ -497,6 +501,29 @@ pub const Conversion = struct {
             .ogg => |*reader| reader.deinit(),
             .wav, .au, .aiff, .caf, .raw => {},
         }
+    }
+
+    /// What a rate change refuses from the request alone, before any output
+    /// (port.md "CLI policy"): what `swr.Swr.init` refuses for FFmpeg's
+    /// packet sizes, and into FLAC (or FLAC in Ogg) a first resampled output
+    /// outside FLAC's block sizes, which the ffmpeg program opens its
+    /// encoder with and fails on. That output depends on the input's
+    /// length, which only a PCM input's header gives exactly: a FLAC or Ogg
+    /// input's, or one of unknown length, is checked when it comes
+    /// (`flacmux.Writer`).
+    fn checkResampling(summary: Summary, packet_frames: u32) InitError!void {
+        try swr.Swr.check(summary.format, summary.outputFormat(), packet_frames, .{});
+        switch (summary.output.family()) {
+            .flac, .ogg => {},
+            .wav, .au, .aiff, .raw, .caf, .mp3 => return,
+        }
+        switch (summary.input.family()) {
+            .wav, .au, .aiff, .caf, .raw => {},
+            .flac, .ogg, .mp3 => return,
+        }
+        const count = summary.frame_count orelse return;
+        const first = try swr.Swr.firstOutputFrames(summary.format.sample_rate, summary.output_rate, packet_frames, count, .{}) orelse return;
+        if (first < flac_codec.min_blocksize or first > flac_codec.max_blocksize) return error.UnsupportedFormat;
     }
 
     /// The frame count a writer's header needs up front.
@@ -773,25 +800,13 @@ fn flacStorage(input: audio.SampleFormat) pcm.Codec {
     return if (score(2, input) <= score(4, input)) .s16le else .s32le;
 }
 
-/// The ffmpeg program's reenc_delete_keys for a re-encoded audio stream:
-/// exact keys, or prefixes (AV_DICT_IGNORE_SUFFIX), case-sensitive.
-const reencode_dropped = [_]struct { key: []const u8, prefix: bool = false }{
-    .{ .key = "iTunPGAP" },                                .{ .key = "comment-iTunPGAP-eng" },                         .{ .key = "iTunSMPB" },
-    .{ .key = "comment-iTunSMPB-eng" },                    .{ .key = "gapless_playback" },                             .{ .key = "iTunNORM" },
-    .{ .key = "comment-iTunNORM-eng" },                    .{ .key = "encoded_by" },                                   .{ .key = "encoding_tool" },
-    .{ .key = "vendor_id" },                               .{ .key = "BPS", .prefix = true },                          .{ .key = "DURATION", .prefix = true },
-    .{ .key = "NUMBER_OF_BYTES", .prefix = true },         .{ .key = "NUMBER_OF_FRAMES", .prefix = true },             .{ .key = "_STATISTICS_TAGS", .prefix = true },
-    .{ .key = "_STATISTICS_WRITING_APP", .prefix = true }, .{ .key = "_STATISTICS_WRITING_DATE_UTC", .prefix = true }, .{ .key = "major_brand" },
-    .{ .key = "minor_version" },                           .{ .key = "compatible_brands" },
-};
-
 /// copy_meta into a re-encoded stream: `input`'s tags after `out`'s, a key
 /// `out` has kept (dictionaries match keys without regard to case), the
-/// keys the program drops on re-encoding left out.
+/// keys the program drops on re-encoding (`stale_keys`) left out.
 fn carryStreamTags(gpa: std.mem.Allocator, out: *metadata.Dictionary, input: *const metadata.Dictionary) error{OutOfMemory}!void {
     for (input.items()) |entry| {
-        const dropped = for (reencode_dropped) |d| {
-            if (if (d.prefix) std.mem.startsWith(u8, entry.key, d.key) else std.mem.eql(u8, entry.key, d.key)) break true;
+        const dropped = for (stale_keys) |stale| {
+            if (stale.matches(entry.key)) break true;
         } else false;
         if (dropped or out.get(entry.key) != null) continue;
         out.put(gpa, entry.key, entry.value, .replace) catch |err| return switch (err) {
@@ -811,6 +826,16 @@ fn decoderSetsLayout(stream: codecs.Codec) bool {
         .opus, .vorbis => true,
         else => false,
     };
+}
+
+/// The input's seeker moved back to the start, where a seekable demuxer
+/// opens (probing read ahead of it), as `detect`'s probes rewind; null for
+/// an input that cannot seek, which the demuxer reads after detection's
+/// replay instead.
+fn rewound(source: *detect.Input) error{IoFailure}!?seek.Seeker {
+    const sk = source.source.seeker orelse return null;
+    try sk.seekTo(0);
+    return sk;
 }
 
 fn streamOf(info: anytype) codecs.Codec {
@@ -924,9 +949,16 @@ const StaleKey = struct {
     prefix: bool = false,
     /// Removed only when the audio is re-encoded, not stream-copied.
     reencoded_only: bool = true,
+
+    /// Whether `key` is this one, in exact case (`AV_DICT_MATCH_CASE`).
+    fn matches(stale: StaleKey, key: []const u8) bool {
+        return if (stale.prefix) std.mem.startsWith(u8, key, stale.key) else std.mem.eql(u8, key, stale.key);
+    }
 };
 
-/// `reenc_delete_keys`, in its order: exact-case matches.
+/// `reenc_delete_keys`, in its order: exact-case matches. The file's tags
+/// (`carriedTags`) and a re-encoded stream's (`carryStreamTags`) both lose
+/// them.
 const stale_keys = [_]StaleKey{
     .{ .key = "iTunPGAP" },
     .{ .key = "comment-iTunPGAP-eng" },
@@ -974,8 +1006,7 @@ fn carriedTags(gpa: std.mem.Allocator, input: *const metadata.Dictionary, mode: 
         if (stale.reencoded_only and mode == .copy) continue;
         // Each exact-case match goes, through a case-insensitive removal.
         while (for (out.items()) |entry| {
-            const matches = if (stale.prefix) std.mem.startsWith(u8, entry.key, stale.key) else std.mem.eql(u8, entry.key, stale.key);
-            if (matches) break entry.key;
+            if (stale.matches(entry.key)) break entry.key;
         } else null) |key| {
             _ = out.remove(gpa, key);
         }
@@ -1017,19 +1048,31 @@ fn rawOptions(limits: Limits) raw.WriteOptions {
     return .{ .max_sample_rate = limits.raw.max_sample_rate };
 }
 
-/// The writer's own failure. `init` already ran the header checks `begin`
-/// repeats, with the same arguments; the parser delivers whole frames of the
-/// same format, exactly the declared count, before `finish`. So only the
-/// output's I/O failure remains.
+/// Every error a writer's `begin`, `writeData` or `finish` returns. A new
+/// one fails to compile in `outputFailure`'s switch until it is classified.
+const WriterError = wav.WriteError || au.WriteError || aiff.WriteError || raw.WriteError || flacmux.WriteError;
+
 /// A writer's failure once output started: the output's, or FLAC's that
 /// only its first frame reveals (T26c: the encoder refusing the block size
-/// it gives, an allocation, the seek back for STREAMINFO). The PCM writers'
-/// other errors cannot happen: `init` ran their checks. Any writer's error
-/// set comes in, so this takes `anyerror`.
-fn outputFailure(err: anyerror) RunError {
+/// it gives, an allocation, the seek back for STREAMINFO, an Ogg comment
+/// packet past 2 GiB).
+fn outputFailure(err: WriterError) RunError {
     return switch (err) {
-        error.WriteFailed, error.OutOfMemory, error.IoFailure, error.UnsupportedFormat => @errorCast(err),
-        else => unreachable,
+        error.WriteFailed => error.WriteFailed,
+        // FLAC's seek back to rewrite STREAMINFO: the output failed too.
+        error.IoFailure => error.WriteFailed,
+        error.OutOfMemory => error.OutOfMemory,
+        error.UnsupportedFormat => error.UnsupportedFormat,
+        // As `init` reports it for FLAC's container.
+        error.TagsTooLong => error.LimitExceeded,
+        // `init` ran the header checks `begin` repeats, with the same
+        // arguments, and the FLAC encoder's option checks, which do not
+        // depend on the block size.
+        error.InvalidFormat, error.LimitExceeded, error.SizeOverflow, error.InvalidOption => unreachable,
+        // The parser delivers whole frames of the same format, exactly the
+        // count `init` declared (`resample.outputFrames` for a rate change),
+        // before `finish`.
+        error.IncompleteFrame, error.TooManyFrames, error.TooFewFrames => unreachable,
     };
 }
 
@@ -2100,8 +2143,6 @@ fn decodeFlac(gpa: std.mem.Allocator, bytes: []const u8, verify_md5: bool) ![]u8
     return decoded.toOwnedSlice(gpa);
 }
 
-const flac_codec = @import("../codec/flac.zig");
-
 test "FLAC output: FFmpeg's block size, the samples back, STREAMINFO rewritten only on a seekable output" {
     const gpa = std.testing.allocator;
     const input = try testWav(gpa, 5000, 44100);
@@ -2153,6 +2194,52 @@ test "FLAC to FLAC: the first decoded frame is the block size; encoder options a
     try std.testing.expectError(error.InvalidOption, convert(&reader, &out, .{ .output = .flac, .mode = .transcode, .gpa = gpa, .flac = .{ .min_prediction_order = 9, .max_prediction_order = 8 } }, .{}));
     reader = .fixed(fixtures.flac.bytes("flac_ffmpeg_level5_stereo"));
     try std.testing.expectError(error.UnsupportedOperation, convert(&reader, &out, .{ .output = .flac, .mode = .copy, .gpa = gpa }, .{}));
+}
+
+test "a rate change the request refuses fails in init, before any output" {
+    const gpa = std.testing.allocator;
+    // A WAV under 20 Hz reads packets of one frame, each call's room the
+    // ratio plus 32 frames, more by the delay, so the first output, FLAC's
+    // block size as the ffmpeg program opens the encoder with it, is one
+    // to two times the ratio: from 1 Hz, 16 kHz fits FLAC's 65,535 frames
+    // and 48 kHz does not.
+    const cases = [_]struct { out_rate: u32, ok: bool }{ .{ .out_rate = 16000, .ok = true }, .{ .out_rate = 48000, .ok = false } };
+    for (cases) |case| {
+        const input = try testWav(gpa, 40, 1);
+        defer gpa.free(input);
+        const out_rate = case.out_rate;
+        const first = (try swr.Swr.firstOutputFrames(1, out_rate, 1, 40, .{})).?;
+        try std.testing.expectEqual(case.ok, first <= flac_codec.max_blocksize);
+        for ([_]Container{ .flac, .ogg }) |output| {
+            var reader: std.Io.Reader = .fixed(input);
+            var source: detect.Input = undefined;
+            try source.open(&reader, .{});
+            const request: Request = .{ .output = output, .mode = .transcode, .gpa = gpa, .sample_rate = out_rate };
+            if (!case.ok) {
+                try std.testing.expectError(error.UnsupportedFormat, Conversion.init(&source, request, .{}));
+                continue;
+            }
+            // Accepted, the encoder opens with the predicted block size.
+            var conversion = try Conversion.init(&source, request, .{});
+            defer conversion.deinit();
+            if (output == .ogg) continue;
+            var out: std.Io.Writer.Allocating = .init(gpa);
+            defer out.deinit();
+            try conversion.run(&out.writer);
+            const streaminfo = out.written()[8..][0..34];
+            try std.testing.expectEqual(first, std.mem.readInt(u16, streaminfo[0..2], .big));
+        }
+    }
+    // A call's room past the resampler's buffers: 1 Hz in calls of one
+    // frame to 2^30 Hz (limits raised so that the writer takes the rate).
+    const input = try testWav(gpa, 40, 1);
+    defer gpa.free(input);
+    var reader: std.Io.Reader = .fixed(input);
+    var source: detect.Input = undefined;
+    try source.open(&reader, .{});
+    var limits: Limits = .{};
+    limits.raw.max_sample_rate = 1 << 30;
+    try std.testing.expectError(error.UnsupportedFormat, Conversion.init(&source, .{ .output = .s16le, .mode = .transcode, .gpa = gpa, .sample_rate = 1 << 30 }, limits));
 }
 
 test "FLAC output fails cleanly under every allocation failure" {
