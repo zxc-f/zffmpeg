@@ -88,9 +88,10 @@ pub const Decoder = struct {
     gpa: std.mem.Allocator,
     stream: Stream = .{},
     got_streaminfo: bool = false,
-    /// One buffer of `max_blocksize` samples per channel.
+    /// One buffer per channel of `max_blocksize` samples rounded up to 32
+    /// (`channelBufferLength`).
     decoded: [][]i32 = &.{},
-    /// The 33-bit side channel of 32-bit stereo.
+    /// The 33-bit side channel of 32-bit stereo, as long as a channel buffer.
     decoded_33: []i64 = &.{},
     output16: []i16 = &.{},
     output32: []i32 = &.{},
@@ -128,7 +129,7 @@ pub const Decoder = struct {
     fn setStreamInfo(d: *Decoder, si: flac.StreamInfo) error{ OutOfMemory, InvalidData }!void {
         if (si.max_blocksize < flac.min_blocksize or si.bps < 4) return error.InvalidData;
         d.stream = .{ .bps = si.bps, .channels = si.channels, .sample_rate = si.sample_rate, .max_blocksize = si.max_blocksize };
-        try d.allocateBuffers();
+        try d.allocateBuffers(si.channels);
         d.setBps();
         d.got_streaminfo = true;
     }
@@ -137,12 +138,24 @@ pub const Decoder = struct {
         d.sample_shift = @intCast(if (d.stream.bps > 16) 32 - @as(u8, d.stream.bps) else 16 - @as(u8, d.stream.bps));
     }
 
-    /// allocate_buffers: per-channel buffers of `max_blocksize`, the 64-bit
-    /// one for 32-bit stereo, and the output.
-    fn allocateBuffers(d: *Decoder) error{OutOfMemory}!void {
+    /// The samples of one channel buffer: `max_blocksize` rounded up to 32,
+    /// as `av_samples_get_buffer_size` with alignment 0 sizes FFmpeg's.
+    /// Every predictor order (at most 32) fits, so the warm-up samples are
+    /// read, in FFmpeg's order, before `decodeResiduals` refuses an order
+    /// above the block size.
+    fn channelBufferLength(max_blocksize: u32) usize {
+        return std.mem.alignForward(usize, @max(max_blocksize, 1), 32);
+    }
+
+    /// allocate_buffers: a buffer per channel (`channelBufferLength`), the
+    /// 64-bit one for 32-bit stereo, and the output, for `channel_count`.
+    /// On failure the previous buffers stay, so the caller commits a new
+    /// channel count only after this succeeds.
+    fn allocateBuffers(d: *Decoder, channel_count: u8) error{OutOfMemory}!void {
         const gpa = d.gpa;
         const n: usize = d.stream.max_blocksize;
-        const channels: usize = d.stream.channels;
+        const len = channelBufferLength(d.stream.max_blocksize);
+        const channels: usize = channel_count;
         const decoded = try gpa.alloc([]i32, channels);
         var made: usize = 0;
         errdefer {
@@ -150,10 +163,10 @@ pub const Decoder = struct {
             gpa.free(decoded);
         }
         for (decoded) |*c| {
-            c.* = try gpa.alloc(i32, n);
+            c.* = try gpa.alloc(i32, len);
             made += 1;
         }
-        const wide = if (d.stream.bps == 32 and channels == 2) try gpa.alloc(i64, n) else try gpa.alloc(i64, 0);
+        const wide = if (d.stream.bps == 32 and channels == 2) try gpa.alloc(i64, len) else try gpa.alloc(i64, 0);
         errdefer gpa.free(wide);
         const out16 = try gpa.alloc(i16, n * channels);
         errdefer gpa.free(out16);
@@ -266,8 +279,7 @@ pub const Decoder = struct {
             .invalid => return d.fail(.frame_header),
         };
         if (d.stream.channels != 0 and fi.channels != d.stream.channels and d.got_streaminfo) {
-            d.stream.channels = fi.channels;
-            try d.allocateBuffers();
+            try d.allocateBuffers(fi.channels);
         }
         d.stream.channels = fi.channels;
         d.ch_mode = fi.ch_mode;
@@ -288,7 +300,7 @@ pub const Decoder = struct {
         if (fi.sample_rate == 0) fi.sample_rate = d.stream.sample_rate;
         d.stream.sample_rate = fi.sample_rate;
         if (!d.got_streaminfo) {
-            try d.allocateBuffers();
+            try d.allocateBuffers(d.stream.channels);
             d.got_streaminfo = true;
         }
         for (0..d.stream.channels) |ch| try d.decodeSubframe(r, ch);
@@ -298,7 +310,10 @@ pub const Decoder = struct {
 
     /// decode_subframe.
     fn decodeSubframe(d: *Decoder, r: *bits.BitReader, channel: usize) DecodeError!void {
-        const decoded = d.decoded[channel][0..d.blocksize];
+        // The whole channel buffer: warm-up samples may run past the block
+        // before the predictor order is checked, as FFmpeg's do.
+        const decoded = d.decoded[channel];
+        const n = d.blocksize;
         var bps: u7 = @intCast(d.stream.bps);
         if (channel == 0) {
             if (d.ch_mode == .right_side) bps += 1;
@@ -316,13 +331,17 @@ pub const Decoder = struct {
             wasted = @intCast(1 + r.unary(1, r.left()));
             bps -= wasted;
         }
-        const wide = d.decoded_33[0..if (bps >= 33 or wasted + bps == 33) d.blocksize else 0];
+        // Empty unless the stream is 32-bit stereo, the only one with a
+        // 33-bit side channel: side modes are stereo, and allocateBuffers
+        // runs for every new channel count with the stream's fixed bps.
+        const wide = d.decoded_33;
+        std.debug.assert(wasted + bps < 33 or wide.len >= n);
         switch (subframe_type) {
-            0 => if (bps < 33) @memset(decoded, r.signed(@intCast(bps))) else @memset(wide, r.signed64(33)),
+            0 => if (bps < 33) @memset(decoded[0..n], r.signed(@intCast(bps))) else @memset(wide[0..n], r.signed64(33)),
             1 => if (bps < 33) {
-                for (decoded) |*s| s.* = r.signed(@intCast(bps));
+                for (decoded[0..n]) |*s| s.* = r.signed(@intCast(bps));
             } else {
-                for (wide) |*s| s.* = r.signed64(33);
+                for (wide[0..n]) |*s| s.* = r.signed64(33);
             },
             8...12 => {
                 const order: u32 = subframe_type & ~@as(u32, 0x8);
@@ -337,14 +356,15 @@ pub const Decoder = struct {
         if (wasted > 0) {
             if (wasted + bps == 33) {
                 // flac_wasted_33_c: into the 64-bit buffer.
-                for (wide, decoded) |*w, s| w.* = @bitCast(@as(u64, @bitCast(@as(i64, s))) << @intCast(wasted));
+                for (wide[0..n], decoded[0..n]) |*w, s| w.* = @bitCast(@as(u64, @bitCast(@as(i64, s))) << @intCast(wasted));
             } else if (wasted < 32) {
-                for (decoded) |*s| s.* = @bitCast(@as(u32, @bitCast(s.*)) << @intCast(wasted));
+                for (decoded[0..n]) |*s| s.* = @bitCast(@as(u32, @bitCast(s.*)) << @intCast(wasted));
             }
         }
     }
 
-    /// decode_residuals: the residual after `pred_order` warm-up samples.
+    /// decode_residuals: the residual after `pred_order` warm-up samples,
+    /// into `decoded[pred_order..blocksize]` once the order is checked.
     fn decodeResiduals(d: *Decoder, r: *bits.BitReader, decoded: []i32, pred_order: u32) DecodeError!void {
         const method_type = r.bits(2);
         const rice_order: u5 = @intCast(r.bits(4));
@@ -380,7 +400,8 @@ pub const Decoder = struct {
     }
 
     /// decode_subframe_fixed (and _wide, which gives the same 32-bit
-    /// results): unsigned, wrapping recurrences, as FFmpeg's.
+    /// results): unsigned, wrapping recurrences, as FFmpeg's. `decoded` is
+    /// the whole channel buffer.
     fn decodeFixed(d: *Decoder, r: *bits.BitReader, decoded: []i32, order: u32, bps: u6) DecodeError!void {
         for (decoded[0..order]) |*s| s.* = r.signed(bps);
         try d.decodeResiduals(r, decoded, order);
@@ -397,7 +418,7 @@ pub const Decoder = struct {
         if (order > 1) b = a -% u(decoded[order - 2]);
         if (order > 2) c = b -% u(decoded[order - 2]) +% u(decoded[order - 3]);
         if (order > 3) e = c -% u(decoded[order - 2]) +% 2 *% u(decoded[order - 3]) -% u(decoded[order - 4]);
-        for (decoded[order..]) |*s| {
+        for (decoded[order..d.blocksize]) |*s| {
             switch (order) {
                 0 => {},
                 1 => a +%= u(s.*),
@@ -423,7 +444,8 @@ pub const Decoder = struct {
     }
 
     /// decode_subframe_fixed_33bps: 33-bit warm-up samples, 64-bit
-    /// wrapping prediction from the 32-bit residual.
+    /// wrapping prediction from the 32-bit residual. `wide` and `residual`
+    /// are whole buffers.
     fn decodeFixed33(d: *Decoder, r: *bits.BitReader, wide: []i64, residual: []i32, order: u32) DecodeError!void {
         for (wide[0..order]) |*s| s.* = r.signed64(33);
         try d.decodeResiduals(r, residual, order);
@@ -432,7 +454,7 @@ pub const Decoder = struct {
                 return @bitCast(v);
             }
         }.of;
-        for (order..wide.len) |i| {
+        for (order..d.blocksize) |i| {
             const res = u(residual[i]);
             const v: u64 = switch (order) {
                 0 => res,
@@ -457,27 +479,30 @@ pub const Decoder = struct {
     }
 
     /// decode_subframe_lpc, without FFmpeg's `use_buggy_lpc` emulation.
+    /// `decoded` is the whole channel buffer.
     fn decodeLpc(d: *Decoder, r: *bits.BitReader, decoded: []i32, order: u32, bps: u6) DecodeError!void {
         for (decoded[0..order]) |*s| s.* = r.signed(bps);
         var coeffs: [32]i32 = undefined;
         const p = try d.lpcParameters(r, order, &coeffs);
         try d.decodeResiduals(r, decoded, order);
+        const block = decoded[0..d.blocksize];
         const log2_order: u32 = std.math.log2_int(u32, order);
         if (bps <= 16 and bps + p.prec + log2_order <= 32) {
-            lpc16(decoded, coeffs[0..order], p.qlevel);
+            lpc16(block, coeffs[0..order], p.qlevel);
         } else {
-            lpc32(decoded, coeffs[0..order], p.qlevel);
-            if (d.stream.bps <= 16) lpcAnalyzeRemodulate(decoded, coeffs[0..order], p.qlevel, bps);
+            lpc32(block, coeffs[0..order], p.qlevel);
+            if (d.stream.bps <= 16) lpcAnalyzeRemodulate(block, coeffs[0..order], p.qlevel, bps);
         }
     }
 
-    /// decode_subframe_lpc_33bps with flac_lpc_33_c.
+    /// decode_subframe_lpc_33bps with flac_lpc_33_c. `wide` and `residual`
+    /// are whole buffers.
     fn decodeLpc33(d: *Decoder, r: *bits.BitReader, wide: []i64, residual: []i32, order: u32) DecodeError!void {
         for (wide[0..order]) |*s| s.* = r.signed64(33);
         var coeffs: [32]i32 = undefined;
         const p = try d.lpcParameters(r, order, &coeffs);
         try d.decodeResiduals(r, residual, order);
-        for (order..wide.len) |i| {
+        for (order..d.blocksize) |i| {
             var sum: i64 = 0;
             for (coeffs[0..order], wide[i - order .. i]) |c, s| sum +%= @as(i64, c) *% s;
             wide[i] = @bitCast(@as(u64, @bitCast(@as(i64, residual[i]))) +% @as(u64, @bitCast(sum >> p.qlevel)));
@@ -664,7 +689,11 @@ fn decodeOne(info: flac.StreamInfo, frame: []const u8) !Decoder.Decoded {
 }
 
 fn expectProblem(problem: Problem, frame: []const u8) !void {
-    var d = try Decoder.init(testing.allocator, test_info);
+    try expectProblemIn(test_info, problem, frame);
+}
+
+fn expectProblemIn(info: flac.StreamInfo, problem: Problem, frame: []const u8) !void {
+    var d = try Decoder.init(testing.allocator, info);
     defer d.deinit();
     try testing.expectError(error.InvalidData, d.decodePacket(frame));
     try testing.expectEqual(problem, d.problem.?);
@@ -864,6 +893,65 @@ test "every refusal of a frame" {
     }
 }
 
+/// An LPC subframe of order 32 at a 1-sample block: the warm-up samples,
+/// one-bit coefficients, then a residual header whose partition holds a
+/// single sample.
+fn putLpc32(t: *TestBits, bps: u6) void {
+    t.put(1, 0);
+    t.put(6, 63);
+    t.put(1, 0);
+    for (0..32) |_| t.signed(bps, -1);
+    t.put(4, 0); // precision 1
+    t.put(5, 0); // shift 0
+    t.put(32, 0); // the coefficients
+    t.put(2, 0);
+    t.put(4, 0);
+}
+
+/// A fixed subframe of order 4 at a 2-sample block.
+fn putFixed4(t: *TestBits, bps: u6) void {
+    t.put(1, 0);
+    t.put(6, 12);
+    t.put(1, 0);
+    for (0..4) |_| t.signed(bps, 3);
+    t.put(2, 0);
+    t.put(4, 0);
+}
+
+test "a predictor order above the block size is refused after its warm-up samples" {
+    // The smallest buffers STREAMINFO allows: 16 samples, rounded up to 32
+    // as FFmpeg's are, so even order 32 reads its warm-up samples in bounds
+    // before decode_residuals refuses the order.
+    var info = test_info;
+    info.max_blocksize = flac.min_blocksize;
+    {
+        var t: TestBits = .{};
+        t.header(1, 0, 4, false);
+        putLpc32(&t, 16);
+        try expectProblemIn(info, .predictor_order, t.finish());
+    }
+    {
+        var t: TestBits = .{};
+        t.header(2, 0, 4, false);
+        putFixed4(&t, 16);
+        try expectProblemIn(info, .predictor_order, t.finish());
+    }
+    // The 33-bit side channel of 32-bit left/side stereo, whose warm-up
+    // samples go to the 64-bit buffer.
+    info.bps = 32;
+    info.channels = 2;
+    for ([_]u32{ 1, 2 }, [_]*const fn (*TestBits, u6) void{ putLpc32, putFixed4 }) |blocksize, putSide| {
+        var t: TestBits = .{};
+        t.header(blocksize, 8, 7, false);
+        t.put(1, 0);
+        t.put(6, 0);
+        t.put(1, 0);
+        t.signed(32, 5); // the left channel, constant
+        putSide(&t, 33);
+        try expectProblemIn(info, .predictor_order, t.finish());
+    }
+}
+
 test "a frame that changes the channels or blocking decodes, as FFmpeg's does" {
     var d = try Decoder.init(testing.allocator, test_info);
     defer d.deinit();
@@ -923,6 +1011,31 @@ test "allocation failures leave nothing behind" {
             d.deinit();
         }
     }.run, .{});
+}
+
+test "a channel change whose buffers fail to allocate keeps the old count" {
+    var failing: std.testing.FailingAllocator = .init(testing.allocator, .{});
+    var d = try Decoder.init(failing.allocator(), test_info);
+    defer d.deinit();
+    // Stereo in the mono stream: two constant subframes.
+    var t: TestBits = .{};
+    t.header(16, 1, 4, false);
+    for (0..2) |_| {
+        t.put(1, 0);
+        t.put(6, 0);
+        t.put(1, 0);
+        t.signed(16, 7);
+    }
+    const stereo = t.finish();
+    failing.fail_index = failing.alloc_index;
+    d.send(stereo, 0);
+    try testing.expectError(error.OutOfMemory, d.receive());
+    try testing.expectEqual(1, d.stream.channels);
+    // The same change again finds the count unchanged, so it allocates
+    // the stereo buffers before decoding into them.
+    failing.fail_index = std.math.maxInt(usize);
+    d.send(stereo, 0);
+    try testing.expectEqual(2, (try d.receive()).?.channels);
 }
 
 test "LPC prediction: the 32-bit path wraps, the 64-bit path remodulates" {
