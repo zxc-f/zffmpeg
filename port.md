@@ -916,7 +916,7 @@ Progress is measured by working, tested behavior, not by translated file counts.
 | 6 — optimization/platforms | SIMD, threading, native platform verification and broader CLI/API adapters. Hardware and devices stay on the not-planned list unless a separate scope decision adds them. | Scalar comparisons, benchmarks, CPU fallback checks, platform integration tests and explicit compatibility claims. |
 
 [TODO.md](TODO.md#roadmap-to-a-nearly-complete-port) breaks phases 3–6 into
-milestones 4–12 (T14–T64), with dependencies, upstream references and
+milestones 4–12 (T14–T65; T65 consolidates duplicated paths), with dependencies, upstream references and
 completion criteria, and lists what is not planned.
 
 Later slices start with native implementations and no external codec libraries.

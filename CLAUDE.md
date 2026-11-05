@@ -64,7 +64,7 @@ stream-copy pipeline) and `file` (file and pipe adapters). Two tools sit on it:
 converts and stream-copies between them (CAF as input only; Ogg Vorbis, Opus
 and FLAC decoded as input, FLAC written as output), carrying tags,
 with `-c:a`, FFmpeg's dither options and its FLAC encoder options. Tests cover 129 WAV,
-41 AU, 57 AIFF, 25 raw PCM, 58 CAF, 56 FLAC, 33 Ogg and 42 MP3 fixtures, process runs of both tools, and a CI comparison against a
+41 AU, 57 AIFF, 25 raw PCM, 58 CAF, 57 FLAC, 37 Ogg and 43 MP3 fixtures, process runs of both tools, and a CI comparison against a
 pinned FFmpeg build that also reads every `zffmpeg` output. Verification is
 Linux-only during development; Windows and ARM wait for T62–T63. T13, T14a
 (packets, frames and stages), T17b (the metadata dictionary), T20a (decoded
@@ -89,7 +89,7 @@ mux, FLAC into Ogg), T27c (FFT and MDCT), T18c (VLC tables) and T27d
 Ogg Opus decoding), T28b (SILK) and T28c (hybrid frames and
 multistream), completing T28, and T29a (the MPEG audio demuxer and
 parser); T29b (the Layer III decoder) is next,
-and TODO.md lays out the roadmap through T64.
+and TODO.md lays out the roadmap through T65.
  When the state changes, update the current-state statements in
 README.md, port.md ("Status and scope"), the TODO.md introduction and this file
 together.
@@ -190,7 +190,7 @@ document does not widen support.
     `testing/` created only when their first feature lands.
   - "Provenance and feature tracking": ledger statuses are planned,
     implemented, verified and optimized.
-- [TODO.md](TODO.md): tasks T01–T64 and their subtasks (T12a, ...) with stable
+- [TODO.md](TODO.md): tasks T01–T65 and their subtasks (T12a, ...) with stable
   IDs, dependency words (**Needs**, **Lands with**, **Verified after**), gates
   G0–G5, a progress card and "Done when" criteria. Check an item only at G5,
   with an evidence note naming the files, the checks, the commit and the CI run

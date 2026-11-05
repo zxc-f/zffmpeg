@@ -663,6 +663,19 @@ build include the WAV muxer. Its first run, locally on Windows at commit
   s16) rejected before any output: **54/54**.
 - Fixtures whose pipe result equals the file result: **105/105**.
 
+The review fix round of 2026-11-05 made the port's float-to-integer
+conversions those of the reference build (`zig/core/cconv.zig`): the 176
+failures recorded below as "known inf and NaN samples of this machine's
+clang 23 build" were a port defect, not the compiler's. FFmpeg's
+`av_clip_int16(lrintf(x))` narrows `lrintf`'s 64-bit result to `int` before
+clipping, so NaN and infinities give 0, not -32768, and finite products from
+2^31 to 2^63 wrap (notes.md "Undefined C cases"). The run, locally on Linux
+x86-64 with clang 23.1.4 for the reference build, reported every required
+case passing, **6346/6346** with none missing, the optional cases **61/61**,
+and every vector generator reproducing its committed file, including the new
+`edge` sample conversions, the dither cases with huge `dither_scale` and the
+remix cases with custom matrices.
+
 T26c added FLAC output: the encoder vectors (84 cases, `flacenc.txt`) and
 compare.py's FLAC output section. The run, locally on Linux x86-64 at the
 T26c part-4 tree, reported:

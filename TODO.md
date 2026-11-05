@@ -223,6 +223,93 @@ Remaining work or blocker / next action:
 
 Do not report a percentage of FFmpeg implemented from checked task counts.
 
+### Review fix rounds
+
+A review's blocking findings are fixed in one round before the next task
+starts ("keep one active implementation slice"). A finding in a verified task
+is a defect in that task: the round re-runs the gates its fix touches and
+records them here, amending the task's card where its evidence or contract
+was wrong. Review documents are not kept in the repository, so this record
+holds every finding a round leaves open, with the task it must land before.
+
+#### The review of 2026-11-05 (before T29b)
+
+Two independent reviews of `1d21eda` (all subsystems, read against this file),
+merged. Fixed in the round, with regression tests that fail on the old code:
+
+- **Float-to-integer conversions** (`d60526f`): `core/cconv.zig` models the
+  reference build's `lrintf`/`lrint`/`rint` and float stores, with NaN and
+  the range checked before any `@trunc`. The float-to-s16/u8 conversion now
+  narrows `lrint`'s `long` to 32 bits before the clip, as
+  `av_clip_int16(int)` receives it (65536.0 is -32768; NaN and ±inf are 0
+  and 128). The 176 reference-job failures recorded since T23b as "known
+  clang 23 inf/NaN failures" were this port defect. The dither noise and the
+  rematrix coefficients no longer trap on huge `dither_scale` values or pan
+  gains (`-dither_scale 1000 -c:a pcm_u8` panicked in Debug). Breaks fixed in
+  T23a's "bit-exact; NaN and float overflow follow x86-64", T23c and T25c.
+- **Demux, Ogg and MP3** (`fe52b80`): a failed MPEG-audio parse no longer
+  frees the packet twice; a read-ahead error ends `findStreamInfo` as
+  FFmpeg's `eof_reached` does, so an Ogg Opus file with an empty first
+  packet opens; a failed Ogg metadata replacement no longer leaves a freed
+  owner; iTunSMPB's bare `0x`, an empty Ogg FLAC header packet and Vorbis'
+  unsigned nominal bit rate as FFmpeg's (five new fixtures).
+- **FLAC, conversion and amix** (`bcf3006`, `439cc28`, `9082a6c`, `0bfd10a`,
+  `143707c`): headerless mid/side FLAC detected (`(8 + 3) << 4`, T16's Done
+  when); decoded input resampled one frame at a time, so `-ar ... .flac`
+  writes FFmpeg's block size (T26c's contract; T27d's evidence had claimed
+  it); `av.convert.convert` frees its probe buffer; FLAC frame numbers from
+  2^31 as the reference build codes them; amix's frame list drains in linear
+  time (a deque).
+- **Test oracle** (`ddcceb2`, `c1c61a2`): compare.py's registry check is
+  two-sided (T16's dump); its recorded refusals assert the exact error; a
+  process case's moved-input comparison, stderr needles and successes can
+  fail; prepared-file cases re-run when their fixtures change.
+- **G3 evidence** (`fe52b80`, `103d11a`, `ec4acee`, `2b037e6`, `cd75679`):
+  allocation-failure sweeps with remap failures and bounded fuzz entries
+  for ogg, demux, mp3, id3v2, mpegaudio, vlc, vorbis, opusdec and oggdecode
+  (`zig/testing/hostile.zig`). The older fuzz entries' seeds had never
+  reached their parsers (raw bytes read as a length prefix) and now do;
+  conversion's then exposed a stale oracle. T18c, T27a, T27d, T28a–T28c and
+  T29a had been checked without these; their G3 is amended by this round.
+- **Codecs** (`103d11a`): `Vlc.init` frees its whole allocation after a
+  failed shrink; Vorbis' first-frame skip survives `flush()` and headers
+  sent in the stream (a one-shot `takeSkip`); `oggdecode` refuses a decoder
+  whose channel count changes instead of reading planes it never set.
+- **Seeking** (`dc6cbf7`): `ff_find_last_ts`'s `int64_t` doubling wraps as
+  the reference build's.
+- **Documents** (`96cfac4`, `0a37c8c`): this file's unclosed fence after
+  T29a, its introduction, T26a's card, T29b's Done when (bit-exact); stale
+  comments and help; notes.md rows for every refusal the review found
+  unrecorded; the `zig-0-17` skill's rules for each defect class above.
+
+Gates re-run at the round's last commit: CHECKS_PLACEHOLDER
+
+Left open, each with the task it must land before:
+
+| Finding | Where | Before |
+| --- | --- | --- |
+| A leading ID3v2 tag opens only MP3 (WAV and FLAC refused; notes.md "A leading ID3v2 tag on other formats") | `detect.zig`, `convert.zig` | T30a (ADTS sets `FF_INFMT_FLAG_ID3V2_AUTO`) |
+| Codec parameters a mapping set during the read-ahead are kept (`parameters_from_context`; notes.md) | `demux.zig` | T29b |
+| Filter-graph timestamp arithmetic overflows on null or extreme pts (atrim, aresample, amix; library only) | `filters.zig`, `multi.zig` | T53b, with T65d |
+| An MP3 stream without parameters refused; negative durations reported as none (notes.md rows) | `detect.zig` | T51a |
+| A 3-byte `ID3` file scores 0 where FFmpeg's probe gives 12 (both refuse) | `mp3.zig` | any time |
+| A damaged Ogg FLAC frame shifts later timestamps; empty FLAC packets lose the start time | `demux.zig` | T65a |
+| Ogg's duration scan creates streams (notes.md "Length scan restore" says it does not) | `ogg.zig` | T65c |
+| A data offset of 0 is never replaced (`demux.c:350`) | `demux.zig` | T52b, T53c |
+| CUESHEET chapter ends are not `compute_chapters_end`'s (library) | `flac.zig` | any time |
+| The allocation-free FLAC `readHeader` keeps its own channel-mask scanner | `flac.zig` | T65a |
+| `oggdecode` refuses a decoder that reconfigures its channel count (FFmpeg reallocates the frame) | `oggdecode.zig` | T33a, T35a |
+| WAV seek with a sample rate above `maxInt(i32)` (a raised limit) panics | `wav.zig` | T60 |
+| `readSamples` returns nothing while data remains; its `catch unreachable` on non-s16 storage (library) | five PCM parsers | T65b, T54 at the latest |
+| A failed WAV seek leaves `data_left` at the target | `wav.zig` | T52b, T53c |
+| C number scanners: `bext` UMID, `-dither_scale`/`-dither_method` through `std.fmt` (T17a's accepted forms), values over 256 bytes, boolean options FFmpeg truncates, eval's `random()` seeds of 2^64 or more, long hex mantissas | `wav.zig`, `dither.zig`, `options.zig`, `eval.zig`, `number.zig` | T53a, with T65e |
+| A failed optional argument's nodes still trigger the RTCTIME exclusion | `eval.zig` | T53b |
+| Public contracts guarded only by asserts: `tx`, `vlc.build`/`Vlc.init`, `audioconvert.convert`, `samples.Buffer`, `Frame.init` past 2^31 bytes, `Dither.initInternal`, `BitReader.initIn`, `flacdec.Decoder.send`, `flac.Demuxer.seekFrame`, `Graph.addSource` at rate 0, `Graph.sendTo` with partial frames | various | T54; T56 for C callers |
+| zffprobe tag bytes that are not UTF-8 (port.md promises UTF-8 lines and bytes as stored) | `cli/probe.zig` | T51a, with a notes.md decision |
+| Superlinear work FFmpeg shares (k³ FLAC comment blocks, WAV INFO dictionaries, Vorbis residue, whole-file junk MP3 buffering, Ogg pushback, multi-GiB aresample allocations) | various | T60's global limits and T57's inputs |
+| CI's reference job runs without `pipefail` | `ci.yml` | T53d |
+| Refusals of `.opus` output and of remix cells name the input, not the output | `cli/ffmpeg.zig` | T53a (decide which path a request refusal names) |
+
 ## Completed preparation
 
 - [x] Inspect the FFmpeg source layout and record the reference revision.
@@ -1012,6 +1099,8 @@ names, not as an empty framework.
   ```text
   ID / parent: T16 / Milestone 4
   State: verified
+  Amended: the 2026-11-05 review fix round fixed headerless mid/side FLAC
+    detection and made the registry check two-sided ("Review fix rounds").
   Supported behavior and explicit exclusions: codec descriptors (media type,
     FFmpeg's name and long name, intra-only/lossy/lossless) for the 16 PCM
     codecs; decoder and encoder registries with compile-time stage-signature
@@ -1194,6 +1283,9 @@ names, not as an empty framework.
     ```text
     ID / parent: T18c / T18
     State: G5 (verified, with T27d)
+    Amended: the 2026-11-05 review fix round added G3's allocation-failure
+      sweep and fuzz entry and fixed Vlc.init's free after a failed shrink
+      ("Review fix rounds").
     Plan: codec/bits.zig gains FFmpeg's LSB-first reader (get_bits.h
       under BITSTREAM_READER_LE: get_bits, get_bits1, get_bits_long,
       skip_bits, get_bits_count, get_bits_left), over-reads returning
@@ -1908,6 +2000,9 @@ names, not as an empty framework.
     ```text
     ID / parent: T23a / T23
     State: verified
+    Amended: the 2026-11-05 review fix round fixed out-of-range float
+      conversion and dither noise, the 176 recorded failures ("Review fix
+      rounds").
     Supported behavior and explicit exclusions: every pair of the twelve T20a
       sample formats, packed or planar, as libswresample converts without
       resampling or rematrixing, floats included bit-exact (no ULP tolerance
@@ -2046,6 +2141,8 @@ names, not as an empty framework.
     ```text
     ID / parent: T23c / T23
     State: verified
+    Amended: the 2026-11-05 review fix round fixed coefficients that leave int
+      ("Review fix rounds").
     Supported behavior and explicit exclusions: part 1, the matrix
       (`swr_build_matrix2`): native and custom layouts of up to 64 channels,
       libswresample's mix rules, the center, surround and LFE mix levels,
@@ -2324,6 +2421,8 @@ names, not as an empty framework.
     ```text
     ID / parent: T25c / T25
     State: verified
+    Amended: the 2026-11-05 review fix round fixed pan's huge coefficients and
+      amix's quadratic drain ("Review fix rounds").
     Supported behavior and explicit exclusions: graphs of several buffer
       sources and sinks, built from filtergraph text with link labels and
       several chains (avfilter_graph_parse_ptr, the sources' and sinks'
@@ -2573,6 +2672,8 @@ names, not as an empty framework.
     ```text
     ID / parent: T26c / T26
     State: verified
+    Amended: the 2026-11-05 review fix round fixed the block size of resampled
+      decoded input and frame numbers from 2^31 ("Review fix rounds").
     Supported behavior and explicit exclusions: port.md "FLAC contract",
       Encoder and Writing rows, and "zffmpeg command", FLAC output row:
       FFmpeg's encoder on s16 and s32 input, 16, 24 and (strict
@@ -2652,6 +2753,9 @@ names, not as an empty framework.
     ```text
     ID / parent: T27a / T27
     State: G5 (verified)
+    Amended: the 2026-11-05 review fix round added G3's sweeps and fuzz
+      entries, and fixed a freed metadata owner and read-ahead errors ("Review
+      fix rounds").
     Evidence: port.md "Ogg contract" and the "Ogg demuxer" ledger row; 20
       Ogg fixtures from generate.py (FLAC, Opus and Vorbis mappings, a
       multiplexed and a chained stream, 9 damaged ones, 3 FFmpeg
@@ -2777,6 +2881,8 @@ names, not as an empty framework.
     ```text
     ID / parent: T27d / T27
     State: G5 (verified)
+    Amended: the 2026-11-05 review fix round added G3's sweeps and fuzz
+      entries and fixed the skip handshake after flush ("Review fix rounds").
     Plan: part 0, the reference build enables FFmpeg's Vorbis decoder
       (and its native encoder, experimental, to make fixtures); its
       decoding in avformat_find_stream_info changes what the Ogg vectors
@@ -2877,6 +2983,8 @@ names, not as an empty framework.
     ```text
     ID / parent: T28a / T28
     State: G5 (verified)
+    Amended: the 2026-11-05 review fix round added G3's sweeps and fuzz
+      entries ("Review fix rounds").
     Plan: part 0, the corpus: FATE's Opus samples are Matroska rewraps
       (.mka), which the port cannot demux yet, so the RFC 6716/8251 test
       vectors themselves (opus_testvectors-rfc8251, their .bit packet
@@ -2976,6 +3084,8 @@ names, not as an empty framework.
     ```text
     ID / parent: T28b / T28
     State: G5 (verified)
+    Amended: the 2026-11-05 review fix round added G3's sweeps and fuzz
+      entries ("Review fix rounds").
     Plan: part 1, FFmpeg's SILK decoder (opus/silk.c and tab.c's SILK
       tables): LSF and LPC, pitch, LTP, excitation and the stereo unmixing,
       as ff_silk_decode_superframe runs them, against an oracle calling
@@ -3029,6 +3139,8 @@ names, not as an empty framework.
     ```text
     ID / parent: T28c / T28
     State: G5 (verified)
+    Amended: the 2026-11-05 review fix round added G3's sweeps and fuzz
+      entries ("Review fix rounds").
     Plan: dec.c's hybrid path (SILK at 16 kHz resampled, CELT from band 17
       added, the CELT samples past the resampled SILK held back in
       celt_delay, the hybrid redundancy flag and size) and
@@ -3085,6 +3197,8 @@ names, not as an empty framework.
     ```text
     ID / parent: T29a / T29
     State: G5 (verified)
+    Amended: the 2026-11-05 review fix round added G3's sweeps and fuzz
+      entries and fixed a double free on a failed parse ("Review fix rounds").
     Scope: FFmpeg's mp3 demuxer (mp3dec.c) on libavformat's generic layer
       (demux.zig), as the ffmpeg program opens an input: the ID3v2 tag
       read before the demuxer (FF_INFMT_FLAG_ID3V2_AUTO, id3v2.c: versions
@@ -3773,6 +3887,68 @@ optimization, concurrency, fuzz duration and corpus breadth.
   (sample missing) and not-applicable tests.
   Done when the report covers every implemented codec and format and CI
   publishes it.
+
+- [ ] **T65 — Consolidate duplicated paths.** Raised by the review of
+  2026-11-05. Each subtask removes a second implementation that the "keep one
+  implementation of an algorithm" rule (CLAUDE.md) allows only with a
+  recorded retirement condition, or a repeated data path whose copies drift
+  apart. They are structural: each keeps every output byte-identical, re-runs
+  the gates of the tasks whose code it moves, and lands separately from bug
+  fixes. Checked when T65a–T65f are.
+  - [ ] **T65a — FLAC on libavformat's generic layer.** **Start with** T30a
+    (ADTS, the next full-raw parser), ideally before T29b's decoded MP3
+    reader. `format/flac.zig` keeps its own read-ahead, timestamps, parse
+    queue and index beside `format/demux.zig`, which serves Ogg and MP3; the
+    notes.md retirement condition ("when a second parsed format needs it")
+    was met at T29a. Give FLAC a concrete source for `demux.Layer` that keeps
+    its raw full-parser behavior, byte positions and STREAMINFO-derived
+    parameters; select the parser with one tagged configuration in
+    `demux.Setup` instead of a boolean per format; drop FLAC's
+    `orderedRemove(0)` queues. Done when flac.txt, seek_flac.txt and
+    compare.py's FLAC, hash and FATE FLAC sections pass unchanged, packet by
+    packet, including headerless files, junk, missing timestamps, several
+    frames per packet, repeated seeks and failure cleanup, and FLAC's
+    damaged-frame and empty-packet timestamps follow the generic layer.
+  - [ ] **T65b — One PCM data path.** **Start with** T31a (ADPCM in WAV); T31b,
+    T31c and T37a follow. `readSamples`, `mapRead`, `readData`,
+    `decodeToRaw`, the skip to the end and the writers' frame counting are
+    repeated in wav, au, aiff, caf and raw. One reader that owns its validated
+    frame size, channel count and bytes left, and one frame sink; headers,
+    limits, error precedence, padding and finalization stay per format. Decide
+    first whether `readSamples`' empty result (end of data or insufficient
+    room, accepted by T13a) becomes an error such as `OutputTooSmall`: that is
+    an API change with port.md and the fixture contract. Remove the
+    assert-only state checks and the `catch unreachable` on non-s16 storage.
+    Done when T21, T22 and T52a's gates pass, with tiny and zero-capacity
+    buffers, fragmented input, truncated frames, unknown length, misaligned
+    WAV seeks and read and write failure.
+  - [ ] **T65c — Typed Ogg and Vorbis state.** **Start with** T52b (flush,
+    then discard) or T33a (Opus outside Ogg). Enums for Ogg's `header`,
+    `got_start` and `curidx`, return values for the `sid` out-pointers, one
+    union for the per-codec mapping state, a page-state-only snapshot (the
+    duration scan must not create streams), and a Vorbis setup state that
+    keeps the skip handshake across `flush()`. Done when T27a, T27d and T28's
+    gates pass unchanged.
+  - [ ] **T65d — Filter dispatch and one timestamp helper.** **Start with**
+    T53b (`-af`, `-filter_complex`). Derive the per-filter dispatch from the
+    `Filter` union (adding a filter touches seven places today) and give
+    atrim, aresample and amix one timestamp helper with libavfilter's
+    wrapping and `INT64_MIN` results, which fixes their overflow on null or
+    extreme timestamps. Done when T25a–T25c's graph vectors pass and a graph
+    test with null and extreme timestamps through amix, aresample and atrim
+    equals FFmpeg's.
+  - [ ] **T65e — C number scanners in one module.** **Start with** T53a
+    (option errors match documented messages). The six hand-written
+    `strtol`/`strtod`/`sscanf` scanners (dither and boolean options, bext's
+    UMID, iTunSMPB, hex floats, eval's seeds) become one module beside
+    `core/cconv.zig`, with glibc's accepted forms and rounding. Done when
+    T17a's and T25b's vectors pass and each scanner's FFmpeg caller has
+    vectors at its edges.
+  - [ ] **T65f — One sample-format element type.** **Start with** T58 (SIMD
+    kernels, which need one scalar oracle per kernel). One function maps
+    `audio.SampleFormat` to its Zig element type with load and store, used by
+    audioconvert, dither, rematrix, resample and pcm instead of their own
+    switches. Done when T20a, T23 and T24's vectors pass unchanged.
 
 ## Milestone 12 (long-term): platforms and release
 
