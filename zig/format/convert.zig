@@ -434,6 +434,8 @@ pub const Conversion = struct {
             },
             .caf, .mp3 => unreachable, // no muxer: refused above as UnsupportedOperation
         }
+        // For a decoded input, the largest frame its decoder gives: the
+        // buffers of `transferResampled`, which takes each frame whole.
         const packet_frames = switch (input) {
             // FFmpeg's packets are the FLAC frames.
             .flac => |*reader| if (reader.demuxer.?.info.stream_info) |si| si.max_blocksize else flac_max_frames,
@@ -697,13 +699,25 @@ pub const Conversion = struct {
             else => |e| return e,
         };
         defer converter.deinit();
-        var packet_bytes: [transfer_len]u8 = undefined;
-        var decoded: [2 * transfer_len]u8 = undefined;
-        const out_frame_bytes = out_format.bytesPerFrame();
         const encoded = try gpa.alloc(u8, converter.max_room * s.output_codec.bytesPerSample() * out_format.channelCount());
         defer gpa.free(encoded);
-        var decoder: pcm.Decoder = .init(s.input_codec, s.format, &decoded);
         var encoder: pcm.Encoder = .init(s.output_codec, out_format, encoded);
+        switch (c.input) {
+            .flac, .ogg => try c.resampleFrames(W, writer, &converter, &encoder),
+            .wav, .au, .aiff, .caf, .raw => try c.resamplePackets(W, writer, &converter, &encoder),
+        }
+        encoder.finishInput();
+        try writeAllEncoded(W, writer, &encoder);
+        std.debug.assert(encoder.receive() == .drained);
+    }
+
+    /// A PCM input: FFmpeg's decoder frames are its demuxer's packets of
+    /// `packet_frames`, which `take` cuts the samples into.
+    fn resamplePackets(c: *Conversion, comptime W: type, writer: *W, converter: *swr.Swr, encoder: *pcm.Encoder) RunError!void {
+        const s = c.summary;
+        var packet_bytes: [transfer_len]u8 = undefined;
+        var decoded: [2 * transfer_len]u8 = undefined;
+        var decoder: pcm.Decoder = .init(s.input_codec, s.format, &decoded);
         var input_done = false;
         while (true) {
             if (!input_done) {
@@ -722,11 +736,7 @@ pub const Conversion = struct {
                     var at: u32 = 0;
                     while (at < count) {
                         at += converter.take(view, at, count - at);
-                        while (try converter.next()) |out| {
-                            // A FLAC output's block size: the first output.
-                            if (W == flacmux.Writer and writer.encoder == null and writer.first_frame == null) writer.setFirstFrame(out.layout.samples);
-                            try c.encodeOut(W, writer, &encoder, out, out_frame_bytes);
-                        }
+                        while (try converter.next()) |out| try c.encodeResampled(W, writer, encoder, out);
                     }
                 },
                 .need_input => continue,
@@ -734,13 +744,62 @@ pub const Conversion = struct {
             }
         }
         converter.finish();
-        while (try converter.next()) |out| {
-            if (W == flacmux.Writer and writer.encoder == null and writer.first_frame == null) writer.setFirstFrame(out.layout.samples);
-            try c.encodeOut(W, writer, &encoder, out, out_frame_bytes);
+        while (try converter.next()) |out| try c.encodeResampled(W, writer, encoder, out);
+    }
+
+    /// A decoded input (FLAC, Ogg): each frame the decoder gives is one
+    /// `aresample` call, as the ffmpeg program's filter graph passes it
+    /// (af_aresample.c's `activate`): first the output a call that filled
+    /// its room left buffered (`flush_frame` without `final`), then the
+    /// frame (`filter_frame`); at the end, the resampler flushed. The calls
+    /// decide the output frames, and so a FLAC output's block size.
+    fn resampleFrames(c: *Conversion, comptime W: type, writer: *W, converter: *swr.Swr, encoder: *pcm.Encoder) RunError!void {
+        const s = c.summary;
+        const gpa = c.gpa.?;
+        // `packet_frames` is the decoder's largest frame, and `readData`
+        // returns at most the rest of one frame: a buffer of that many
+        // frames receives each frame whole.
+        const frame_len = std.math.mul(usize, c.packet_frames, s.format.bytesPerFrame()) catch return error.OutOfMemory;
+        std.debug.assert(s.input_codec.bytesPerSample() == s.format.sample_format.bytesPerSample());
+        const frame_bytes = try gpa.alloc(u8, frame_len);
+        defer gpa.free(frame_bytes);
+        const decoded = try gpa.alloc(u8, frame_len);
+        defer gpa.free(decoded);
+        var decoder: pcm.Decoder = .init(s.input_codec, s.format, decoded);
+        while (try c.readPacket(frame_bytes)) |packet| {
+            const sent = decoder.send(packet) catch unreachable; // whole frames, decoded into as many bytes
+            std.debug.assert(sent == .accepted);
+            const frame = switch (decoder.receive()) {
+                .output => |f| f,
+                .need_input, .drained => unreachable, // a packet was just accepted
+            };
+            try c.flushBuffered(W, writer, converter, encoder);
+            const out = converter.filterFrame(frame.view(), @intCast(frame.frameCount())) catch |err| return switch (err) {
+                // `init` checked the layouts, and the frame fits the buffers.
+                error.UnsupportedLayout => unreachable,
+                else => |e| e,
+            };
+            if (out) |o| try c.encodeResampled(W, writer, encoder, o);
         }
-        encoder.finishInput();
-        try writeAllEncoded(W, writer, &encoder);
-        std.debug.assert(encoder.receive() == .drained);
+        try c.flushBuffered(W, writer, converter, encoder);
+        while (try converter.flushFrame(true)) |out| try c.encodeResampled(W, writer, encoder, out);
+    }
+
+    /// aresample's `more_data`: calls without input while the last one
+    /// filled its room.
+    fn flushBuffered(c: *Conversion, comptime W: type, writer: *W, converter: *swr.Swr, encoder: *pcm.Encoder) RunError!void {
+        while (converter.more) {
+            const out = try converter.flushFrame(false) orelse break;
+            try c.encodeResampled(W, writer, encoder, out);
+        }
+        converter.more = false;
+    }
+
+    /// One resampler output, encoded and written; the first sets a FLAC
+    /// output's block size.
+    fn encodeResampled(c: *Conversion, comptime W: type, writer: *W, encoder: *pcm.Encoder, out: samples_storage.View) RunError!void {
+        if (W == flacmux.Writer and writer.encoder == null and writer.first_frame == null) writer.setFirstFrame(out.layout.samples);
+        try c.encodeOut(W, writer, encoder, out, c.summary.outputFormat().bytesPerFrame());
     }
 
     fn encodeOut(c: *Conversion, comptime W: type, writer: *W, encoder: *pcm.Encoder, out: samples_storage.View, frame_bytes: u32) RunError!void {
@@ -2228,6 +2287,31 @@ test "FLAC to FLAC: the first decoded frame is the block size; encoder options a
     try std.testing.expectError(error.InvalidOption, convert(&reader, &out, .{ .output = .flac, .mode = .transcode, .gpa = gpa, .flac = .{ .min_prediction_order = 9, .max_prediction_order = 8 } }, .{}));
     reader = .fixed(fixtures.flac.bytes("flac_ffmpeg_level5_stereo"));
     try std.testing.expectError(error.UnsupportedOperation, convert(&reader, &out, .{ .output = .flac, .mode = .copy, .gpa = gpa }, .{}));
+}
+
+test "a decoded input resamples frame by frame: FFmpeg's FLAC block size and bytes" {
+    // Each decoded frame is one aresample call, as the ffmpeg program's
+    // filter graph makes them, so the first call's output, the encoder's
+    // block size, follows the decoder's first frame. The block sizes and
+    // hashes are the pinned ffmpeg's (`-bitexact -c:a flac -ar R -f flac -`),
+    // which cutting the input at the largest frame did not give (6217 and
+    // 1072 samples).
+    const gpa = std.testing.allocator;
+    const cases = [_]struct { input: []const u8, rate: u32, block: u16, sha256: []const u8 }{
+        .{ .input = fixtures.flac.bytes("flac_variable_blocksize"), .rate = 48000, .block = 92, .sha256 = "0cd8ae133c87561cfbe077596d8b66b826ea38146abaeb03a6184b47955c04e5" },
+        .{ .input = fixtures.ogg.bytes("ogg_opus_ffmpeg_stereo"), .rate = 44100, .block = 756, .sha256 = "b40898b913622db4b3a48665b3419ed9725accad958e64220c8a2c7e84460c0f" },
+    };
+    for (cases) |case| {
+        var reader: std.Io.Reader = .fixed(case.input);
+        var out: std.Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        _ = try convert(&reader, &out.writer, .{ .output = .flac, .mode = .transcode, .gpa = gpa, .sample_rate = case.rate }, .{});
+        const si = flac_codec.StreamInfo.parse(out.written()[8..42]);
+        try std.testing.expectEqual(case.block, si.max_blocksize);
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(out.written(), &digest, .{});
+        try std.testing.expectEqualStrings(case.sha256, &std.fmt.bytesToHex(digest, .lower));
+    }
 }
 
 test "a rate change the request refuses fails in init, before any output" {

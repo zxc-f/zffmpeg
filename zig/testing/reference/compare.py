@@ -2299,6 +2299,30 @@ def compare_flac_output(args, lines, failures):
             result = "pass" if not problems else "**FAIL**: " + "; ".join(problems)
             rows.append(f"| `{name}` | {len(FLAC_OUTPUT_OPTIONS)} | {result} |")
             failures.extend(f"FLAC output {name}: {p}" for p in problems)
+        # Decoded inputs with a rate change: each decoded frame is one
+        # aresample call, so the block size follows the decoder's frames.
+        for fixture, rate in (("flac/flac_variable_blocksize.flac", "48000"), ("ogg/ogg_opus_ffmpeg_stereo.ogg", "44100"),
+                              ("ogg/ogg_opus_ffmpeg_mono.ogg", "22050"), ("ogg/ogg_vorbis_ffmpeg_44k.ogg", "48000")):
+            total += 1
+            source, theirs, ours = FIXTURES / fixture, work / "theirs.flac", work / "ours.flac"
+            for path in (theirs, ours):
+                path.unlink(missing_ok=True)
+            tp = run(args.ffmpeg, "-nostdin", "-v", "error", "-y", "-i", source, "-bitexact", "-c:a", "flac", "-ar", rate, theirs)
+            zp = run(args.zffmpeg, "-y", "-i", source, "-ar", rate, ours)
+            tpipe = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", source, "-bitexact", "-c:a", "flac", "-ar", rate,
+                        "-f", "flac", "-")
+            zpipe = run(args.zffmpeg, "-i", source, "-ar", rate, "-f", "flac", "-")
+            name = pathlib.Path(fixture).stem
+            if tp.returncode != 0 or zp.returncode != 0:
+                problem = f"FFmpeg {tp.returncode}, zffmpeg {zp.returncode} ({first_line(text(zp.stderr))})"
+            elif theirs.read_bytes() != ours.read_bytes() or tpipe.stdout != zpipe.stdout:
+                problem = "the files or piped outputs differ"
+            else:
+                problem = None
+                same += 1
+            rows.append(f"| `{name}` (decoded) | -ar {rate} | {'pass' if problem is None else '**FAIL**: ' + problem} |")
+            if problem is not None:
+                failures.append(f"FLAC output {name} -ar {rate}: {problem}")
     record("FLAC output (T26c)", same, total)
     lines += [
         "",
