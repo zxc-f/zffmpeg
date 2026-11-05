@@ -642,12 +642,12 @@ fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
 
 test "fuzz: arbitrary input never crashes the AU parser" {
     try std.testing.fuzz({}, fuzzOne, .{ .corpus = &.{
-        fixtures.au.bytes("au_mono_8k"),
-        fixtures.au.bytes("au_stereo_44k1"),
-        fixtures.au.bytes("au_annotation_text"),
-        fixtures.au.bytes("au_truncated_data"),
-        fixtures.au.bytes("au_s24_stereo"),
-        fixtures.au.bytes("au_mulaw_mono_8k"),
+        hostile.fuzzSeed(fixtures.au.bytes("au_mono_8k"), &.{}),
+        hostile.fuzzSeed(fixtures.au.bytes("au_stereo_44k1"), &.{}),
+        hostile.fuzzSeed(fixtures.au.bytes("au_annotation_text"), &.{}),
+        hostile.fuzzSeed(fixtures.au.bytes("au_truncated_data"), &.{}),
+        hostile.fuzzSeed(fixtures.au.bytes("au_s24_stereo"), &.{}),
+        hostile.fuzzSeed(fixtures.au.bytes("au_mulaw_mono_8k"), &.{}),
     } });
 }
 
@@ -801,3 +801,5 @@ test "a failing reader reports IoFailure" {
     var reader: std.Io.Reader = .failing;
     try std.testing.expectError(error.IoFailure, probe(&reader, .{}));
 }
+
+const hostile = @import("../testing/hostile.zig");

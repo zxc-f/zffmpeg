@@ -809,15 +809,15 @@ fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
 
 test "fuzz: detection agrees with the direct parser on arbitrary input" {
     try std.testing.fuzz({}, fuzzOne, .{ .corpus = &.{
-        fixtures.bytes("mono_8k"),
-        fixtures.au.bytes("au_mono_8k"),
-        fixtures.au.bytes("au_annotation_odd_length"),
-        fixtures.bytes("w64_alaw_mono_8k"),
-        fixtures.bytes("rf64"),
-        fixtures.aiff.bytes("aifc_sowt"),
-        fixtures.aiff.bytes("aiff_other_chunks"),
-        fixtures.caf.bytes("caf_chunks_around_data"),
-        fixtures.flac.bytes("flac_constant_mono_8k"),
+        hostile.fuzzSeed(fixtures.bytes("mono_8k"), &.{}),
+        hostile.fuzzSeed(fixtures.au.bytes("au_mono_8k"), &.{}),
+        hostile.fuzzSeed(fixtures.au.bytes("au_annotation_odd_length"), &.{}),
+        hostile.fuzzSeed(fixtures.bytes("w64_alaw_mono_8k"), &.{}),
+        hostile.fuzzSeed(fixtures.bytes("rf64"), &.{}),
+        hostile.fuzzSeed(fixtures.aiff.bytes("aifc_sowt"), &.{}),
+        hostile.fuzzSeed(fixtures.aiff.bytes("aiff_other_chunks"), &.{}),
+        hostile.fuzzSeed(fixtures.caf.bytes("caf_chunks_around_data"), &.{}),
+        hostile.fuzzSeed(fixtures.flac.bytes("flac_constant_mono_8k"), &.{}),
     } });
 }
 
@@ -825,3 +825,5 @@ test "a failing reader reports IoFailure" {
     var reader: std.Io.Reader = .failing;
     try std.testing.expectError(error.IoFailure, probe(&reader, .{}));
 }
+
+const hostile = @import("../testing/hostile.zig");

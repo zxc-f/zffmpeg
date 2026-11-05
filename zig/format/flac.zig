@@ -1443,18 +1443,18 @@ fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
 test "fuzz: the demuxer and decoder on arbitrary input" {
     try testing.fuzz({}, fuzzOne, .{
         .corpus = &.{
-            fixtures.flac.bytes("flac_constant_mono_8k"),
-            fixtures.flac.bytes("flac_lpc_zero_shift"),
-            fixtures.flac.bytes("flac_junk_between_frames"),
-            fixtures.flac.bytes("flac_mid_side"),
+            hostile.fuzzSeed(fixtures.flac.bytes("flac_constant_mono_8k"), &.{}),
+            hostile.fuzzSeed(fixtures.flac.bytes("flac_lpc_zero_shift"), &.{}),
+            hostile.fuzzSeed(fixtures.flac.bytes("flac_junk_between_frames"), &.{}),
+            hostile.fuzzSeed(fixtures.flac.bytes("flac_mid_side"), &.{}),
             // T26b: other sample sizes, the 33-bit side channel, variable
             // blocking, no STREAMINFO, and metadata blocks.
-            fixtures.flac.bytes("flac_bps24_mid_side"),
-            fixtures.flac.bytes("flac_bps32_right_side_lpc"),
-            fixtures.flac.bytes("flac_variable_blocksize"),
-            fixtures.flac.bytes("flac_headerless"),
-            fixtures.flac.bytes("flac_metadata_blocks"),
-            fixtures.flac.bytes("flac_channel_change"),
+            hostile.fuzzSeed(fixtures.flac.bytes("flac_bps24_mid_side"), &.{}),
+            hostile.fuzzSeed(fixtures.flac.bytes("flac_bps32_right_side_lpc"), &.{}),
+            hostile.fuzzSeed(fixtures.flac.bytes("flac_variable_blocksize"), &.{}),
+            hostile.fuzzSeed(fixtures.flac.bytes("flac_headerless"), &.{}),
+            hostile.fuzzSeed(fixtures.flac.bytes("flac_metadata_blocks"), &.{}),
+            hostile.fuzzSeed(fixtures.flac.bytes("flac_channel_change"), &.{}),
         },
     });
 }
@@ -1944,3 +1944,5 @@ test "PICTURE blocks: the MIME type and description end at a NUL, PNG's signatur
     try testing.expectEqualStrings("png", info.pictures[1].codec);
     try testing.expectEqual(null, info.pictures[1].description);
 }
+
+const hostile = @import("../testing/hostile.zig");

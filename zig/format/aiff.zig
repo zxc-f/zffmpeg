@@ -824,12 +824,12 @@ fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
 
 test "fuzz: arbitrary input never crashes the AIFF parser" {
     try std.testing.fuzz({}, fuzzOne, .{ .corpus = &.{
-        fixtures.aiff.bytes("aiff_mono_8k"),
-        fixtures.aiff.bytes("aiff_s24_stereo"),
-        fixtures.aiff.bytes("aiff_other_chunks"),
-        fixtures.aiff.bytes("aiff_ssnd_offset"),
-        fixtures.aiff.bytes("aifc_sowt"),
-        fixtures.aiff.bytes("aifc_ulaw"),
+        hostile.fuzzSeed(fixtures.aiff.bytes("aiff_mono_8k"), &.{}),
+        hostile.fuzzSeed(fixtures.aiff.bytes("aiff_s24_stereo"), &.{}),
+        hostile.fuzzSeed(fixtures.aiff.bytes("aiff_other_chunks"), &.{}),
+        hostile.fuzzSeed(fixtures.aiff.bytes("aiff_ssnd_offset"), &.{}),
+        hostile.fuzzSeed(fixtures.aiff.bytes("aifc_sowt"), &.{}),
+        hostile.fuzzSeed(fixtures.aiff.bytes("aifc_ulaw"), &.{}),
     } });
 }
 
@@ -971,3 +971,5 @@ test "a chunk filling a 4 GiB FORM extent ends as truncation" {
     var reader: std.Io.Reader = .fixed(&form);
     try std.testing.expectError(error.Truncated, probe(&reader, .{}));
 }
+
+const hostile = @import("../testing/hostile.zig");

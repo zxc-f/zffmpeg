@@ -500,9 +500,9 @@ fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
 
 test "fuzz: arbitrary input never crashes the raw parser" {
     try std.testing.fuzz({}, fuzzOne, .{ .corpus = &.{
-        fixtures.raw.bytes("raw_s16le_mono_8k"),
-        fixtures.raw.bytes("raw_s24le_stereo_48k"),
-        fixtures.raw.bytes("raw_partial_frame"),
+        hostile.fuzzSeed(fixtures.raw.bytes("raw_s16le_mono_8k"), &.{}),
+        hostile.fuzzSeed(fixtures.raw.bytes("raw_s24le_stereo_48k"), &.{}),
+        hostile.fuzzSeed(fixtures.raw.bytes("raw_partial_frame"), &.{}),
     } });
 }
 
@@ -578,3 +578,5 @@ test "a failing reader reports IoFailure" {
     var known: std.Io.Reader = .failing;
     try std.testing.expectError(error.IoFailure, probe(&known, .s16le, .{}, 4, .{}));
 }
+
+const hostile = @import("../testing/hostile.zig");

@@ -553,10 +553,10 @@ fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
 
 test "fuzz: arbitrary input never crashes the CAF parser" {
     try std.testing.fuzz({}, fuzzOne, .{ .corpus = &.{
-        fixtures.caf.bytes("caf_s16be_mono_8k"),
-        fixtures.caf.bytes("caf_chunks_around_data"),
-        fixtures.caf.bytes("caf_f64be_stereo_96k"),
-        fixtures.caf.bytes("caf_data_size_unknown"),
+        hostile.fuzzSeed(fixtures.caf.bytes("caf_s16be_mono_8k"), &.{}),
+        hostile.fuzzSeed(fixtures.caf.bytes("caf_chunks_around_data"), &.{}),
+        hostile.fuzzSeed(fixtures.caf.bytes("caf_f64be_stereo_96k"), &.{}),
+        hostile.fuzzSeed(fixtures.caf.bytes("caf_data_size_unknown"), &.{}),
     } });
 }
 
@@ -576,3 +576,5 @@ test "a chunk of 4 GiB ends as truncation" {
     var reader: std.Io.Reader = .fixed(&file);
     try std.testing.expectError(error.Truncated, probe(&reader, .{}));
 }
+
+const hostile = @import("../testing/hostile.zig");

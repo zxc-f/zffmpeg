@@ -2065,7 +2065,11 @@ fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
                 try std.testing.expectError(error.UnsupportedOperation, result);
             } else {
                 const summary = try result;
-                try std.testing.expectEqual(info.format, summary.format);
+                // The command line's layout guess names an unspecified
+                // layout (T23b); the probe reports the stream as stored.
+                var expected = info.format;
+                if (request.guess_layout) expected.layout = audio.guessLayout(expected.layout);
+                try std.testing.expectEqual(expected, summary.format);
                 try std.testing.expectEqual(info.frame_count, summary.frame_count);
             }
         } else |_| {
@@ -2076,14 +2080,14 @@ fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
 
 test "fuzz: conversion agrees with probing on arbitrary input" {
     try std.testing.fuzz({}, fuzzOne, .{ .corpus = &.{
-        fixtures.bytes("mono_8k"),
-        fixtures.bytes("unknown_chunks"),
-        fixtures.au.bytes("au_stereo_44k1"),
-        fixtures.au.bytes("au_truncated_data"),
-        fixtures.bytes("s24_stereo_48k_extensible"),
-        fixtures.bytes("alaw_mono_8k"),
-        fixtures.aiff.bytes("aifc_sowt"),
-        fixtures.aiff.bytes("aiff_odd_data"),
+        hostile.fuzzSeed(fixtures.bytes("mono_8k"), &.{}),
+        hostile.fuzzSeed(fixtures.bytes("unknown_chunks"), &.{}),
+        hostile.fuzzSeed(fixtures.au.bytes("au_stereo_44k1"), &.{}),
+        hostile.fuzzSeed(fixtures.au.bytes("au_truncated_data"), &.{}),
+        hostile.fuzzSeed(fixtures.bytes("s24_stereo_48k_extensible"), &.{}),
+        hostile.fuzzSeed(fixtures.bytes("alaw_mono_8k"), &.{}),
+        hostile.fuzzSeed(fixtures.aiff.bytes("aifc_sowt"), &.{}),
+        hostile.fuzzSeed(fixtures.aiff.bytes("aiff_odd_data"), &.{}),
     } });
 }
 
@@ -2372,3 +2376,5 @@ test "FLAC output fails cleanly under every allocation failure" {
         }
     }.run, .{input});
 }
+
+const hostile = @import("../testing/hostile.zig");
