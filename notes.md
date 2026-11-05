@@ -478,6 +478,26 @@ FFmpeg has none of them. Each is `LimitExceeded`.
 | Error spelling | `Canceled`, Zig's `std.Io.Cancelable` spelling, not `Cancelled`. | port.md error list. |
 | Sequential parsing | The first parser is synchronous and blocking through `*std.Io.Reader`; resumable nonblocking parsing is a separate future capability. | port.md "Recorded design decisions". |
 
+## Open questions
+
+Questions the review of 2026-11-04 raised and nobody has answered yet. Each
+row states what the code does now, which is the safe interim choice, and the
+evidence that would settle it. When one is answered, move the decision into
+its feature's section, change the code, tests and recorded differences
+together, and delete the row.
+
+| Question | Current behavior | Evidence that would settle it |
+| --- | --- | --- |
+| Headerless FLAC whose sample size changes mid-stream: follow the decoder's real format, or refuse? | `DecodedReader` refuses a frame whose sample size differs from the peeked header, as it refuses channel and rate changes ("FLAC conversion"). FFmpeg's codec parameters follow the decoder, so ffprobe and the ffmpeg program report and convert the new format. | A decision on whether mid-stream format changes are in scope. Following FFmpeg means a deferred or rewritten output header, like the channel and rate changes. |
+| AIFF framing quirks: reproduce FFmpeg's chunk desync, or keep correct framing? | Correct framing ("AIFF contract" rows). With an odd `COMM` size, FFmpeg rounds the size up and loses chunk sync, so it decodes nothing, or misreads `sow` and the pad byte as `sowt`. An `FVER` longer than 4 bytes makes its open fail. | Whether such files exist in the wild. Matching FFmpeg would lose all audio from them, which the "Reference behavior" policy would require; fixtures pinning FFmpeg's verdict come first. |
+| An Ogg FLAC comment header over 16 MiB: truncate the 24-bit length as FFmpeg's `put_be24` does, or refuse? | Refused before the header is written ("Ogg" rows). FFmpeg writes a corrupt length and exits 0. | Whether bit-exact output of a corrupt header is wanted. Truncating matches FFmpeg and produces a file that no reader parses correctly. |
+| An ID3v2 tag whose size runs past the end of the file: model FFmpeg's resync? | `InvalidMp3` ("MP3" rows). FFmpeg's seek to the tag's end fails on small files and pipes, so it resumes where its tag parser stopped, resyncs and demuxes the frames. | FFmpeg's result depends on its I/O buffer size and its 32 KiB short-seek threshold, which the port does not model. Modeling them, or a fixture set showing the results are stable, would settle it. |
+| Standard input that is a regular file: stream it as FFmpeg's `pipe:` does, or keep seeking it? | Positional reads from offset 0 ("I/O and API"). Bytes the shell already consumed are read again, and raw PCM lengths count them. FFmpeg streams `pipe:` from the descriptor's current offset and never seeks it. | A decision on whether seekable stdin is a feature. Streaming changes raw-PCM frame counts and Ogg/FLAC counting passes on `-` input. |
+| `core/libm/sin.zig`'s `ldexp(z, q0)` with a zero `z` and `q0` above the mantissa width | The libm port is bit-exact against glibc on its test vectors. Zig 0.17's `std.math.ldexp(0, n)` is wrong for large `n` ("std pitfalls" in the `zig-0-17` guide). | A unit test over `__kernel_rem_pio2`'s inputs showing whether `z` can be 0 with such a `q0`, or switching it to the project's C-equivalent `ldexp`. |
+| `avlanguage.zig`'s 504 ISO 639-2 codes: generated with FFmpeg's bsearch over `lang_table`, or by table membership? | Every MP3 fixture's COMM keys match FFmpeg. | Replaying `ff_convert_lang_to` over all ISO 639-2 codes against the pinned libavformat. The two methods differ if any range of the table is unsorted. |
+| Decoding after a seek in `oggdecode` | No seek path reaches the decoder yet. `first_frame_consumed` is never reset, unlike FFmpeg's `vorbis_decode_flush`, so a future seek path would skip differently from FFmpeg. | The first seek-then-decode consumer (T52 or T53), with a vector of FFmpeg's decoded samples after a seek. |
+| Recursion depth of the FLAC parser's `scoreHeader` | Bounded only by the caller's chunking. The demuxer's 1024-byte reads keep it to about 150 levels; a caller passing about 90 kB at once could buffer about 13k headers. | A documented bound in `flac_parser.zig`'s API, or an iterative rewrite, with a test feeding one large buffer. |
+
 ## Documentation and agents
 
 | Decision | Current choice and reason | To change it |
@@ -485,6 +505,7 @@ FFmpeg has none of them. Each is `LimitExceeded`.
 | Agent guidance | `CLAUDE.md` is canonical; `AGENTS.md` only contains `@CLAUDE.md`. | Move the content back if a tool cannot follow the import. |
 | Document authority | port.md owns architecture and behavior; fixture READMEs own detailed expectations; TODO.md owns tasks and evidence; this file owns revisable decisions. Agent guidance follows the contracts. Summaries add no completion evidence. | port.md "Document authority", CLAUDE.md and TODO.md together. Resolve conflicting rules before implementation; update the affected contract, task, fixtures and decision in one change. |
 | Style guide precedence | The [`zig-0-17` skill](.claude/skills/zig-0-17/SKILL.md) and its guide govern new Zig, but `CLAUDE.md` wins where they differ. | Either file. |
+| Review lessons as rules | The review of 2026-11-04 turned its defect classes into rules rather than a document: coding rules in the `zig-0-17` guide ("Hostile input", "Shape the port as Zig, not as C") and the SKILL.md checklist, project rules in CLAUDE.md ("Malformed input, cleanup and the CLI"), and its unanswered questions into "Open questions" above. The rules are loaded on every Zig change, so they apply to new code; a separate review report would not be. | The guide, SKILL.md and CLAUDE.md together; drop a rule only with the defect class it prevents. |
 | Zig guide as a skill | The Zig 0.17 guide is a project skill (`.claude/skills/zig-0-17/`) rather than a plain document, so Claude Code loads it on every Zig change; CLAUDE.md requires it. `SKILL.md` keeps the workflow, section map and the only copy of the checklist; `references/guide.md` keeps the full guide, so the always-loaded part stays short. | Move `references/guide.md` back to `doc/` and drop the skill, updating CLAUDE.md, README.md, zig/README.md and this row together. |
 
 ## Planning

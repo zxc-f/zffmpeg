@@ -385,6 +385,36 @@ changes: search the changed files for those phrases and the new `compare.py`
 entries, and confirm each has its row. Rows describe the current state, so
 fix a row a change makes stale in the same commit.
 
+### Malformed input, cleanup and the CLI
+
+The review of 2026-11-04 found memory-safety defects, double frees and
+unbounded work that every test mode and the FFmpeg comparison passed. They
+live on paths valid fixtures never reach. The `zig-0-17` guide's "Hostile
+input" and "Shape the port as Zig, not as C" sections hold the coding rules;
+these are the project rules around them:
+
+- A parser, demuxer or decoder change needs a malformed-input regression test
+  that runs in Debug. Use crafted bytes in a unit test, plus a process case
+  for each tool that reaches the path. A fuzz entry varies the limits
+  (unknown length, tag collection, seeking), not only the defaults.
+- Compare work against FFmpeg's on adversarial input. A header-declared count
+  must not drive per-unit work, and where FFmpeg is linear the port must be
+  too.
+- CLI outputs:
+  - Every check that depends only on the request runs before the output is
+    created; this includes resampler bounds and encoder block sizes.
+  - Failure cleanup removes only a regular file this run created; never a
+    FIFO, symlink or device.
+  - Header rewrites seek only regular files.
+  - Output-side failures name the output.
+- A recorded difference in compare.py asserts the difference it records, for
+  example the error name, or equality of everything but the recorded field.
+  A fixture listed there must still fail when our side crashes.
+- An open design question goes in notes.md's "Open questions" section. It
+  states the current behavior and the evidence that would settle it. Until
+  it is answered, the code takes the safe option: refuse with a recorded
+  difference, or keep the current behavior.
+
 For implemented multimedia behavior, use hand-checked vectors and differential
 tests against a recorded FFmpeg revision/configuration. Check decoded content,
 metadata, timestamps, failure cases, and resource cleanup. Bit-exact results are

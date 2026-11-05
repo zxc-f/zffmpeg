@@ -54,6 +54,8 @@ every Zig change starts from the pinned toolchain's rules instead.
 | Tests | "Tests" |
 | `build.zig`, `build.zig.zon` | "Build graph" |
 | Formatting, literals, declarations | "Formatting", "Types, literals, and declarations" |
+| Parsers, decoders, demuxers, anything that reads untrusted bytes; cleanup and error paths; adversarial tests | "Hostile input" |
+| A new parser, helper, codec state, dispatch switch or registry entry; a second copy of existing logic | "Shape the port as Zig, not as C" |
 | A whole new file | "A file that already looks like 0.17", then everything above it touches |
 
 ## Checklist before sending Zig
@@ -71,6 +73,12 @@ every Zig change starts from the pinned toolchain's rules instead.
 - `std.lang` for language types. `@import("builtin")` only for target facts.
 - `find` / `trimStart` / `allocator.print` / `@fromBackingInt` / `@trunc`.
 - Overflowing size math uses `std.math.mul` / `add`, not `+%` and not a bare `+` that is only safe in Debug.
+- No union or owner field assigned from a fallible initializer in one expression: bind the result to a local, then assign. No owner stored in `self` while its `errdefer` is armed.
+- Input-derived values: `@intCast` only after a check; `@truncate` with a comment where the C truncates; `+%`/`-%` with the notes.md comment where the C's signed arithmetic wraps on the reference build.
+- No `std.debug.assert` as the only guard of a public contract, no `catch unreachable` / `else => unreachable` on an error input can cause, no `else => unreachable` over `anyerror`.
+- No `discardShort`/`discardAll` with an untrusted length (use the bounded skip helper), no `std.math.ldexp` on values that can be zero (use the project helper). See the guide's "std pitfalls".
+- Work stays proportional to bytes present: no per-unit loop over a header-declared count, no `orderedRemove(0)` drain, no re-copy of a growing value per append.
+- A buffer that is written before its bound is checked is sized as FFmpeg sizes it; widths come from the value being written, not a second copy of the format.
 - Tests do not print to stdout. `expectEqual` needs no `@as`; peer type resolution types both arguments.
 - No OS-specific code: no `std.os.linux`, direct `std.posix` calls or libc; no hard-coded `/` paths; explicit byte order; fixed-width integers for sizes and counts. See CLAUDE.md "Portable Zig code".
 - If a snippet's first line is `const std = @import("std");` and its second line could have been written in 0.13, it is not done.
@@ -93,6 +101,14 @@ Design questions, from the guide's "Model values, state and boundaries":
   that expresses validation locally. A proven `unreachable` sits next to its proof.
 - Before duplicating an operation, check whether the second working caller
   calls for a small shared helper. Do not add a framework to satisfy this.
+- Before porting an FFmpeg function, search for an existing port of it: one
+  implementation per FFmpeg function (a second Vorbis comment parser drifted).
+  New parsed formats use `demux.Layer`.
+- Per-stream codec state is one `union(enum)`; sentinels, tri-state integers
+  and out-pointers become enums, optionals, tagged unions and return values.
+- Dispatch over a union's cases is derived from the union (`inline else`,
+  `field_names`/`field_types`), not kept in parallel lists; arms that
+  genuinely differ stay an explicit exhaustive switch.
 - A guide example or [io_patterns.zig](../../../zig/examples/io_patterns.zig)
   is copied only if it follows this checklist; the guide, this checklist and
   that executable example must agree, so fix whichever one drifts. Compile-only
@@ -114,5 +130,9 @@ Repository checks, from CLAUDE.md:
   files and output.
 - Parsers check lengths and arithmetic before reading or allocating, so they
   stay safe in ReleaseFast, where runtime safety is off.
+- A malformed-input path has a regression test that runs in Debug: a unit
+  test with crafted bytes, and a process case for the tool that reaches it
+  (zffprobe never builds decoders; decoder refusals need `convert_cases`).
+  Fuzz entries vary the limits, not only the defaults.
 - Nothing breaks the compile-only cross build for x86_64-windows-gnu,
   aarch64-linux-musl and aarch64-macos.

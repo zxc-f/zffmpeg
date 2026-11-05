@@ -28,6 +28,8 @@ this guide and [CLAUDE.md](../../../../CLAUDE.md) differ, CLAUDE.md wins.
 - [Allocators and containers](#allocators-and-containers)
 - [Builtins agents still copy](#builtins-agents-still-copy): type construction, reflection, integers, errors and control flow, other deletions
 - [Model values, state and boundaries](#model-values-state-and-boundaries): typed statuses, error domains, state payloads, empty results, reuse, error assertions, captures
+- [Hostile input](#hostile-input): initialization order, buffer sizing, ReleaseFast checks, input-derived integers, std pitfalls, work bounds, cleanup, tests
+- [Shape the port as Zig, not as C](#shape-the-port-as-zig-not-as-c): one implementation per FFmpeg function, shared data paths, typed state, derived dispatch
 - [Formatting](#formatting)
 - [Types, literals, and declarations](#types-literals-and-declarations)
 - [Tests](#tests)
@@ -769,6 +771,184 @@ try write(container);
   compile-time work.
 - `catch unreachable` beside a stated capacity proof; external input is still
   rejected explicitly, because ReleaseFast has no safety checks.
+
+## Hostile input
+
+Every rule here comes from a defect that passed all three test modes and the
+FFmpeg comparison, and was found only by crafted input (the review of
+2026-11-04). The green suites exercise valid streams; these rules are about
+the bytes nobody wrote on purpose.
+
+### Initialize into a local, then publish
+
+A union field assignment sets the tag **before** the payload's initializer
+runs. If the initializer fails, the union already claims a payload it never
+got, and its `deinit` frees undefined memory:
+
+```zig
+// Do not write: on failure r.decoder is tagged .vorbis with garbage inside,
+// and the deferred r.deinit() frees it.
+r.decoder = .{ .vorbis = vorbis.Decoder.init(gpa, extradata) catch |err| return mapError(err) };
+
+// Write: the long-lived state changes only after init succeeded.
+const dec = vorbis.Decoder.init(gpa, extradata) catch |err| return mapError(err);
+r.decoder = .{ .vorbis = dec };
+```
+
+The same holds for any owner stored in a field whose cleanup runs later. Do
+not store a resource in `self` while its own `errdefer` is still armed: when
+a later step fails, the `errdefer` frees it and `self.deinit` frees it again.
+Finish every fallible step, then assign the fields, or clear the field in the
+`errdefer`. Commit derived state (a channel count, a buffer length) only after
+the allocation that backs it succeeded; otherwise the next call trusts a
+count whose buffers do not exist.
+
+### Size buffers for what writes them
+
+A buffer sized exactly to a header value is only safe if nothing writes before
+the check that bounds the write. FFmpeg often survives a late check because
+`av_samples_get_buffer_size`, `AV_INPUT_BUFFER_PADDING_SIZE` or an aligned
+allocation leaves room; the port must not assume it does. When porting a
+function that writes and then validates (FLAC's warm-up samples are read
+before `pred_order > samples` is refused), either allocate as FFmpeg does
+(the same rounding) or move the check before the write, keeping FFmpeg's
+error order observable.
+
+Derive a write's element width from the value actually being written (the
+active tag of a sample union), never from a second copy of the format kept
+elsewhere. Two sources of truth for one format will disagree on damaged input.
+
+### ReleaseFast removes every safety net
+
+- `std.debug.assert` is a no-op in ReleaseFast. A contract a caller of a
+  public function can break (a plane length, an output capacity) is checked
+  with an error; asserts stay for invariants the module itself guarantees.
+- `catch unreachable` and `else => unreachable` are undefined behavior when
+  reached. Never put them on an error that input can cause, and never end a
+  switch over `anyerror` with `else => unreachable`: a new error in a callee
+  then compiles silently. Name the error set and switch exhaustively.
+- `@intCast` of a value derived from input is a panic in safe builds and
+  undefined behavior in ReleaseFast. Decide what the C does: if it truncates
+  (`int x = int64_value`, `put_be24`), write `@truncate` with a comment; if it
+  is a size, check it and return an error.
+- Signed arithmetic that C performs on input (timestamps, interpolation,
+  counters such as `header_count`) overflows on crafted streams. notes.md
+  "Follow the reference build" says it wraps on the reference platform: write
+  `+%` / `-%` / `*%` with the comment that rule asks for. This is not a size:
+  sizes, offsets and allocation counts still use `std.math.add`/`mul`.
+
+### std pitfalls verified on 0.17.0
+
+| API | Pitfall | Use |
+| --- | --- | --- |
+| `std.Io.Reader.discardShort` / `discardAll` | `r.seek + n` is unchecked (`lib/std/Io/Reader.zig`): a skip near `maxInt(usize)` panics in safe builds and wraps backward in ReleaseFast. | The project's bounded skip helper for every untrusted length. |
+| `std.math.ldexp` | Wrong for a zero mantissa (`ldexp(0, n)` returns a large value or inf once `n` exceeds the mantissa width) and rounds subnormal ties up. | The project's C-equivalent `ldexp`. |
+| `std.fs.path.extension(".ogg")` | Returns `""` for a name that is only an extension; FFmpeg's `av_match_ext` uses `strrchr('.')`. | Match FFmpeg's rule explicitly where extensions decide behavior. |
+| `Run.expectStdOutMatch("")` | Matches every output: `find(stdout, "")` is never null. | Assert real content, a size or a hash. |
+
+When a std function's behavior matters to bit-exactness or safety, read its
+source in `lib/std` before using it on input.
+
+### Work proportional to the input, not to its claims
+
+- A loop that steps once per unit of a header-declared count (frames, bytes,
+  output samples) lets a 100-byte file claim hours of work. Compute counts in
+  closed form, or cap them by the length actually available.
+- `orderedRemove(0)` in a drain loop is quadratic. Use a head index or
+  `std.Deque`.
+- Re-copying a growing value on every append (joining repeated tag keys) is
+  quadratic. Grow in place, or collect and join once.
+- FFmpeg is the benchmark: when it is linear and the port is not, that is a
+  defect even if both finish on the fixtures. Measure with a generated
+  adversarial input in ReleaseFast.
+
+### Cleanup on every path
+
+- Replacing an owned field frees the old value first (a second SEEKTABLE
+  block must not leak the first).
+- Save/restore pairs give each buffer one owner. If `restore` frees a
+  snapshot, the caller's `errdefer` must not free it again.
+- Test failure cleanup with `std.testing.allocator` and a writer or seeker
+  that fails: a 16-byte fixed writer makes a header write fail.
+
+### Tests that reach these paths
+
+- A fuzz entry covers non-default limits too (unknown length, tag collection,
+  seeking), not only `.{}`; the defaults hide the paths that opt in.
+- A path that only one tool reaches needs that tool's process case:
+  zffprobe never builds a decoder, so a decoder refusal needs a
+  `convert_cases` entry, not only a `probe_cases` one.
+- `zig build test` in Debug is the run that turns most of these defects into
+  panics; a ReleaseSafe-only check can pass by luck of the stack contents.
+- A recorded difference in compare.py asserts the specific difference it
+  records (an error name, a shifted timestamp with everything else equal); a
+  table keyed only by fixture name counts any failure, including a crash of
+  our own tool, as understood.
+
+## Shape the port as Zig, not as C
+
+FFmpeg is the behavioral reference, not the structural one. Its macros,
+parallel tables, sentinels and copy-pasted variants exist for C's reasons.
+The port keeps FFmpeg's observable behavior and should be smaller and harder
+to misuse. Prefer a few understandable abstractions; do not add a
+metaprogramming framework or optimize for line count alone.
+
+### One implementation per FFmpeg function
+
+When FFmpeg calls one shared function from several places, the port calls
+one Zig implementation. A second copy drifts: FLAC kept its own Vorbis comment
+parser beside `format/vorbiscomment.zig` (FFmpeg's `ff_vorbis_comment`) and it
+diverged in three observable ways. Before writing a parser, decoder helper or
+timing rule, search for an existing port of the same FFmpeg function. A
+deliberate second copy needs a notes.md row with its retirement condition.
+
+`format/flac.zig` still carries its own copy of libavformat's generic layer
+(timestamps, read-ahead, seeking) beside `format/demux.zig`, which now serves
+Ogg and MP3. New parsed formats go through `demux.Layer`; selecting a parser
+is one enum in `demux.Setup`, not a new boolean per format.
+
+### Share the data path, keep the headers local
+
+The PCM containers (wav, au, aiff, caf, raw) each repeat the same data
+reader (`readSamples`, `mapRead`, the `decodeToRaw` loop) and the same
+frame-counting writer (`writeFrames`/`writeData`/`finish`). A defect in that
+shape (a missing channel-count check, an unbounded skip) then appears five
+times. Factor such a path into one struct that owns its validated invariants
+(frame size, channels, bytes left) with `comptime` parameters for real static
+variation (byte order, sample type), and keep header parsing, limits, error
+precedence and finalization in each format ("Reuse follows working callers").
+
+### State types that match the stream
+
+- Per-stream codec state is one `union(enum)` keyed by the codec, not every
+  codec's state side by side with the codec stored twice.
+- Replace numeric sentinels and tri-state integers (`-1`/`-2` from a check
+  function, `sid: *i32` with `-1`, `header: i32` with three meanings) with
+  enums, optionals and tagged unions, and out-pointers with return values.
+- A decoder either owns its output buffer or checks the caller's buffer with
+  an error at its public boundary; a reconfiguring packet (a new identification
+  header) must not silently outgrow a buffer sized at open.
+- Split state that is saved and restored (Ogg's page state) from state that
+  is not, so the snapshot is a copy plus one owned buffer.
+
+### Derive dispatch from the type that already lists the cases
+
+- A tagged union of filters, codecs or formats already enumerates the cases.
+  Generate the per-case dispatch with `inline else`, `@unionInit` and
+  `@typeInfo(T).@"union".field_names` / `field_types`, and have each payload
+  declare its metadata, instead of maintaining parallel lists that must stay
+  in step. Avoid `@hasDecl` probing: a missing declaration should be a
+  compile error.
+- Give each header type a method (`stream()`) instead of dispatching on
+  `@TypeOf` over `anytype`.
+- One function maps `audio.SampleFormat` to its Zig element type; kernels
+  call it instead of carrying their own switch.
+- Repetitive build data (process-case reports) can be generated with
+  `std.fmt.comptimePrint` while the expected values stay hand-written.
+
+Do not fold switches whose arms genuinely differ (the per-format arms in
+`detect.zig` and `convert.zig`) into a descriptor table: the exhaustive
+switch is the documented design and the clearest code there.
 
 ## Formatting
 
