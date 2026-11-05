@@ -470,10 +470,15 @@ def tool_error(process, tool, path):
     or more: not a usage error, and not a crash, whose signal Python reports
     as a negative status). None for anything else, so a crash, a usage error
     or a stray message never counts as the recorded refusal."""
-    if process.returncode < 2:
+    return refusal_name(process.returncode, process.stderr, tool, path)
+
+
+def refusal_name(code, stderr, tool, path):
+    """`tool_error` for an exit status and stderr bytes (`zffprobe_raw`'s)."""
+    if code < 2:
         return None
     match = re.fullmatch(rf"{re.escape(tool)}: {re.escape(str(path))}: ([A-Z][A-Za-z0-9]*)\n",
-                         process.stderr.decode(errors="replace"))
+                         stderr.decode(errors="replace"))
     return match.group(1) if match else None
 
 
@@ -1134,7 +1139,8 @@ def compare_zffmpeg(args, lines, failures):
     command through standard input and output must give the same bytes, except
     that raw PCM from a pipe into a container with a header must fail with
     status 3, `UnsupportedStreamingSize`, writing nothing (T22c). Every
-    other cell must fail with status 3 before creating any output. FFmpeg's
+    other cell must fail with status 3, `UnsupportedOperation` naming the
+    input, before creating any output. FFmpeg's
     Wave64 demuxer rejects an empty `data` chunk (24 bytes, its header only),
     so an empty Wave64 output must be refused by FFmpeg and read by zffprobe.
     For a writer-output input without tags, an AU or AIFF output must also
@@ -1180,8 +1186,10 @@ def compare_zffmpeg(args, lines, failures):
                 supported = stream.codec in carried[output] if copy else True
                 if not supported:
                     rejected_total += 1
-                    error = b"UnsupportedOperation"
-                    if code == 3 and error in err and not out.exists():
+                    # Exactly this refusal, naming the input: a crash or
+                    # another error does not count.
+                    if code == 3 and refusal_name(code, err, "zffmpeg", path) == "UnsupportedOperation" \
+                            and not out.exists():
                         rejected_ok += 1
                     else:
                         failures.append(f"zffmpeg {fixture.name} {cell}: exited {code} "
@@ -1201,7 +1209,8 @@ def compare_zffmpeg(args, lines, failures):
                     if container in generate.RAW_FORMATS and output not in generate.RAW_FORMATS:
                         # Raw PCM from a pipe has no length for a header's sizes
                         # (T22c contract): status 3 before any output.
-                        if pipe_code != 3 or b"UnsupportedStreamingSize" not in pipe_err or pipe_out:
+                        if pipe_code != 3 or pipe_out or \
+                                refusal_name(pipe_code, pipe_err, "zffmpeg", "-") != "UnsupportedStreamingSize":
                             problems.append(f"through pipes zffmpeg exited {pipe_code} "
                                             f"({first_line(text(pipe_err)) or 'no error'}), "
                                             f"expected UnsupportedStreamingSize")
@@ -1656,14 +1665,19 @@ REMIX_OPTIONS = [
     ["-ac", "2", "-c:a", "pcm_f32le"],
 ]
 
+# libswresample's refusal when it has no matrix between two layouts
+# (swr_init's auto_matrix failing, libswresample/rematrix.c).
+REMIX_REFUSAL = re.compile(r"Rematrix is needed between .* but there is not enough information to do it")
+
 
 def compare_remix(args, lines, failures):
     """zffmpeg's output -ac and -ch_layout against FFmpeg's (T23c): every
     accepted fixture of every input container, rematrixed into each layout
     of REMIX_OPTIONS and written as raw PCM by both (s16le, or f32le for the
     float encoder), so the samples alone are compared, must give the same
-    bytes; where FFmpeg's libswresample cannot mix the layouts, zffmpeg must
-    refuse too, with status 3 and no output. The input differences recorded
+    bytes; where FFmpeg's libswresample cannot mix the layouts (its "Rematrix
+    is needed" refusal), zffmpeg must refuse too, with `UnsupportedLayout`
+    and no output. The input differences recorded
     for the other sections stay: FFmpeg decodes the bytes after an AU's
     data (`au_trailing_bytes_after_data`)."""
     lines += [
@@ -1699,11 +1713,16 @@ def compare_remix(args, lines, failures):
                 total += 1
                 label = " ".join(options)
                 if process.returncode != 0:
-                    if code == 3 and not ours.exists():
+                    # Both refuse the mix itself: libswresample has no matrix
+                    # for the layouts, and zffmpeg names it UnsupportedLayout.
+                    # Any other failure of either side is a problem.
+                    if REMIX_REFUSAL.search(text(process.stderr)) and \
+                            refusal_name(code, err, "zffmpeg", path) == "UnsupportedLayout" and not ours.exists():
                         refused += 1
                     else:
                         problems.append(f"{label}: FFmpeg refuses ({first_line(text(process.stderr))}), "
-                                        f"zffmpeg exited {code}")
+                                        f"zffmpeg exited {code} ({first_line(text(err)) or 'no error'}), "
+                                        f"where both must refuse the mix (UnsupportedLayout)")
                 elif code != 0:
                     problems.append(f"{label}: zffmpeg exited {code} ({first_line(text(err))})")
                 elif theirs.read_bytes() != ours.read_bytes():
@@ -2376,23 +2395,31 @@ def compare_ogg_output(args, lines, failures):
             result = "pass" if not problems else "**FAIL**: " + "; ".join(problems)
             rows.append(f"| `{name}` | {2 * len(OGG_OUTPUT_OPTIONS)} | {result} |")
             failures.extend(f"Ogg output {name}: {p}" for p in problems)
-        # -f opus asks for the Opus encoder, which neither build has.
+        # .opus asks for the Opus encoder: the port has none, and the
+        # reference build's native one is experimental, which the program
+        # refuses without -strict experimental. Each refusal must be that one.
         total += 1
         tp = run(args.ffmpeg, "-nostdin", "-v", "error", "-y", "-i", inputs["s16_stereo_44k1"], "-bitexact",
                  work / "theirs.opus")
         zp = run(args.zffmpeg, "-y", "-i", inputs["s16_stereo_44k1"], work / "ours.opus")
-        if tp.returncode != 0 and zp.returncode == 3 and not (work / "ours.opus").exists():
+        experimental = "The encoder 'opus' is experimental but experimental codecs are not enabled"
+        if tp.returncode != 0 and experimental in text(tp.stderr) and \
+                tool_error(zp, "zffmpeg", inputs["s16_stereo_44k1"]) == "UnsupportedOperation" and \
+                not (work / "ours.opus").exists():
             same += 1
         else:
-            failures.append(f"Ogg output: .opus: FFmpeg {tp.returncode}, zffmpeg {zp.returncode}")
+            failures.append(f"Ogg output: .opus: FFmpeg {tp.returncode} ({first_line(text(tp.stderr))}), zffmpeg "
+                            f"{zp.returncode} ({first_line(text(zp.stderr)) or 'no error'}), where FFmpeg must refuse "
+                            f"its experimental encoder and zffmpeg with UnsupportedOperation")
     record("Ogg output (T27b)", same, total)
     lines += [
         "",
         "## Ogg output (T27b)",
         "",
         f"zffmpeg's FLAC in Ogg equal to the ffmpeg program's (`-bitexact`) as `.ogg` and `.oga` files and on "
-        f"pipes, and decoded by FFmpeg as the same conversion to FLAC; `.opus`, whose default encoder neither "
-        f"has, refused before any output: {same}/{total}.",
+        f"pipes, and decoded by FFmpeg as the same conversion to FLAC; `.opus`, refused by "
+        f"zffmpeg (no Opus encoder, UnsupportedOperation) before any output and by FFmpeg (its encoder is "
+        f"experimental): {same}/{total}.",
         "",
         "| Input | Outputs | Result |",
         "| --- | --- | --- |",
@@ -3044,7 +3071,8 @@ KNOWN_REGISTRY_DIFFERENCES = {
 def compare_registries(args, lines, failures):
     """The registry dump against FFmpeg's own listings (T16). The reference
     build enables exactly the codecs and formats the port implements, so the
-    two sets must be equal, and every field must match."""
+    two sets must be equal both ways, and every field must match; a codec
+    only a demuxer names must be listed when zffprobe reports it."""
     ours = text(run(args.registry).stdout).splitlines()
     codecs = {}
     formats = {}
@@ -3082,6 +3110,34 @@ def compare_registries(args, lines, failures):
     ours_enabled = {name for name, (flags, _) in codecs.items() if flags.startswith("DE") and name not in known_codecs}
     if enabled != ours_enabled:
         problems.append(f"codecs FFmpeg decodes and encodes {sorted(enabled)}, the registry {sorted(ours_enabled)}")
+    # Two-sided: every codec the reference build decodes or encodes (a
+    # decoder alone, an encoder alone, or a recorded flag difference) has a
+    # descriptor in the registry, whose fields the loop below checks; every
+    # descriptor the registry lists is FFmpeg's.
+    their_active = {name for name, (flags, _) in their_codecs.items() if flags[0] == "D" or flags[1] == "E"}
+    if their_active - set(codecs):
+        problems.append(f"codecs FFmpeg decodes or encodes that the registry lacks: {sorted(their_active - set(codecs))}")
+    # A codec only a demuxer names (mp1, mp2 and mp3, T29a) is in neither
+    # set above. zffprobe's codec for every fixture it accepts is FFmpeg's
+    # (each fixture section compares it with ffprobe's), so each one it
+    # reports needs a descriptor here.
+    reported = set()
+    for directory in ("wav", "au", "aiff", "caf", "flac", "ogg", "mp3"):
+        for path in sorted((FIXTURES / directory).glob(f"*.{directory}")):
+            probe = run(args.zffprobe, path)
+            if probe.returncode == 0:
+                reported |= {line.partition("=")[2] for line in text(probe.stdout).splitlines()
+                             if line.startswith("codec=")}
+    if not reported or reported - set(codecs):
+        problems.append(f"codecs zffprobe reports for the fixtures {sorted(reported)}; the registry lacks "
+                        f"{sorted(reported - set(codecs))}")
+    # A recorded flag difference holds exactly: listed but now equal is stale.
+    for name in sorted(known_codecs):
+        ours_flags = codecs[name][0] if name in codecs else None
+        theirs_flags = their_codecs[name][0] if name in their_codecs else None
+        if (ours_flags, theirs_flags) != KNOWN_REGISTRY_DIFFERENCES[("codec", name)][0]:
+            problems.append(f"codec {name}: flags ours {ours_flags}, FFmpeg's {theirs_flags}, where "
+                            f"KNOWN_REGISTRY_DIFFERENCES records {KNOWN_REGISTRY_DIFFERENCES[('codec', name)][0]}")
     for name, value in codecs.items():
         theirs = their_codecs.get(name)
         known = KNOWN_REGISTRY_DIFFERENCES.get(("codec", name))
@@ -3099,6 +3155,14 @@ def compare_registries(args, lines, failures):
     hash_muxers = {name for (kind, name) in KNOWN_REGISTRY_DIFFERENCES if kind == "format only in FFmpeg"}
     if set(their_formats) - hash_muxers != set(formats):
         problems.append(f"FFmpeg's formats {sorted(their_formats)}, the registry {sorted(formats)}")
+    if not hash_muxers <= set(their_formats):
+        problems.append(f"FFmpeg's formats {sorted(their_formats)} lack the recorded {sorted(hash_muxers)}")
+    # Each demuxing format has its demuxer line and each muxing one its
+    # muxer line, and no line names another format.
+    for kind, lines_of, column in (("demuxer", demuxers, 0), ("muxer", muxers, 1)):
+        expected = {name for name, (flags, _) in formats.items() if flags[column] != "."}
+        if set(lines_of) != expected:
+            problems.append(f"{kind} lines for {sorted(lines_of)}, the formats' flags name {sorted(expected)}")
     for name, value in formats.items():
         theirs = their_formats.get(name)
         known = KNOWN_REGISTRY_DIFFERENCES.get(("format", name))

@@ -527,7 +527,10 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   descriptors, decoders and encoders, formats and muxers. They must equal the
   reference build's `ffmpeg -codecs` (flags and long names), `ffmpeg -formats`
   and `ffmpeg -h muxer=...` (extensions, MIME type, default audio codec), and
-  cover exactly the codecs and formats it enables; no registered demuxer may
+  cover exactly the codecs and formats it enables, checked both ways: every
+  codec it decodes or encodes, every codec `zffprobe` reports for a fixture
+  (descriptors only a demuxer names, such as mp3), and a demuxer or muxer
+  line for each format that has one; no registered demuxer may
   declare an extension, since detection ignores file names.
 - **Zig-written files.** The write driver writes every WAV, AU and AIFF
   writer-output stream from raw samples, in its codec (T21a: every WAV
