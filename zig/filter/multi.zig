@@ -637,8 +637,9 @@ pub const MixRun = struct {
     scale_norm: []f32,
     /// Each input's queued samples, as the output format packs them.
     fifos: []Fifo,
-    /// The first input's frames not yet mixed: their sizes and pts.
-    frames: std.ArrayList(FrameInfo) = .empty,
+    /// The first input's frames not yet mixed: their sizes and pts. A ring
+    /// buffer, so draining it is linear, as af_amix.c's linked list is.
+    frames: std.Deque(FrameInfo) = .empty,
     next_pts: ?i64 = null,
 
     const FrameInfo = struct { samples: u32, pts: ?i64 };
@@ -729,30 +730,31 @@ pub const MixRun = struct {
 
     /// The first input's next frame size (0 without one).
     pub fn nextFrameSize(r: *const MixRun) u32 {
-        return if (r.frames.items.len > 0) r.frames.items[0].samples else 0;
+        return if (r.frames.front()) |first| first.samples else 0;
     }
 
     pub fn frameCount(r: *const MixRun) usize {
-        return r.frames.items.len;
+        return r.frames.len;
     }
 
     /// Queues frame `frame` of input `i`; `pts` is in the output's time
     /// base for the first input.
     pub fn write(r: *MixRun, i: usize, frame: *const Owned, pts: ?i64) error{OutOfMemory}!void {
-        if (i == 0) try r.frames.append(r.gpa, .{ .samples = frame.frameCount(), .pts = pts });
+        if (i == 0) try r.frames.pushBack(r.gpa, .{ .samples = frame.frameCount(), .pts = pts });
         const view = frame.buffer().view();
         const bytes = frame.frameCount() * r.sampleBytes();
         for (r.fifos[i].planes, 0..) |*p, k| try p.appendSlice(r.gpa, view.plane(@intCast(k))[0..bytes]);
     }
 
-    /// `frame_list_remove_samples`.
+    /// `frame_list_remove_samples`: whole frames leave from the front, a
+    /// partly mixed one keeps its rest with its pts advanced.
     fn removeSamples(r: *MixRun, count: u32) void {
         var left = count;
-        while (left > 0 and r.frames.items.len > 0) {
-            const first = &r.frames.items[0];
+        while (left > 0) {
+            const first = r.frames.frontPtr() orelse break;
             if (first.samples <= left) {
                 left -= first.samples;
-                _ = r.frames.orderedRemove(0);
+                _ = r.frames.popFront();
             } else {
                 first.samples -= left;
                 if (first.pts) |*p| p.* += left;
@@ -810,7 +812,7 @@ pub const MixRun = struct {
                     nb_samples = ns;
                 }
             }
-            r.next_pts = if (r.frames.items.len > 0) r.frames.items[0].pts else null;
+            r.next_pts = if (r.frames.front()) |first| first.pts else null;
         } else {
             nb_samples = std.math.maxInt(i32);
             for (1..r.inputs) |i| {
@@ -866,3 +868,149 @@ pub const MixRun = struct {
         return active == 0 or (r.duration == .first and !r.isOn(0)) or (r.duration == .shortest and active != r.inputs);
     }
 };
+
+const testing = std.testing;
+
+/// A mono float frame of `n` samples counting up from `first`.
+fn rampFrame(gpa: std.mem.Allocator, format: audio.Format, first: u32, n: u32, pts: ?i64) !Owned {
+    const f = try Owned.alloc(gpa, format, n, pts);
+    for (std.mem.bytesAsSlice(f32, f.data), 0..) |*sample, k| sample.* = @floatFromInt(first + k);
+    return f;
+}
+
+/// Writes frame `f` of input `i`, then frees it.
+fn writeFrame(r: *MixRun, i: usize, f: *Owned, pts: ?i64) !void {
+    defer f.free(r.gpa);
+    try r.write(i, f, pts);
+}
+
+/// Takes every output `r` gives now; checks that it continues the ramp at
+/// `pos.*` with the pts 1000 + its first sample, and advances `pos`.
+fn drainChecked(r: *MixRun, pos: *u32) !void {
+    while (true) {
+        switch (try r.output()) {
+            .none => return,
+            .end => return error.TestUnexpectedResult,
+            .frame => |frame| {
+                var f = frame;
+                defer f.free(r.gpa);
+                try testing.expectEqual(1000 + pos.*, f.pts.?);
+                for (std.mem.bytesAsSlice(f32, f.data)) |sample| {
+                    const expected: f32 = @floatFromInt(pos.*);
+                    try testing.expectEqual(expected, sample);
+                    pos.* += 1;
+                }
+            },
+        }
+    }
+}
+
+test "amix drains a long first-input queue in order, in part and at the end" {
+    const gpa = testing.allocator;
+    // Without normalizing, each input is scaled by its weight, 1: the
+    // output is the first input's ramp plus the second input's silence.
+    const a: AMix = .{ .scalars = .{ .normalize = false } };
+    const format = try audio.Format.init(48000, 1, .flt);
+    var r = try MixRun.init(gpa, &a, format);
+    defer r.deinit();
+    // Frames of varied sizes wait on the first input while the second has
+    // nothing: no output.
+    const sizes = [_]u32{ 3, 1, 5, 2, 7, 4 };
+    var total: u32 = 0;
+    for (0..300) |k| {
+        const n = sizes[k % sizes.len];
+        var f = try rampFrame(gpa, format, total, n, 1000 + total);
+        try writeFrame(&r, 0, &f, f.pts);
+        total += n;
+        try testing.expect(try r.output() == .none);
+    }
+    try testing.expectEqual(300, r.frameCount());
+    try testing.expectEqual(3, r.nextFrameSize());
+    // The second input comes in pieces of 5 samples: each output is a
+    // whole first-input frame, as far as the second input reaches.
+    var pos: u32 = 0;
+    var fed: u32 = 0;
+    while (fed < total / 2) : (fed += 5) {
+        var silence = try Owned.alloc(gpa, format, 5, null);
+        @memset(silence.data, 0);
+        try writeFrame(&r, 1, &silence, null);
+        try drainChecked(&r, &pos);
+    }
+    try testing.expectEqual(fed - r.fifoSize(1), pos);
+    // Fewer samples than the next frame, then the end of the second input:
+    // that frame is mixed in part, its pts advanced by the part.
+    const next = r.nextFrameSize();
+    const part = if (r.fifoSize(1) + 1 < next) next - r.fifoSize(1) - 1 else 0;
+    if (part > 0) {
+        var silence = try Owned.alloc(gpa, format, part, null);
+        @memset(silence.data, 0);
+        try writeFrame(&r, 1, &silence, null);
+    }
+    try drainChecked(&r, &pos);
+    try testing.expect(r.fifoSize(1) > 0 and r.fifoSize(1) < r.nextFrameSize());
+    r.endInput(1);
+    const before = r.frameCount();
+    try drainChecked(&r, &pos);
+    try testing.expectEqual(0, r.fifoSize(1));
+    try testing.expectEqual(before, r.frameCount()); // the frame stays, shorter
+    // With the second input off, the rest of the first input's frames come
+    // out whole, starting with the rest of the partly mixed one.
+    r.endInput(1);
+    try testing.expect(!r.isOn(1));
+    try drainChecked(&r, &pos);
+    try testing.expectEqual(total, pos);
+    try testing.expectEqual(0, r.frameCount());
+    r.endInput(0);
+    try testing.expect(r.ended());
+    try testing.expect(try r.output() == .end);
+}
+
+/// Queues `n` one-sample frames on the first input of a two-input amix,
+/// then gives the second input as many samples at once and mixes them all:
+/// the nanoseconds this took. An arena keeps the debug allocator's
+/// bookkeeping out of the time.
+fn drainOneSampleFrames(n: u32) !i96 {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const a: AMix = .{};
+    const format = try audio.Format.init(48000, 1, .flt);
+    var r = try MixRun.init(gpa, &a, format);
+    defer r.deinit();
+    for (0..n) |k| {
+        var f = try rampFrame(gpa, format, @intCast(k), 1, @intCast(k));
+        try writeFrame(&r, 0, &f, f.pts);
+    }
+    var silence = try Owned.alloc(gpa, format, n, null);
+    @memset(silence.data, 0);
+    try writeFrame(&r, 1, &silence, null);
+    const start = std.Io.Clock.awake.now(testing.io);
+    var mixed: u32 = 0;
+    while (true) {
+        switch (try r.output()) {
+            .frame => |frame| {
+                var f = frame;
+                mixed += f.frameCount();
+                f.free(gpa);
+            },
+            .none, .end => break,
+        }
+    }
+    const elapsed = start.durationTo(std.Io.Clock.awake.now(testing.io)).nanoseconds;
+    try testing.expectEqual(n, mixed);
+    return elapsed;
+}
+
+test "amix's first-input queue drains in linear time" {
+    // af_amix.c's frame list drains in linear time: 8 times the frames take
+    // about 8 times as long. An array shifted per frame measured 32 times
+    // in Debug and 60 in ReleaseFast. The fastest of three runs keeps a
+    // busy machine from deciding.
+    var small: i96 = std.math.maxInt(i96);
+    var large: i96 = std.math.maxInt(i96);
+    for (0..3) |_| {
+        small = @min(small, try drainOneSampleFrames(8000));
+        large = @min(large, try drainOneSampleFrames(64000));
+    }
+    try testing.expect(large < 16 * @max(small, 1));
+}
