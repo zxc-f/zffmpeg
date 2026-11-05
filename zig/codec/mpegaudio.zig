@@ -330,3 +330,92 @@ test "the parser's header count wraps after 2^31 matching headers, as the refere
     try testing.expectEqual(std.math.minInt(i32), p.header_count);
     try testing.expectEqual(0, ctx.sample_rate);
 }
+
+const fixtures = @import("../testing/fixtures.zig");
+const hostile = @import("../testing/hostile.zig");
+
+/// parse_packet's loop over `bytes` given in pieces of `chunk` bytes, then
+/// the flush; the frames returned. Every call consumes bytes or returns a
+/// frame, so the calls are bounded by the bytes.
+fn parseAll(gpa: std.mem.Allocator, bytes: []const u8, chunk: usize, codec: Codec) !u32 {
+    var p: Parser = .{};
+    defer p.deinit(gpa);
+    var ctx: Context = .{ .codec = codec };
+    var frames: u32 = 0;
+    var calls: usize = 0;
+    var rest = bytes;
+    while (rest.len > 0) {
+        var data = rest[0..@min(chunk, rest.len)];
+        rest = rest[data.len..];
+        while (data.len > 0) : (calls += 1) {
+            if (calls > 2 * bytes.len + 2) return error.TestUnboundedParse;
+            const r = try p.parse(gpa, &ctx, data);
+            if (r.consumed == 0 and r.frame == null) return error.TestUnboundedParse;
+            data = data[r.consumed..];
+            if (r.frame) |f| {
+                try testing.expect(f.len > 0);
+                frames += 1;
+            }
+        }
+    }
+    while (true) : (calls += 1) {
+        if (calls > 2 * bytes.len + 4) return error.TestUnboundedParse;
+        const r = try p.parse(gpa, &ctx, &.{});
+        if (r.frame == null) break;
+        frames += 1;
+    }
+    return frames;
+}
+
+test "the parser frees everything under every allocation failure, fed in pieces" {
+    inline for (.{ "mp3_junk_between", "mp3_layer_change", "mp3_free_format", "mp3_ape_tag", "mp3_id3v1" }) |name| {
+        for ([_]usize{ 1000, 4096 }) |chunk| {
+            try hostile.checkAll(parseAll, .{ fixtures.mp3.bytes(name), chunk, Codec.mp3 });
+        }
+    }
+}
+
+/// Arbitrary bytes through the parser, in pieces of 1 to 4096 bytes (the
+/// first value), the context's codec first the second value's.
+fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
+    _ = context;
+    _ = try fuzzRun(smith);
+}
+
+fn fuzzRun(smith: *std.testing.Smith) !u32 {
+    var input: [16710 + hostile.max_growth]u8 = undefined;
+    const len = smith.slice(&input);
+    const chunk = smith.valueRangeAtMost(u16, 1, 4096);
+    const codec: Codec = switch (smith.valueRangeAtMost(u8, 0, 2)) {
+        0 => .mp3,
+        1 => .mp2,
+        else => .mp1,
+    };
+    return parseAll(testing.allocator, input[0..len], chunk, codec);
+}
+
+const fuzz_corpus: []const []const u8 = &.{
+    hostile.fuzzSeed(fixtures.mp3.bytes("mp3_mpeg1_l3_stereo"), &.{ 1024, 0 }),
+    hostile.fuzzSeed(fixtures.mp3.bytes("mp3_junk_between"), &.{ 1, 0 }),
+    hostile.fuzzSeed(fixtures.mp3.bytes("mp3_layer_change"), &.{ 333, 2 }),
+    hostile.fuzzSeed(fixtures.mp3.bytes("mp3_rate_change"), &.{ 4096, 0 }),
+    hostile.fuzzSeed(fixtures.mp3.bytes("mp3_header_emulation"), &.{ 17, 0 }),
+    hostile.fuzzSeed(fixtures.mp3.bytes("mp3_ape_tag"), &.{ 4096, 0 }),
+    hostile.fuzzSeed(fixtures.mp3.bytes("mp2_layer2_48k"), &.{ 512, 1 }),
+    hostile.fuzzSeed(fixtures.mp3.bytes("mp3_mpeg25_l3_8k"), &.{ 100, 0 }),
+};
+
+test "fuzz: the MPEG audio parser on arbitrary bytes in arbitrary pieces" {
+    try std.testing.fuzz({}, fuzzOne, .{ .corpus = fuzz_corpus });
+}
+
+test "every seed of the MPEG audio parser's fuzz entry gives frames" {
+    for (fuzz_corpus) |seed| {
+        var smith: std.testing.Smith = .{ .in = seed };
+        try testing.expect(try fuzzRun(&smith) > 5);
+    }
+}
+
+test "mutation smoke: the MPEG audio parser on mutated seeds" {
+    try hostile.mutationSmoke({}, fuzzOne, fuzz_corpus, 256, 0x6d7061);
+}

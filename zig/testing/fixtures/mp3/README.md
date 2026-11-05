@@ -36,6 +36,7 @@ libavformat; port.md's "MP3 contract" says which behavior the port follows.
 | `mp3_xing_mpeg2_mono` | accepted | yes | A Xing tag in an MPEG-2 mono frame (side information of 9 bytes). |
 | `mp3_vbri` | accepted | yes | A Fraunhofer VBRI header: its frame and byte counts give the duration. |
 | `mp3_itunsmpb` | accepted | yes | Gapless data in an iTunSMPB comment (an ID3v2.3 COMM frame), as Apple's encoders write it instead of LAME's tag. |
+| `mp3_itunsmpb_bare_0x` | accepted | yes | An iTunSMPB comment whose priming field is a bare 0x: glibc's sscanf fails to match it, so FFmpeg ignores the tag and keeps no gapless counts. |
 | `mp3_id3v23_tags` | accepted | yes | ID3v2.3: text frames in every encoding (ISO-8859-1, UTF-16 with either BOM), TYER, TDAT and TIME merged into a date, a numeric genre, TXXX, COMM frames with and without a language and descriptor, USLT, PRIV, ReplayGain in TXXX and an unread WXXX, with padding. |
 | `mp3_id3v24_tags` | accepted | yes | ID3v2.4: an extended header, UTF-8 and UTF-16BE texts, TDRC, sort and compilation frames, a frame sized as v2.3 by mistake, a data length indicator, a compressed and an encrypted frame (both skipped), an unsynchronised frame, an empty frame, padding and a footer. |
 | `mp3_id3v22_tags` | accepted | yes | ID3v2.2: three-letter frames (TT2, TP1, TAL, TCO, TYE, TRK, COM, TXX) and an empty one. |

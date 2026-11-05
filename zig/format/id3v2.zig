@@ -773,5 +773,56 @@ test "every MP3 fixture's ID3v2 and ID3v1 tags are FFmpeg's (vectors/mp3.txt)" {
             checked += 1;
         }
     }
-    try testing.expectEqual(40, checked);
+    try testing.expectEqual(41, checked);
+}
+
+const hostile = @import("../testing/hostile.zig");
+
+fn formatTagsUnderFailures(gpa: std.mem.Allocator, bytes: []const u8) !void {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    try formatTags(gpa, bytes, &out);
+}
+
+test "the ID3 readers free everything under every allocation failure" {
+    inline for (.{
+        "mp3_id3v23_tags", "mp3_id3v24_tags", "mp3_id3v22_tags", "mp3_id3v23_unsync",
+        "mp3_two_id3v2",   "mp3_apic_chap",   "mp3_id3v1",       "mp3_itunsmpb",
+    }) |name| {
+        try hostile.checkAll(formatTagsUnderFailures, .{fixtures.mp3.bytes(name)});
+    }
+}
+
+/// Arbitrary bytes as ID3v2 tags from their start, then ID3v1 at their end
+/// when no ID3v2 tag gave a tag, as `formatTags` reads a file.
+fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
+    _ = context;
+    var input: [16384]u8 = undefined;
+    const len = smith.slice(&input);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    try formatTags(testing.allocator, input[0..len], &out);
+}
+
+/// A fixture's tags with its first frame's bytes after them.
+fn fuzzSeed(comptime name: []const u8, comptime len: usize) []const u8 {
+    return hostile.fuzzSeed(fixtures.mp3.bytes(name)[0..len], &.{});
+}
+
+const fuzz_corpus: []const []const u8 = &.{
+    fuzzSeed("mp3_id3v23_tags", 1024),
+    fuzzSeed("mp3_id3v24_tags", 900),
+    fuzzSeed("mp3_id3v22_tags", 400),
+    fuzzSeed("mp3_id3v23_unsync", 300),
+    fuzzSeed("mp3_two_id3v2", 300),
+    fuzzSeed("mp3_apic_chap", 600),
+    hostile.fuzzSeed(fixtures.mp3.bytes("mp3_id3v1"), &.{}),
+};
+
+test "fuzz: the ID3v2 and ID3v1 readers on arbitrary tags" {
+    try std.testing.fuzz({}, fuzzOne, .{ .corpus = fuzz_corpus });
+}
+
+test "mutation smoke: the ID3 readers on mutated tags" {
+    try hostile.mutationSmoke({}, fuzzOne, fuzz_corpus, 512, 0x6964);
 }

@@ -326,7 +326,15 @@ pub fn Layer(comptime Source: type) type {
                 }
                 if (all) break;
                 if (read_size >= probesize) break;
-                var h = try l.readFrameInternal() orelse break;
+                // "EOF or error": a demuxer's error ends the read-ahead as
+                // its end does (eof_reached), and the file opens; the next
+                // read goes on after the refused packet. Running out of
+                // memory, and an input that cannot be read, still fail.
+                const next_held = l.readFrameInternal() catch |err| switch (err) {
+                    error.OutOfMemory, error.IoFailure => |e| return e,
+                    else => break,
+                };
+                var h = next_held orelse break;
                 l.packet_buffer.pushBack(l.gpa, h) catch |err| {
                     h.deinit(l.gpa);
                     return err;
@@ -553,8 +561,11 @@ pub fn Layer(comptime Source: type) type {
                     continue;
                 }
                 if (setup.parse_mpegaudio) {
-                    defer h.deinit(l.gpa);
+                    // The parser copies its frames out of the raw packet,
+                    // which is freed here once parsed; on an error the
+                    // errdefer above frees it, and only it.
                     try l.parseMpa(h.stream, h.data, h.pos, setup);
+                    h.deinit(l.gpa);
                     continue;
                 }
                 try l.computePktFields(&h, setup);
@@ -1127,4 +1138,120 @@ test "packets held across the read-ahead and the parser's queue get their timest
         try std.testing.expectEqual(368640, p.duration);
     }
     try std.testing.expectEqual(24, count);
+}
+
+const test_support = struct {
+    const mp3 = @import("mp3.zig");
+    const ogg = @import("ogg.zig");
+    const fixtures = @import("../testing/fixtures.zig");
+    const hostile = @import("../testing/hostile.zig");
+    const TestPlan = hostile.TestPlan;
+    const drawTestPlan = hostile.drawTestPlan;
+    const seedValues = hostile.seedValues;
+    const runTestPlan = hostile.runTestPlan;
+
+    fn openMp3(gpa: std.mem.Allocator, bytes: []const u8, seekable: bool, plan: TestPlan) error{OutOfMemory}!u32 {
+        var reader: std.Io.Reader = .fixed(bytes);
+        const opened = if (seekable) mp3.Demuxer.initSeekable(gpa, &reader, .fixed(&reader), .{}) else mp3.Demuxer.init(gpa, &reader, .{});
+        const d = opened catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return 0,
+        };
+        defer d.deinit();
+        return runTestPlan(mp3.Demuxer, gpa, d, plan);
+    }
+
+    fn openOgg(gpa: std.mem.Allocator, bytes: []const u8, seekable: bool, plan: TestPlan) error{OutOfMemory}!u32 {
+        var reader: std.Io.Reader = .fixed(bytes);
+        const opened = if (seekable) ogg.Demuxer.initSeekable(gpa, &reader, .fixed(&reader)) else ogg.Demuxer.init(gpa, &reader);
+        const d = opened catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return 0,
+        };
+        defer d.deinit();
+        return runTestPlan(ogg.Demuxer, gpa, d, plan);
+    }
+
+    /// The bytes as MP3 or Ogg (the first value), from a file or a pipe
+    /// (the second), then `drawTestPlan`'s plan.
+    fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
+        _ = context;
+        _ = try fuzzRun(smith);
+    }
+
+    fn fuzzRun(smith: *std.testing.Smith) error{OutOfMemory}!u32 {
+        var input: [16710 + hostile.max_growth]u8 = undefined;
+        const len = smith.slice(&input);
+        const is_ogg = smith.value(bool);
+        const seekable = !smith.value(bool);
+        const plan = drawTestPlan(smith, seekable);
+        const bytes = input[0..len];
+        return if (is_ogg)
+            openOgg(std.testing.allocator, bytes, seekable, plan)
+        else
+            openMp3(std.testing.allocator, bytes, seekable, plan);
+    }
+
+    /// A seed: the bytes, the format (1 Ogg), 1 for a pipe, the seek.
+    fn seed(comptime bytes: []const u8, comptime is_ogg: bool, comptime pipe: bool, comptime s: ?TestPlan.Seek) []const u8 {
+        return hostile.fuzzSeed(bytes, &([2]u64{ @intFromBool(is_ogg), @intFromBool(pipe) } ++ seedValues(s)));
+    }
+
+    const corpus: []const []const u8 = &.{
+        seed(fixtures.mp3.bytes("mp3_six_frames"), false, false, .{ .ts = 3 * 368640 }),
+        seed(fixtures.mp3.bytes("mp3_junk_between"), false, false, .{ .ts = 10 * 368640, .flags = .{ .backward = true } }),
+        seed(fixtures.mp3.bytes("mp3_layer_change"), false, true, null),
+        seed(fixtures.mp3.bytes("mp3_xing_lame"), false, false, .{ .file = false, .stream = 0, .ts = 5000, .flags = .{ .byte = true } }),
+        seed(fixtures.mp3.bytes("mp3_itunsmpb"), false, false, .{ .file = false, .stream = 0, .ts = 0, .flags = .{ .any = true } }),
+        seed(fixtures.ogg.bytes("ogg_multiplexed"), true, false, .{ .ts = 2000, .stream = 1 }),
+        seed(fixtures.ogg.bytes("ogg_chained_opus"), true, false, .{ .ts = 4000 }),
+        seed(fixtures.ogg.bytes("ogg_opus_empty_first_packet"), true, true, null),
+        seed(fixtures.ogg.bytes("ogg_flac_comment_twice"), true, true, null),
+        seed(fixtures.ogg.bytes("ogg_vorbis_stereo"), true, false, .{ .file = false, .stream = 0, .ts = 1000, .flags = .{ .backward = true } }),
+    };
+};
+
+test "a failed MPEG audio parse frees the demuxer's packet once (allocation failures, review M2)" {
+    const support = test_support;
+    inline for (.{ "mp3_six_frames", "mp3_junk_between", "mp3_layer_change" }) |name| {
+        const bytes = support.fixtures.mp3.bytes(name);
+        try support.hostile.checkAll(support.openMp3, .{ bytes, false, support.TestPlan{} });
+        try support.hostile.checkAll(support.openMp3, .{ bytes, true, support.TestPlan{ .seek = .{ .ts = 4 * 368640, .exact = true } } });
+        try support.hostile.checkAll(support.openMp3, .{ bytes, true, support.TestPlan{ .seek = .{ .file = false, .stream = 0, .ts = 2000, .flags = .{ .byte = true } } } });
+    }
+}
+
+test "the read-ahead ends at a packet the demuxer refuses, and reading goes on after it (review M3)" {
+    const support = test_support;
+    const bytes = support.fixtures.ogg.bytes("ogg_opus_empty_first_packet");
+    var reader: std.Io.Reader = .fixed(bytes);
+    const d = try support.ogg.Demuxer.init(std.testing.allocator, &reader);
+    defer d.deinit();
+    var l = Layer(support.ogg.Demuxer).init(std.testing.allocator, d);
+    defer l.deinit();
+    try l.findStreamInfo();
+    // vectors/ogg.txt: twelve packets, the first at -312.
+    var count: usize = 0;
+    while (try l.next()) |p| : (count += 1) {
+        if (count == 0) try std.testing.expectEqual(-312, p.pts);
+    }
+    try std.testing.expectEqual(12, count);
+    try support.hostile.checkAll(support.openOgg, .{ bytes, false, support.TestPlan{} });
+    try support.hostile.checkAll(support.openOgg, .{ bytes, true, support.TestPlan{ .seek = .{ .ts = 5000, .exact = true } } });
+}
+
+test "fuzz: the generic layer over MP3 and Ogg input, from a file or a pipe, with a seek" {
+    try std.testing.fuzz({}, test_support.fuzzOne, .{ .corpus = test_support.corpus });
+}
+
+test "every seed of the generic layer's fuzz entry opens and returns packets" {
+    for (test_support.corpus, 0..) |seed, i| {
+        errdefer std.debug.print("generic layer fuzz seed {d}\n", .{i});
+        var smith: std.testing.Smith = .{ .in = seed };
+        try std.testing.expect(try test_support.fuzzRun(&smith) > 0);
+    }
+}
+
+test "mutation smoke: the generic layer over mutated MP3 and Ogg seeds" {
+    try test_support.hostile.mutationSmoke({}, test_support.fuzzOne, test_support.corpus, 256, 0x64656d7578);
 }

@@ -108,6 +108,26 @@
         .expected = .accept,
     },
     .{
+        .name = "ogg_opus_empty_first_packet",
+        .sha256 = "06ad6e5f09975e3af1f79f230f8ffdb16ff89e67702dccbfb21f9b2f73d41641",
+        .expected = .accept,
+    },
+    .{
+        .name = "ogg_flac_empty_header_packet",
+        .sha256 = "bca920ec00e3059fdbb906123dbf9beb3ddc1f5b5ff18757262b8ffff44be9e0",
+        .expected = .accept,
+    },
+    .{
+        .name = "ogg_opus_tags_twice",
+        .sha256 = "e79a82bf5e4d86fd91ea6fbea05ddc69cb0291b8d4ada0af6a78f8dca943b7d0",
+        .expected = .accept,
+    },
+    .{
+        .name = "ogg_flac_comment_twice",
+        .sha256 = "9f39ae9d7e4a38dbb121f98f164ae414d958f4b171cb83895d5329a7710cfc2b",
+        .expected = .accept,
+    },
+    .{
         .name = "ogg_opus_short_head",
         .sha256 = "30dcd4b1c2d63aa89ca0b1efa314f4ab34e05b653a85c413b5994c65725810e1",
         .expected = .reject,

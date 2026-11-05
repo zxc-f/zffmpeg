@@ -216,7 +216,7 @@ slowdowns of the default build.
 | `zig/cli/ffmpeg.zig`, `zig/cli/status.zig`, `zig/testing/zffmpeg_cases.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. FFmpeg's `fftools/ffmpeg_opt.c` (`assert_file_overwrite`) was read for the `-y`/`-n` and same-file behavior only; no code is copied. |
 | `zig/testing/reference/build-ffmpeg.sh`, `compare.py` | `LGPL-2.1-or-later` (SPDX header) | Original scripts; they build and run the separate, unmodified FFmpeg reference. |
 | `zig/codec/pcm.zig`, `zig/core/audio.zig`, `zig/core/time.zig` | `LGPL-2.1-or-later` (SPDX header) | Original. Behavior follows FFmpeg's `libavcodec/pcm.c`, `libavutil/mathematics.c`, `channel_layout.h` and `samplefmt.c` at the pinned revision; no code is copied. |
-| `zig/testing/fixtures.zig`, `zig/testing/fixtures/generate.py`, `zig/testing/write_driver.zig`, `zig/testing/registry_dump.zig` | `LGPL-2.1-or-later` (SPDX header) | Original project files. |
+| `zig/testing/fixtures.zig`, `zig/testing/fixtures/generate.py`, `zig/testing/write_driver.zig`, `zig/testing/registry_dump.zig`, `zig/testing/hostile.zig` | `LGPL-2.1-or-later` (SPDX header) | Original project files. |
 | `zig/testing/fixtures/wav/*.wav`, `manifest.zon` | Generated data | Written by `generate.py`; see the [fixture README](testing/fixtures/README.md#provenance). |
 | `zig/testing/fixtures/au/*.au`, `au/manifest.zon` | Generated data | Written by `generate.py`; see the [AU fixture README](testing/fixtures/au/README.md#provenance). |
 | `.zig-version` | Not applicable | A one-line version marker. |

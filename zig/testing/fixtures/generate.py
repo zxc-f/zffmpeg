@@ -3407,6 +3407,38 @@ def build_ogg_fixtures():
     ok("ogg_page_without_granule", "An Opus data page whose granule is -1 although packets end on it: "
        "FFmpeg's Opus mapping refuses the granule (above 2^62) and reading stops with an error.",
        b"".join(pages[:3]) + bytes(nogp) + b"".join(pages[4:]), group="damaged")
+    granules = [0, 0, 0] + [960 * (i + 1) for i in range(len(opus_ps))]
+    ok("ogg_opus_empty_first_packet", "The first Opus data packet is empty: the Opus mapping refuses it during "
+       "avformat_find_stream_info's read-ahead, which ends there as at the end of the input (eof_reached), so "
+       "FFmpeg opens the file and reads on after it.",
+       b"".join(ogg_stream_pages(0x7007, [opus_head(), OPUS_TAGS, b""] + opus_ps, granules)), group="damaged")
+    flac_data = flac_signal(1152, 2, seed=11)
+    flac_frames = [flac_frame(n, [c[n * 576:(n + 1) * 576] for c in flac_data], 44100) for n in range(2)]
+    first, comment = ogg_flac_headers(44100, 2, 1152, 576)
+    ok("ogg_flac_empty_header_packet", "An empty FLAC header packet before a second STREAMINFO packet on the "
+       "same page: FFmpeg's block type is bytestream2_get_byte's 0 for it, not the next packet's 0x7F, so the "
+       "packet is skipped as a header and the file opens.",
+       b"".join(ogg_stream_pages(0x7008, [first, b"", first, comment] + flac_frames, [0, 0, 0, 0, 576, 1152],
+                                 per_page=3)), group="damaged")
+
+    def opus_tags(title):
+        return vorbis_comment_packet(b"OpusTags", b"generate.py", [b"TITLE=" + title], framing=False)
+
+    ok("ogg_opus_tags_twice", "Two OpusTags packets in a row after a data packet: the second replaces the "
+       "first's tags and strings-metadata side data before the next data packet takes it.",
+       b"".join(ogg_stream_pages(0x7009, [opus_head(), OPUS_TAGS, opus_ps[0], opus_tags(b"first"),
+                                          opus_tags(b"second")] + opus_ps[1:6],
+                                 [0, 0, 960, 960, 960] + [960 * (i + 2) for i in range(5)])))
+
+    def flac_comment(title):
+        body = vorbis_comment_packet(b"", b"generate.py", [b"TITLE=" + title], framing=False)
+        return b"\x84" + len(body).to_bytes(3, "big") + body
+
+    ok("ogg_flac_comment_twice", "Two VORBIS_COMMENT packets in a row after a FLAC frame: the second replaces "
+       "the first's tags and strings-metadata side data before the next frame takes it.",
+       b"".join(ogg_stream_pages(0x700a, [first, comment, flac_frames[0], flac_comment(b"first"),
+                                          flac_comment(b"second"), flac_frames[1]],
+                                 [0, 0, 576, 576, 576, 1152], per_page=2)))
     bad("ogg_opus_short_head", "An OpusHead shorter than 19 bytes.",
         b"".join(ogg_opus_stream(0x9001, opus_ps, head=opus_head()[:15])), "INVALIDDATA")
     bad("ogg_no_pages", "OggS and nothing else: the input ends before a page.", b"OggS\x00\x02", "EOF")
@@ -3713,6 +3745,11 @@ def build_mp3_fixtures():
     ok("mp3_itunsmpb", "Gapless data in an iTunSMPB comment (an ID3v2.3 COMM frame), as Apple's encoders "
        "write it instead of LAME's tag.",
        id3v2_tag([id3_text_frame(b"TIT2", 0, "iTunes"), id3_lang_frame(b"COMM", 0, b"eng", "iTunSMPB", smpb)])
+       + j(mpa_frames(25, seed=19)))
+    ok("mp3_itunsmpb_bare_0x", "An iTunSMPB comment whose priming field is a bare 0x: glibc's sscanf fails "
+       "to match it, so FFmpeg ignores the tag and keeps no gapless counts.",
+       id3v2_tag([id3_text_frame(b"TIT2", 0, "iTunes"),
+                  id3_lang_frame(b"COMM", 0, b"eng", "iTunSMPB", smpb.replace(" 00000840 ", " 0x "))])
        + j(mpa_frames(25, seed=19)))
 
     v23 = [

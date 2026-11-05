@@ -973,11 +973,12 @@ pub const Demuxer = struct {
 
     fn flacHeader(d: *Demuxer, os: *Stream) Error!i32 {
         const p = os.packet();
-        // FFmpeg reads the byte at the packet's start even when it is
-        // empty: the next packet's, or the buffer's zero padding.
-        const first = os.byteAt(os.pstart);
-        if (first == 0xff) return 0;
-        const mdt = first & 0x7f;
+        // FFmpeg tests the byte at the packet's start for 0xff even when
+        // the packet is empty: the next packet's, or the buffer's zero
+        // padding. The block type comes from bytestream2_get_byte, which
+        // gives 0 for an empty packet.
+        if (os.byteAt(os.pstart) == 0xff) return 0;
+        const mdt = if (p.len > 0) p[0] & 0x7f else 0;
         if (mdt == 0x7f) {
             if (p.len < 1 + 4 + 4 + 4 + 4 + flac.streaminfo_size) return error.InvalidOgg;
             // "FLAC", the major version (1), the minor, the header count,
@@ -1035,8 +1036,11 @@ pub const Demuxer = struct {
             try packed_tags.appendSlice(d.gpa, entry.value);
             try packed_tags.append(d.gpa, 0);
         }
+        // toOwnedSlice can fail (it copies after a failed remap): the old
+        // side data is freed only once the new one exists.
+        const new_metadata = try packed_tags.toOwnedSlice(d.gpa);
         if (os.new_metadata) |b| d.gpa.free(b);
-        os.new_metadata = try packed_tags.toOwnedSlice(d.gpa);
+        os.new_metadata = new_metadata;
     }
 
     // Opus (oggparseopus.c).
@@ -1141,7 +1145,9 @@ pub const Demuxer = struct {
         if (os.info.channels != 0 and channels != os.info.channels) return error.UnsupportedFormat;
         os.info.channels = channels;
         const srate = std.mem.readInt(i32, p[12..16], .little);
-        os.info.bit_rate = std.mem.readInt(i32, p[20..24], .little);
+        // bytestream_get_le32 is unsigned: a nominal rate past 2^31 stays
+        // positive in the int64_t bit_rate.
+        os.info.bit_rate = std.mem.readInt(u32, p[20..24], .little);
         const bs0 = p[28] & 15;
         const bs1 = p[28] >> 4;
         if (bs0 > bs1 or bs0 < 6 or bs1 > 13) return error.InvalidOgg;
@@ -1659,7 +1665,13 @@ fn seekBlock(name: []const u8) ?[]const u8 {
 /// sample frames, as seek_vectors.c prints them (the reference build
 /// decodes Vorbis only from its headers on, which a seek does not resend).
 fn nextAfterSeek(gpa: std.mem.Allocator, layer: anytype, d: *Demuxer, out: *std.ArrayList(u8)) !void {
-    const p = try layer.next() orelse return out.appendSlice(gpa, "P EOF\n");
+    const next_packet = layer.next() catch |err| switch (err) {
+        // A packet the mapping refuses (ogg_opus_empty_first_packet's,
+        // read again from the start).
+        error.InvalidOgg => return out.appendSlice(gpa, "P INVALIDDATA\n"),
+        else => |e| return e,
+    };
+    const p = next_packet orelse return out.appendSlice(gpa, "P EOF\n");
     var a: [24]u8 = undefined;
     const pts = if (p.pts) |v| try std.fmt.bufPrint(&a, "{d}", .{v}) else "N";
     const line = try std.fmt.allocPrint(gpa, "P {s} {d} {d}\n", .{ pts, p.pos, p.data.len });
@@ -1796,7 +1808,7 @@ test "every Ogg fixture seeks as FFmpeg seeks it (vectors/seek_ogg.txt)" {
         }
     }
     // Every seek of the fixtures FFmpeg opens.
-    try testing.expectEqual(1620, compared);
+    try testing.expectEqual(1836, compared);
 }
 
 /// Appends an Ogg page of `body` laced as `lacing`, its CRC computed.
@@ -2153,7 +2165,7 @@ test "every Ogg fixture's Opus stream decodes as FFmpeg's decoder decodes it (ve
             };
         }
     }
-    try testing.expectEqual(244, frames);
+    try testing.expectEqual(262, frames);
 }
 
 /// opus_vectors.c's lines for one file: the input opened as the ffmpeg
@@ -2226,4 +2238,147 @@ fn appendOpusFrame(gpa: std.mem.Allocator, planes: []const []f32, kept: [2]u32, 
     md5.final(&digest);
     var line: [96]u8 = undefined;
     try out.appendSlice(gpa, try std.fmt.bufPrint(&line, "D {d} {x}\n", .{ kept[1] - kept[0], digest }));
+}
+
+test "the Vorbis nominal bit rate is read unsigned, as bytestream_get_le32 reads it" {
+    // ogg_vorbis_stereo with a nominal bit rate of 0xFFFFFFFF: its first
+    // page holds only the identification header, after 27 bytes of page
+    // header and one lacing value.
+    const bytes = try testing.allocator.dupe(u8, fixtures.ogg.bytes("ogg_vorbis_stereo"));
+    defer testing.allocator.free(bytes);
+    const id = bytes[28..][0..30];
+    try testing.expectEqualStrings("\x01vorbis", id[0..7]);
+    @memset(id[20..24], 0xff);
+    const page_len = 28 + 30;
+    @memset(bytes[22..26], 0);
+    var crc: Crc = .init();
+    crc.update(bytes[0..page_len]);
+    std.mem.writeInt(u32, bytes[22..26], crc.final(), .little);
+    var reader: std.Io.Reader = .fixed(bytes);
+    const d = try Demuxer.init(testing.allocator, &reader);
+    defer d.deinit();
+    try testing.expectEqual(0xffff_ffff, d.stream(0).bit_rate);
+}
+
+const hostile = @import("../testing/hostile.zig");
+
+/// Opens Ogg bytes from a file or a pipe and runs `plan` on them; the
+/// packets returned (0 when opening fails).
+fn exercise(gpa: std.mem.Allocator, bytes: []const u8, seekable: bool, plan: hostile.TestPlan) error{OutOfMemory}!u32 {
+    var reader: std.Io.Reader = .fixed(bytes);
+    const opened = if (seekable) Demuxer.initSeekable(gpa, &reader, .fixed(&reader)) else Demuxer.init(gpa, &reader);
+    const d = opened catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return 0,
+    };
+    defer d.deinit();
+    return hostile.runTestPlan(Demuxer, gpa, d, plan);
+}
+
+test "two comment packets in a row replace the side data once (allocation failures, review M8)" {
+    // The second OpusTags or VORBIS_COMMENT replaces the first's
+    // strings-metadata before a data packet takes it; with every resize
+    // failing, its toOwnedSlice allocates, and fails, after the first
+    // update's slice exists. Both the stream and the generic layer are
+    // freed after every failure.
+    inline for (.{ "ogg_opus_tags_twice", "ogg_flac_comment_twice" }) |name| {
+        const bytes = fixtures.ogg.bytes(name);
+        try hostile.checkAll(exercise, .{ bytes, false, hostile.TestPlan{} });
+        try hostile.checkAll(exercise, .{ bytes, true, hostile.TestPlan{} });
+        try hostile.checkAll(exercise, .{ bytes, true, hostile.TestPlan{ .seek = .{ .ts = 600, .exact = true } } });
+    }
+}
+
+test "the Ogg demuxer and the generic layer free everything under every allocation failure" {
+    inline for (.{
+        .{ "ogg_multiplexed", 2000 },
+        .{ "ogg_chained_opus", 4000 },
+        .{ "ogg_packet_spanning_pages", 600 },
+        .{ "ogg_opus_empty_first_packet", 5000 },
+        // Opening an encoded Vorbis stream runs the decoder's setup
+        // (ogg_vorbis_ffmpeg_22k_short), whose VLC tables free invalid
+        // memory after a failed allocation (vorbis.zig parseCodebooks,
+        // vlc.zig): left out until that is fixed. These synthetic setup
+        // headers are refused before any codebook.
+        .{ "ogg_vorbis_granule_zero", 500 },
+        .{ "ogg_page_without_granule", 3000 },
+    }) |case| {
+        const bytes = fixtures.ogg.bytes(case[0]);
+        try hostile.checkAll(exercise, .{ bytes, false, hostile.TestPlan{} });
+        try hostile.checkAll(exercise, .{ bytes, true, hostile.TestPlan{ .seek = .{ .ts = case[1], .exact = true } } });
+        try hostile.checkAll(exercise, .{ bytes, true, hostile.TestPlan{ .seek = .{ .file = false, .stream = 0, .ts = case[1], .flags = .{ .backward = true } } } });
+    }
+}
+
+/// As `exercise` from a pipe that gives one byte per read.
+fn exerciseFragmented(gpa: std.mem.Allocator, bytes: []const u8) error{OutOfMemory}!u32 {
+    var buffer: [64]u8 = undefined;
+    var source: std.testing.Reader = .init(&buffer, &.{.{ .buffer = bytes }});
+    source.artificial_limit = .limited(1);
+    const d = Demuxer.init(gpa, &source.interface) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return 0,
+    };
+    defer d.deinit();
+    return hostile.runTestPlan(Demuxer, gpa, d, .{});
+}
+
+test "the Ogg demuxer from a pipe of one-byte reads frees everything under every allocation failure" {
+    inline for (.{ "ogg_opus_tags_twice", "ogg_multiplexed", "ogg_packet_spanning_pages" }) |name| {
+        const bytes = fixtures.ogg.bytes(name);
+        const expected = try exercise(testing.allocator, bytes, false, .{});
+        try testing.expect(expected > 0);
+        try testing.expectEqual(expected, try exerciseFragmented(testing.allocator, bytes));
+        try hostile.checkAll(exerciseFragmented, .{bytes});
+    }
+}
+
+/// Arbitrary bytes as Ogg, from a file or a pipe (the first value), then
+/// `hostile.drawTestPlan`'s plan.
+fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
+    _ = context;
+    _ = try fuzzRun(smith);
+}
+
+fn fuzzRun(smith: *std.testing.Smith) error{OutOfMemory}!u32 {
+    var input: [8192 + hostile.max_growth]u8 = undefined;
+    const len = smith.slice(&input);
+    const seekable = !smith.value(bool);
+    return exercise(testing.allocator, input[0..len], seekable, hostile.drawTestPlan(smith, seekable));
+}
+
+fn fuzzSeed(comptime name: []const u8, comptime pipe: bool, comptime s: ?hostile.TestPlan.Seek) []const u8 {
+    return hostile.fuzzSeed(fixtures.ogg.bytes(name), &([1]u64{@intFromBool(pipe)} ++ hostile.seedValues(s)));
+}
+
+const fuzz_corpus: []const []const u8 = &.{
+    fuzzSeed("ogg_opus_tags_twice", false, .{ .ts = 600 }),
+    fuzzSeed("ogg_flac_comment_twice", true, null),
+    fuzzSeed("ogg_flac_empty_header_packet", false, .{ .file = false, .stream = 0, .ts = 576 }),
+    fuzzSeed("ogg_opus_empty_first_packet", false, null),
+    fuzzSeed("ogg_multiplexed", false, .{ .stream = 1, .ts = 3000, .flags = .{ .backward = true } }),
+    fuzzSeed("ogg_chained_opus", true, null),
+    fuzzSeed("ogg_vorbis_ffmpeg_22k_short", false, .{ .ts = 500 }),
+    fuzzSeed("ogg_vorbis_granule_zero", false, .{ .file = false, .stream = 0, .ts = 1000, .flags = .{ .any = true } }),
+    fuzzSeed("ogg_opus_multistream", false, .{ .ts = 2000 }),
+    fuzzSeed("ogg_packet_spanning_pages", true, null),
+    fuzzSeed("ogg_flac_packed_pages", false, .{ .file = false, .stream = 0, .ts = 200, .flags = .{ .byte = true } }),
+    fuzzSeed("ogg_lost_continued_page", true, null),
+    fuzzSeed("ogg_unknown_codec", false, .{ .ts = 1000 }),
+};
+
+test "fuzz: the Ogg demuxer on arbitrary input, from a file or a pipe, with a seek" {
+    try std.testing.fuzz({}, fuzzOne, .{ .corpus = fuzz_corpus });
+}
+
+test "every seed of the Ogg fuzz entry opens and returns packets" {
+    for (fuzz_corpus, 0..) |seed, i| {
+        errdefer std.debug.print("Ogg fuzz seed {d}\n", .{i});
+        var smith: std.testing.Smith = .{ .in = seed };
+        try testing.expect(try fuzzRun(&smith) > 0);
+    }
+}
+
+test "mutation smoke: the Ogg demuxer on mutated seeds" {
+    try hostile.mutationSmoke({}, fuzzOne, fuzz_corpus, 256, 0x6f6767);
 }

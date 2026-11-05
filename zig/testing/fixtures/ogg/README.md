@@ -35,6 +35,10 @@ port.md's "Ogg contract" says which behavior the port follows.
 | `ogg_truncated` | damaged | yes | The file ends inside a data page. |
 | `ogg_unknown_codec` | damaged | yes | A stream of an unknown codec beside an Opus one: FFmpeg keeps it without a codec and returns none of its packets. |
 | `ogg_page_without_granule` | damaged | yes | An Opus data page whose granule is -1 although packets end on it: FFmpeg's Opus mapping refuses the granule (above 2^62) and reading stops with an error. |
+| `ogg_opus_empty_first_packet` | damaged | yes | The first Opus data packet is empty: the Opus mapping refuses it during avformat_find_stream_info's read-ahead, which ends there as at the end of the input (eof_reached), so FFmpeg opens the file and reads on after it. |
+| `ogg_flac_empty_header_packet` | damaged | yes | An empty FLAC header packet before a second STREAMINFO packet on the same page: FFmpeg's block type is bytestream2_get_byte's 0 for it, not the next packet's 0x7F, so the packet is skipped as a header and the file opens. |
+| `ogg_opus_tags_twice` | accepted | yes | Two OpusTags packets in a row after a data packet: the second replaces the first's tags and strings-metadata side data before the next data packet takes it. |
+| `ogg_flac_comment_twice` | accepted | yes | Two VORBIS_COMMENT packets in a row after a FLAC frame: the second replaces the first's tags and strings-metadata side data before the next frame takes it. |
 | `ogg_opus_short_head` | rejected | `INVALIDDATA` | An OpusHead shorter than 19 bytes. |
 | `ogg_no_pages` | rejected | `EOF` | OggS and nothing else: the input ends before a page. |
 | `ogg_vorbis_ffmpeg_44k` | vorbis | yes | FFmpeg's Vorbis encoder, 30000 samples at 44100 Hz, `-c:a vorbis`; decoded by the T27d oracle. |

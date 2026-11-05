@@ -42,6 +42,10 @@ P 44 0
 D 960 0e11d7194f061b40110b291f3a398429
 P 40 0
 D 960 1ff8ce18785782d50556e82118fc3960
+F ogg_flac_comment_twice
+O -1128613112
+F ogg_flac_empty_header_packet
+O -1128613112
 F ogg_flac_packed_pages
 O -1128613112
 F ogg_flac_stereo
@@ -102,6 +106,32 @@ P 41 0
 D 960 4d854b65e74ded2b56add9e5db634f3c
 F ogg_no_pages
 O EOF
+F ogg_opus_empty_first_packet
+O ok
+P 40 0
+D 648 49db03d6db9098c2d9a18ff3322f5442
+P 41 0
+D 960 2ffbcd6c473c7d26d4ca0670fc0f0d4a
+P 42 0
+D 960 047e49594f3baf4d517e9721f85528d2
+P 43 0
+D 960 87d7b3fc2c0e462b27d725daaa7d7396
+P 44 0
+D 960 9161aa4b8cbaded9b1f5a726ce5cb4be
+P 40 0
+D 960 ffa7f8ee4ce59bf631453278f68e150b
+P 41 0
+D 960 939f22dbc397981da71dfd591d22bfe3
+P 42 0
+D 960 22e35539cb076398e578decf99e8267b
+P 43 0
+D 960 4003d39df1029fca250a3a620bcb9227
+P 44 0
+D 960 aa189c7859258d09567ea732d145d9f1
+P 40 0
+D 960 7fbab23cec66c49368c832a8222fcece
+P 41 0
+D 960 4d854b65e74ded2b56add9e5db634f3c
 F ogg_opus_end_trim
 O ok
 P 40 0
@@ -466,6 +496,20 @@ P 40 0
 D 960 7fbab23cec66c49368c832a8222fcece
 P 41 0
 D 960 4d854b65e74ded2b56add9e5db634f3c
+F ogg_opus_tags_twice
+O ok
+P 40 0
+D 648 49db03d6db9098c2d9a18ff3322f5442
+P 41 0
+D 960 2ffbcd6c473c7d26d4ca0670fc0f0d4a
+P 42 0
+D 960 047e49594f3baf4d517e9721f85528d2
+P 43 0
+D 960 87d7b3fc2c0e462b27d725daaa7d7396
+P 44 0
+D 960 9161aa4b8cbaded9b1f5a726ce5cb4be
+P 40 0
+D 960 ffa7f8ee4ce59bf631453278f68e150b
 F ogg_packet_spanning_pages
 O -1128613112
 F ogg_page_without_granule

@@ -215,6 +215,7 @@ test {
     // Test-only files: the WAV and AU fixture contracts and their integrity
     // checks, and the controlled buffering stage for the stage contract.
     _ = @import("testing/fixtures.zig");
+    _ = @import("testing/hostile.zig");
     _ = @import("testing/delay_stage.zig");
     _ = @import("testing/synthetic.zig");
 }

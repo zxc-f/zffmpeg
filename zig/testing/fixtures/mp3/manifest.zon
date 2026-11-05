@@ -103,6 +103,11 @@
         .expected = .accept,
     },
     .{
+        .name = "mp3_itunsmpb_bare_0x",
+        .sha256 = "b98ba668c8ce39e3768e2e404ca8540c95fbed310ba41168a91856b3245992ff",
+        .expected = .accept,
+    },
+    .{
         .name = "mp3_id3v23_tags",
         .sha256 = "e4d9a3534969afddb5f9b8d84b854bfa8675bbc7b3360ac618cac86dfb34dbea",
         .expected = .accept,

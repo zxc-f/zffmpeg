@@ -480,6 +480,14 @@ const probe_cases = [_]ProbeCase{
     .{ .name = "Ogg beside an unknown stream", .set = .ogg, .fixture = "ogg_unknown_codec", .exit_code = 0, .stdout_contains = "codec=opus\n", .stderr = "" },
     .{ .name = "Ogg without a page", .set = .ogg, .fixture = "ogg_no_pages", .exit_code = 2, .stderr_contains = ": Truncated\n" },
     .{ .name = "Ogg Vorbis without a mode table", .set = .ogg, .fixture = "ogg_vorbis_bad_setup", .exit_code = 2, .stderr_contains = ": InvalidOgg\n" },
+    // A packet the mapping refuses during avformat_find_stream_info ends
+    // the read-ahead, and the input opens as ffprobe opens it.
+    .{ .name = "Ogg Opus whose first data packet is empty", .set = .ogg, .fixture = "ogg_opus_empty_first_packet", .exit_code = 0, .stdout = "format=ogg\ncodec=opus\nsample_fmt=fltp\nchannels=2\nchannel_layout=stereo\nsample_rate=48000\nnb_samples=11520\nduration_num=11520\nduration_den=48000\n", .stderr = "" },
+    .{ .name = "Ogg Opus from a pipe whose first data packet is empty", .set = .ogg, .args = &.{"-"}, .stdin_fixture = "ogg_opus_empty_first_packet", .exit_code = 0, .stdout = "format=ogg\ncodec=opus\nsample_fmt=fltp\nchannels=2\nchannel_layout=stereo\nsample_rate=48000\nnb_samples=N/A\nduration_num=N/A\nduration_den=N/A\n", .stderr = "" },
+    .{ .name = "Ogg FLAC with an empty header packet", .set = .ogg, .fixture = "ogg_flac_empty_header_packet", .exit_code = 0, .stdout_contains = "codec=flac\nsample_fmt=s16\nchannels=2\nchannel_layout=stereo\nsample_rate=44100\nnb_samples=1152\n", .stderr = "" },
+    // A bare 0x fails glibc's sscanf: no gapless counts, so the duration
+    // is every frame's (ffprobe's 0.652125 s).
+    .{ .name = "MP3 iTunSMPB with a bare 0x", .set = .mp3, .fixture = "mp3_itunsmpb_bare_0x", .exit_code = 0, .stdout_contains = "nb_samples=28759\nduration_num=9202788\nduration_den=14112000\n", .stderr = "" },
 };
 
 const flac_mid_side_report =
@@ -770,6 +778,12 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "a short MP3 file opens from its start", .set = .mp3, .args = &.{"-i"}, .input = "mp3_six_frames", .tail = &.{ "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = "mp3_six_frames.mp3: UnsupportedOperation\n" },
     .{ .name = "an MP3 file after a large ID3v2 tag opens from its start", .set = .mp3, .args = &.{"-i"}, .input = "mp3_large_id3v2", .tail = &.{ "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = "mp3_large_id3v2.mp3: UnsupportedOperation\n" },
     .{ .name = "Ogg FLAC whose frames all fail to decode", .set = .ogg, .args = &.{"-i"}, .input = "ogg_lost_continued_page", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stdout = "", .stderr_contains = ": DecodeErrorRate\n" },
+    // A packet the mapping refuses during the stream-info read-ahead ends
+    // it, and the input decodes from the next packet on, as the ffmpeg
+    // program decodes it (the same bytes, from a file and from a pipe).
+    .{ .name = "Ogg Opus whose first data packet is empty to WAV", .set = .ogg, .args = &.{"-i"}, .input = "ogg_opus_empty_first_packet", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt ", .stderr = "" },
+    .{ .name = "Ogg Opus from a pipe whose first data packet is empty to raw PCM", .set = .ogg, .args = &.{ "-i", "-" }, .stdin_input = "ogg_opus_empty_first_packet", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stderr = "" },
+    .{ .name = "Ogg FLAC with an empty header packet to WAV", .set = .ogg, .args = &.{"-i"}, .input = "ogg_flac_empty_header_packet", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt ", .stderr = "" },
     // T27b: FLAC encoded into Ogg; compare.py checks the bytes against FFmpeg's.
     .{ .name = "FLAC into Ogg on standard output", .set = .flac, .args = &.{"-i"}, .input = "flac_ffmpeg_level5_stereo", .tail = &.{ "-f", "ogg", "-" }, .exit_code = 0, .stdout_contains = "OggS\x00\x02", .stderr = "" },
     .{ .name = "FLAC into Ogg Audio carries the encoder tag", .set = .flac, .args = &.{"-i"}, .input = "flac_ffmpeg_level5_stereo", .tail = &.{ "-f", "oga", "-" }, .exit_code = 0, .stdout_contains = "\x11\x00\x00\x00encoder=Lavc flac", .stderr = "" },

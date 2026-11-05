@@ -638,9 +638,10 @@ fn parseSmpb(value: []const u8) ?SmpbCounts {
         }
         var digits: usize = 0;
         if (at + 1 < width_end and value[at] == '0' and (value[at + 1] == 'x' or value[at + 1] == 'X')) {
-            // "0x": the zero counts as a digit even without more.
+            // "0x" with no hexadecimal digit after it is glibc's matching
+            // failure (the longest prefix of a match is the input item),
+            // so the tag is refused: the zero is not a digit by itself.
             at += 2;
-            digits = 1;
         }
         var v: u64 = 0;
         while (at < width_end and std.ascii.isHex(value[at])) : (at += 1) {
@@ -921,7 +922,7 @@ test "every MP3 fixture seeks as FFmpeg seeks it (vectors/seek_mp3.txt)" {
         }
     }
     // Every seek of the fixtures FFmpeg opens, but the picture's.
-    try testing.expectEqual(2106, compared);
+    try testing.expectEqual(2160, compared);
 }
 
 test "iTunSMPB counts up to SMPB_MAX_SAMPLES (2^40) are kept, larger ones refuse the tag" {
@@ -940,4 +941,137 @@ test "iTunSMPB counts up to SMPB_MAX_SAMPLES (2^40) are kept, larger ones refuse
     try testing.expectEqual(null, parseSmpb(" 00000000 00000000 00000000 0000010000000001"));
     // 2^51, which the port accepted before.
     try testing.expectEqual(null, parseSmpb(" 00000000 00000210 0000097C 0008000000000000"));
+}
+
+test "iTunSMPB fields with 0x take glibc's sscanf %x: a bare 0x is a matching failure" {
+    // Each as glibc 2.44's sscanf reads it with ff_itunes_parse_smpb's
+    // format (checked with a C program on the reference machine).
+    try testing.expectEqual(null, parseSmpb("0x 1 2 3"));
+    try testing.expectEqual(null, parseSmpb("0xg 1 2 3"));
+    try testing.expectEqual(null, parseSmpb("-0x 1 2 3"));
+    try testing.expectEqual(null, parseSmpb("+0x 1 2 3"));
+    try testing.expectEqual(null, parseSmpb("0X 1 2 3"));
+    try testing.expectEqual(null, parseSmpb("1 2 3 0x"));
+    try testing.expectEqual(null, parseSmpb("1 2 3 0xz"));
+    try testing.expectEqual(null, parseSmpb("1 0x 2 3"));
+    try testing.expectEqual(null, parseSmpb("00x1 2 3 4"));
+    const prefixed = parseSmpb("0x1 0X2 0x3 0x4").?;
+    try testing.expectEqual(2, prefixed.priming);
+    try testing.expectEqual(3, prefixed.remainder);
+    try testing.expectEqual(4, prefixed.samples);
+    const zero = parseSmpb("0 1 2 3").?;
+    try testing.expectEqual(1, zero.priming);
+}
+
+const hostile = @import("../testing/hostile.zig");
+
+/// Opens MPEG audio bytes from a file or a pipe with `limits` and runs
+/// `plan` on them; the packets returned (0 when opening fails).
+fn exercise(gpa: std.mem.Allocator, bytes: []const u8, seekable: bool, limits: Limits, plan: hostile.TestPlan) error{OutOfMemory}!u32 {
+    var reader: std.Io.Reader = .fixed(bytes);
+    const opened = if (seekable) Demuxer.initSeekable(gpa, &reader, .fixed(&reader), limits) else Demuxer.init(gpa, &reader, limits);
+    const d = opened catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return 0,
+    };
+    defer d.deinit();
+    return hostile.runTestPlan(Demuxer, gpa, d, plan);
+}
+
+/// As `exercise` from a pipe that gives one byte per read.
+fn exerciseFragmented(gpa: std.mem.Allocator, bytes: []const u8) error{OutOfMemory}!u32 {
+    var buffer: [64]u8 = undefined;
+    var source: std.testing.Reader = .init(&buffer, &.{.{ .buffer = bytes }});
+    source.artificial_limit = .limited(1);
+    const d = Demuxer.init(gpa, &source.interface, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return 0,
+    };
+    defer d.deinit();
+    return hostile.runTestPlan(Demuxer, gpa, d, .{});
+}
+
+test "the MP3 demuxer from a pipe of one-byte reads frees everything under every allocation failure" {
+    inline for (.{ "mp3_id3v23_tags", "mp3_junk_between", "mp3_xing_lame" }) |name| {
+        const bytes = fixtures.mp3.bytes(name);
+        const expected = try exercise(testing.allocator, bytes, false, .{}, .{});
+        try testing.expect(expected > 0);
+        try testing.expectEqual(expected, try exerciseFragmented(testing.allocator, bytes));
+        try hostile.checkAll(exerciseFragmented, .{bytes});
+    }
+}
+
+test "the MP3 demuxer, its tags and the generic layer free everything under every allocation failure" {
+    // Open (ID3v2, ID3v1 and APE tags, Xing, Info, VBRI and iTunSMPB
+    // headers), the read-ahead through the mpegaudio parser, a seek by
+    // timestamp and by byte, from a file and from a pipe.
+    inline for (.{
+        "mp3_id3v23_tags",  "mp3_id3v24_tags",      "mp3_id3v22_tags", "mp3_id3v23_unsync",
+        "mp3_two_id3v2",    "mp3_apic_chap",        "mp3_id3v1",       "mp3_ape_tag",
+        "mp3_itunsmpb",     "mp3_xing_lame",        "mp3_vbri",        "mp3_info_lame",
+        "mp3_free_format",  "mp3_header_emulation", "mp3_rate_change", "mp3_truncated",
+        "mp3_zeros_before", "mp3_large_id3v2",
+    }) |name| {
+        const bytes = fixtures.mp3.bytes(name);
+        try hostile.checkAll(exercise, .{ bytes, false, Limits{}, hostile.TestPlan{} });
+        try hostile.checkAll(exercise, .{ bytes, true, Limits{}, hostile.TestPlan{ .seek = .{ .ts = 6 * 368640, .exact = true } } });
+        try hostile.checkAll(exercise, .{ bytes, true, Limits{}, hostile.TestPlan{ .seek = .{ .file = false, .stream = 0, .ts = 3000, .flags = .{ .byte = true } } } });
+    }
+}
+
+/// Arbitrary bytes as MPEG audio, from a file or a pipe (the first value),
+/// with an ID3v2 limit (the second: FFmpeg's none, 0 or 1 KiB), then
+/// `hostile.drawTestPlan`'s plan.
+fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
+    _ = context;
+    _ = try fuzzRun(smith);
+}
+
+fn fuzzRun(smith: *std.testing.Smith) error{OutOfMemory}!u32 {
+    var input: [16710 + hostile.max_growth]u8 = undefined;
+    const len = smith.slice(&input);
+    const seekable = !smith.value(bool);
+    const limits: Limits = switch (smith.valueRangeAtMost(u8, 0, 2)) {
+        0 => .{},
+        1 => .{ .max_id3v2_bytes = 0 },
+        else => .{ .max_id3v2_bytes = 1024 },
+    };
+    return exercise(testing.allocator, input[0..len], seekable, limits, hostile.drawTestPlan(smith, seekable));
+}
+
+fn fuzzSeed(comptime name: []const u8, comptime pipe: bool, comptime limit: u64, comptime s: ?hostile.TestPlan.Seek) []const u8 {
+    return hostile.fuzzSeed(fixtures.mp3.bytes(name), &([2]u64{ @intFromBool(pipe), limit } ++ hostile.seedValues(s)));
+}
+
+const fuzz_corpus: []const []const u8 = &.{
+    fuzzSeed("mp3_id3v23_tags", false, 0, .{ .ts = 4 * 368640 }),
+    fuzzSeed("mp3_id3v24_tags", true, 0, null),
+    fuzzSeed("mp3_two_id3v2", false, 2, .{ .file = false, .stream = 0, .ts = 2 * 368640, .flags = .{ .backward = true } }),
+    fuzzSeed("mp3_apic_chap", false, 0, .{ .ts = 368640 }),
+    fuzzSeed("mp3_itunsmpb", false, 0, .{ .ts = 10 * 368640 }),
+    fuzzSeed("mp3_xing_lame", false, 0, .{ .file = false, .stream = 0, .ts = 4000, .flags = .{ .byte = true } }),
+    fuzzSeed("mp3_vbri", true, 0, null),
+    fuzzSeed("mp3_info_lame", false, 0, .{ .ts = 5 * 368640, .flags = .{ .any = true } }),
+    fuzzSeed("mp3_header_emulation", false, 0, .{ .ts = 3 * 368640 }),
+    fuzzSeed("mp3_layer_change", true, 0, null),
+    fuzzSeed("mp3_junk_between", false, 0, .{ .file = false, .stream = -1, .ts = 100000 }),
+    fuzzSeed("mp3_ape_tag", false, 0, null),
+    fuzzSeed("mp2_layer2_mpeg2_24k", false, 0, .{ .ts = 2 * 368640 }),
+    fuzzSeed("mp1_layer1_44k", true, 0, null),
+};
+
+test "fuzz: the MP3 demuxer on arbitrary input, from a file or a pipe, with ID3v2 limits and a seek" {
+    try std.testing.fuzz({}, fuzzOne, .{ .corpus = fuzz_corpus });
+}
+
+test "every seed of the MP3 fuzz entry opens and returns packets" {
+    for (fuzz_corpus, 0..) |seed, i| {
+        errdefer std.debug.print("MP3 fuzz seed {d}\n", .{i});
+        var smith: std.testing.Smith = .{ .in = seed };
+        try testing.expect(try fuzzRun(&smith) > 0);
+    }
+}
+
+test "mutation smoke: the MP3 demuxer on mutated seeds" {
+    try hostile.mutationSmoke({}, fuzzOne, fuzz_corpus, 128, 0x6d7033);
 }
