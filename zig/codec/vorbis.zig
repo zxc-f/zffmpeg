@@ -227,15 +227,16 @@ pub const Decoder = struct {
     saved: []f32 = &.{},
     previous_window: i8 = -1,
     mode_number: u8 = 0,
+    /// A frame was decoded since the start or the last `flush`
+    /// (`vc->first_frame`); freeing the headers keeps it, as `vorbis_free`.
     first_frame: bool = false,
-    /// The samples libavcodec's decode.c discards from the next frames
-    /// (`avctx->internal->skip_samples`): the first frame's length.
-    skip_samples: u32 = 0,
+    /// `avctx->internal->skip_samples` as the decoder sets it: the length
+    /// of the first frame after the start or a `flush`, which libavcodec's
+    /// decode.c discards from that frame on. Set until the caller takes it
+    /// (`takeSkip`) after the frame, so each first frame is seen once.
+    skip_samples: ?u32 = null,
     /// Whether the setup header was parsed (FFmpeg's `vc->modes`).
     have_setup: bool = false,
-    /// The caller took `skip_samples` (libavcodec reads it once, after the
-    /// first frame).
-    first_frame_consumed: bool = false,
 
     /// vorbis_decode_init: the identification and setup headers from the
     /// stream's extradata, Xiph-laced as Ogg carries them.
@@ -288,8 +289,8 @@ pub const Decoder = struct {
             gpa.free(m.mux);
         }
         gpa.free(d.mappings);
-        const keep = d.gpa;
-        d.* = .{ .gpa = keep };
+        // The frame state is the codec context's, not the headers'.
+        d.* = .{ .gpa = gpa, .first_frame = d.first_frame, .skip_samples = d.skip_samples };
     }
 
     fn signature(r: *bits.LsbReader) bool {
@@ -671,16 +672,10 @@ pub const Decoder = struct {
         if (packet.len == 0) return null;
         if (packet[0] == 1 and packet.len > 7) {
             // An identification header in the stream starts over.
-            const first_frame = d.first_frame;
-            const skip = d.skip_samples;
-            d.free();
-            d.first_frame = first_frame;
-            d.skip_samples = skip;
             var r = bits.LsbReader.init(packet[1..]) catch return error.InvalidData;
+            d.free();
             d.parseIdHeader(&r) catch |err| {
                 d.free();
-                d.first_frame = first_frame;
-                d.skip_samples = skip;
                 return err;
             };
             return null;
@@ -689,11 +684,7 @@ pub const Decoder = struct {
         if (packet[0] == 5 and packet.len > 7 and d.channel_residues.len != 0 and !d.have_setup) {
             var r = bits.LsbReader.init(packet[1..]) catch return error.InvalidData;
             d.parseSetupHeader(&r) catch |err| {
-                const first_frame = d.first_frame;
-                const skip = d.skip_samples;
                 d.free();
-                d.first_frame = first_frame;
-                d.skip_samples = skip;
                 return err;
             };
             return null;
@@ -727,7 +718,14 @@ pub const Decoder = struct {
         return true;
     }
 
-    /// vorbis_decode_flush: the overlap and the first-frame state cleared.
+    /// The skip the last decoded frame set (`skip_samples`), once.
+    pub fn takeSkip(d: *Decoder) ?u32 {
+        defer d.skip_samples = null;
+        return d.skip_samples;
+    }
+
+    /// vorbis_decode_flush: the overlap and the first-frame state cleared,
+    /// so the next frame sets `skip_samples` again.
     pub fn flush(d: *Decoder) void {
         @memset(d.saved, 0);
         d.previous_window = -1;
@@ -1303,6 +1301,7 @@ fn readyFloor1List(list: []Floor1Entry) bool {
 }
 
 const testing = std.testing;
+const sweep = @import("../testing/sweep.zig");
 
 test "len2vlc assigns Vorbis' codewords and refuses incomplete and overfull trees" {
     var codes: [4]u32 = undefined;
@@ -1350,34 +1349,13 @@ test "vorbisFloat is FFmpeg's ldexpf: a zero mantissa is a signed zero, subnorma
     }
 }
 
-/// The first `out.len` packets of an Ogg file's single logical stream, each
-/// its pages' segments joined into `gpa` memory (no CRC or sequence check).
-fn testOggPackets(gpa: std.mem.Allocator, file: []const u8, out: []std.ArrayList(u8)) !void {
-    var count: usize = 0;
-    var pos: usize = 0;
-    while (count < out.len) {
-        if (file.len - pos < 27 or !std.mem.eql(u8, file[pos..][0..4], "OggS")) return error.TestUnexpectedResult;
-        const segments = file[pos + 26];
-        var body = pos + 27 + segments;
-        for (file[pos + 27 ..][0..segments]) |len| {
-            try out[count].appendSlice(gpa, file[body..][0..len]);
-            body += len;
-            if (len < 255) {
-                count += 1;
-                if (count == out.len) return;
-            }
-        }
-        pos = body;
-    }
-}
-
 test "planes that an in-stream identification header outgrows are refused before any write" {
     const gpa = testing.allocator;
     // FFmpeg's encoder's stereo stream: blocksizes 2048 and 2048, so planes
     // of 1024 samples; headers, then two audio packets.
     var packets: [4]std.ArrayList(u8) = @splat(.empty);
     defer for (&packets) |*p| p.deinit(gpa);
-    try testOggPackets(gpa, @embedFile("../testing/fixtures/ogg/ogg_vorbis_ffmpeg_22k_short.ogg"), &packets);
+    try sweep.oggPackets(gpa, @embedFile("../testing/fixtures/ogg/ogg_vorbis_ffmpeg_22k_short.ogg"), &packets);
     const id = packets[0].items;
     const setup = packets[2].items;
     const audio = packets[3].items;
@@ -1425,4 +1403,191 @@ test "planes that an in-stream identification header outgrows are refused before
     // A channel count change is the plane count check above: this setup's
     // coupling fields are sized by the channel count, so it parses only
     // with two.
+}
+
+/// An Ogg Vorbis fixture's extradata (its three headers, Xiph-laced) and
+/// its packets, the headers included; free with `deinit`.
+const TestStream = struct {
+    packets: [10]std.ArrayList(u8) = @splat(.empty),
+    count: usize,
+    extradata: []u8,
+
+    fn init(gpa: std.mem.Allocator, file: []const u8, count: usize) !TestStream {
+        var t: TestStream = .{ .count = count, .extradata = &.{} };
+        errdefer for (&t.packets) |*p| p.deinit(gpa);
+        try sweep.oggPackets(gpa, file, t.packets[0..count]);
+        t.extradata = try sweep.xiphExtradata(gpa, .{ t.packets[0].items, t.packets[1].items, t.packets[2].items });
+        return t;
+    }
+
+    fn deinit(t: *TestStream, gpa: std.mem.Allocator) void {
+        for (&t.packets) |*p| p.deinit(gpa);
+        gpa.free(t.extradata);
+    }
+
+    fn audio(t: *const TestStream) []const std.ArrayList(u8) {
+        return t.packets[3..t.count];
+    }
+};
+
+const fixture_22k = @embedFile("../testing/fixtures/ogg/ogg_vorbis_ffmpeg_22k_short.ogg");
+const fixture_8k = @embedFile("../testing/fixtures/ogg/ogg_vorbis_ffmpeg_8k.ogg");
+
+test "each first frame sets the skip once: after a flush again, after in-stream headers not (review Low 18)" {
+    const gpa = testing.allocator;
+    var t = try TestStream.init(gpa, fixture_8k, 10);
+    defer t.deinit(gpa);
+    var d = try Decoder.init(gpa, t.extradata);
+    defer d.deinit();
+    const capacity = d.blocksize[1] / 2;
+    const storage = try gpa.alloc(f32, 2 * capacity);
+    defer gpa.free(storage);
+    const planes = [2][]f32{ storage[0..capacity], storage[capacity..] };
+    const audio = t.audio();
+
+    // vorbis_decode_frame sets avctx->internal->skip_samples to the first
+    // frame's length, once.
+    const first = (try d.decodePacket(audio[0].items, &planes)).?;
+    try testing.expectEqual(first, d.takeSkip());
+    try testing.expectEqual(null, d.takeSkip());
+    _ = try d.decodePacket(audio[1].items, &planes);
+    try testing.expectEqual(null, d.takeSkip());
+
+    // vorbis_decode_flush clears first_frame: the next frame sets it again.
+    d.flush();
+    const after_flush = (try d.decodePacket(audio[2].items, &planes)).?;
+    try testing.expectEqual(after_flush, d.takeSkip());
+
+    // vorbis_free, on an identification header in the stream, keeps
+    // first_frame: the frames after the new headers set no skip.
+    try testing.expectEqual(null, try d.decodePacket(t.packets[0].items, &planes));
+    try testing.expectEqual(null, try d.decodePacket(t.packets[2].items, &planes));
+    try testing.expectEqual(null, d.takeSkip());
+    _ = try d.decodePacket(audio[3].items, &planes);
+    try testing.expectEqual(null, d.takeSkip());
+    // A failed identification header frees the headers, the frame state
+    // still kept.
+    var bad: [30]u8 = t.packets[0].items[0..30].*;
+    bad[11] = 0; // no channels
+    try testing.expectError(error.InvalidData, d.decodePacket(&bad, &planes));
+    try testing.expect(d.first_frame);
+}
+
+fn decodeUnderFailures(gpa: std.mem.Allocator, t: *const TestStream) !void {
+    var d = Decoder.init(gpa, t.extradata) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.InvalidData => error.TestUnexpectedResult,
+    };
+    defer d.deinit();
+    const capacity = d.blocksize[1] / 2;
+    const storage = try gpa.alloc(f32, 2 * capacity);
+    defer gpa.free(storage);
+    const planes = [2][]f32{ storage[0..capacity], storage[capacity..] };
+    for (t.audio()[0..2]) |p| _ = try d.decodePacket(p.items, &planes);
+    // Headers in the stream: everything freed and parsed again.
+    _ = try d.decodePacket(t.packets[0].items, &planes);
+    _ = try d.decodePacket(t.packets[2].items, &planes);
+    _ = try d.decodePacket(t.audio()[2].items, &planes);
+}
+
+test "the Vorbis decoder frees everything under every allocation and remap failure" {
+    const gpa = testing.allocator;
+    var t = try TestStream.init(gpa, fixture_8k, 10);
+    defer t.deinit(gpa);
+    // Remaps failing only, bounded for Debug: that pass reaches every
+    // allocation the other makes; vlc.zig sweeps the tables' shrink both ways.
+    try sweep.checkAllocationFailuresWith(gpa, .fail, &t, decodeUnderFailures);
+}
+
+/// The fuzz entry's input: the extradata, then up to 32 steps, each an
+/// end flag, whether to flush after it, and a packet. Planes follow the
+/// decoder's channels and block sizes, as a caller resizing after a null
+/// return does.
+fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
+    _ = context;
+    const gpa = testing.allocator;
+    var extradata: [8192]u8 = undefined;
+    const len = smith.slice(&extradata);
+    var d = Decoder.init(gpa, extradata[0..len]) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        error.InvalidData => return,
+    };
+    defer d.deinit();
+    var storage: []f32 = &.{};
+    defer gpa.free(storage);
+    var planes: [255][]f32 = @splat(&.{});
+    var packet: [4096]u8 = undefined;
+    for (0..32) |_| {
+        if (smith.eos()) break;
+        const flush_after = smith.value(bool);
+        const n = smith.slice(&packet);
+        if (!d.planesFit(planes[0..d.channels])) {
+            const capacity = d.blocksize[1] / 2;
+            gpa.free(storage);
+            storage = &.{};
+            storage = try gpa.alloc(f32, @as(usize, capacity) * d.channels);
+            for (0..d.channels) |c| planes[c] = storage[c * capacity ..][0..capacity];
+        }
+        const decoded = d.decodePacket(packet[0..n], planes[0..d.channels]) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            error.InvalidData => null,
+        };
+        if (decoded) |samples| {
+            try testing.expect(samples <= d.blocksize[1] / 2);
+            for (planes[0..d.channels]) |plane| for (plane[0..samples]) |v| std.mem.doNotOptimizeAway(v);
+        }
+        _ = d.takeSkip();
+        if (flush_after) d.flush();
+    }
+}
+
+/// A `fuzzOne` input: `t`'s extradata, then its audio packets with the
+/// `flush` flags, then `more` packets as they are.
+fn fuzzSeed(gpa: std.mem.Allocator, extradata: []const u8, audio: []const std.ArrayList(u8), flush: []const bool, more: []const []const u8) ![]u8 {
+    var s: sweep.Seed = .{};
+    errdefer s.deinit(gpa);
+    try s.slice(gpa, extradata);
+    for (audio, 0..) |p, i| {
+        try s.eos(gpa, false);
+        try s.value(gpa, @intFromBool(i < flush.len and flush[i]));
+        try s.slice(gpa, p.items);
+    }
+    for (more) |p| {
+        try s.eos(gpa, false);
+        try s.value(gpa, 0);
+        try s.slice(gpa, p);
+    }
+    try s.eos(gpa, true);
+    return s.toOwnedSlice(gpa);
+}
+
+test "fuzz: the Vorbis decoder on arbitrary headers and packets" {
+    const gpa = testing.allocator;
+    var t22 = try TestStream.init(gpa, fixture_22k, 5);
+    defer t22.deinit(gpa);
+    var t8 = try TestStream.init(gpa, fixture_8k, 10);
+    defer t8.deinit(gpa);
+    var synthetic = try TestStream.init(gpa, @embedFile("../testing/fixtures/ogg/ogg_vorbis_granule_zero.ogg"), 10);
+    defer synthetic.deinit(gpa);
+    var bad_setup = try TestStream.init(gpa, @embedFile("../testing/fixtures/ogg/ogg_vorbis_bad_setup.ogg"), 4);
+    defer bad_setup.deinit(gpa);
+    // The 22 kHz stream's identification header with blocksize_1 raised to
+    // 8192, then its setup header again: an in-stream restart.
+    var bigger: [30]u8 = t22.packets[0].items[0..30].*;
+    bigger[28] = (bigger[28] & 0x0f) | 13 << 4;
+
+    var seeds: [5][]u8 = undefined;
+    var made: usize = 0;
+    defer for (seeds[0..made]) |s| gpa.free(s);
+    seeds[0] = try fuzzSeed(gpa, t22.extradata, t22.audio(), &.{}, &.{});
+    made += 1;
+    seeds[1] = try fuzzSeed(gpa, t8.extradata, t8.audio(), &.{ false, true, false, false, true }, &.{});
+    made += 1;
+    seeds[2] = try fuzzSeed(gpa, t22.extradata, t22.audio()[0..1], &.{}, &.{ &bigger, t22.packets[2].items, t22.packets[4].items, t22.packets[1].items });
+    made += 1;
+    seeds[3] = try fuzzSeed(gpa, synthetic.extradata, synthetic.audio(), &.{}, &.{});
+    made += 1;
+    seeds[4] = try fuzzSeed(gpa, bad_setup.extradata, bad_setup.audio(), &.{}, &.{});
+    made += 1;
+    try testing.fuzz({}, fuzzOne, .{ .corpus = &seeds });
 }

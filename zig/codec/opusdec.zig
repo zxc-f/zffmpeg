@@ -709,3 +709,163 @@ test "planes other than one per channel of max_output samples are refused before
     var planes = [2][]f32{ storage[0..max_output], storage[max_output..][0..max_output] };
     try testing.expectEqual(960, try dec.decodePacket(&packet, &planes));
 }
+
+const sweep = @import("../testing/sweep.zig");
+
+/// An Ogg Opus fixture's packets (the OpusHead first, then OpusTags and
+/// the audio); free with `deinit`.
+const TestStream = struct {
+    packets: [24]std.ArrayList(u8) = @splat(.empty),
+    count: usize,
+
+    fn init(gpa: std.mem.Allocator, file: []const u8, count: usize) !TestStream {
+        var t: TestStream = .{ .count = count };
+        errdefer t.deinit(gpa);
+        try sweep.oggPackets(gpa, file, t.packets[0..count]);
+        return t;
+    }
+
+    fn deinit(t: *TestStream, gpa: std.mem.Allocator) void {
+        for (&t.packets) |*p| p.deinit(gpa);
+    }
+
+    fn head(t: *const TestStream) []const u8 {
+        return t.packets[0].items;
+    }
+
+    fn audio(t: *const TestStream) []const std.ArrayList(u8) {
+        return t.packets[2..t.count];
+    }
+};
+
+const fixture_hybrid = @embedFile("../testing/fixtures/ogg/ogg_opus_hybrid.ogg");
+const fixture_multistream = @embedFile("../testing/fixtures/ogg/ogg_opus_multistream.ogg");
+const fixture_silk = @embedFile("../testing/fixtures/ogg/ogg_opus_silk.ogg");
+const fixture_mapped = @embedFile("../testing/fixtures/ogg/ogg_opus_mapped.ogg");
+
+fn decodeUnderFailures(gpa: std.mem.Allocator, t: *const TestStream) !void {
+    var d = Decoder.init(gpa, t.head(), true) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.InvalidData, error.UnsupportedFormat => error.TestUnexpectedResult,
+    };
+    defer d.deinit();
+    const storage = try gpa.alloc(f32, @as(usize, max_output) * d.channels());
+    defer gpa.free(storage);
+    var planes: [255][]f32 = undefined;
+    for (0..d.channels()) |c| planes[c] = storage[c * max_output ..][0..max_output];
+    for (t.audio(), 0..) |p, i| {
+        _ = d.decodePacket(p.items, planes[0..d.channels()]) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            error.InvalidData => {},
+        };
+        // A flush midway: the resamplers closed and opened again.
+        if (i == 3) d.flush();
+    }
+    _ = try d.decodePacket(null, planes[0..d.channels()]);
+}
+
+test "the Opus decoder frees everything under every allocation and remap failure" {
+    const gpa = testing.allocator;
+    // Bounded for Debug: the three-stream fixture with remaps failing only
+    // (which reaches every allocation the other pass makes).
+    const cases = [_]struct { file: []const u8, count: usize, remaps: sweep.Remaps }{
+        .{ .file = fixture_hybrid, .count = 12, .remaps = .both },
+        .{ .file = fixture_silk, .count = 12, .remaps = .both },
+        .{ .file = fixture_mapped, .count = 6, .remaps = .both },
+        .{ .file = fixture_multistream, .count = 10, .remaps = .fail },
+    };
+    for (cases) |case| {
+        var t = try TestStream.init(gpa, case.file, case.count);
+        defer t.deinit(gpa);
+        try sweep.checkAllocationFailuresWith(gpa, case.remaps, &t, decodeUnderFailures);
+    }
+}
+
+/// The fuzz entry's input: the OpusHead, the decoder's `apply_phase_inv`
+/// option, then up to 32 steps, each an end flag, an action (0 a packet,
+/// 1 the end's null packet, 2 a flush) and a packet.
+fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
+    _ = context;
+    const gpa = testing.allocator;
+    var head: [300]u8 = undefined;
+    const head_len = smith.slice(&head);
+    const phase_inv = smith.value(bool);
+    var d = Decoder.init(gpa, head[0..head_len], phase_inv) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        error.InvalidData, error.UnsupportedFormat => return,
+    };
+    defer d.deinit();
+    const storage = try gpa.alloc(f32, @as(usize, max_output) * d.channels());
+    defer gpa.free(storage);
+    var planes: [255][]f32 = undefined;
+    for (0..d.channels()) |c| planes[c] = storage[c * max_output ..][0..max_output];
+    var packet: [4096]u8 = undefined;
+    for (0..32) |_| {
+        if (smith.eos()) break;
+        const action = smith.valueRangeAtMost(u8, 0, 2);
+        const n = smith.slice(&packet);
+        switch (action) {
+            0, 1 => {
+                const buf: ?[]const u8 = if (action == 0) packet[0..n] else null;
+                const samples = d.decodePacket(buf, planes[0..d.channels()]) catch |err| switch (err) {
+                    error.OutOfMemory => return err,
+                    error.InvalidData => 0,
+                };
+                try testing.expect(samples <= max_output);
+                for (planes[0..d.channels()]) |plane| for (plane[0..samples]) |v| std.mem.doNotOptimizeAway(v);
+            },
+            else => d.flush(),
+        }
+    }
+}
+
+/// A `fuzzOne` input: `t`'s head and packets, with `actions[i]` before
+/// packet i (a null packet or a flush) where given, and the null packet
+/// at the end.
+fn fuzzSeed(gpa: std.mem.Allocator, t: *const TestStream, phase_inv: bool, actions: []const u8) ![]u8 {
+    var s: sweep.Seed = .{};
+    errdefer s.deinit(gpa);
+    try s.slice(gpa, t.head());
+    try s.value(gpa, @intFromBool(phase_inv));
+    for (t.audio(), 0..) |p, i| {
+        if (i < actions.len and actions[i] != 0) {
+            try s.eos(gpa, false);
+            try s.value(gpa, actions[i]);
+            try s.slice(gpa, &.{});
+        }
+        try s.eos(gpa, false);
+        try s.value(gpa, 0);
+        try s.slice(gpa, p.items);
+    }
+    try s.eos(gpa, false);
+    try s.value(gpa, 1);
+    try s.slice(gpa, &.{});
+    try s.eos(gpa, true);
+    return s.toOwnedSlice(gpa);
+}
+
+test "fuzz: the Opus decoder on arbitrary heads and packets" {
+    const gpa = testing.allocator;
+    var hybrid = try TestStream.init(gpa, fixture_hybrid, 17);
+    defer hybrid.deinit(gpa);
+    var multistream = try TestStream.init(gpa, fixture_multistream, 10);
+    defer multistream.deinit(gpa);
+    var silk_stream = try TestStream.init(gpa, fixture_silk, 18);
+    defer silk_stream.deinit(gpa);
+    var mapped = try TestStream.init(gpa, fixture_mapped, 6);
+    defer mapped.deinit(gpa);
+    var seeds: [5][]u8 = undefined;
+    var made: usize = 0;
+    defer for (seeds[0..made]) |s| gpa.free(s);
+    seeds[0] = try fuzzSeed(gpa, &hybrid, true, &.{});
+    made += 1;
+    seeds[1] = try fuzzSeed(gpa, &multistream, true, &.{ 0, 0, 2, 0, 1 });
+    made += 1;
+    seeds[2] = try fuzzSeed(gpa, &silk_stream, false, &.{ 0, 0, 0, 1, 0, 2 });
+    made += 1;
+    seeds[3] = try fuzzSeed(gpa, &mapped, true, &.{});
+    made += 1;
+    seeds[4] = try fuzzSeed(gpa, &hybrid, false, &.{ 0, 2, 1 });
+    made += 1;
+    try testing.fuzz({}, fuzzOne, .{ .corpus = &seeds });
+}

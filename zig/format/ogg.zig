@@ -2108,10 +2108,7 @@ fn decodeVorbisFixture(gpa: std.mem.Allocator, bytes: []const u8, out: *std.Arra
             if (samples) |n| {
                 // The decoder's first frame sets the skip, as
                 // avctx->internal->skip_samples.
-                if (dec.skip_samples != 0 and !dec.first_frame_consumed) {
-                    discard.skip = dec.skip_samples;
-                    dec.first_frame_consumed = true;
-                }
+                if (dec.takeSkip()) |skip| discard.skip = skip;
                 if (discard.apply(n, p.skip)) |kept| {
                     var md5: std.crypto.hash.Md5 = .init(.{});
                     for (planes[0..dec.channels]) |plane| {

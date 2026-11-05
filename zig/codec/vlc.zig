@@ -189,7 +189,10 @@ pub fn build(out: []Elem, work: []Code, nb_bits: u5, lens: []const u8, codewords
 /// A table built at run time.
 pub const Vlc = struct {
     nb_bits: u5,
+    /// The entries the build used.
     table: []Elem,
+    /// The allocation behind `table`: longer when shrinking it failed.
+    allocated_len: usize,
 
     /// `ff_vlc_init_sparse` (`vlc_init`): the table for `lens[i]` and
     /// `codewords[i]` (symbol i, or `symbols[i]`).
@@ -208,12 +211,15 @@ pub const Vlc = struct {
                 }
                 return err;
             };
-            return .{ .nb_bits = nb_bits, .table = gpa.realloc(table, used) catch table[0..used] };
+            // Shrinking in place is optional: a failed remap keeps the
+            // whole allocation, which `deinit` frees at its own length.
+            if (gpa.remap(table, used)) |shrunk| return .{ .nb_bits = nb_bits, .table = shrunk, .allocated_len = used };
+            return .{ .nb_bits = nb_bits, .table = table[0..used], .allocated_len = table.len };
         }
     }
 
     pub fn deinit(v: *Vlc, gpa: std.mem.Allocator) void {
-        gpa.free(v.table);
+        gpa.free(v.table.ptr[0..v.allocated_len]);
         v.* = undefined;
     }
 
@@ -257,6 +263,7 @@ pub fn lookup(table: []const Elem, r: *bits.LsbReader, nb_bits: u5, max_depth: u
 }
 
 const testing = std.testing;
+const sweep = @import("../testing/sweep.zig");
 const vectors = @embedFile("../testing/vectors/vlc.txt");
 
 /// vlc_vectors.c's generator.
@@ -294,11 +301,13 @@ fn canonicalCodes(lens: []const u8, codes: []u32, le: bool) void {
     var next_code: [34]u64 = @splat(0);
     for (lens) |len| count[len] += 1;
     count[0] = 0;
-    for (1..34) |len| next_code[len] = (next_code[len - 1] + count[len - 1]) << 1;
+    // Unsigned arithmetic as the C's: an overfull set of lengths (the fuzz
+    // entry's) wraps.
+    for (1..34) |len| next_code[len] = (next_code[len - 1] +% count[len - 1]) *% 2;
     for (lens, codes) |len, *code| {
         if (len == 0) continue;
         var c: u32 = @truncate(next_code[len]);
-        next_code[len] += 1;
+        next_code[len] +%= 1;
         if (le) c = @bitReverse(c) >> @intCast(32 - @as(u32, len));
         code.* = c;
     }
@@ -391,6 +400,140 @@ test "every code decodes back to its symbol through the levels, LSB first" {
         for (0..n) |i| try testing.expectEqual(@as(i32, @intCast(i)), v.get(&r, 3));
         try testing.expectEqual(at, r.count());
     }
+}
+
+test "a table whose shrink fails frees its whole allocation (review Low 14)" {
+    // Lengths 1, 2, 3, 3 at nb_bits 2: the 3-bit codes need a 1-bit
+    // subtable, so the first try (4 entries) is too small and the second
+    // (8) uses 6. The shrink to 6 fails; freeing 6 entries of the 8 was
+    // the defect, which the testing allocator reports as a size mismatch.
+    // Allocations: the work codes, the 4-entry try, the 8-entry try; a
+    // fourth (a copying realloc's) fails.
+    var failing: std.testing.FailingAllocator = .init(testing.allocator, .{ .fail_index = 3, .resize_fail_index = 0 });
+    const gpa = failing.allocator();
+    var v = try Vlc.init(gpa, 2, &.{ 1, 2, 3, 3 }, &.{ 0, 1, 3, 7 }, null, .le);
+    try testing.expectEqual(6, v.table.len);
+    try testing.expectEqual(8, v.allocated_len);
+    v.deinit(gpa);
+    try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+}
+
+fn buildUnderFailures(gpa: std.mem.Allocator, nb_bits: u5) !void {
+    var lens: [300]u8 = undefined;
+    var codes: [300]u32 = undefined;
+    var g: Generator = .{ .state = nb_bits };
+    const n = g.lengths(&lens, 300, 3 * @as(u8, nb_bits));
+    canonicalCodes(lens[0..n], codes[0..n], true);
+    var v = try Vlc.init(gpa, nb_bits, lens[0..n], codes[0..n], null, .le);
+    v.deinit(gpa);
+}
+
+test "Vlc.init frees everything under every allocation and remap failure" {
+    for ([_]u5{ 3, 6, 9 }) |nb_bits| try sweep.checkAllocationFailures(testing.allocator, nb_bits, buildUnderFailures);
+}
+
+/// The fuzz entry's input: the first level's bits (1 to 11; Vorbis uses 8
+/// and 11), the flags, whether symbols are given, whether the codewords
+/// are the lengths' canonical code (deep, complete trees) or the input's
+/// own, the lengths, the codewords' bytes, the decoding depth, then bits
+/// to decode.
+fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
+    _ = context;
+    const gpa = testing.allocator;
+    const nb_bits: u5 = @intCast(smith.valueRangeAtMost(u8, 1, 11));
+    const flags: Flags = .{ .input_le = smith.value(bool), .output_le = smith.value(bool) };
+    const with_symbols = smith.value(bool);
+    const canonical = smith.value(bool);
+    var lens: [256]u8 = undefined;
+    const n = smith.slice(&lens);
+    var code_bytes: [4 * 256]u8 = @splat(0);
+    _ = smith.slice(&code_bytes);
+    var codes: [256]u32 = undefined;
+    for (&codes, 0..) |*c, i| c.* = std.mem.readInt(u32, code_bytes[4 * i ..][0..4], .little);
+    if (canonical) {
+        // canonicalCodes takes lengths up to 32 (longer ones, refused, come
+        // with the input's own codewords).
+        for (lens[0..n]) |*len| len.* = @min(len.*, 32);
+        canonicalCodes(lens[0..n], codes[0..n], flags.input_le);
+    }
+    var symbols: [256]i16 = undefined;
+    for (&symbols, 0..) |*s, i| s.* = @truncate(@as(isize, @intCast(i)) * 7 - 300);
+    const max_depth: u2 = @intCast(smith.valueRangeAtMost(u8, 1, 3));
+    var stream: [64]u8 = undefined;
+    const stream_len = smith.slice(&stream);
+
+    const sym: ?[]const i16 = if (with_symbols) symbols[0..n] else null;
+    var v = Vlc.init(gpa, nb_bits, lens[0..n], codes[0..n], sym, flags) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        // A refused code is refused by `build` too, whatever the buffer.
+        error.InvalidLength, error.IncorrectCodes, error.StrangeCodes => {
+            var out: [1 << 12]Elem = undefined;
+            var work: [256]Code = undefined;
+            if (build(&out, &work, nb_bits, lens[0..n], codes[0..n], sym, flags)) |_| {
+                return error.TestUnexpectedResult;
+            } else |build_err| if (build_err != error.TableTooSmall) try testing.expectEqual(err, build_err);
+            return;
+        },
+        error.TableTooSmall => return error.TestUnexpectedResult,
+    };
+    defer v.deinit(gpa);
+    // `build` into a buffer of exactly the table's size gives the same
+    // entries; one entry less is too small.
+    const exact = try gpa.alloc(Elem, v.table.len);
+    defer gpa.free(exact);
+    var work: [256]Code = undefined;
+    try testing.expectEqual(v.table.len, try build(exact, &work, nb_bits, lens[0..n], codes[0..n], sym, flags));
+    for (exact, v.table) |a, b| try testing.expectEqual(a, b);
+    try testing.expectError(error.TableTooSmall, build(exact[0 .. exact.len - 1], &work, nb_bits, lens[0..n], codes[0..n], sym, flags));
+    // Any bits decode without reading outside the table, a bounded number
+    // of symbols (each at least one bit, or none at an unused entry).
+    var r = try bits.LsbReader.init(stream[0..stream_len]);
+    for (0..2 * 8 * stream.len) |_| {
+        if (r.left() <= 0) break;
+        const before = r.count();
+        const s = v.get(&r, max_depth);
+        if (s == -1 and r.count() == before) break;
+    }
+}
+
+/// A `fuzzOne` input: canonical lengths from vlc_vectors.c's generator.
+fn fuzzSeed(gpa: std.mem.Allocator, nb_bits: u5, le: bool, symbols: bool, count: usize, max_len: u8, seed: u32) ![]u8 {
+    var lens: [256]u8 = undefined;
+    var g: Generator = .{ .state = seed };
+    const n = g.lengths(&lens, count, max_len);
+    var s: sweep.Seed = .{};
+    errdefer s.deinit(gpa);
+    try s.value(gpa, nb_bits);
+    try s.value(gpa, @intFromBool(le));
+    try s.value(gpa, @intFromBool(le));
+    try s.value(gpa, @intFromBool(symbols));
+    try s.value(gpa, 1); // canonical
+    try s.slice(gpa, lens[0..n]);
+    try s.slice(gpa, &.{});
+    try s.value(gpa, 3);
+    var stream: [64]u8 = undefined;
+    for (&stream, 0..) |*b, i| b.* = @truncate(i *% 0x9d +% seed);
+    try s.slice(gpa, &stream);
+    return s.toOwnedSlice(gpa);
+}
+
+test "fuzz: VLC tables from arbitrary lengths and codewords" {
+    const gpa = testing.allocator;
+    var seeds: [5][]u8 = undefined;
+    var made: usize = 0;
+    defer for (seeds[0..made]) |s| gpa.free(s);
+    const params = [_]struct { nb_bits: u5, le: bool, symbols: bool, count: usize, max_len: u8, seed: u32 }{
+        .{ .nb_bits = 8, .le = true, .symbols = false, .count = 200, .max_len = 24, .seed = 1 },
+        .{ .nb_bits = 11, .le = true, .symbols = false, .count = 256, .max_len = 32, .seed = 2 },
+        .{ .nb_bits = 3, .le = true, .symbols = true, .count = 40, .max_len = 9, .seed = 3 },
+        .{ .nb_bits = 6, .le = false, .symbols = true, .count = 100, .max_len = 18, .seed = 4 },
+        .{ .nb_bits = 1, .le = false, .symbols = false, .count = 4, .max_len = 3, .seed = 5 },
+    };
+    for (params, &seeds) |p, *s| {
+        s.* = try fuzzSeed(gpa, p.nb_bits, p.le, p.symbols, p.count, p.max_len, p.seed);
+        made += 1;
+    }
+    try testing.fuzz({}, fuzzOne, .{ .corpus = &seeds });
 }
 
 test "an incomplete code reads -1 where no code reaches, consuming nothing there" {

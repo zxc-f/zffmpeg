@@ -200,6 +200,8 @@ pub const DecodedReader = struct {
                 r.decoder = .{ .opus = opus };
                 const dec = &r.decoder.opus;
                 const n = dec.channels();
+                // The planes and the output follow the decoder's count.
+                r.channels = n;
                 r.plane_storage = try r.gpa.alloc(f32, @as(usize, opusdec.max_output) * n);
                 for (0..n) |c| r.planes[c] = r.plane_storage[c * opusdec.max_output ..][0..opusdec.max_output];
                 r.pending = .{ .planes = .{ 0, 0 } };
@@ -219,6 +221,7 @@ pub const DecodedReader = struct {
                 r.decoder = .{ .vorbis = decoder };
                 const dec = &r.decoder.vorbis;
                 const capacity = dec.blocksize[1] / 2;
+                r.channels = dec.channels;
                 r.plane_storage = try r.gpa.alloc(f32, @as(usize, capacity) * dec.channels);
                 for (0..dec.channels) |c| r.planes[c] = r.plane_storage[c * capacity ..][0..capacity];
                 r.pending = .{ .planes = .{ 0, 0 } };
@@ -364,7 +367,10 @@ pub const DecodedReader = struct {
                 .none => unreachable,
                 .flac => |*dec| dec.send(p.data, p.pts),
                 .vorbis => |*dec| {
-                    const samples = dec.decodePacket(p.data, r.planes[0..dec.channels]) catch |err| switch (err) {
+                    // The planes allocated at open: a decoder whose channels
+                    // or block sizes changed since refuses them (`planesFit`),
+                    // where slicing by its own count read unset planes.
+                    const samples = dec.decodePacket(p.data, r.planes[0..r.channels]) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         error.InvalidData => {
                             diagnostics.report(r.sink, .err, "Decoding error: Invalid data found when processing input", .{});
@@ -373,11 +379,8 @@ pub const DecodedReader = struct {
                         },
                     };
                     const n = samples orelse continue;
-                    if (!dec.first_frame_consumed and dec.skip_samples != 0) {
-                        // avctx->internal->skip_samples, set by the first frame.
-                        r.discard.skip = dec.skip_samples;
-                        dec.first_frame_consumed = true;
-                    }
+                    // avctx->internal->skip_samples, set by the first frame.
+                    if (dec.takeSkip()) |skip| r.discard.skip = skip;
                     const kept = r.discard.apply(n, p.skip) orelse continue;
                     r.frames_decoded += 1;
                     r.pending = .{ .planes = kept };
@@ -521,4 +524,98 @@ test "a decoder that refuses the headers fails opening without freeing its unset
             try testing.expectError(case.err, r.readHeader());
         }
     }
+}
+
+const sweep = @import("../testing/sweep.zig");
+
+const SweepInput = struct { bytes: []const u8, seekable: bool };
+
+/// Opens and decodes `input.bytes` through a fresh demuxer and decoder,
+/// seekable (the counting pass included) or not; any error but an
+/// allocation failure fails the test.
+fn decodeUnderFailures(gpa: std.mem.Allocator, input: SweepInput) !void {
+    var reader: std.Io.Reader = .fixed(input.bytes);
+    var r = DecodedReader.init(gpa, &reader, if (input.seekable) .fixed(&reader) else null, null);
+    defer r.deinit();
+    _ = r.readHeader() catch |err| return if (err == error.OutOfMemory) err else error.TestUnexpectedResult;
+    var scratch: [4096]u8 = undefined;
+    while (true) {
+        const got = r.readData(&scratch) catch |err| return if (err == error.OutOfMemory) err else error.TestUnexpectedResult;
+        if (got.len == 0) break;
+    }
+    r.finish() catch return error.TestUnexpectedResult;
+}
+
+test "an Ogg stream decoded frees everything under every allocation and remap failure" {
+    // Each codec once with the counting pass or once without, bounded for
+    // Debug: a full Vorbis sweep with the counting pass takes 600 runs of
+    // its setup. The decoders' own sweeps (vorbis.zig, opusdec.zig) cover
+    // their headers and packets.
+    const Case = struct { name: []const u8, seekable: bool, remaps: sweep.Remaps };
+    const cases = [_]Case{
+        .{ .name = "ogg_flac_stereo", .seekable = false, .remaps = .both },
+        .{ .name = "ogg_flac_stereo", .seekable = true, .remaps = .both },
+        .{ .name = "ogg_vorbis_ffmpeg_22k_short", .seekable = false, .remaps = .fail },
+        .{ .name = "ogg_opus_hybrid", .seekable = true, .remaps = .fail },
+        .{ .name = "ogg_opus_mapped", .seekable = false, .remaps = .fail },
+    };
+    inline for (cases) |case| {
+        const input: SweepInput = .{ .bytes = fixtures.ogg.bytes(case.name), .seekable = case.seekable };
+        try sweep.checkAllocationFailuresWith(testing.allocator, case.remaps, input, decodeUnderFailures);
+    }
+}
+
+/// The fuzz entry's input: whether the input seeks (the counting pass and
+/// the duration scan), whether the reader takes the samples as they come
+/// (`expected` cleared), then the file.
+fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
+    _ = context;
+    const seekable = smith.value(bool);
+    const uncounted = smith.value(bool);
+    var input: [16384]u8 = undefined;
+    const len = smith.slice(&input);
+    var reader: std.Io.Reader = .fixed(input[0..len]);
+    var r = DecodedReader.init(testing.allocator, &reader, if (seekable) .fixed(&reader) else null, null);
+    defer r.deinit();
+    _ = r.readHeader() catch |err| return if (err == error.OutOfMemory) err else {};
+    if (uncounted) r.expected = null;
+    var scratch: [4096]u8 = undefined;
+    while (true) {
+        const got = r.readData(&scratch) catch |err| return if (err == error.OutOfMemory) err else {};
+        if (got.len == 0) break;
+    }
+    r.finish() catch {};
+}
+
+fn fuzzSeed(gpa: std.mem.Allocator, bytes: []const u8, seekable: bool, uncounted: bool) ![]u8 {
+    var s: sweep.Seed = .{};
+    errdefer s.deinit(gpa);
+    try s.value(gpa, @intFromBool(seekable));
+    try s.value(gpa, @intFromBool(uncounted));
+    try s.slice(gpa, bytes);
+    return s.toOwnedSlice(gpa);
+}
+
+test "fuzz: an Ogg stream decoded from arbitrary input" {
+    const gpa = testing.allocator;
+    const Case = struct { name: []const u8, seekable: bool, uncounted: bool };
+    const cases = [_]Case{
+        .{ .name = "ogg_vorbis_ffmpeg_22k_short", .seekable = false, .uncounted = false },
+        .{ .name = "ogg_vorbis_ffmpeg_8k", .seekable = true, .uncounted = false },
+        .{ .name = "ogg_vorbis_granule_zero", .seekable = true, .uncounted = true },
+        .{ .name = "ogg_opus_hybrid", .seekable = true, .uncounted = false },
+        .{ .name = "ogg_opus_multistream", .seekable = false, .uncounted = false },
+        .{ .name = "ogg_opus_ffmpeg_delay10", .seekable = true, .uncounted = true },
+        .{ .name = "ogg_chained_opus", .seekable = true, .uncounted = false },
+        .{ .name = "ogg_flac_stereo", .seekable = false, .uncounted = false },
+        .{ .name = "ogg_page_without_granule", .seekable = true, .uncounted = false },
+    };
+    var seeds: [cases.len][]u8 = undefined;
+    var made: usize = 0;
+    defer for (seeds[0..made]) |s| gpa.free(s);
+    inline for (cases, 0..) |case, i| {
+        seeds[i] = try fuzzSeed(gpa, fixtures.ogg.bytes(case.name), case.seekable, case.uncounted);
+        made += 1;
+    }
+    try testing.fuzz({}, fuzzOne, .{ .corpus = &seeds });
 }
