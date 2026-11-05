@@ -367,10 +367,13 @@ pub fn Search(
             var ts_max: i64 = undefined;
             while (true) {
                 limit = pos_max;
-                pos_max = @max(0, pos_max - step);
+                pos_max = @max(0, pos_max -% step);
                 ts_max = try readTimestamp(context, &pos_max, limit);
-                step += step;
-                if (!(ts_max == nopts and 2 * limit > step)) break;
+                // C's int64_t `step += step` and `2*limit` wrap on the
+                // reference build when the size is near 2^63 (a seeker that
+                // reports no real size); notes.md "Follow the reference build".
+                step +%= step;
+                if (!(ts_max == nopts and 2 *% limit > step)) break;
             }
             if (ts_max == nopts) return null;
             while (true) {
@@ -542,4 +545,20 @@ test "the generic search lands on the packet at or around the target" {
     const backward = (try S.genSearch({}, 0, 1000, 455, .{}, true)).?;
     try std.testing.expectEqual(Found{ .pos = 400, .ts = 400 }, backward);
     try std.testing.expectEqual(Found{ .pos = 900, .ts = 900 }, (try S.findLastTs({}, 1000)).?);
+}
+
+test "the last-timestamp search wraps as the reference build's int64_t near 2^63" {
+    // No packet anywhere, with sizes whose `2*limit` and `step += step`
+    // overflow int64_t: the search ends as the reference build's does.
+    const Empty = struct {
+        fn readTimestamp(_: void, pos: *i64, pos_limit: i64) error{}!i64 {
+            _ = pos;
+            _ = pos_limit;
+            return nopts;
+        }
+    };
+    const S = Search(void, error{}, Empty.readTimestamp);
+    for ([_]i64{ std.math.maxInt(i64), (1 << 62) + 1, (1 << 62) - 1, 1 << 40 }) |size| {
+        try std.testing.expectEqual(null, try S.findLastTs({}, size));
+    }
 }
