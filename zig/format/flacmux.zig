@@ -233,7 +233,9 @@ pub const Writer = struct {
     }
 
     /// Opens the encoder with a block of `frame_size` samples (0 lets it
-    /// choose) and writes the header.
+    /// choose) and writes the header. The writer takes the encoder, its
+    /// block and the Ogg muxer only once the header is written, so on
+    /// failure they are freed here alone and `deinit` frees nothing twice.
     fn open(w: *Writer, frame_size: u32) WriteError!void {
         var params = w.params;
         params.frame_size = frame_size;
@@ -244,27 +246,37 @@ pub const Writer = struct {
         };
         errdefer e.deinit();
         const count = @as(usize, e.frame_size) * w.params.channels;
-        w.block = switch (w.params.sample_format) {
+        const block: Block = switch (w.params.sample_format) {
             .s16 => .{ .s16 = try w.gpa.alloc(i16, count) },
             .s32 => .{ .s32 = try w.gpa.alloc(i32, count) },
         };
-        w.encoder = e;
+        errdefer switch (block) {
+            inline else => |b| w.gpa.free(b),
+        };
         const streaminfo = e.initialStreaminfo();
+        var ogg: ?oggmux.Muxer = null;
+        errdefer if (ogg) |*m| m.deinit();
+        var streaminfo_offset: u64 = 0;
         switch (w.options.container) {
             .flac => {
-                if (w.seeker) |s| w.streaminfo_offset = s.position() + 8;
+                if (w.seeker) |s| streaminfo_offset = s.position() + 8;
                 try writeHeader(w.out, &streaminfo, &w.tags, w.options.padding orelse 8192);
             },
             .ogg => |o| {
                 const streams = [_]oggmux.Stream{.{ .codec = .flac, .sample_rate = w.params.sample_rate, .extradata = &streaminfo, .tags = o.stream_tags }};
-                w.ogg = oggmux.Muxer.init(w.gpa, w.out, &streams, .{ .format_tags = w.options.tags }) catch |err| return switch (err) {
+                ogg = oggmux.Muxer.init(w.gpa, w.out, &streams, .{ .format_tags = w.options.tags }) catch |err| return switch (err) {
                     error.OutOfMemory => error.OutOfMemory,
                     error.TagsTooLong => error.TagsTooLong,
                     error.InvalidExtradata => unreachable, // a whole STREAMINFO
                 };
-                try w.ogg.?.writeHeader();
+                try ogg.?.writeHeader();
             },
         }
+        // Nothing fails past here.
+        w.encoder = e;
+        w.block = block;
+        w.ogg = ogg;
+        w.streaminfo_offset = streaminfo_offset;
     }
 
     /// Encodes whole blocks, and at the end what is left; opens the encoder
@@ -427,4 +439,23 @@ test "a stream shorter than 16 samples is refused, as FFmpeg's encoder refuses i
     try testing.expectEqual(0, out.buffered().len);
     try testing.expectError(error.UnsupportedFormat, Writer.check(gpa, .s24le, .{ .sample_rate = 8000, .layout = .mono, .sample_format = .s32 }, 24, .{}));
     try testing.expectError(error.UnsupportedFormat, Writer.check(gpa, .s16le, .{ .sample_rate = 8000, .layout = .{ .unspecified = 9 }, .sample_format = .s16 }, 16, .{}));
+}
+
+test "a header the output refuses fails once, and deinit frees each part once" {
+    const gpa = testing.allocator;
+    const format: audio.Format = .{ .sample_rate = 8000, .layout = .mono, .sample_format = .s16 };
+    var input: [32 * 2]u8 = undefined;
+    const data = testSamples(i16, &input, 32, 1);
+    for ([_]WriteOptions.Container{ .flac, .{ .ogg = .{} } }) |container| {
+        // Too small for the header (fLaC and STREAMINFO alone are 42
+        // bytes; an Ogg page header is 27).
+        var bytes: [16]u8 = undefined;
+        var out: std.Io.Writer = .fixed(&bytes);
+        var w: Writer = try .begin(gpa, &out, null, .s16le, format, 16, 16, .{ .container = container });
+        defer w.deinit();
+        // The first whole block opens the encoder and writes the header.
+        try testing.expectError(error.WriteFailed, w.writeData(data));
+        try testing.expectEqual(null, w.encoder);
+        try testing.expectEqual(null, w.ogg);
+    }
 }
