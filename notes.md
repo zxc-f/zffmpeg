@@ -397,6 +397,7 @@ FFmpeg has none of them. Each is `LimitExceeded`.
 | Decision | Current choice and reason | To change it |
 | --- | --- | --- |
 | Seekable source (T52a) | The caller passes a `seek.Seeker` over the stream the parser reads, with its position and size, rather than the parser owning the I/O: parsers stay over `*std.Io.Reader`, and seekability stays optional. | `format/seek.zig`; a seekable replay when detection must seek (T53). |
+| A failed first seek attempt, out of memory included (T52a, T27a) | After any error of its first `av_seek_frame`, `seekFile` seeks to the nearer bound and back, as `seek_file`'s fallback does on any negative return (`ret < 0 && ts != min_ts && max_ts != ts`), so an allocation failure in the first attempt is not reported when the retry succeeds. Allocation-failure sweeps therefore seek with `min_ts == ts == max_ts` (`hostile.TestPlan`'s exact seeks), where FFmpeg makes no second attempt. | `seek.zig`'s `seekFile`; `zig/testing/hostile.zig`. |
 | Past the end | A target past the data positions at its end in every case. FFmpeg's result there depends on its I/O buffer and the packets it has read (read-ahead to the end, then its generic index), which the port does not model: the comparison classifies those cases instead. | The seeking contract; `KNOWN` handling in `wav.zig`'s seek test. |
 | Timestamp after a byte seek | `null`: the position gives none. FFmpeg reports 0, its relative count restarting, which is not the stream's time. | `seek.Position.timestamp`. |
 
