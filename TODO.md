@@ -792,7 +792,9 @@ sample formats stay in T20.
       the paired fixtures; FFmpeg must probe and decode every output to the
       fixture's samples and stream, with the known channel_layout and
       empty-WAV duration_ts differences. Differences from FFmpeg: no prompt,
-      same file by identity, partial output removed.
+      same file by identity, partial output removed when this run created
+      the file (since the 2026-11-04 review a path `-y` replaced keeps it,
+      as FFmpeg's does).
     Implementation files and test entry points: zig/cli/ffmpeg.zig,
       zig/cli/status.zig; convert_cases in build.zig;
       zig/testing/zffmpeg_cases.zig; compare_zffmpeg in compare.py.

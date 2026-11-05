@@ -355,8 +355,9 @@ fn outputContainer(command: Command) error{ FormatRequired, UnknownFormat, Unkno
         return av.formats.findMuxer(name) orelse error.UnknownFormat;
     }
     if (isStdio(command.output)) return error.FormatRequired;
-    // The muxers' extensions, without regard to case, as FFmpeg matches them.
-    return av.formats.muxerForExtension(std.fs.path.extension(command.output)) orelse error.UnknownExtension;
+    // The muxers' extensions, without regard to case, after the name's last
+    // dot, as FFmpeg's av_match_ext finds them.
+    return av.formats.muxerForFileName(command.output) orelse error.UnknownExtension;
 }
 
 fn isFlacOption(arg: []const u8) bool {

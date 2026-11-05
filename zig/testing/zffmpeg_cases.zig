@@ -191,7 +191,13 @@ pub fn main(init: std.process.Init) !u8 {
     const exe = try std.Io.Dir.cwd().realPathFileAlloc(io, args[1], init.arena.allocator());
     var fixture_dir = try std.Io.Dir.cwd().openDir(io, args[2], .{});
     defer fixture_dir.close(io);
-    var dir = try std.Io.Dir.cwd().openDir(io, args[3], .{});
+    var work = try std.Io.Dir.cwd().openDir(io, args[3], .{});
+    defer work.close(io);
+    // The build reuses the output directory when its inputs are unchanged,
+    // so files from an earlier (failed) run may still be there: every run
+    // starts in an empty subdirectory.
+    try work.deleteTree(io, "run");
+    var dir = try work.createDirPathOpen(io, "run", .{});
     defer dir.close(io);
     var h: Harness = .{ .io = io, .gpa = init.gpa, .dir = dir, .exe = exe };
 
@@ -217,6 +223,10 @@ pub fn main(init: std.process.Init) !u8 {
     try h.write("out.au", previous);
     h.expect("-y replaces an existing output", try h.run(&.{ "-y", "-i", "in.wav", "out.au" }, .ignore, null), 0, "");
     try h.expectContent("-y replaces an existing output", "out.au", au_out);
+    // FFmpeg's extension is the text after the name's last dot, so a file
+    // named only `.au` is AU output (av_match_ext's strrchr).
+    h.expect("an output named only by its extension", try h.run(&.{ "-i", "in.wav", ".au" }, .ignore, null), 0, "");
+    try h.expectContent("an output named only by its extension", ".au", au_out);
     try h.write("out.au", previous);
     h.expect("-y with -n is refused", try h.run(&.{ "-y", "-n", "-i", "in.wav", "out.au" }, .ignore, null), 1, "contradict");
     try h.expectContent("-y with -n is refused", "out.au", previous);
