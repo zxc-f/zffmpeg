@@ -18,11 +18,13 @@ pub const ExitStatus = enum(u8) {
 };
 
 /// Every error either tool classifies: the library's media and conversion
-/// errors and the file operations around them.
+/// errors and the file operations around them, a FLAC output's seek back
+/// to its STREAMINFO included.
 pub const Error = av.convert.Error ||
     std.Io.File.OpenError ||
     std.Io.File.Reader.Error ||
-    std.Io.File.Writer.Error;
+    std.Io.File.Writer.Error ||
+    std.Io.File.SeekError;
 
 /// Contract errors map to their categories; every remaining platform error in
 /// `Error` is an I/O failure.
@@ -69,14 +71,50 @@ pub const RawParams = union(enum) {
     failed: ExitStatus,
 };
 
+/// A raw PCM input's rate as the command line gives it, in FFmpeg's two
+/// syntaxes.
+pub const RawRate = union(enum) {
+    /// The raw demuxers' `sample_rate` AVOption (`-sample_rate`): FFmpeg's
+    /// expression (`8k`, `44.1k`), 0 to `INT_MAX`.
+    option: []const u8,
+    /// The ffmpeg program's `-ar` (`OPT_TYPE_INT`): `parse_number`'s
+    /// integer, which the demuxer's option range then bounds.
+    number: []const u8,
+};
+
+/// The raw demuxers' `sample_rate` option, for `av.options.set`.
+const RateOption = struct {
+    sample_rate: i32 = 44100,
+
+    pub const option_specs = [_]av.options.Spec{
+        .{ .name = "sample_rate", .field = "sample_rate", .kind = .int, .help = "", .min = 0, .max = std.math.maxInt(i32) },
+    };
+
+    comptime {
+        av.options.check(RateOption);
+    }
+};
+
 /// Parses `-sample_rate` (or zffmpeg's `-ar`), `-ch_layout` and zffmpeg's
-/// `-ac`, as given; null for each one absent. A rate that is not a decimal
-/// number is a usage error; the layout is `layoutOption`'s.
-pub fn rawParams(io: std.Io, tool: []const u8, rate_text: ?[]const u8, layout_text: ?[]const u8, channels_text: ?[]const u8) RawParams {
-    if (rate_text == null and layout_text == null and channels_text == null) return .{ .ok = null };
+/// `-ac`, as given; null for each one absent. A rate FFmpeg refuses (T17a's
+/// number or expression syntax, by option) is a usage error; the layout is
+/// `layoutOption`'s.
+pub fn rawParams(io: std.Io, tool: []const u8, rate: ?RawRate, layout_text: ?[]const u8, channels_text: ?[]const u8) RawParams {
+    if (rate == null and layout_text == null and channels_text == null) return .{ .ok = null };
     var params: av.raw.Params = .{};
-    if (rate_text) |text| {
-        params.sample_rate = std.fmt.parseInt(u32, text, 10) catch {
+    if (rate) |r| {
+        const value: ?i32 = switch (r) {
+            .option => |text| value: {
+                var o: RateOption = .{};
+                av.options.set(RateOption, &o, "sample_rate", text) catch break :value null;
+                break :value o.sample_rate;
+            },
+            .number => |text| av.number.parseInt(text) catch null,
+        };
+        const text = switch (r) {
+            inline else => |t| t,
+        };
+        params.sample_rate = std.math.cast(u32, value orelse -1) orelse {
             printError(io, "{s}: {s}: invalid sample rate\n", .{ tool, text });
             return .{ .failed = .usage };
         };
@@ -98,13 +136,24 @@ pub const LayoutOption = union(enum) {
     failed: ExitStatus,
 };
 
-/// Parses `-ch_layout` or zffmpeg's `-ac`, at most one of them given. Text
-/// FFmpeg cannot parse, or a count that is not a positive decimal number,
-/// is a usage error; an ambisonic layout, or a custom one past 64
-/// channels, is unsupported. FFmpeg's command line passes `-ac N` on as N
-/// channels, unspecified: the layout `NC` to a raw demuxer, an unspecified
-/// encoder layout for an output (T23c).
+/// Parses `-ch_layout` or zffmpeg's `-ac`; with both, `-ch_layout` wins,
+/// as FFmpeg sets it after `-ac`. Text FFmpeg cannot parse, or a count
+/// that is not a positive number, is a usage error; an ambisonic layout,
+/// or a custom one past 64 channels, is unsupported. FFmpeg's command line
+/// passes `-ac N` on as N channels, unspecified: the layout `NC` to a raw
+/// demuxer, an unspecified encoder layout for an output (T23c).
 pub fn layoutOption(io: std.Io, tool: []const u8, layout_text: ?[]const u8, channels_text: ?[]const u8) LayoutOption {
+    var channels: ?u16 = null;
+    if (channels_text) |text| {
+        // FFmpeg's number syntax (T17a), within a channel count; checked
+        // even when -ch_layout follows, as FFmpeg parses -ac first.
+        const value = av.number.parseInt(text) catch -1;
+        if (value <= 0 or value > std.math.maxInt(u16)) {
+            printError(io, "{s}: {s}: invalid channel count\n", .{ tool, text });
+            return .{ .failed = .usage };
+        }
+        channels = @intCast(value);
+    }
     if (layout_text) |text| {
         const layout = av.channel_layout.Layout.parse(text) catch |err| switch (err) {
             error.InvalidLayout => {
@@ -118,14 +167,6 @@ pub fn layoutOption(io: std.Io, tool: []const u8, layout_text: ?[]const u8, chan
         };
         return .{ .ok = layout };
     }
-    if (channels_text) |text| {
-        // FFmpeg's number syntax (T17a), within a channel count.
-        const value = av.number.parseInt(text) catch -1;
-        if (value <= 0 or value > std.math.maxInt(u16)) {
-            printError(io, "{s}: {s}: invalid channel count\n", .{ tool, text });
-            return .{ .failed = .usage };
-        }
-        return .{ .ok = .{ .unspecified = @intCast(value) } };
-    }
+    if (channels) |count| return .{ .ok = .{ .unspecified = count } };
     return .{ .ok = null };
 }

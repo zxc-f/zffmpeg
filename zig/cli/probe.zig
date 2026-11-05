@@ -52,12 +52,14 @@ fn run(init: std.process.Init) ExitStatus {
     if (args.len == 2 and (std.mem.eql(u8, args[1], "-h") or std.mem.eql(u8, args[1], "--help"))) {
         return status.writeStdout(io, "zffprobe", help);
     }
-    // Options in pairs, each once, then the input.
+    // Options with their values, then the input. An option given again
+    // replaces its value, as FFmpeg's last one wins; one without a value
+    // is FFmpeg's missing argument, a usage error.
     var format_name: ?[]const u8 = null;
     var rate_text: ?[]const u8 = null;
     var layout_text: ?[]const u8 = null;
     var i: usize = 1;
-    while (i + 1 < args.len) : (i += 2) {
+    while (i < args.len) : (i += 2) {
         const slot = if (std.mem.eql(u8, args[i], "-f"))
             &format_name
         else if (std.mem.eql(u8, args[i], "-sample_rate"))
@@ -66,7 +68,10 @@ fn run(init: std.process.Init) ExitStatus {
             &layout_text
         else
             break;
-        if (slot.* != null) break;
+        if (i + 1 == args.len) {
+            printError(io, "zffprobe: missing value for {s}\n" ++ usage, .{args[i]});
+            return .usage;
+        }
         slot.* = args[i + 1];
     }
     if (i + 1 != args.len) {
@@ -80,7 +85,8 @@ fn run(init: std.process.Init) ExitStatus {
         }
     else
         null;
-    const raw_params = switch (status.rawParams(io, "zffprobe", rate_text, layout_text, null)) {
+    const rate: ?status.RawRate = if (rate_text) |text| .{ .option = text } else null;
+    const raw_params = switch (status.rawParams(io, "zffprobe", rate, layout_text, null)) {
         .ok => |params| params,
         .failed => |exit| return exit,
     };

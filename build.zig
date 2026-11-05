@@ -416,7 +416,15 @@ const probe_cases = [_]ProbeCase{
     .{ .name = "an invalid channel layout", .args = &.{ "-f", "s16le", "-ch_layout", "7 speakers" }, .fixture = "mono_8k", .exit_code = 1, .stderr = "zffprobe: 7 speakers: invalid channel layout\n" },
     .{ .name = "raw PCM in a custom order", .set = .raw, .args = &.{ "-f", "s16le", "-sample_rate", "8000", "-ch_layout", "FC+FL+FR" }, .fixture = "raw_s16le_custom", .exit_code = 0, .stdout_contains = "channels=3\nchannel_layout=3 channels (FC+FL+FR)\n", .stderr = "" },
     .{ .name = "raw PCM over the channel limit", .set = .raw, .args = &.{ "-f", "s16le", "-ch_layout", "65C" }, .fixture = "raw_s16le_channels65", .exit_code = 5, .stderr_contains = ": LimitExceeded\n" },
-    .{ .name = "an option given twice", .args = &.{ "-f", "s16le", "-f", "s16le" }, .fixture = "mono_8k", .exit_code = 1, .stderr = usage_line },
+    // An option given again takes its last value, as FFmpeg's (Low-13); one
+    // without a value is FFmpeg's missing argument (Low-14).
+    .{ .name = "an option given twice takes the last value", .args = &.{ "-f", "s16le", "-f", "wav" }, .fixture = "mono_8k", .exit_code = 0, .stdout = mono_8k_report, .stderr = "" },
+    .{ .name = "-f without a value", .args = &.{"-f"}, .exit_code = 1, .stderr = "zffprobe: missing value for -f\n" ++ usage_line },
+    .{ .name = "-sample_rate without a value", .args = &.{ "-f", "s16le", "-sample_rate" }, .exit_code = 1, .stderr = "zffprobe: missing value for -sample_rate\n" ++ usage_line },
+    // -sample_rate is the demuxer's option: FFmpeg's expression (Low-12).
+    .{ .name = "-sample_rate in FFmpeg's syntax", .set = .raw, .args = &.{ "-sample_rate", "8k", "-f", "s16le", "-ch_layout", "mono" }, .fixture = "raw_s16le_mono_8k", .exit_code = 0, .stdout = raw_s16le_report, .stderr = "" },
+    .{ .name = "-sample_rate as an expression", .set = .raw, .args = &.{ "-sample_rate", "4000*2", "-f", "s16le", "-ch_layout", "mono" }, .fixture = "raw_s16le_mono_8k", .exit_code = 0, .stdout = raw_s16le_report, .stderr = "" },
+    .{ .name = "-sample_rate with a digit separator", .set = .raw, .args = &.{ "-sample_rate", "44_100", "-f", "s16le" }, .fixture = "raw_s16le_mono_8k", .exit_code = 1, .stderr = "zffprobe: 44_100: invalid sample rate\n" },
     .{ .name = "an unknown raw format", .args = &.{ "-f", "s64le" }, .fixture = "mono_8k", .exit_code = 3, .stderr = "zffprobe: s64le: unsupported input format\n" },
     // T22d: CAF, detected from content.
     .{ .name = "CAF", .set = .caf, .fixture = "caf_s16be_mono_8k", .exit_code = 0, .stdout = caf_s16be_report, .stderr = "" },
@@ -664,14 +672,21 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "A-law copy to raw PCM from the .al extension", .args = &.{"-i"}, .input = "alaw_mono_8k", .tail = &.{ "-c", "copy" }, .output_file = "out.al", .output_bytes = raw_alaw_mono_8k, .exit_code = 0, .stderr = "" },
     .{ .name = "raw PCM from a pipe to raw PCM", .set = .raw, .args = &.{ "-f", "alaw", "-i", "-" }, .stdin_input = "raw_alaw_mono_8k", .tail = &.{ "-c", "copy", "-f", "alaw", "-" }, .exit_code = 0, .stdout = raw_alaw_mono_8k, .stderr = "" },
     .{ .name = "raw parameters for a WAV input", .args = &.{ "-ar", "8000", "-i" }, .input = "mono_8k", .tail = &.{ "-f", "wav", "-" }, .exit_code = 1, .stderr_contains = ": -sample_rate and -ch_layout apply only to raw PCM input\n" },
-    .{ .name = "-ac with -ch_layout", .args = &.{ "-ac", "1", "-ch_layout", "mono", "-i", "a.raw", "b.wav" }, .exit_code = 1, .stderr_contains = "given twice: -ch_layout\n" },
+    // FFmpeg sets the program's -ar after the demuxer's -sample_rate and
+    // -ch_layout after -ac, whatever their order (Low-13).
+    .{ .name = "input -ch_layout wins over -ac, -ar over -sample_rate", .set = .raw, .args = &.{ "-f", "s16le", "-ch_layout", "mono", "-ar", "8000", "-sample_rate", "16000", "-ac", "2", "-i" }, .input = "raw_s16le_mono_8k", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_mono_8k, .stderr = "" },
+    .{ .name = "input -sample_rate in FFmpeg's syntax", .set = .raw, .args = &.{ "-f", "s16le", "-sample_rate", "8k", "-i" }, .input = "raw_s16le_mono_8k", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_mono_8k, .stderr = "" },
+    .{ .name = "input -ar in FFmpeg's number syntax", .set = .raw, .args = &.{ "-f", "s16le", "-ar", "8k", "-i" }, .input = "raw_s16le_mono_8k", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_mono_8k, .stderr = "" },
+    .{ .name = "input -ar is a number, not an expression", .set = .raw, .args = &.{ "-f", "s16le", "-ar", "4000*2", "-i" }, .input = "raw_s16le_mono_8k", .tail = &.{ "-f", "wav", "-" }, .exit_code = 1, .stderr = "zffmpeg: 4000*2: invalid sample rate\n" },
     .{ .name = "a negative output -ar", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-ar", "-8000", "-f", "wav", "-" }, .exit_code = 1, .stderr = "zffmpeg: -8000: invalid sample rate\n" },
     .{ .name = "an output -ar in FFmpeg's number syntax", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-ar", "8k", "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt ", .stderr = "" },
     .{ .name = "an output -ar that is not a number", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-ar", "8kHz", "-f", "wav", "-" }, .exit_code = 1, .stderr = "zffmpeg: 8kHz: invalid sample rate\n" },
     .{ .name = "a rate change with -c copy", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-c", "copy", "-ar", "48000", "-f", "wav", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
-    .{ .name = "-ar twice", .args = &.{ "-i", "a.wav", "-ar", "8000", "-ar", "16000", "b.wav" }, .exit_code = 1, .stderr_contains = "given twice: -ar\n" },
+    .{ .name = "-ar twice takes the last", .args = &.{"-i"}, .input = "mono_8k", .tail = &.{ "-ar", "16000", "-ar", "8000", "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_mono_8k, .stderr = "" },
+    .{ .name = "-f twice takes the last", .args = &.{"-i"}, .input = "mono_8k", .tail = &.{ "-f", "au", "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_mono_8k, .stderr = "" },
+    .{ .name = "-c twice takes the last, the first never looked up", .args = &.{"-i"}, .input = "mono_8k", .tail = &.{ "-c", "bogus", "-c:a", "pcm_s16le", "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_mono_8k, .stderr = "" },
     .{ .name = "an output -ac of 0", .args = &.{"-i"}, .input = "extensible_5point1", .tail = &.{ "-ac", "0", "-f", "wav", "-" }, .exit_code = 1, .stderr = "zffmpeg: 0: invalid channel count\n" },
-    .{ .name = "output -ac and -ch_layout together", .args = &.{ "-i", "a.wav", "-ac", "2", "-ch_layout", "mono", "b.wav" }, .exit_code = 1, .stderr_contains = "given twice: -ch_layout\n" },
+    .{ .name = "output -ch_layout wins over -ac", .args = &.{"-i"}, .input = "mono_8k", .tail = &.{ "-ch_layout", "mono", "-ac", "2", "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_mono_8k, .stderr = "" },
     .{ .name = "a layout change with -c copy", .args = &.{"-i"}, .input = "extensible_5point1", .tail = &.{ "-c", "copy", "-ac", "2", "-f", "wav", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
     .{ .name = "a layout libswresample cannot mix", .args = &.{"-i"}, .input = "extensible_5point1", .tail = &.{ "-ch_layout", "FL+FR+SL", "-f", "wav", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedLayout\n" },
     .{ .name = "an invalid channel count", .set = .raw, .args = &.{ "-f", "s16le", "-ac", "0", "-i" }, .input = "raw_s16le_mono_8k", .tail = &.{ "-f", "wav", "-" }, .exit_code = 1, .stderr = "zffmpeg: 0: invalid channel count\n" },
@@ -708,6 +723,11 @@ const convert_cases = [_]ConvertCase{
     // from a file (after the counting pass) and from a pipe.
     .{ .name = "Ogg Vorbis whose setup header the decoder refuses", .set = .ogg, .args = &.{"-i"}, .input = "ogg_vorbis_stereo", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stdout = "", .stderr_contains = ": InvalidVorbis\n" },
     .{ .name = "Ogg Vorbis from a pipe whose setup header the decoder refuses", .set = .ogg, .args = &.{ "-i", "-" }, .stdin_input = "ogg_vorbis_stereo", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 2, .stdout = "", .stderr_contains = ": InvalidVorbis\n" },
+    // A file whose frames sit inside the probe buffer, and one needing
+    // several probe rounds: the demuxer opens from the start (M7), as from
+    // a pipe.
+    .{ .name = "a short MP3 file opens from its start", .set = .mp3, .args = &.{"-i"}, .input = "mp3_six_frames", .tail = &.{ "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = "mp3_six_frames.mp3: UnsupportedOperation\n" },
+    .{ .name = "an MP3 file after a large ID3v2 tag opens from its start", .set = .mp3, .args = &.{"-i"}, .input = "mp3_large_id3v2", .tail = &.{ "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = "mp3_large_id3v2.mp3: UnsupportedOperation\n" },
     .{ .name = "Ogg FLAC whose frames all fail to decode", .set = .ogg, .args = &.{"-i"}, .input = "ogg_lost_continued_page", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stdout = "", .stderr_contains = ": DecodeErrorRate\n" },
     // T27b: FLAC encoded into Ogg; compare.py checks the bytes against FFmpeg's.
     .{ .name = "FLAC into Ogg on standard output", .set = .flac, .args = &.{"-i"}, .input = "flac_ffmpeg_level5_stereo", .tail = &.{ "-f", "ogg", "-" }, .exit_code = 0, .stdout_contains = "OggS\x00\x02", .stderr = "" },

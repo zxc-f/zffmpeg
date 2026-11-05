@@ -42,8 +42,11 @@
 //! output file is opened: the arguments, the input header, the operation
 //! matrix, the output header, then whether the output is the input file. An
 //! existing output is never replaced without `-y`. A failure after the output
-//! file was created removes it; output already written to standard output
-//! stays. Exit statuses are those of zffprobe (`status.zig`); the conversion
+//! file was created removes it when this run created it; an existing path
+//! replaced with `-y` (a file, a pipe, a device) keeps what was written, as
+//! FFmpeg keeps it, and so does standard output. An option given again
+//! replaces its value, as FFmpeg's last one wins. Exit statuses are those of
+//! zffprobe (`status.zig`); the conversion
 //! itself is `av.convert`, so this file only handles arguments, files and
 //! output.
 
@@ -100,8 +103,11 @@ const Command = struct {
     output: []const u8,
     /// The `-f` value before `-i`, if any: the forced input container.
     input_format: ?[]const u8,
-    /// The raw PCM parameters before `-i`, as given.
-    input_rate: ?[]const u8,
+    /// The raw PCM parameters before `-i`, as given: the demuxer's
+    /// `-sample_rate`, the program's `-ar` (which FFmpeg sets after the
+    /// demuxer's options, so it wins), `-ch_layout` and `-ac`.
+    input_sample_rate: ?[]const u8,
+    input_ar: ?[]const u8,
     input_layout: ?[]const u8,
     input_channels: ?[]const u8,
     /// `-ch_layout` or `-ac` after `-i`: the output's layout (T23c).
@@ -111,9 +117,8 @@ const Command = struct {
     output_rate: ?[]const u8,
     /// The `-f` value after `-i`, if any; resolved by `outputContainer`.
     format: ?[]const u8,
-    mode: av.convert.Mode,
-    /// The `-c` encoder, when it names one rather than `copy`.
-    encoder: ?av.codecs.Codec,
+    /// The last `-c` value: `copy` or an encoder's name.
+    codec: ?[]const u8,
     /// The FLAC encoder's options after `-i` (T26c).
     flac: av.flacenc.AvOptions,
     dither: av.dither.Options,
@@ -176,7 +181,14 @@ fn run(init: std.process.Init) ExitStatus {
         }
     else
         null;
-    const raw_params = switch (status.rawParams(io, "zffmpeg", command.input_rate, command.input_layout, command.input_channels)) {
+    // FFmpeg sets the program's -ar after the demuxer's -sample_rate.
+    const input_rate: ?status.RawRate = if (command.input_ar) |text|
+        .{ .number = text }
+    else if (command.input_sample_rate) |text|
+        .{ .option = text }
+    else
+        null;
+    const raw_params = switch (status.rawParams(io, "zffmpeg", input_rate, command.input_layout, command.input_channels)) {
         .ok => |params| params,
         .failed => |exit| return exit,
     };
@@ -194,14 +206,30 @@ fn run(init: std.process.Init) ExitStatus {
         }
         break :rate if (rate == 0) null else @intCast(rate);
     } else null;
+    // The last -c only, as FFmpeg takes it: an unknown encoder before it
+    // is never looked up.
+    var mode: av.convert.Mode = .transcode;
+    var encoder: ?av.codecs.Codec = null;
+    if (command.codec) |name| {
+        if (std.mem.eql(u8, name, "copy")) {
+            mode = .copy;
+        } else {
+            // An encoder, as FFmpeg names it (T23a, T26c).
+            const found = av.codecs.findEncoder(name) orelse {
+                printError(io, "zffmpeg: unknown encoder: {s}\n" ++ usage, .{name});
+                return .usage;
+            };
+            encoder = found.codec;
+        }
+    }
     // The input's tags are carried, as FFmpeg's default -map_metadata does
     // (T21c, the project owner's choice).
     var tags: av.metadata.Dictionary = .empty;
     defer tags.deinit(init.gpa);
     return convert(io, command, .{
         .output = container,
-        .mode = command.mode,
-        .codec = command.encoder,
+        .mode = mode,
+        .codec = encoder,
         .flac = command.flac.toOptions(),
         .dither = command.dither,
         .input = .{ .format = input_container, .raw = raw_params },
@@ -215,6 +243,10 @@ fn run(init: std.process.Init) ExitStatus {
     });
 }
 
+/// The command line, in FFmpeg's syntax: an option before `-i` applies to
+/// the input, after it to the output. An option given again replaces its
+/// value, as FFmpeg's last one wins (FFmpeg warns; zffmpeg prints errors
+/// only).
 fn parse(args: []const [:0]const u8) Parsed {
     if (args.len == 2 and (std.mem.eql(u8, args[1], "-h") or std.mem.eql(u8, args[1], "--help"))) {
         return .help;
@@ -222,16 +254,15 @@ fn parse(args: []const [:0]const u8) Parsed {
     var input: ?[]const u8 = null;
     var output: ?[]const u8 = null;
     var input_format: ?[]const u8 = null;
-    var input_rate: ?[]const u8 = null;
+    var input_sample_rate: ?[]const u8 = null;
+    var input_ar: ?[]const u8 = null;
     var input_layout: ?[]const u8 = null;
     var input_channels: ?[]const u8 = null;
     var output_layout: ?[]const u8 = null;
     var output_channels: ?[]const u8 = null;
     var output_rate: ?[]const u8 = null;
     var format: ?[]const u8 = null;
-    var codec_given = false;
-    var copy = false;
-    var encoder: ?av.codecs.Codec = null;
+    var codec: ?[]const u8 = null;
     var flac: av.flacenc.AvOptions = .{};
     var dither_method: ?[]const u8 = null;
     var dither_scale: ?[]const u8 = null;
@@ -243,84 +274,56 @@ fn parse(args: []const [:0]const u8) Parsed {
         if (output != null) return .{ .usage = .{ .reason = "options after the output are not supported", .arg = arg } };
         if (std.mem.eql(u8, arg, "-y")) {
             yes = true;
-        } else if (std.mem.eql(u8, arg, "-n")) {
-            no = true;
-        } else if (std.mem.eql(u8, arg, "-i")) {
-            if (input != null) return .{ .usage = .{ .reason = "only one input is supported" } };
-            i += 1;
-            if (i == args.len) return .{ .usage = .{ .reason = "missing value for", .arg = arg } };
-            input = args[i];
-        } else if (input == null and isRawOption(arg)) {
-            // FFmpeg's raw demuxer options, and the -ar/-ac it maps to them
-            // before -i (T22c).
-            i += 1;
-            if (i == args.len) return .{ .usage = .{ .reason = "missing value for", .arg = arg } };
-            const is_rate = std.mem.eql(u8, arg, "-sample_rate") or std.mem.eql(u8, arg, "-ar");
-            if (is_rate) {
-                if (input_rate != null) return .{ .usage = .{ .reason = "given twice", .arg = arg } };
-                input_rate = args[i];
-            } else {
-                if (input_layout != null or input_channels != null) return .{ .usage = .{ .reason = "given twice", .arg = arg } };
-                if (std.mem.eql(u8, arg, "-ac")) input_channels = args[i] else input_layout = args[i];
-            }
-        } else if (input != null and std.mem.eql(u8, arg, "-ar")) {
-            // After -i, the output's sample rate (T24).
-            i += 1;
-            if (i == args.len) return .{ .usage = .{ .reason = "missing value for", .arg = arg } };
-            if (output_rate != null) return .{ .usage = .{ .reason = "given twice", .arg = arg } };
-            output_rate = args[i];
-        } else if (input != null and (std.mem.eql(u8, arg, "-ch_layout") or std.mem.eql(u8, arg, "-ac"))) {
-            // After -i, the output's layout, which the samples are
-            // rematrixed into (T23c).
-            i += 1;
-            if (i == args.len) return .{ .usage = .{ .reason = "missing value for", .arg = arg } };
-            if (output_layout != null or output_channels != null) return .{ .usage = .{ .reason = "given twice", .arg = arg } };
-            if (std.mem.eql(u8, arg, "-ac")) output_channels = args[i] else output_layout = args[i];
-        } else if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "-c") or std.mem.eql(u8, arg, "-c:a")) {
-            // Before -i, FFmpeg applies these to the input; -f is an input
-            // option here (T16), -c is not.
-            const is_format = arg[1] == 'f';
-            if (input == null and !is_format) return .{ .usage = .{ .reason = "input options other than -f and the raw PCM ones are not supported; put this after -i <input>", .arg = arg } };
-            i += 1;
-            if (i == args.len) return .{ .usage = .{ .reason = "missing value for", .arg = arg } };
-            const value: []const u8 = args[i];
-            if (is_format) {
-                const slot = if (input == null) &input_format else &format;
-                if (slot.* != null) return .{ .usage = .{ .reason = "given twice", .arg = arg } };
-                slot.* = value;
-            } else {
-                if (codec_given) return .{ .usage = .{ .reason = "given twice", .arg = arg } };
-                codec_given = true;
-                if (std.mem.eql(u8, value, "copy")) {
-                    copy = true;
-                } else {
-                    // An encoder, as FFmpeg names it (T23a, T26c).
-                    const found = av.codecs.findEncoder(value) orelse return .{ .usage = .{ .reason = "unknown encoder", .arg = value } };
-                    encoder = found.codec;
-                }
-            }
-        } else if (std.mem.eql(u8, arg, "-dither_method") or std.mem.eql(u8, arg, "-dither_scale")) {
-            // libswresample's options, for the output (T23a); before -i
-            // FFmpeg takes them for the input and ignores them.
-            if (input == null) return .{ .usage = .{ .reason = "input options other than -f and the raw PCM ones are not supported; put this after -i <input>", .arg = arg } };
-            i += 1;
-            if (i == args.len) return .{ .usage = .{ .reason = "missing value for", .arg = arg } };
-            const slot = if (std.mem.eql(u8, arg, "-dither_method")) &dither_method else &dither_scale;
-            if (slot.* != null) return .{ .usage = .{ .reason = "given twice", .arg = arg } };
-            slot.* = args[i];
-        } else if (input != null and isFlacOption(arg)) {
-            // The FLAC encoder's options, in FFmpeg's syntax (T26c); FFmpeg
-            // leaves them unused for another encoder, as zffmpeg does.
-            i += 1;
-            if (i == args.len) return .{ .usage = .{ .reason = "missing value for", .arg = arg } };
-            av.options.set(av.flacenc.AvOptions, &flac, arg[1..], args[i]) catch
-                return .{ .usage = .{ .reason = "invalid value for", .arg = arg } };
-        } else if (arg.len > 1 and arg[0] == '-') {
-            return .{ .usage = .{ .reason = "unknown option", .arg = arg } };
-        } else {
-            if (input == null) return .{ .usage = .{ .reason = "the output must follow -i <input>", .arg = arg } };
-            output = arg;
+            continue;
         }
+        if (std.mem.eql(u8, arg, "-n")) {
+            no = true;
+            continue;
+        }
+        // Every other option takes a value, into its slot.
+        const slot: *?[]const u8 = if (std.mem.eql(u8, arg, "-i")) slot: {
+            if (input != null) return .{ .usage = .{ .reason = "only one input is supported" } };
+            break :slot &input;
+        } else if (input == null) slot: {
+            // FFmpeg's raw demuxer options and the -ar/-ac it maps to them
+            // (T22c), and -f (T16).
+            if (std.mem.eql(u8, arg, "-sample_rate")) break :slot &input_sample_rate;
+            if (std.mem.eql(u8, arg, "-ar")) break :slot &input_ar;
+            if (std.mem.eql(u8, arg, "-ch_layout")) break :slot &input_layout;
+            if (std.mem.eql(u8, arg, "-ac")) break :slot &input_channels;
+            if (std.mem.eql(u8, arg, "-f")) break :slot &input_format;
+            // FFmpeg would apply these to the input.
+            if (isOutputOnly(arg)) return .{ .usage = .{ .reason = "input options other than -f and the raw PCM ones are not supported; put this after -i <input>", .arg = arg } };
+            if (arg.len > 1 and arg[0] == '-') return .{ .usage = .{ .reason = "unknown option", .arg = arg } };
+            return .{ .usage = .{ .reason = "the output must follow -i <input>", .arg = arg } };
+        } else slot: {
+            // The output's rate (T24), its layout, which the samples are
+            // rematrixed into (T23c), its container, its encoder, and
+            // libswresample's dither options (T23a).
+            if (std.mem.eql(u8, arg, "-ar")) break :slot &output_rate;
+            if (std.mem.eql(u8, arg, "-ch_layout")) break :slot &output_layout;
+            if (std.mem.eql(u8, arg, "-ac")) break :slot &output_channels;
+            if (std.mem.eql(u8, arg, "-f")) break :slot &format;
+            if (std.mem.eql(u8, arg, "-c") or std.mem.eql(u8, arg, "-c:a")) break :slot &codec;
+            if (std.mem.eql(u8, arg, "-dither_method")) break :slot &dither_method;
+            if (std.mem.eql(u8, arg, "-dither_scale")) break :slot &dither_scale;
+            if (isFlacOption(arg)) {
+                // The FLAC encoder's options, in FFmpeg's syntax (T26c);
+                // FFmpeg leaves them unused for another encoder, as
+                // zffmpeg does.
+                i += 1;
+                if (i == args.len) return .{ .usage = .{ .reason = "missing value for", .arg = arg } };
+                av.options.set(av.flacenc.AvOptions, &flac, arg[1..], args[i]) catch
+                    return .{ .usage = .{ .reason = "invalid value for", .arg = arg } };
+                continue;
+            }
+            if (arg.len > 1 and arg[0] == '-') return .{ .usage = .{ .reason = "unknown option", .arg = arg } };
+            output = arg;
+            continue;
+        };
+        i += 1;
+        if (i == args.len) return .{ .usage = .{ .reason = "missing value for", .arg = arg } };
+        slot.* = args[i];
     }
     if (yes and no) return .{ .usage = .{ .reason = "-y and -n contradict each other" } };
     var dither: av.dither.Options = .{};
@@ -332,15 +335,15 @@ fn parse(args: []const [:0]const u8) Parsed {
         .input = input orelse return .{ .usage = .{ .reason = "missing -i <input>" } },
         .output = output orelse return .{ .usage = .{ .reason = "missing output" } },
         .input_format = input_format,
-        .input_rate = input_rate,
+        .input_sample_rate = input_sample_rate,
+        .input_ar = input_ar,
         .input_layout = input_layout,
         .input_channels = input_channels,
         .output_layout = output_layout,
         .output_channels = output_channels,
         .output_rate = output_rate,
         .format = format,
-        .mode = if (copy) .copy else .transcode,
-        .encoder = encoder,
+        .codec = codec,
         .flac = flac,
         .dither = dither,
         .overwrite = yes,
@@ -364,8 +367,10 @@ fn isFlacOption(arg: []const u8) bool {
     return false;
 }
 
-fn isRawOption(arg: []const u8) bool {
-    for ([_][]const u8{ "-sample_rate", "-ar", "-ch_layout", "-ac" }) |name| {
+/// The options zffmpeg takes only after `-i`, where they apply to the
+/// output: FFmpeg would apply them to the input before it.
+fn isOutputOnly(arg: []const u8) bool {
+    for ([_][]const u8{ "-c", "-c:a", "-dither_method", "-dither_scale" }) |name| {
         if (std.mem.eql(u8, arg, name)) return true;
     }
     return false;
@@ -424,23 +429,37 @@ fn convert(io: std.Io, command: Command, request: av.convert.Request) ExitStatus
         return .usage;
     }
     // Exclusive creation refuses an existing output without a separate,
-    // racy existence check.
-    const output_file = cwd.createFile(io, command.output, .{ .exclusive = !command.overwrite }) catch |err| switch (err) {
-        error.PathAlreadyExists => {
-            printError(io, "zffmpeg: {s}: PathAlreadyExists (use -y to replace it)\n", .{command.output});
-            return .usage;
+    // racy existence check, and tells whether this run created the file:
+    // only then is it removed after a failure. With -y an existing path is
+    // opened as it is, which follows a symbolic link and keeps a pipe or a
+    // device what it is.
+    var created = true;
+    const output_file = cwd.createFile(io, command.output, .{ .exclusive = true }) catch |err| switch (err) {
+        error.PathAlreadyExists => existing: {
+            if (!command.overwrite) {
+                printError(io, "zffmpeg: {s}: PathAlreadyExists (use -y to replace it)\n", .{command.output});
+                return .usage;
+            }
+            created = false;
+            break :existing cwd.createFile(io, command.output, .{}) catch |open_err| return fail(io, command.output, open_err);
         },
         else => return fail(io, command.output, err),
     };
     var writer = output_file.writerStreaming(io, &output_buffer);
-    // A file can seek back, so a FLAC output's final STREAMINFO replaces the
-    // first, as FFmpeg's muxer does on a seekable output (T26c).
-    const result = conversion.runTo(&writer.interface, .file(&writer));
+    // A regular file can seek back, so a FLAC output's final STREAMINFO
+    // replaces the first, as FFmpeg's muxer does on a seekable output
+    // (T26c). A pipe or a device keeps the first, as FFmpeg's muxer leaves
+    // an unseekable output's (it warns that it cannot rewrite the header).
+    const regular = if (output_file.stat(io)) |stat| stat.kind == .file else |_| false;
+    const result = conversion.runTo(&writer.interface, if (regular) .file(&writer) else null);
     // Close before removing: a file cannot be deleted while open everywhere.
     output_file.close(io);
     result catch |err| {
         const exit = runFailure(io, command, err, &reader, &writer);
-        cwd.deleteFile(io, command.output) catch |delete_err| {
+        // A file this run created (a regular one, by exclusive creation);
+        // what was there before, replaced with -y, keeps the partial output
+        // as FFmpeg's does.
+        if (created) cwd.deleteFile(io, command.output) catch |delete_err| {
             printError(io, "zffmpeg: {s}: cannot remove the partial output: {t}\n", .{ command.output, delete_err });
         };
         return exit;
@@ -459,8 +478,9 @@ fn sameFile(io: std.Io, input: std.Io.File, output_path: []const u8) bool {
     return output_stat.kind == .file and output_stat.inode == input_stat.inode;
 }
 
-/// Reports a failure after the output started: an output failure names the
-/// output and its file error, anything else names the input.
+/// Reports a failure after the output started: an output failure (a write,
+/// or FLAC's seek back to STREAMINFO) names the output and its file error,
+/// anything else names the input.
 fn runFailure(
     io: std.Io,
     command: Command,
@@ -469,7 +489,7 @@ fn runFailure(
     writer: *const std.Io.File.Writer,
 ) ExitStatus {
     if (err == error.WriteFailed) {
-        const cause: status.Error = writer.err orelse error.WriteFailed;
+        const cause: status.Error = if (writer.err) |e| e else if (writer.seek_err) |e| e else error.WriteFailed;
         return fail(io, command.output, cause);
     }
     return fail(io, command.input, withReadCause(err, reader));

@@ -33,6 +33,7 @@ const Stdout = union(enum) {
 
 const Harness = struct {
     io: std.Io,
+    gpa: std.mem.Allocator,
     dir: std.Io.Dir,
     exe: []const u8,
     failures: usize = 0,
@@ -97,6 +98,32 @@ const Harness = struct {
         return .{ .term = term, .stderr = try h.dir.readFile(io, "stderr.txt", &h.stderr_buffer) };
     }
 
+    /// Runs zffmpeg with its standard output a pipe that is read to the
+    /// end, which the caller frees (`gpa`).
+    fn runCapture(h: *Harness, args: []const []const u8) !struct { outcome: Outcome, stdout: []u8 } {
+        const io = h.io;
+        var argv_buffer: [16][]const u8 = undefined;
+        argv_buffer[0] = h.exe;
+        @memcpy(argv_buffer[1..][0..args.len], args);
+        const stderr_file = try h.dir.createFile(io, "stderr.txt", .{});
+        defer stderr_file.close(io);
+        var child = try std.process.spawn(io, .{
+            .argv = argv_buffer[0 .. args.len + 1],
+            .cwd = .{ .dir = h.dir },
+            .stdin = .ignore,
+            .stdout = .pipe,
+            .stderr = .{ .file = stderr_file },
+        });
+        // Spawned with `.pipe`, so the read end exists; read before waiting,
+        // so a full pipe cannot stall the child.
+        var buffer: [4096]u8 = undefined;
+        var reader = child.stdout.?.readerStreaming(io, &buffer);
+        const stdout = try reader.interface.allocRemaining(h.gpa, .limited(1 << 22));
+        errdefer h.gpa.free(stdout);
+        const term = try child.wait(io);
+        return .{ .outcome = .{ .term = term, .stderr = try h.dir.readFile(io, "stderr.txt", &h.stderr_buffer) }, .stdout = stdout };
+    }
+
     fn run(h: *Harness, args: []const []const u8, stdin: std.process.SpawnOptions.StdIo, stdout: ?std.Io.File) !Outcome {
         return h.runWith(args, stdin, if (stdout) |file| .{ .file = file } else .scratch);
     }
@@ -119,6 +146,20 @@ const Harness = struct {
             return h.fail(case, "{s}: {t}", .{ path, err });
         };
         if (!std.mem.eql(u8, content, expected)) h.fail(case, "{s} has unexpected content", .{path});
+    }
+
+    fn expectLacking(h: *Harness, case: []const u8, outcome: Outcome, text: []const u8) void {
+        if (std.mem.find(u8, outcome.stderr, text) != null) h.fail(case, "stderr \"{s}\" contains \"{s}\"", .{ outcome.stderr, text });
+    }
+
+    /// `path` exists and no longer holds `old`: a partial output kept.
+    fn expectReplaced(h: *Harness, case: []const u8, path: []const u8, old: []const u8) !void {
+        // A longer file fills the buffer, which is not `old` either.
+        var buffer: [1024]u8 = undefined;
+        const content = h.dir.readFile(h.io, path, &buffer) catch |err| {
+            return h.fail(case, "{s}: {t}", .{ path, err });
+        };
+        if (std.mem.eql(u8, content, old)) h.fail(case, "{s} still holds its old content", .{path});
     }
 
     fn expectAbsent(h: *Harness, case: []const u8, path: []const u8) void {
@@ -152,7 +193,7 @@ pub fn main(init: std.process.Init) !u8 {
     defer fixture_dir.close(io);
     var dir = try std.Io.Dir.cwd().openDir(io, args[3], .{});
     defer dir.close(io);
-    var h: Harness = .{ .io = io, .dir = dir, .exe = exe };
+    var h: Harness = .{ .io = io, .gpa = init.gpa, .dir = dir, .exe = exe };
 
     var wav_buffer: [256]u8 = undefined;
     const wav_in = try fixture_dir.readFile(io, "wav" ++ std.fs.path.sep_str ++ "mono_8k.wav", &wav_buffer);
@@ -209,14 +250,73 @@ pub fn main(init: std.process.Init) !u8 {
         try h.expectContent(case, "out.au", previous);
     }
 
-    // A failure after the output file was created removes it.
+    // A failure after the output file was created removes it when this run
+    // created it; what -y replaced keeps the partial output, as FFmpeg's.
     {
         const case = "a late failure removes the partial output";
         h.expect(case, try h.run(&.{ "-i", "late.wav", "new.au" }, .ignore, null), 2, "late.wav: InvalidWave");
         h.expectAbsent(case, "new.au");
+        const kept = "a late failure keeps what -y replaced";
         try h.write("out.au", previous);
-        h.expect(case, try h.run(&.{ "-y", "-i", "late.wav", "out.au" }, .ignore, null), 2, "late.wav: InvalidWave");
-        h.expectAbsent(case, "out.au");
+        const outcome = try h.run(&.{ "-y", "-i", "late.wav", "out.au" }, .ignore, null);
+        h.expect(kept, outcome, 2, "late.wav: InvalidWave");
+        h.expectLacking(kept, outcome, "cannot remove");
+        try h.expectReplaced(kept, "out.au", previous);
+    }
+    // A symbolic link replaced with -y stays a link, its target written
+    // through it (POSIX only: Windows needs a privilege to create one).
+    if (builtin.os.tag != .windows) {
+        const case = "a late failure keeps a linked output";
+        try h.write("target.au", previous);
+        try dir.symLink(io, "target.au", "link.au", .{});
+        h.expect(case, try h.run(&.{ "-y", "-i", "late.wav", "link.au" }, .ignore, null), 2, "late.wav: InvalidWave");
+        if (dir.statFile(io, "link.au", .{ .follow_symlinks = false })) |stat| {
+            if (stat.kind != .sym_link) h.fail(case, "link.au is now a {t}", .{stat.kind});
+        } else |err| h.fail(case, "link.au: {t}", .{err});
+        try h.expectReplaced(case, "target.au", previous);
+    }
+    // A pipe named as the output, Linux's /dev/stdout here (the only name
+    // of one that needs no system call to make): FLAC keeps its first
+    // STREAMINFO there, as on standard output and as FFmpeg, which only
+    // warns that it cannot rewrite it (M13); a failure removes nothing
+    // that was there (M14).
+    if (builtin.os.tag == .linux) {
+        try writeLongWav(io, dir, "pipe.wav");
+        const case = "FLAC into a named pipe";
+        const named = try h.runCapture(&.{ "-y", "-i", "pipe.wav", "-f", "flac", "/dev/stdout" });
+        h.expect(case, named.outcome, 0, "");
+        h.expect(case, try h.run(&.{ "-i", "pipe.wav", "-f", "flac", "-" }, .ignore, null), 0, "");
+        const stdout = try dir.readFileAlloc(io, "stdout.bin", h.gpa, .limited(1 << 22));
+        defer h.gpa.free(stdout);
+        if (!std.mem.eql(u8, named.stdout, stdout)) h.fail(case, "the pipe got other bytes than standard output", .{});
+        h.gpa.free(named.stdout);
+        const failed = "a late failure into a named pipe removes nothing";
+        const late_pipe = try h.runCapture(&.{ "-y", "-i", "late.wav", "-f", "au", "/dev/stdout" });
+        h.gpa.free(late_pipe.stdout);
+        h.expect(failed, late_pipe.outcome, 2, "late.wav: InvalidWave");
+        h.expectLacking(failed, late_pipe.outcome, "cannot remove");
+    }
+    // A header declaring 2^32 - 256 bytes of data in a 144-byte file, with
+    // a rate change: the output's frame count comes at once (H4), and the
+    // missing data is the late failure it is without -ar.
+    {
+        const case = "a huge declared length resampled";
+        try h.write("huge.wav", &hugeDeclaredWav());
+        h.expect(case, try h.run(&.{ "-i", "huge.wav", "-ar", "48000", "huge-out.wav" }, .ignore, null), 2, "huge.wav: Truncated");
+        h.expectAbsent(case, "huge-out.wav");
+    }
+    // Refusals that depend only on the request come before the output is
+    // created (M15): an output in a missing directory is never opened.
+    {
+        const case = "a resampler refusal before the output";
+        // 1 Hz 8-bit in AIFF's 4 KiB packets to 100 kHz: a call's room
+        // past the buffers.
+        try writeAiff(io, dir, "rate1.aiff", .s8, 1, 8192);
+        h.expect(case, try h.run(&.{ "-y", "-i", "rate1.aiff", "-ar", "100000", "-c:a", "pcm_s32le", "missing" ++ std.fs.path.sep_str ++ "o.wav" }, .ignore, null), 3, "rate1.aiff: UnsupportedFormat");
+        // 100 Hz in packets of 2048 to 48 kHz: a first output past FLAC's
+        // block sizes, which FFmpeg's encoder refuses too.
+        try writeAiff(io, dir, "r100.aiff", .s16be, 100, 2000);
+        h.expect(case, try h.run(&.{ "-y", "-i", "r100.aiff", "-ar", "48000", "missing" ++ std.fs.path.sep_str ++ "o.flac" }, .ignore, null), 3, "r100.aiff: UnsupportedFormat");
     }
 
     // Standard streams: a pipe-free round trip, then read and write failures.
@@ -288,6 +388,38 @@ pub fn main(init: std.process.Init) !u8 {
 }
 
 const long_frames = 1 << 16;
+
+/// The review's 144-byte WAV (H4): 8 kHz mono u8 whose `data` chunk
+/// declares 2^32 - 256 bytes, with 100 of them present.
+fn hugeDeclaredWav() [144]u8 {
+    var bytes: [144]u8 = @splat(0x80);
+    @memcpy(bytes[0..4], "RIFF");
+    std.mem.writeInt(u32, bytes[4..8], 0xFFFF_FF24, .little);
+    @memcpy(bytes[8..16], "WAVEfmt ");
+    std.mem.writeInt(u32, bytes[16..20], 16, .little);
+    std.mem.writeInt(u16, bytes[20..22], 1, .little); // PCM
+    std.mem.writeInt(u16, bytes[22..24], 1, .little); // mono
+    std.mem.writeInt(u32, bytes[24..28], 8000, .little);
+    std.mem.writeInt(u32, bytes[28..32], 8000, .little);
+    std.mem.writeInt(u16, bytes[32..34], 1, .little);
+    std.mem.writeInt(u16, bytes[34..36], 8, .little);
+    @memcpy(bytes[36..40], "data");
+    std.mem.writeInt(u32, bytes[40..44], 0xFFFF_FF00, .little);
+    return bytes;
+}
+
+/// A mono AIFF of `frames` silent frames of `codec` at `rate`.
+fn writeAiff(io: std.Io, dir: std.Io.Dir, path: []const u8, codec: av.pcm.Codec, rate: u32, frames: u32) !void {
+    const file = try dir.createFile(io, path, .{});
+    defer file.close(io);
+    var buffer: [4096]u8 = undefined;
+    var file_writer = file.writerStreaming(io, &buffer);
+    const format = try av.audio.Format.init(rate, 1, codec.storage());
+    var writer = try av.aiff.Writer.begin(&file_writer.interface, codec, format, frames, .{});
+    const zero: [2]u8 = @splat(0);
+    for (0..frames) |_| try writer.writeData(zero[0..codec.bytesPerSample()]);
+    try writer.finish();
+}
 
 /// 256 KiB of stereo samples: larger than zffmpeg's 64 KiB output buffer.
 fn writeLongWav(io: std.Io, dir: std.Io.Dir, path: []const u8) !void {
