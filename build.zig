@@ -782,7 +782,7 @@ const convert_cases = [_]ConvertCase{
     // it, and the input decodes from the next packet on, as the ffmpeg
     // program decodes it (the same bytes, from a file and from a pipe).
     .{ .name = "Ogg Opus whose first data packet is empty to WAV", .set = .ogg, .args = &.{"-i"}, .input = "ogg_opus_empty_first_packet", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt ", .stderr = "" },
-    .{ .name = "Ogg Opus from a pipe whose first data packet is empty to raw PCM", .set = .ogg, .args = &.{ "-i", "-" }, .stdin_input = "ogg_opus_empty_first_packet", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stderr = "" },
+    .{ .name = "Ogg Opus from a pipe whose first data packet is empty to raw PCM", .set = .ogg, .args = &.{ "-i", "-" }, .stdin_input = "ogg_opus_empty_first_packet", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stdout_raw = .{ .args = &.{ "-f", "s16le", "-ch_layout", "stereo", "-sample_rate", "48000" }, .nb_samples = 11208 }, .stderr = "" },
     .{ .name = "Ogg FLAC with an empty header packet to WAV", .set = .ogg, .args = &.{"-i"}, .input = "ogg_flac_empty_header_packet", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt ", .stderr = "" },
     // T27b: FLAC encoded into Ogg; compare.py checks the bytes against FFmpeg's.
     .{ .name = "FLAC into Ogg on standard output", .set = .flac, .args = &.{"-i"}, .input = "flac_ffmpeg_level5_stereo", .tail = &.{ "-f", "ogg", "-" }, .exit_code = 0, .stdout_contains = "OggS\x00\x02", .stderr = "" },
