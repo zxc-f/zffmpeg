@@ -18,6 +18,7 @@
 //! none to contract to.
 
 const std = @import("std");
+const cconv = @import("../core/cconv.zig");
 
 pub const min_order = 1;
 pub const max_order = 32;
@@ -328,19 +329,6 @@ fn estimateBestOrder(ref: *const [max_order]f64, min: usize, max: usize) usize {
     return min;
 }
 
-/// `lrintf` on x86-64: the double rounded to float, then to the nearest
-/// 64-bit integer, ties to even; NaN or out of range gives the minimum,
-/// as `cvtss2si` does.
-fn lrintf(x: f64) i64 {
-    const f: f32 = @floatCast(x);
-    if (std.math.isNan(f) or @abs(f) >= 0x1p63) return std.math.minInt(i64);
-    // Ties to even: round, then step back from an odd result at an exact
-    // half.
-    var r = @round(f);
-    if (@abs(f - @trunc(f)) == 0.5 and @rem(r, 2) != 0) r -= std.math.sign(f);
-    return @intFromFloat(r);
-}
-
 /// `quantize_lpc_coefs`: scales `lpc_in` in place when no shift fits.
 fn quantizeCoefs(lpc_in: []f64, precision: u5, lpc_out: []i32, shift: *i32, min_shift: i32, max_shift: u5, zero_shift: i32) void {
     const qmax: i32 = (@as(i32, 1) << (precision - 1)) - 1;
@@ -366,8 +354,8 @@ fn quantizeCoefs(lpc_in: []f64, precision: u5, lpc_out: []i32, shift: *i32, min_
     var err: f64 = 0;
     for (lpc_in, lpc_out) |c, *out| {
         err -= c * scale_sh;
-        // av_clip takes an int: lrintf's long is truncated to 32 bits first.
-        const rounded: i32 = @truncate(lrintf(err));
+        // av_clip takes an int: lrintf's long is narrowed to 32 bits first.
+        const rounded = cconv.lrintfInt(err);
         out.* = std.math.clamp(rounded, -qmax, qmax);
         err -= @floatFromInt(out.*);
     }
@@ -375,20 +363,6 @@ fn quantizeCoefs(lpc_in: []f64, precision: u5, lpc_out: []i32, shift: *i32, min_
 }
 
 const testing = std.testing;
-
-test "lrintf rounds ties to even through float, out of range to the minimum" {
-    try testing.expectEqual(2, lrintf(2.5));
-    try testing.expectEqual(4, lrintf(3.5));
-    try testing.expectEqual(-2, lrintf(-2.5));
-    try testing.expectEqual(-4, lrintf(-3.5));
-    try testing.expectEqual(3, lrintf(2.6));
-    try testing.expectEqual(-3, lrintf(-2.6));
-    // 16777217 is not a float: it rounds to 16777216 first.
-    try testing.expectEqual(16777216, lrintf(16777217.0));
-    try testing.expectEqual(std.math.minInt(i64), lrintf(std.math.nan(f64)));
-    try testing.expectEqual(std.math.minInt(i64), lrintf(1e30));
-    try testing.expectEqual(std.math.minInt(i64), lrintf(-1e30));
-}
 
 test "quantization: shifts, scaling and the zero case" {
     var coefs = [_]f64{ 0.5, -0.25 };

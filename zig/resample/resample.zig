@@ -22,6 +22,7 @@ const std = @import("std");
 const libm = @import("../core/libm.zig");
 const audio = @import("../core/audio.zig");
 const typed_options = @import("../core/options.zig");
+const cconv = @import("../core/cconv.zig");
 
 pub const FilterType = enum { cubic, blackman_nuttall, kaiser };
 
@@ -159,25 +160,6 @@ fn besselI0(x_in: f64) f64 {
     const y = 1 / x - 1.0 / 15.0;
     const r = evalPoly(&bessel_p2, y) / evalPoly(&bessel_q2, y);
     return libm.exp(x) / @sqrt(x) * r;
-}
-
-/// `lrintf` of a double: to `float`, then to the nearest integer, ties to even.
-fn lrintf(x: f64) i64 {
-    const f: f32 = @floatCast(x);
-    return @trunc(roundEven(f64, f));
-}
-
-/// `llrint`: the nearest integer, ties to even.
-fn llrint(x: f64) i64 {
-    return @trunc(roundEven(f64, x));
-}
-
-fn roundEven(comptime F: type, x: anytype) F {
-    const v: F = x;
-    const floor = @floor(v);
-    const diff = v - floor;
-    const up = diff > 0.5 or (diff == 0.5 and @mod(floor, 2) != 0);
-    return if (up) floor + 1 else floor;
 }
 
 /// The resampler of one internal format: libswresample's `ResampleContext`
@@ -369,8 +351,10 @@ fn EngineIn(comptime format: audio.SampleFormat, comptime counting: bool) type {
 
         fn coefficient(v: f64) Sample {
             return switch (format) {
-                .s16p => @intCast(std.math.clamp(lrintf(v), std.math.minInt(i16), std.math.maxInt(i16))),
-                .s32p => @intCast(std.math.clamp(llrint(v), std.math.minInt(i32), std.math.maxInt(i32))),
+                // av_clip_int16(lrintf(v)): the long narrowed to the clip's int.
+                .s16p => @intCast(std.math.clamp(cconv.lrintfInt(v), std.math.minInt(i16), std.math.maxInt(i16))),
+                // av_clipl_int32(llrint(v)) clips the 64-bit value.
+                .s32p => @intCast(std.math.clamp(cconv.lrint(v), std.math.minInt(i32), std.math.maxInt(i32))),
                 .fltp => @floatCast(v),
                 .dblp => v,
                 else => unreachable,
@@ -916,9 +900,9 @@ pub const Signal = struct {
 
 fn storeSample(bytes: []u8, format: audio.SampleFormat, v: f64) void {
     switch (format) {
-        .u8 => bytes[0] = @intCast(@as(i64, @trunc(roundEven(f64, v * 127 + 128)))),
-        .s16 => std.mem.writeInt(i16, bytes[0..2], @intCast(@as(i64, @trunc(roundEven(f64, v * 32767)))), native_endian),
-        .s32 => std.mem.writeInt(i32, bytes[0..4], @intCast(@as(i64, @trunc(roundEven(f64, v * 2147483647.0)))), native_endian),
+        .u8 => bytes[0] = @intCast(@as(i64, @trunc(cconv.rint(v * 127 + 128)))),
+        .s16 => std.mem.writeInt(i16, bytes[0..2], @intCast(@as(i64, @trunc(cconv.rint(v * 32767)))), native_endian),
+        .s32 => std.mem.writeInt(i32, bytes[0..4], @intCast(@as(i64, @trunc(cconv.rint(v * 2147483647.0)))), native_endian),
         .flt => {
             const f: f32 = @floatCast(v);
             std.mem.writeInt(u32, bytes[0..4], @bitCast(f), native_endian);

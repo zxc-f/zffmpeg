@@ -14,16 +14,17 @@
 //! - integer to float multiplies the integer, converted to the float type
 //!   with round-to-nearest-even, by 2^-(bits - 1), which is exact;
 //! - float to integer multiplies by 2^(bits - 1) in the float's own
-//!   precision, rounds half to even (`lrint` in the default mode) and clips
-//!   to the integer's range (u8 after adding 128);
+//!   precision, rounds half to even (`lrint`) and clips to the integer's
+//!   range (u8 after adding 128). s16 and u8 clip with `av_clip_int16` and
+//!   `av_clip_uint8`, which take an `int`, so `lrint`'s 64-bit `long` is
+//!   narrowed to its low 32 bits first: 65536.0 to s16 is -32768, 131072.0
+//!   is 0. s32 and s64 clip the 64-bit value;
 //! - float to float converts with round-to-nearest-even.
 //!
-//! So every result is bit-exact with FFmpeg's on the inputs C defines. Where C
-//! leaves FFmpeg's `lrint`/`llrint` undefined (NaN, or a product beyond the
-//! 64-bit range, such as 1.0 to s64), this file gives what x86-64, the
-//! reference platform, gives: the most negative 64-bit value, then clipped.
-//! (Windows' 32-bit `long` also overflows `lrint` for finite products from
-//! 2^31 to 2^63 in the u8 and s16 paths; this file computes those in 64 bits.)
+//! Where C leaves `lrint`/`llrint` unspecified (NaN, ±inf, a product beyond
+//! the 64-bit range), `core/cconv.zig` gives the reference build's result
+//! (x86-64's most negative 64-bit value), so NaN and ±inf become 0 in s16,
+//! 128 in u8 and the minimum in s32 and s64 (notes.md "Undefined C cases").
 //! zig/testing/vectors/sampleconv.txt, printed by the pinned libswresample,
 //! checks every pair and layout. The kernels are scalar loops specialized at
 //! compile time per format pair; nothing allocates.
@@ -36,6 +37,7 @@ const stage = @import("../core/stage.zig");
 const Frame = @import("../core/frame.zig").Frame;
 const Dither = @import("dither.zig").Dither;
 const rematrix = @import("rematrix.zig");
+const cconv = @import("../core/cconv.zig");
 
 /// Stored samples are in the target's byte order (T20a).
 const native_endian = builtin.cpu.arch.endian();
@@ -120,23 +122,6 @@ fn narrow(comptime kind: Kind, wide: i64) kind.Type() {
     if (kind == .u8) return @intCast(shifted + 0x80);
     return @intCast(shifted);
 }
-/// Round half to even, as `lrint` does in the default rounding mode.
-fn roundEven(x: anytype) @TypeOf(x) {
-    const nearest = @round(x); // half away from zero
-    if (@abs(x - @trunc(x)) != 0.5) return nearest;
-    return 2 * @round(x / 2);
-}
-
-/// `llrint` of an already rounded float as x86-64 computes it, the
-/// reference platform: NaN and values outside the 64-bit range give the most
-/// negative value (the "integer indefinite"), which C leaves undefined.
-fn toI64(x: anytype) i64 {
-    const F = @TypeOf(x);
-    const limit: F = 9223372036854775808.0; // 2^63, exact
-    if (std.math.isNan(x) or x >= limit or x < -limit) return std.math.minInt(i64);
-    return @intFromFloat(x);
-}
-
 /// FFmpeg's `av_clip` to `[min, max]`.
 fn clip(comptime T: type, value: i64, min: T, max: T) T {
     return @intCast(std.math.clamp(value, min, max));
@@ -154,12 +139,27 @@ fn convertSample(comptime out: Kind, comptime in: Kind, value: in.Type()) out.Ty
     if (comptime out.isFloat()) return @floatCast(value);
     const F = in.Type();
     const one: F = 1;
-    const rounded = roundEven(value * std.math.ldexp(one, out.bits() - 1));
-    const whole = toI64(rounded);
-    // u8 adds 128 before clipping, in 64 bits: the most negative value stays negative.
-    if (comptime out == .u8) return clip(u8, whole +| 0x80, 0, 0xFF);
-    if (comptime out == .s64) return whole;
-    return clip(Out, whole, std.math.minInt(Out), std.math.maxInt(Out));
+    const scaled = value * std.math.ldexp(one, out.bits() - 1);
+    // lrintf/llrintf for float input, lrint/llrint for double.
+    const whole: i64 = if (F == f32) cconv.lrintf(scaled) else cconv.lrint(scaled);
+    switch (comptime out) {
+        // av_clip_uint8(lrint(x) + 0x80): the sum is a long (it cannot
+        // overflow: a float below 2^63 is at most 2^63 - 1024), narrowed to
+        // av_clip_uint8's int; Clang keeps the low 32 bits.
+        .u8 => {
+            const low: i32 = @truncate(whole + 0x80);
+            return clip(u8, low, 0, 0xFF);
+        },
+        // av_clip_int16(lrint(x)): the long narrowed to int, as for u8.
+        .s16 => {
+            const low: i32 = @truncate(whole);
+            return clip(i16, low, std.math.minInt(i16), std.math.maxInt(i16));
+        },
+        // av_clipl_int32(llrint(x)) takes the 64-bit value.
+        .s32 => return clip(i32, whole, std.math.minInt(i32), std.math.maxInt(i32)),
+        .s64 => return whole,
+        else => comptime unreachable,
+    }
 }
 /// Converts `count` samples per channel from `src` at `src_offset` into `dst`
 /// at `dst_offset`. Any formats, packed or planar; the channel counts must
@@ -374,13 +374,23 @@ test "float to integer rounds half to even and clips" {
     try expectConverted(.s32, .dbl, -1.0, std.math.minInt(i32));
     try expectConverted(.s64, .dbl, -1.0, std.math.minInt(i64));
     try expectConverted(.s64, .dbl, 0.5, 1 << 62);
-    // Where C is undefined, x86-64's most negative 64-bit value, clipped.
+    // Where C is unspecified, the reference build's most negative 64-bit
+    // value; s16 and u8 then keep its low 32 bits (0) before clipping.
     try expectConverted(.s64, .flt, 1.0, std.math.minInt(i64));
-    try expectConverted(.s16, .flt, std.math.inf(f32), -32768);
-    try expectConverted(.s16, .dbl, std.math.nan(f64), -32768);
-    try expectConverted(.u8, .flt, std.math.nan(f32), 0);
+    try expectConverted(.s16, .flt, std.math.inf(f32), 0);
+    try expectConverted(.s16, .dbl, std.math.nan(f64), 0);
+    try expectConverted(.s16, .dbl, -std.math.inf(f64), 0);
+    try expectConverted(.u8, .flt, std.math.nan(f32), 0x80);
+    try expectConverted(.u8, .dbl, std.math.inf(f64), 0x80);
     try expectConverted(.s32, .dbl, -std.math.inf(f64), std.math.minInt(i32));
-    try expectConverted(.s16, .flt, 65536.0, 32767); // in range for 64 bits
+    try expectConverted(.s32, .flt, std.math.nan(f32), std.math.minInt(i32));
+    // Finite products from 2^31 to 2^63 wrap in the narrowing, then clip.
+    try expectConverted(.s16, .flt, 65536.0, -32768);
+    try expectConverted(.s16, .flt, 131072.0, 0);
+    try expectConverted(.s16, .dbl, -65537.0, 32767);
+    try expectConverted(.u8, .flt, 16777216.0, 0);
+    try expectConverted(.u8, .dbl, 65536.0, 0xFF);
+    try expectConverted(.s32, .dbl, 65536.0, std.math.maxInt(i32));
 }
 
 test "float to float rounds to nearest even" {
@@ -414,13 +424,23 @@ test "packed and planar buffers convert by channel, at any offset" {
 // documents the patterns regenerated below. Every line is checked, and the
 // count makes a truncated or missing file fail.
 const vectors = @embedFile("../testing/vectors/sampleconv.txt");
-const vector_count = 232;
+const vector_count = 280;
 
 const lcg_multiplier: u64 = 6364136223846793005;
 const lcg_increment: u64 = 1442695040888963407;
 
 /// Writes the named pattern's interleaved samples, packed and native-endian,
 /// into `out` and returns how many samples it holds.
+/// The `edge` pattern: NaN, infinities, products that overflow 32 or 64
+/// bits, and rounding ties, as doubles (flt takes each rounded to float).
+const edge_pattern = [_]f64{
+    0.5,                    -0.5,                 std.math.nan(f64), -std.math.nan(f64), std.math.inf(f64),   -std.math.inf(f64), 65535.0,     65536.0,
+    100000.0,               131072.0,             -65537.0,          16777216.0,         3e9,                 1e10,               1e19,        -1e19,
+    3e38,                   -3e38,                1e300,             -1e300,             1.0,                 -1.0,               0.99999,     0.0,
+    -0.0,                   0.5 / 32768.0,        1.5 / 32768.0,     2.5 / 32768.0,      -2.5 / 32768.0,      0.5 / 128.0,        1.5 / 128.0, -1.5 / 128.0,
+    2147483647.5 / 32768.0, 4294967296.0 / 128.0, 1e-40,             0.9999999999999999, -0.9999999999999999, 2.0,                1e-300,      -1e-300,
+};
+
 fn pattern(name: []const u8, kind: Kind, out: []u8) !usize {
     var x: u64 = 1;
     if (std.mem.eql(u8, name, "all") and kind == .u8) {
@@ -452,6 +472,17 @@ fn pattern(name: []const u8, kind: Kind, out: []u8) !usize {
             while (i < frames * 2 * width) : (i += width) std.mem.reverse(u8, out[i..][0..width]);
         }
         return frames * 2;
+    }
+    if (std.mem.eql(u8, name, "edge")) {
+        for (edge_pattern, 0..) |d, k| {
+            const f: f32 = @floatCast(d);
+            switch (kind) {
+                .flt => store(.flt, out[4 * k ..][0..4], f),
+                .dbl => store(.dbl, out[8 * k ..][0..8], d),
+                else => return error.MalformedVector,
+            }
+        }
+        return edge_pattern.len;
     }
     const random = std.mem.eql(u8, name, "rand");
     const unit = std.mem.eql(u8, name, "unit");

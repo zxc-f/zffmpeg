@@ -163,6 +163,7 @@ test {
     _ = @import("core/diagnostics.zig");
     _ = @import("core/eval.zig");
     _ = @import("core/rational.zig");
+    _ = @import("core/cconv.zig");
     _ = @import("format/wav.zig");
     _ = @import("format/au.zig");
     _ = @import("format/aiff.zig");

@@ -35,6 +35,7 @@ const audio = @import("../core/audio.zig");
 const samples = @import("../core/samples.zig");
 const audioconvert = @import("audioconvert.zig");
 const diagnostics = @import("../core/diagnostics.zig");
+const cconv = @import("../core/cconv.zig");
 
 /// libswresample's dither methods (`SwrDitherType`), by its option names.
 pub const Method = enum {
@@ -522,8 +523,12 @@ pub const Dither = struct {
             const value = load(T, plane, i);
             const sum: T = switch (format) {
                 .s16p, .s32p => sum: {
-                    // C truncates the noise toward zero into the sample type.
-                    const noise: T = @intFromFloat(@trunc(v));
+                    // swri_get_dither stores the double noise into int16_t or
+                    // int32_t: the reference build's cvttsd2si into 32 bits
+                    // (toward zero; NaN or out of range gives INT_MIN), then
+                    // the low 16 bits for s16p. A dither_scale of 1000 into
+                    // u8 makes the s16p noise wrap.
+                    const noise: T = @truncate(cconv.cvttsd2si32(v));
                     const wide: i64 = value;
                     const noise_wide: i64 = noise;
                     // (32768 * a + 32768 * b + 16384) >> 15, stored truncated.
@@ -575,7 +580,7 @@ pub const Dither = struct {
             }
             pos = if (pos != 0) pos - 1 else taps - 1;
             const noise: f32 = @floatCast(d.noise[channel].next());
-            var y = roundEven(x + noise);
+            var y = cconv.rint(x + noise);
             const err: f32 = @floatCast(y - x);
             errors[pos + taps] = err;
             errors[pos] = err;
@@ -584,7 +589,11 @@ pub const Dither = struct {
                 .s16p, .s32p => int: {
                     const min: f64 = @floatFromInt(std.math.minInt(T));
                     const max: f64 = @floatFromInt(std.math.maxInt(T));
-                    break :int @intFromFloat(@trunc(std.math.clamp(y, min, max)));
+                    // CLIP: FFMAX(FFMIN(v, max), min), whose comparisons send
+                    // NaN to the minimum; then the double stored as T.
+                    const below = if (y > max) max else y;
+                    const clipped = if (below > min) below else min;
+                    break :int @truncate(cconv.cvttsd2si32(clipped));
                 },
                 .fltp => @floatCast(y),
                 .dblp => y,
@@ -597,13 +606,6 @@ pub const Dither = struct {
 };
 
 const native_endian = @import("builtin").cpu.arch.endian();
-
-/// Round half to even, as C's `rint` does in the default mode.
-fn roundEven(x: f64) f64 {
-    const nearest = @round(x);
-    if (@abs(x - @trunc(x)) != 0.5) return nearest;
-    return 2 * @round(x / 2);
-}
 
 test "the internal format and scale follow swr_init and swri_dither_init" {
     try std.testing.expectEqual(audio.SampleFormat.fltp, internalFormat(.flt, .s16, false));
@@ -632,7 +634,7 @@ test "the internal format and scale follow swr_init and swri_dither_init" {
 // documents the input regenerated below and the call sizes. Every line is
 // checked, and the count makes a truncated or missing file fail.
 const vectors = @embedFile("../testing/vectors/dither.txt");
-const vector_count = 133;
+const vector_count = 137;
 const vector_frames = 276005;
 const mixed_calls = [_]u32{ 1000, 70000, 5, 65000, 140000 };
 /// The chunks a fixed-call vector is converted in, unlike its calls.

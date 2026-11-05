@@ -649,6 +649,9 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "an invalid -dither_method", .args = &.{ "-i", "a.wav", "-dither_method", "64", "b.wav" }, .exit_code = 1, .stderr_contains = "invalid -dither_method: 64\n" },
     .{ .name = "an invalid -dither_scale", .args = &.{ "-i", "a.wav", "-dither_scale", "-1", "b.wav" }, .exit_code = 1, .stderr_contains = "invalid -dither_scale: -1\n" },
     .{ .name = "dither without a format change", .args = &.{"-i"}, .input = "s24_stereo_48k_extensible", .tail = &.{ "-c:a", "pcm_s24le", "-dither_method", "shibata", "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_s24_stereo, .stderr = "" },
+    // A dither_scale far past the s16 range: FFmpeg's noise wraps through
+    // int16_t (the reference build's truncation) and the run succeeds.
+    .{ .name = "a large -dither_scale wraps the noise", .args = &.{"-i"}, .input = "mono_8k", .tail = &.{ "-dither_method", "rectangular", "-dither_scale", "1000", "-c:a", "pcm_u8", "-f", "wav", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stderr = "" },
     .{ .name = "dither ignored by stream copy", .set = .aiff, .args = &.{"-i"}, .input = "aifc_sowt", .tail = &.{ "-c", "copy", "-dither_method", "triangular", "-dither_scale", "2", "-f", "wav", "-" }, .exit_code = 0, .stdout = wav_mono_8k, .stderr = "" },
     .{ .name = "a missing value", .args = &.{ "-i", "a.wav", "-f" }, .exit_code = 1, .stderr_contains = "missing value for: -f\n" },
     .{ .name = "standard output needs -f", .args = &.{ "-i", "a.wav", "-" }, .exit_code = 1, .stderr_contains = "-f is required when writing to standard output\n" },

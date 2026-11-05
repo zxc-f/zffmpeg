@@ -170,5 +170,13 @@ int main(void)
     run(AV_SAMPLE_FMT_S32, AV_SAMPLE_FMT_S16, 44100, SWR_DITHER_TRIANGULAR_HIGHPASS, "triangular_hp", 1, 0, 4096);
     run(AV_SAMPLE_FMT_FLT, AV_SAMPLE_FMT_U8, 44100, SWR_DITHER_RECTANGULAR, "rectangular", 1, 0, 100000);
     run(AV_SAMPLE_FMT_S16, AV_SAMPLE_FMT_U8, 8000, SWR_DITHER_TRIANGULAR, "triangular", 1, 0, 455);
+    /* Noise beyond the internal format: swri_get_dither stores the double
+       noise into int16_t or int32_t, which the reference build truncates to
+       32 bits (INT_MIN out of range) and, for s16p, to the low 16 bits. */
+    run(AV_SAMPLE_FMT_S16, AV_SAMPLE_FMT_U8, 44100, SWR_DITHER_RECTANGULAR, "rectangular", 1000, 0, 0);
+    run(AV_SAMPLE_FMT_S16, AV_SAMPLE_FMT_U8, 44100, SWR_DITHER_TRIANGULAR_HIGHPASS, "triangular_hp", 1000, 0, 0);
+    run(AV_SAMPLE_FMT_S32, AV_SAMPLE_FMT_S32, 44100, SWR_DITHER_TRIANGULAR, "triangular", 1e9, 24, 0);
+    /* Noise shaping far past the output range: CLIP, then the store. */
+    run(AV_SAMPLE_FMT_FLT, AV_SAMPLE_FMT_S16, 44100, SWR_DITHER_NS_SHIBATA, "shibata", 1000, 0, 0);
     return 0;
 }

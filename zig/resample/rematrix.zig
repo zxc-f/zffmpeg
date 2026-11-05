@@ -25,6 +25,7 @@ const audio = @import("../core/audio.zig");
 const samples = @import("../core/samples.zig");
 const audioconvert = @import("audioconvert.zig");
 const dither = @import("dither.zig");
+const cconv = @import("../core/cconv.zig");
 const channel_layout = @import("../core/channel_layout.zig");
 const Channel = channel_layout.Channel;
 const Layout = channel_layout.Layout;
@@ -662,17 +663,21 @@ pub const Remix = struct {
         r.internal = dither.internalFormatResampling(in.sample_format, out_format, r.mixing, resampling);
         r.clip = false;
         if (r.internal == .s16p or r.internal == .s32p) {
-            var max_sum: i64 = 0;
+            // C's `int sum` and `maxsum` (s16p only); FFABS and the sum wrap
+            // on the reference build when coefficients are huge, as a gain of
+            // 1e5 makes them (notes.md "Follow the reference build").
+            var max_sum: i32 = 0;
             for (0..r.out_channels) |i| {
                 var rem: f64 = 0;
-                var sum: i64 = 0;
+                var sum: i32 = 0;
                 for (0..r.in_channels) |j| {
                     const target = r.matrix[i][j] * 32768 + rem;
-                    const native = lrintf(target);
+                    // `int = lrintf(double)`: through float, then the low 32 bits.
+                    const native = cconv.lrintfInt(target);
                     r.ints[i][j] = native;
                     const native_wide: f64 = @floatFromInt(native);
                     rem += target - native_wide;
-                    sum += @abs(native);
+                    sum +%= if (native >= 0) native else 0 -% native;
                 }
                 max_sum = @max(max_sum, sum);
             }
@@ -852,7 +857,7 @@ pub const Remix = struct {
                         .s16p => {
                             var v: i32 = 0;
                             for (sources.index[0..sources.count]) |i| {
-                                v +%= @as(i32, @intCast(load(in.plane(i), n))) *% lrintf(r.matrix[o][i] * 32768);
+                                v +%= @as(i32, @intCast(load(in.plane(i), n))) *% cconv.lrintfInt(r.matrix[o][i] * 32768);
                             }
                             store(plane, n, @truncate((v +% 16384) >> 15));
                         },
@@ -884,17 +889,6 @@ fn special(in: *const Layout, out: *const Layout, m: *const Matrix) Remix.Specia
     const seven_one: Layout = .{ .native = five_one.native | bit(BL) | bit(BR) };
     if (in.eql(&seven_one) and m[0][7] == 0 and m[1][6] == 0) return .eight_to_two;
     return .none;
-}
-
-/// `lrintf` of a double, as C converts it: to `float`, then to the nearest
-/// integer, ties to even. The coefficients keep it far inside `int`.
-fn lrintf(x: f64) i32 {
-    const f: f32 = @floatCast(x);
-    const floor = @floor(f);
-    const diff = f - floor;
-    const up = diff > 0.5 or (diff == 0.5 and @mod(floor, 2) != 0);
-    const rounded = if (up) floor + 1 else floor;
-    return @trunc(rounded);
 }
 
 const native_endian = @import("builtin").cpu.arch.endian();
@@ -1004,7 +998,7 @@ test "downmixing 5.1 to stereo uses the default levels" {
 }
 
 const remix_vectors = @embedFile("../testing/vectors/remix.txt");
-const remix_vector_count = 1792;
+const remix_vector_count = 1872;
 
 /// The generator's input: a 64-bit LCG, one step per sample (remix_vectors.c).
 const Lcg = struct {
@@ -1038,25 +1032,48 @@ fn writeSample(bytes: []u8, format: audio.SampleFormat, v: u64) void {
 
 fn checkRemixVector(line: []const u8, gpa: std.mem.Allocator) !void {
     var fields = std.mem.tokenizeScalar(u8, line, ' ');
-    if (!std.mem.eql(u8, try field(&fields), "X")) return error.MalformedVector;
+    // X: the automatic matrix; C: a custom matrix, as pan sets one.
+    const kind = try field(&fields);
+    const custom = std.mem.eql(u8, kind, "C");
+    if (!custom and !std.mem.eql(u8, kind, "X")) return error.MalformedVector;
     const in_layout = try layoutField(&fields);
     const out_layout = try layoutField(&fields);
     const in_format = audio.SampleFormat.fromName(try field(&fields)) orelse return error.MalformedVector;
     const out_format = audio.SampleFormat.fromName(try field(&fields)) orelse return error.MalformedVector;
     const frames = try std.fmt.parseInt(u32, try field(&fields), 10);
-    const method: ?dither.Method = switch (try std.fmt.parseInt(u8, try field(&fields), 10)) {
-        0 => null,
-        2 => .triangular,
-        3 => .triangular_hp,
-        69 => .shibata,
-        else => return error.MalformedVector,
-    };
+    const matrix = try gpa.create(Matrix);
+    defer gpa.destroy(matrix);
+    matrix.* = @splat(@splat(0));
+    var method: ?dither.Method = null;
+    if (custom) {
+        var entries = std.mem.tokenizeScalar(u8, try field(&fields), ';');
+        while (entries.next()) |entry| {
+            const comma = std.mem.findScalar(u8, entry, ',') orelse return error.MalformedVector;
+            const equals = std.mem.findScalar(u8, entry, '=') orelse return error.MalformedVector;
+            const o = try std.fmt.parseInt(usize, entry[0..comma], 10);
+            const i = try std.fmt.parseInt(usize, entry[comma + 1 .. equals], 10);
+            if (o >= max_channels or i >= max_channels) return error.MalformedVector;
+            matrix[o][i] = try std.fmt.parseFloat(f64, entry[equals + 1 ..]);
+        }
+    } else {
+        method = switch (try std.fmt.parseInt(u8, try field(&fields), 10)) {
+            0 => null,
+            2 => .triangular,
+            3 => .triangular_hp,
+            69 => .shibata,
+            else => return error.MalformedVector,
+        };
+    }
     const want = try std.fmt.parseInt(u64, try field(&fields), 16);
 
     const in: audio.Format = try .initLayout(8000, in_layout, in_format);
     const remix = try gpa.create(Remix);
     defer gpa.destroy(remix);
-    try std.testing.expect(try remix.init(in, out_layout, out_format, .{}));
+    if (custom) {
+        remix.initMatrix(in, out_layout, out_format, matrix);
+    } else {
+        try std.testing.expect(try remix.init(in, out_layout, out_format, .{}));
+    }
     const in_buffer_layout = try samples.Layout.init(in_format, in_layout.channelCount(), frames, .{ .line = 1 });
     const out_buffer_layout = try samples.Layout.init(out_format, remix.out_channels, frames, .{ .line = 1 });
     const in_bytes = try gpa.alloc(u8, in_buffer_layout.size);
