@@ -3954,6 +3954,7 @@ def main():
     CAF_DIR.mkdir(exist_ok=True)
     FLAC_DIR.mkdir(exist_ok=True)
     OGG_DIR.mkdir(exist_ok=True)
+    MP3_DIR.mkdir(exist_ok=True)
     for path in extra:
         path.unlink()
     for path in stale:

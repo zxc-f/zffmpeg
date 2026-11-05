@@ -498,7 +498,9 @@ fn expectConsistent(comptime Contract: type) void {
                 @compileError("duplicate fixture name: " ++ fixture.name);
             }
         }
-        expectValidResult(fixture.name, fixture.expected);
+        // Ogg's and MP3's expectation is a plain accept or reject: what an
+        // accepted file holds is its C oracle vector's (vectors/ogg.txt, mp3.txt).
+        if (@typeInfo(@TypeOf(fixture.expected)) == .@"union") expectValidResult(fixture.name, fixture.expected);
         if (@hasField(@TypeOf(fixture), "writer_output") and fixture.expected == .reject and fixture.writer_output) {
             @compileError("only accepted fixtures can be writer output: " ++ fixture.name);
         }
@@ -562,6 +564,8 @@ test "manifest names are unique and expectations are consistent" {
         expectConsistent(raw);
         expectConsistent(caf);
         expectConsistent(flac);
+        expectConsistent(ogg);
+        expectConsistent(mp3);
     }
 }
 
@@ -572,6 +576,8 @@ test "every fixture file is present and matches its recorded SHA-256" {
     try expectHashes(raw);
     try expectHashes(caf);
     try expectHashes(flac);
+    try expectHashes(ogg);
+    try expectHashes(mp3);
 }
 
 test "fixture names do not collide across contracts" {
@@ -592,6 +598,19 @@ test "fixture names do not collide across contracts" {
         expectDistinct(flac, aiff);
         expectDistinct(flac, raw);
         expectDistinct(flac, caf);
+        expectDistinct(ogg, wav_contract);
+        expectDistinct(ogg, au);
+        expectDistinct(ogg, aiff);
+        expectDistinct(ogg, raw);
+        expectDistinct(ogg, caf);
+        expectDistinct(ogg, flac);
+        expectDistinct(mp3, wav_contract);
+        expectDistinct(mp3, au);
+        expectDistinct(mp3, aiff);
+        expectDistinct(mp3, raw);
+        expectDistinct(mp3, caf);
+        expectDistinct(mp3, flac);
+        expectDistinct(mp3, ogg);
     }
 }
 

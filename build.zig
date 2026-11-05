@@ -28,7 +28,9 @@ const examples = [_]Example{
     .{ .name = "io_patterns", .path = "zig/examples/io_patterns.zig" },
 };
 
-/// The fixture directories: zig/testing/fixtures/wav/ and zig/testing/fixtures/au/.
+/// The fixture directories, zig/testing/fixtures/<set>/, each named after its
+/// files' extension: wav (WAV and Wave64), au, aiff, raw (raw PCM), caf,
+/// flac, ogg and mp3 (MPEG audio, Layers I to III).
 const FixtureSet = enum { wav, au, aiff, raw, caf, flac, ogg, mp3 };
 
 /// A zffprobe process run with its expected exit code and output.
@@ -513,9 +515,16 @@ const ConvertCase = struct {
     /// The exact bytes `output_file` must hold.
     output_bytes: ?[]const u8 = null,
     exit_code: u8,
-    /// Exact stdout, unless `stdout_contains` is set.
+    /// Exact stdout, unless `stdout_contains` or `stdout_as_other_input` is set.
     stdout: []const u8 = "",
+    /// Nonempty: an empty string is in every stdout.
     stdout_contains: ?[]const u8 = null,
+    /// Stdout must equal, byte for byte, the stdout of the same command with
+    /// the input moved between the file argument and standard input, which
+    /// must give the same status and stderr checks. For output too long to
+    /// spell out here: compare.py checks the file conversion's bytes against
+    /// FFmpeg's, so this ties the other path to them.
+    stdout_as_other_input: bool = false,
     stderr: ?[]const u8 = null,
     stderr_contains: ?[]const u8 = null,
 };
@@ -675,8 +684,8 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "FLAC to s16le", .set = .flac, .args = &.{"-i"}, .input = "flac_constant_mono_8k", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout = &flac_constant_s16le, .stderr = "" },
     .{ .name = "FLAC to s16be from a pipe", .set = .flac, .args = &.{ "-i", "-" }, .stdin_input = "flac_constant_mono_8k", .tail = &.{ "-f", "s16be", "-" }, .exit_code = 0, .stdout = &flac_constant_s16be, .stderr = "" },
     .{ .name = "FLAC copy has no output", .set = .flac, .args = &.{"-i"}, .input = "flac_constant_mono_8k", .tail = &.{ "-c", "copy", "-f", "wav", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
-    .{ .name = "FLAC that decodes short of STREAMINFO", .set = .flac, .args = &.{"-i"}, .input = "flac_junk_between_frames", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stdout_contains = "", .stderr_contains = ": FrameCountMismatch\n" },
-    .{ .name = "FLAC that decodes short of STREAMINFO to raw PCM", .set = .flac, .args = &.{"-i"}, .input = "flac_junk_between_frames", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout_contains = "", .stderr = "" },
+    .{ .name = "FLAC that decodes short of STREAMINFO", .set = .flac, .args = &.{"-i"}, .input = "flac_junk_between_frames", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stdout = "", .stderr_contains = ": FrameCountMismatch\n" },
+    .{ .name = "FLAC that decodes short of STREAMINFO to raw PCM", .set = .flac, .args = &.{"-i"}, .input = "flac_junk_between_frames", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stderr = "" },
     .{ .name = "CAF output is unsupported", .args = &.{"-i"}, .input = "mono_8k", .tail = &.{ "-f", "caf", "-" }, .exit_code = 3, .stderr = "zffmpeg: caf: unsupported output format\n" },
     // T26c: FLAC output, the ffmpeg program's block size (the input's first
     // frame) and FFmpeg's header; standard output cannot seek back, so its
@@ -688,11 +697,11 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "an invalid FLAC encoder option value", .args = &.{ "-i", "a.wav", "-lpc_type", "burg", "b.flac" }, .exit_code = 1, .stderr_contains = "invalid value for: -lpc_type\n" },
     // T27d: Ogg decoded; compare.py checks the bytes against FFmpeg's.
     .{ .name = "Ogg Vorbis to WAV", .set = .ogg, .args = &.{"-i"}, .input = "ogg_vorbis_ffmpeg_22k_short", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt ", .stderr = "" },
-    .{ .name = "Ogg Vorbis from a pipe to raw PCM", .set = .ogg, .args = &.{ "-i", "-" }, .stdin_input = "ogg_vorbis_ffmpeg_22k_short", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout_contains = "", .stderr = "" },
+    .{ .name = "Ogg Vorbis from a pipe to raw PCM", .set = .ogg, .args = &.{ "-i", "-" }, .stdin_input = "ogg_vorbis_ffmpeg_22k_short", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stderr = "" },
     .{ .name = "Ogg Vorbis from a pipe has no count for WAV", .set = .ogg, .args = &.{ "-i", "-" }, .stdin_input = "ogg_vorbis_ffmpeg_22k_short", .tail = &.{ "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedStreamingSize\n" },
     .{ .name = "Ogg Vorbis copy is unsupported", .set = .ogg, .args = &.{"-i"}, .input = "ogg_vorbis_ffmpeg_22k_short", .tail = &.{ "-c", "copy", "-f", "ogg", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
     .{ .name = "Ogg Opus to WAV", .set = .ogg, .args = &.{"-i"}, .input = "ogg_opus_ffmpeg_stereo", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt ", .stderr = "" },
-    .{ .name = "Ogg Opus from a pipe to raw PCM", .set = .ogg, .args = &.{ "-i", "-" }, .stdin_input = "ogg_opus_ffmpeg_mono", .tail = &.{ "-f", "f32le", "-" }, .exit_code = 0, .stdout_contains = "", .stderr = "" },
+    .{ .name = "Ogg Opus from a pipe to raw PCM", .set = .ogg, .args = &.{ "-i", "-" }, .stdin_input = "ogg_opus_ffmpeg_mono", .tail = &.{ "-f", "f32le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stderr = "" },
     .{ .name = "Ogg Opus with hybrid frames to WAV", .set = .ogg, .args = &.{"-i"}, .input = "ogg_opus_frame_counts", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt ", .stderr = "" },
     .{ .name = "MP3 is not decoded yet", .set = .mp3, .args = &.{"-i"}, .input = "mp3_mpeg1_l3_stereo", .tail = &.{ "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
     .{ .name = "Ogg FLAC whose frames all fail to decode", .set = .ogg, .args = &.{"-i"}, .input = "ogg_lost_continued_page", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stdout = "", .stderr_contains = ": DecodeErrorRate\n" },
@@ -871,10 +880,17 @@ fn addProbeCase(b: *std.Build, test_step: *std.Build.Step, probe: *std.Build.Ste
     if (case.fixture) |name| run.addFileArg(fixturePath(b, case.set, name));
     if (case.stdin_fixture) |name| run.setStdIn(.{ .lazy_path = fixturePath(b, case.set, name) });
     run.expectExitCode(case.exit_code);
-    if (case.stdout_contains) |text| run.expectStdOutMatch(text) else run.expectStdOutEqual(case.stdout);
+    if (case.stdout_contains) |text| expectStdOutContains(run, case.name, text) else run.expectStdOutEqual(case.stdout);
     if (case.stderr) |text| run.expectStdErrEqual(text);
     if (case.stderr_contains) |text| run.expectStdErrMatch(text);
     test_step.dependOn(&run.step);
+}
+
+/// `expectStdOutMatch` finds an empty string in any stdout, so a case that
+/// asks for one would check nothing: the case table is wrong.
+fn expectStdOutContains(run: *std.Build.Step.Run, case_name: []const u8, text: []const u8) void {
+    if (text.len == 0) std.debug.panic("case \"{s}\": an empty stdout_contains checks nothing", .{case_name});
+    run.expectStdOutMatch(text);
 }
 
 fn addConvertCase(b: *std.Build, test_step: *std.Build.Step, zffmpeg: *std.Build.Step.Compile, case: ConvertCase) void {
@@ -886,7 +902,14 @@ fn addConvertCase(b: *std.Build, test_step: *std.Build.Step, zffmpeg: *std.Build
     if (case.stdin_input) |name| run.setStdIn(.{ .lazy_path = fixturePath(b, case.set, name) });
     run.addArgs(case.tail);
     run.expectExitCode(case.exit_code);
-    if (case.stdout_contains) |text| run.expectStdOutMatch(text) else run.expectStdOutEqual(case.stdout);
+    if (case.stdout_contains) |text| {
+        expectStdOutContains(run, case.name, text);
+    } else if (!case.stdout_as_other_input) {
+        run.expectStdOutEqual(case.stdout);
+    }
+    if (case.stdout_as_other_input) {
+        run.addCheck(.{ .expect_stdout_snapshot = otherInputStdOut(b, zffmpeg, case) });
+    }
     if (case.stderr) |text| run.expectStdErrEqual(text);
     if (case.stderr_contains) |text| run.expectStdErrMatch(text);
     if (case.output_file) |name| {
@@ -895,6 +918,36 @@ fn addConvertCase(b: *std.Build, test_step: *std.Build.Step, zffmpeg: *std.Build
         test_step.dependOn(&check.step);
     }
     test_step.dependOn(&run.step);
+}
+
+/// The stdout of `case`'s command with its input moved: a file argument
+/// becomes standard input ("-i", "-"), standard input becomes the file
+/// argument. That run must give the case's status and stderr checks too.
+fn otherInputStdOut(b: *std.Build, zffmpeg: *std.Build.Step.Compile, case: ConvertCase) std.Build.LazyPath {
+    const other = b.addRunArtifact(zffmpeg);
+    other.setName(b.fmt("zffmpeg: {s} (the input moved)", .{case.name}));
+    other.setCwd(b.path("."));
+    if (case.input) |name| {
+        other.addArgs(case.args);
+        other.addArg("-");
+        other.setStdIn(.{ .lazy_path = fixturePath(b, case.set, name) });
+    } else if (case.stdin_input) |name| {
+        const args = case.args;
+        if (args.len == 0 or !std.mem.eql(u8, args[args.len - 1], "-")) {
+            std.debug.panic("case \"{s}\": stdin_input needs args ending with \"-\"", .{case.name});
+        }
+        other.addArgs(args[0 .. args.len - 1]);
+        other.addFileArg(fixturePath(b, case.set, name));
+    } else {
+        std.debug.panic("case \"{s}\": stdout_as_other_input needs an input", .{case.name});
+    }
+    other.addArgs(case.tail);
+    other.expectExitCode(case.exit_code);
+    if (case.stderr_contains) |text| other.expectStdErrMatch(text);
+    // An exact stderr names the input's path, which moving it changes; only
+    // an empty one carries over.
+    if (case.stderr) |text| if (text.len == 0) other.expectStdErrEqual(text);
+    return other.captureStdOut(.{});
 }
 
 fn fixturePath(b: *std.Build, set: FixtureSet, name: []const u8) std.Build.LazyPath {
