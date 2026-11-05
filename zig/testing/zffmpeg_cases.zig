@@ -9,7 +9,9 @@
 //!
 //!     zffmpeg-cases <zffmpeg> <fixture directory> <empty work directory>
 //!
-//! The fixture directory is zig/testing/fixtures. `zig build test` runs it in
+//! The fixture directory is zig/testing/fixtures; the files read from it are
+//! listed in build.zig's `zffmpeg_case_fixtures`, as the build re-runs the
+//! cases only when a listed file changes. `zig build test` runs it in
 //! a fresh work directory and expects no output and status 0; each failing case
 //! prints one line to stderr.
 
@@ -128,7 +130,13 @@ const Harness = struct {
         return h.runWith(args, stdin, if (stdout) |file| .{ .file = file } else .scratch);
     }
 
+    /// A refusal: status `exit` (not 0) and a stderr containing
+    /// `stderr_contains`, which is not empty, as every stderr contains "".
     fn expect(h: *Harness, case: []const u8, outcome: Outcome, exit: u8, stderr_contains: []const u8) void {
+        if (exit == 0 or stderr_contains.len == 0) {
+            return h.fail(case, "the case table is wrong: expect needs a failure status and stderr text " ++
+                "(expectSuccess checks a success)", .{});
+        }
         const exited_as_expected = switch (outcome.term) {
             .exited => |code| code == exit,
             else => false,
@@ -137,6 +145,18 @@ const Harness = struct {
             h.fail(case, "ended with {any}, stderr \"{s}\"; expected exit {d} and stderr containing \"{s}\"", .{
                 outcome.term, outcome.stderr, exit, stderr_contains,
             });
+        }
+    }
+
+    /// Status 0 and nothing on stderr: zffmpeg prints nothing on success.
+    /// The caller still checks the output.
+    fn expectSuccess(h: *Harness, case: []const u8, outcome: Outcome) void {
+        const succeeded = switch (outcome.term) {
+            .exited => |code| code == 0,
+            else => false,
+        };
+        if (!succeeded or outcome.stderr.len != 0) {
+            h.fail(case, "ended with {any}, stderr \"{s}\"; expected exit 0 and no stderr", .{ outcome.term, outcome.stderr });
         }
     }
 
@@ -221,11 +241,11 @@ pub fn main(init: std.process.Init) !u8 {
         try h.expectContent(case[0], "out.au", previous);
     }
     try h.write("out.au", previous);
-    h.expect("-y replaces an existing output", try h.run(&.{ "-y", "-i", "in.wav", "out.au" }, .ignore, null), 0, "");
+    h.expectSuccess("-y replaces an existing output", try h.run(&.{ "-y", "-i", "in.wav", "out.au" }, .ignore, null));
     try h.expectContent("-y replaces an existing output", "out.au", au_out);
     // FFmpeg's extension is the text after the name's last dot, so a file
     // named only `.au` is AU output (av_match_ext's strrchr).
-    h.expect("an output named only by its extension", try h.run(&.{ "-i", "in.wav", ".au" }, .ignore, null), 0, "");
+    h.expectSuccess("an output named only by its extension", try h.run(&.{ "-i", "in.wav", ".au" }, .ignore, null));
     try h.expectContent("an output named only by its extension", ".au", au_out);
     try h.write("out.au", previous);
     h.expect("-y with -n is refused", try h.run(&.{ "-y", "-n", "-i", "in.wav", "out.au" }, .ignore, null), 1, "contradict");
@@ -294,10 +314,12 @@ pub fn main(init: std.process.Init) !u8 {
         try writeLongWav(io, dir, "pipe.wav");
         const case = "FLAC into a named pipe";
         const named = try h.runCapture(&.{ "-y", "-i", "pipe.wav", "-f", "flac", "/dev/stdout" });
-        h.expect(case, named.outcome, 0, "");
-        h.expect(case, try h.run(&.{ "-i", "pipe.wav", "-f", "flac", "-" }, .ignore, null), 0, "");
+        h.expectSuccess(case, named.outcome);
+        h.expectSuccess(case, try h.run(&.{ "-i", "pipe.wav", "-f", "flac", "-" }, .ignore, null));
         const stdout = try dir.readFileAlloc(io, "stdout.bin", h.gpa, .limited(1 << 22));
         defer h.gpa.free(stdout);
+        // Equal bytes say nothing when both are empty.
+        if (!std.mem.startsWith(u8, stdout, "fLaC")) h.fail(case, "standard output is not FLAC", .{});
         if (!std.mem.eql(u8, named.stdout, stdout)) h.fail(case, "the pipe got other bytes than standard output", .{});
         h.gpa.free(named.stdout);
         const failed = "a late failure into a named pipe removes nothing";
@@ -334,7 +356,7 @@ pub fn main(init: std.process.Init) !u8 {
         const case = "standard input to standard output";
         const stdin = try dir.openFile(io, "in.wav", .{});
         defer stdin.close(io);
-        h.expect(case, try h.run(&.{ "-i", "-", "-f", "au", "-" }, .{ .file = stdin }, null), 0, "");
+        h.expectSuccess(case, try h.run(&.{ "-i", "-", "-f", "au", "-" }, .{ .file = stdin }, null));
         try h.expectContent(case, "stdout.bin", au_out);
     }
     // A write-only standard input fails to read. On Windows, std's spawn
@@ -373,19 +395,29 @@ pub fn main(init: std.process.Init) !u8 {
         const case = "raw PCM through a pipe has no length for a header";
         h.expect(case, try h.runPiped(&.{ "-f", "alaw", "-i", "-", "-f", "wav", "-" }, raw_alaw), 3, "zffmpeg: -: UnsupportedStreamingSize");
         const piped = "raw PCM through a pipe to raw PCM";
-        h.expect(piped, try h.runPiped(&.{ "-f", "alaw", "-i", "-", "-c", "copy", "-f", "alaw", "-" }, raw_alaw), 0, "");
+        h.expectSuccess(piped, try h.runPiped(&.{ "-f", "alaw", "-i", "-", "-c", "copy", "-f", "alaw", "-" }, raw_alaw));
         try h.expectContent(piped, "stdout.bin", raw_alaw);
         try h.write("take.al", raw_alaw);
         const named = "a raw extension names the input format";
-        h.expect(named, try h.run(&.{ "-i", "take.al", "-c", "copy", "-f", "alaw", "-" }, .ignore, null), 0, "");
+        h.expectSuccess(named, try h.run(&.{ "-i", "take.al", "-c", "copy", "-f", "alaw", "-" }, .ignore, null));
         try h.expectContent(named, "stdout.bin", raw_alaw);
-        h.expect(named, try h.run(&.{ "-i", "take.al", "-c", "copy", "take.wav" }, .ignore, null), 0, "");
+        h.expectSuccess(named, try h.run(&.{ "-i", "take.al", "-c", "copy", "take.wav" }, .ignore, null));
+        // The copy holds the A-law samples, one byte per mono frame.
+        const file = try dir.openFile(io, "take.wav", .{});
+        defer file.close(io);
+        var buffer: [4096]u8 = undefined;
+        var reader = file.readerStreaming(io, &buffer);
+        if (av.wav.probe(&reader.interface, .{})) |info| {
+            if (info.codec != .alaw or info.format.channelCount() != 1 or info.frame_count != raw_alaw.len) {
+                h.fail(named, "take.wav holds {t}, {d} channels, {?d} frames", .{ info.codec, info.format.channelCount(), info.frame_count });
+            }
+        } else |err| h.fail(named, "take.wav: {t}", .{err});
     }
 
     // A long stream converts through files with exact frame counts.
     {
         const case = "a long stream converts";
-        h.expect(case, try h.run(&.{ "-i", "long.wav", "long.au" }, .ignore, null), 0, "");
+        h.expectSuccess(case, try h.run(&.{ "-i", "long.wav", "long.au" }, .ignore, null));
         const file = try dir.openFile(io, "long.au", .{});
         defer file.close(io);
         var buffer: [4096]u8 = undefined;

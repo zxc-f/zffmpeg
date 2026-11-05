@@ -531,10 +531,21 @@ const ConvertCase = struct {
     /// the input moved between the file argument and standard input, which
     /// must give the same status and stderr checks. For output too long to
     /// spell out here: compare.py checks the file conversion's bytes against
-    /// FFmpeg's, so this ties the other path to them.
+    /// FFmpeg's, so this ties the other path to them. Needs `stdout_raw`,
+    /// so that two empty or equally short outputs fail.
     stdout_as_other_input: bool = false,
+    /// zffprobe reads the stdout back as raw PCM with `args` (`-f`,
+    /// `-ch_layout`, `-sample_rate`); its report must give `nb_samples`,
+    /// the count the ffmpeg program decodes from the same input.
+    stdout_raw: ?RawStdout = null,
     stderr: ?[]const u8 = null,
+    /// Nonempty: an empty string is in every stderr.
     stderr_contains: ?[]const u8 = null,
+};
+
+const RawStdout = struct {
+    args: []const []const u8,
+    nb_samples: u64,
 };
 
 const zffmpeg_usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout <layout>] -i <input | -> [-c copy|<encoder>] [-ar <rate>] [-ac <channels> | -ch_layout <layout>] [-dither_method <method>] [-dither_scale <scale>] [FLAC encoder options] [-f <format>] <output | ->\n";
@@ -566,6 +577,15 @@ const aifc_sowt = @embedFile("zig/testing/fixtures/aiff/aifc_sowt.aiff");
 // T22c: the raw payloads of the paired fixtures.
 const raw_s16be_stereo_44k1 = @embedFile("zig/testing/fixtures/raw/raw_s16be_stereo_44k1.raw");
 const raw_alaw_mono_8k = @embedFile("zig/testing/fixtures/raw/raw_alaw_mono_8k.raw");
+
+/// The fixtures zig/testing/zffmpeg_cases.zig reads from the fixture
+/// directory: the build re-runs it when one changes. Keep the two in step.
+const zffmpeg_case_fixtures = [_][]const u8{
+    "zig/testing/fixtures/wav/mono_8k.wav",
+    "zig/testing/fixtures/au/au_mono_8k.au",
+    "zig/testing/fixtures/wav/duplicate_data.wav",
+    "zig/testing/fixtures/raw/raw_alaw_mono_8k.raw",
+};
 
 /// T13b: every cell of the operation matrix (files and pipes, transcode and
 /// copy), the output format from -f or the extension, late and early media
@@ -703,7 +723,7 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "FLAC to s16be from a pipe", .set = .flac, .args = &.{ "-i", "-" }, .stdin_input = "flac_constant_mono_8k", .tail = &.{ "-f", "s16be", "-" }, .exit_code = 0, .stdout = &flac_constant_s16be, .stderr = "" },
     .{ .name = "FLAC copy has no output", .set = .flac, .args = &.{"-i"}, .input = "flac_constant_mono_8k", .tail = &.{ "-c", "copy", "-f", "wav", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
     .{ .name = "FLAC that decodes short of STREAMINFO", .set = .flac, .args = &.{"-i"}, .input = "flac_junk_between_frames", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stdout = "", .stderr_contains = ": FrameCountMismatch\n" },
-    .{ .name = "FLAC that decodes short of STREAMINFO to raw PCM", .set = .flac, .args = &.{"-i"}, .input = "flac_junk_between_frames", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stderr = "" },
+    .{ .name = "FLAC that decodes short of STREAMINFO to raw PCM", .set = .flac, .args = &.{"-i"}, .input = "flac_junk_between_frames", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stdout_raw = .{ .args = &.{ "-f", "s16le", "-ch_layout", "mono", "-sample_rate", "44100" }, .nb_samples = 384 }, .stderr = "" },
     .{ .name = "CAF output is unsupported", .args = &.{"-i"}, .input = "mono_8k", .tail = &.{ "-f", "caf", "-" }, .exit_code = 3, .stderr = "zffmpeg: caf: unsupported output format\n" },
     // T26c: FLAC output, the ffmpeg program's block size (the input's first
     // frame) and FFmpeg's header; standard output cannot seek back, so its
@@ -715,11 +735,11 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "an invalid FLAC encoder option value", .args = &.{ "-i", "a.wav", "-lpc_type", "burg", "b.flac" }, .exit_code = 1, .stderr_contains = "invalid value for: -lpc_type\n" },
     // T27d: Ogg decoded; compare.py checks the bytes against FFmpeg's.
     .{ .name = "Ogg Vorbis to WAV", .set = .ogg, .args = &.{"-i"}, .input = "ogg_vorbis_ffmpeg_22k_short", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt ", .stderr = "" },
-    .{ .name = "Ogg Vorbis from a pipe to raw PCM", .set = .ogg, .args = &.{ "-i", "-" }, .stdin_input = "ogg_vorbis_ffmpeg_22k_short", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stderr = "" },
+    .{ .name = "Ogg Vorbis from a pipe to raw PCM", .set = .ogg, .args = &.{ "-i", "-" }, .stdin_input = "ogg_vorbis_ffmpeg_22k_short", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stdout_raw = .{ .args = &.{ "-f", "s16le", "-ch_layout", "stereo", "-sample_rate", "22050" }, .nb_samples = 1024 }, .stderr = "" },
     .{ .name = "Ogg Vorbis from a pipe has no count for WAV", .set = .ogg, .args = &.{ "-i", "-" }, .stdin_input = "ogg_vorbis_ffmpeg_22k_short", .tail = &.{ "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedStreamingSize\n" },
     .{ .name = "Ogg Vorbis copy is unsupported", .set = .ogg, .args = &.{"-i"}, .input = "ogg_vorbis_ffmpeg_22k_short", .tail = &.{ "-c", "copy", "-f", "ogg", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
     .{ .name = "Ogg Opus to WAV", .set = .ogg, .args = &.{"-i"}, .input = "ogg_opus_ffmpeg_stereo", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt ", .stderr = "" },
-    .{ .name = "Ogg Opus from a pipe to raw PCM", .set = .ogg, .args = &.{ "-i", "-" }, .stdin_input = "ogg_opus_ffmpeg_mono", .tail = &.{ "-f", "f32le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stderr = "" },
+    .{ .name = "Ogg Opus from a pipe to raw PCM", .set = .ogg, .args = &.{ "-i", "-" }, .stdin_input = "ogg_opus_ffmpeg_mono", .tail = &.{ "-f", "f32le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stdout_raw = .{ .args = &.{ "-f", "f32le", "-ch_layout", "mono", "-sample_rate", "48000" }, .nb_samples = 15000 }, .stderr = "" },
     .{ .name = "Ogg Opus with hybrid frames to WAV", .set = .ogg, .args = &.{"-i"}, .input = "ogg_opus_frame_counts", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt ", .stderr = "" },
     .{ .name = "MP3 is not decoded yet", .set = .mp3, .args = &.{"-i"}, .input = "mp3_mpeg1_l3_stereo", .tail = &.{ "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
     // A decoder that refuses the headers fails cleanly, before any output,
@@ -822,7 +842,7 @@ pub fn build(b: *std.Build) void {
     b.step("zffmpeg", "Run zffmpeg; pass its arguments after --").dependOn(&run_zffmpeg.step);
 
     if (test_filters.len == 0) {
-        for (convert_cases) |case| addConvertCase(b, test_step, zffmpeg, case);
+        for (convert_cases) |case| addConvertCase(b, test_step, zffmpeg, probe, case);
 
         // Cases that need prepared files run in a fresh directory each time.
         const cases_tool = b.addExecutable(.{
@@ -838,6 +858,9 @@ pub fn build(b: *std.Build) void {
         run_cases.setName("zffmpeg: prepared-file cases");
         run_cases.addArtifactArg(zffmpeg);
         run_cases.addDirectoryArg(b.path("zig/testing/fixtures"));
+        // A directory argument is hashed by its path alone; the files the
+        // tool reads are inputs, so a changed fixture runs the cases again.
+        for (zffmpeg_case_fixtures) |path| run_cases.addFileInput(b.path(path));
         _ = run_cases.addOutputDirectoryArg("work");
         run_cases.expectExitCode(0);
         run_cases.expectStdErrEqual("");
@@ -909,7 +932,7 @@ fn addProbeCase(b: *std.Build, test_step: *std.Build.Step, probe: *std.Build.Ste
     run.expectExitCode(case.exit_code);
     if (case.stdout_contains) |text| expectStdOutContains(run, case.name, text) else run.expectStdOutEqual(case.stdout);
     if (case.stderr) |text| run.expectStdErrEqual(text);
-    if (case.stderr_contains) |text| run.expectStdErrMatch(text);
+    if (case.stderr_contains) |text| expectStdErrContains(run, case.name, text);
     test_step.dependOn(&run.step);
 }
 
@@ -920,7 +943,19 @@ fn expectStdOutContains(run: *std.Build.Step.Run, case_name: []const u8, text: [
     run.expectStdOutMatch(text);
 }
 
-fn addConvertCase(b: *std.Build, test_step: *std.Build.Step, zffmpeg: *std.Build.Step.Compile, case: ConvertCase) void {
+/// As `expectStdOutContains`, for stderr.
+fn expectStdErrContains(run: *std.Build.Step.Run, case_name: []const u8, text: []const u8) void {
+    if (text.len == 0) std.debug.panic("case \"{s}\": an empty stderr_contains checks nothing", .{case_name});
+    run.expectStdErrMatch(text);
+}
+
+fn addConvertCase(
+    b: *std.Build,
+    test_step: *std.Build.Step,
+    zffmpeg: *std.Build.Step.Compile,
+    probe: *std.Build.Step.Compile,
+    case: ConvertCase,
+) void {
     const run = b.addRunArtifact(zffmpeg);
     run.setName(b.fmt("zffmpeg: {s}", .{case.name}));
     run.setCwd(b.path("."));
@@ -936,9 +971,23 @@ fn addConvertCase(b: *std.Build, test_step: *std.Build.Step, zffmpeg: *std.Build
     }
     if (case.stdout_as_other_input) {
         run.addCheck(.{ .expect_stdout_snapshot = otherInputStdOut(b, zffmpeg, case) });
+        // Both runs' outputs being equal says nothing when both are empty:
+        // zffprobe counts the samples, the ffmpeg program's count.
+        const raw = case.stdout_raw orelse
+            std.debug.panic("case \"{s}\": stdout_as_other_input needs stdout_raw", .{case.name});
+        const count = b.addRunArtifact(probe);
+        count.setName(b.fmt("zffmpeg: {s} (the samples counted)", .{case.name}));
+        count.addArgs(raw.args);
+        count.addFileArg(run.captureStdOut(.{}));
+        count.expectExitCode(0);
+        count.expectStdOutMatch(b.fmt("\nnb_samples={d}\n", .{raw.nb_samples}));
+        count.expectStdErrEqual("");
+        test_step.dependOn(&count.step);
+    } else if (case.stdout_raw != null) {
+        std.debug.panic("case \"{s}\": stdout_raw is only read with stdout_as_other_input", .{case.name});
     }
     if (case.stderr) |text| run.expectStdErrEqual(text);
-    if (case.stderr_contains) |text| run.expectStdErrMatch(text);
+    if (case.stderr_contains) |text| expectStdErrContains(run, case.name, text);
     if (case.output_file) |name| {
         const output = run.addOutputFileArg(name);
         const check = b.addCheckFile(output, .{ .expected_exact = case.output_bytes.? });
@@ -970,7 +1019,7 @@ fn otherInputStdOut(b: *std.Build, zffmpeg: *std.Build.Step.Compile, case: Conve
     }
     other.addArgs(case.tail);
     other.expectExitCode(case.exit_code);
-    if (case.stderr_contains) |text| other.expectStdErrMatch(text);
+    if (case.stderr_contains) |text| expectStdErrContains(other, case.name, text);
     // An exact stderr names the input's path, which moving it changes; only
     // an empty one carries over.
     if (case.stderr) |text| if (text.len == 0) other.expectStdErrEqual(text);
