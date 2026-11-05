@@ -332,7 +332,17 @@ and `streamhash` muxers (`-fflags +bitexact`) beside `hash-driver`, which
 `zig build test-tools` installs: every FLAC fixture's packets copied and
 frames decoded to pcm_s16le in all three, and every accepted WAV, AU, AIFF
 and CAF fixture's stream in `streamhash`; `compare.py`'s
-`KNOWN_HASH_DIFFERENCES` lists the understood differences. By hand:
+`KNOWN_HASH_DIFFERENCES` lists the understood differences, each with the
+check that asserts it (see "Known differences" below). Where both refuse
+an input, the program's refusal must be the input's (`Error opening input
+files: Invalid data found when processing input`, for instance) and the
+hash driver's error zffprobe's for the same file. The Ogg and MP3 sections
+compare the hash driver's framecrc copy the same way; the MP3 reference
+command takes `-copyts`, because the hash driver hashes libavformat's
+timestamps (`mp3.txt`) and the program otherwise shifts them by the
+stream's start time, the gapless skip of a Xing, Info or iTunSMPB header
+(`ts_offset` in `ffmpeg_demux.c`, the program's timestamps that T53
+ports). By hand:
 
 ```bash
 zig build test-tools
@@ -585,7 +595,27 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   diagnostic text is normalized: the file path and `@ 0x…` pointer addresses are
   removed.
 - **Known differences** are listed in `compare.py` and matched on the exact
-  field and value; any other mismatch fails.
+  field and value; any other mismatch fails. The tables of whole-output
+  differences assert what they record rather than accepting any failure:
+  a refusal by the tool's exit status and error name (its one stderr line
+  `<tool>: <path>: <Name>`); a timestamp difference by equal framecrc or
+  framemd5 text apart from the packets' dts and pts; an input FFmpeg reads
+  further (an AU's bytes after its data, a layout chunk after the samples)
+  by FFmpeg's result for the input cut after its samples, for the stream
+  hashes, the remixes and the lossy conversions; an attached-picture
+  stream by the program's output with `-map 0:a:0`; a mid-stream FLAC
+  change by libavcodec's decoded frames in `vectors/flac.txt`; an Ogg
+  output whose granules differ by the same pages apart from granule
+  positions and CRCs, decoded by FFmpeg to the same samples; a FLAC
+  conversion to WAV that zffmpeg refuses by its status and error, with
+  the same input's raw PCM equal to the program's. An entry whose outputs
+  now agree fails as stale. Run with `--hasher /bin/false`, every Ogg,
+  MP3 and hash case fails.
+- **Ogg decoding through pipes.** Each Ogg fixture's raw PCM decode
+  (`-f s16le`, `-f f32le`) also runs with the input on a pipe and the
+  output on stdout, and must equal the ffmpeg program's doing the same
+  (`-i pipe:`), or be the same refusal: from a pipe a junk prefix leaves
+  both probes no file name to fall back on.
 
 ## Results
 

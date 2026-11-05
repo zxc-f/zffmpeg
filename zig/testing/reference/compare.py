@@ -464,6 +464,102 @@ def clean(message, path):
     return re.sub(r" @ 0x[0-9a-f]+\]", "]", message)
 
 
+def tool_error(process, tool, path):
+    """The error a refusal of `tool` (zffprobe, zffmpeg, hash-driver) names:
+    its one stderr line `<tool>: <path>: <Name>`, with a failure status (2
+    or more: not a usage error, and not a crash, whose signal Python reports
+    as a negative status). None for anything else, so a crash, a usage error
+    or a stray message never counts as the recorded refusal."""
+    if process.returncode < 2:
+        return None
+    match = re.fullmatch(rf"{re.escape(tool)}: {re.escape(str(path))}: ([A-Z][A-Za-z0-9]*)\n",
+                         process.stderr.decode(errors="replace"))
+    return match.group(1) if match else None
+
+
+# The ffmpeg program's last line when an input's own bytes stop it opening
+# (AVERROR_INVALIDDATA, AVERROR_EOF, and the Ogg Vorbis header parser's
+# AVERROR_UNKNOWN); a missing file, memory or an encoder the reference build
+# lacks fail otherwise, and are never a refusal both tools share.
+FFMPEG_INPUT_REFUSALS = tuple(f"Error opening input files: {reason}" for reason in (
+    "Invalid data found when processing input", "End of file", "Unknown error occurred"))
+
+
+def ffmpeg_refuses_input(process):
+    """Whether the ffmpeg program failed because the input's bytes do not open."""
+    lines = text(process.stderr).splitlines()
+    return process.returncode != 0 and bool(lines) and lines[-1] in FFMPEG_INPUT_REFUSALS
+
+
+def samples_end(data):
+    """The offset just past an AU, AIFF or CAF stream's samples: a copy cut
+    there holds nothing FFmpeg reads that the port does not (the bytes after
+    an AU's declared data, a layout chunk after the samples)."""
+    if data[:4] == b".snd":
+        return int.from_bytes(data[4:8], "big") + int.from_bytes(data[8:12], "big")
+    if data[:4] == b"FORM":
+        position = 12
+        while position + 8 <= len(data):
+            size = int.from_bytes(data[position + 4:position + 8], "big")
+            if data[position:position + 4] == b"SSND":
+                return position + 8 + size
+            position += 8 + size + (size & 1)
+    if data[:4] == b"caff":
+        position = 8
+        while position + 12 <= len(data):
+            size = int.from_bytes(data[position + 4:position + 12], "big")
+            if data[position:position + 4] == b"data":
+                return position + 12 + size
+            position += 12 + size
+    return None
+
+
+def cut_after_samples(path, work):
+    """A copy of `path` cut after its samples (`samples_end`), in `work`, or
+    None when nothing follows them (then the recorded difference the cut
+    explains is gone, and the caller fails)."""
+    data = path.read_bytes()
+    end = samples_end(data)
+    if end is None or end >= len(data):
+        return None
+    cut = pathlib.Path(work) / f"cut-{path.name}"
+    cut.write_bytes(data[:end])
+    return cut
+
+
+def packet_columns(hash_text, dropped):
+    """A framecrc or framemd5 text with the `dropped` columns of every packet
+    line removed (1 is the dts, 2 the pts); header lines kept whole."""
+    lines = []
+    for line in text(hash_text).splitlines():
+        if line.startswith("#"):
+            lines.append(line)
+        else:
+            lines.append([column.strip() for i, column in enumerate(line.split(",")) if i not in dropped])
+    return lines
+
+
+def ogg_without_granules(data):
+    """An Ogg stream's pages with every granule position and CRC zeroed, so
+    two streams compare equal when only their granules differ; None if the
+    bytes are not whole Ogg pages."""
+    out, position = bytearray(), 0
+    while position < len(data):
+        if data[position:position + 4] != b"OggS" or position + 27 > len(data):
+            return None
+        segments = data[position + 26]
+        lacing = data[position + 27:position + 27 + segments]
+        size = 27 + segments + sum(lacing)
+        if len(lacing) != segments or position + size > len(data):
+            return None
+        page = bytearray(data[position:position + size])
+        page[6:14] = bytes(8)
+        page[22:26] = bytes(4)
+        out += page
+        position += size
+    return bytes(out)
+
+
 def wav_container(fixture):
     """The container of a WAV-contract fixture: Wave64 starts with the `riff` GUID."""
     return "w64" if fixture.data.startswith(b"riff") else "wav"
@@ -1061,7 +1157,7 @@ def compare_zffmpeg(args, lines, failures):
     carried = {"wav": generate.WAV_CODECS, "w64": generate.WAV_CODECS, "au": generate.AU_CODECS,
                "aiff": generate.AIFF_CODECS}
     carried.update({fmt: {codec} for fmt, codec in generate.RAW_FORMATS.items()})
-    read_ok = read_total = rejected_ok = rejected_total = same_ok = same_total = 0
+    read_ok = read_total = rejected_ok = rejected_total = same_ok = same_total = understood = 0
     with tempfile.TemporaryDirectory() as tmp:
         work = pathlib.Path(tmp)
         for container, path, fixture in inputs:
@@ -1118,7 +1214,10 @@ def compare_zffmpeg(args, lines, failures):
                     in_layout = (stream.layout if container in generate.RAW_FORMATS and fixture.params
                                  else guessed_layout(stream.layout, channels))
                     out_layout = written_layout(output, codec, rate, in_layout, channels)
-                    expected = expected_stream(output, codec, channels, rate, frames, stream.storage, out_layout)
+                    # The output's storage is its codec's (an empty input's
+                    # transcode into another storage is read as one).
+                    expected = expected_stream(output, codec, channels, rate, frames, generate.CAF_STORAGE[codec],
+                                               out_layout)
                     differences = dict(FIELD_DIFFERENCES.get(output, KNOWN_FIELD_DIFFERENCES))
                     # FFmpeg reads raw output with the stream's parameters.
                     output_args = (raw_input_args(output, (rate, channels)) if output in generate.RAW_FORMATS
@@ -1133,11 +1232,22 @@ def compare_zffmpeg(args, lines, failures):
                         differences = w64_differences(written, codec, channels, frames, differences)
                     if output in generate.RAW_FORMATS and frames == 0:
                         differences[("duration_ts", "N/A")] = "FFmpeg gives an empty raw file no duration"
-                    if lossy:
+                    # An empty input converts no samples, so its output is
+                    # checked as a lossless one is, below.
+                    if lossy and frames > 0:
                         if fixture.name in KNOWN_AU_DECODE_DIFFERENCES:
-                            notes.append("lossy, and FFmpeg reads the input differently: not compared")
-                        elif frames == 0:
-                            notes.append("empty: nothing to convert")
+                            # FFmpeg decodes the bytes after the declared
+                            # data: its conversion of the input cut there.
+                            source = cut_after_samples(path, work)
+                            if source is None:
+                                problems.append("listed in KNOWN_AU_DECODE_DIFFERENCES, but nothing follows the data")
+                            else:
+                                problems += check_converted(args, source, input_args, out, output, output_args,
+                                                            codec, work)
+                            if not problems:
+                                understood += 1
+                                notes.append("converted: the samples of FFmpeg's own conversion of the input cut "
+                                             f"after its declared data ({KNOWN_AU_DECODE_DIFFERENCES[fixture.name]})")
                         else:
                             problems += check_converted(args, path, input_args, out, output, output_args, codec, work)
                             if not problems:
@@ -1183,7 +1293,8 @@ def compare_zffmpeg(args, lines, failures):
         f"AU and AIFF outputs of untagged writer-output inputs equal to FFmpeg's own conversion: "
         f"{same_ok}/{same_total}.",
     ]
-    record("zffmpeg outputs (T13b, T23a)", read_ok + rejected_ok + same_ok, read_total + rejected_total + same_total)
+    record("zffmpeg outputs (T13b, T23a)", read_ok + rejected_ok + same_ok, read_total + rejected_total + same_total,
+           understood=understood)
 
 
 # zffmpeg's outputs in the matrix: every container with a header, and raw PCM
@@ -1522,7 +1633,10 @@ def compare_resample(args, lines, failures):
 
 
 # Inputs whose decoded samples FFmpeg reads differently, for reasons other
-# sections record: their remixed outputs differ by that alone.
+# sections record: their remixed outputs differ by that alone, so each
+# differing output must equal FFmpeg's remix of the input cut after its
+# samples (`cut_after_samples`); a listed input whose outputs all equal
+# FFmpeg's fails as stale.
 KNOWN_REMIX_DIFFERENCES = {
     "au_trailing_bytes_after_data": "FFmpeg decodes the bytes after the declared data",
     # FFmpeg reads their layout chunk after the samples (quad); the port
@@ -1572,6 +1686,7 @@ def compare_remix(args, lines, failures):
             else:
                 input_args = forced_input(fixture, container)
             problems = []
+            differed = False
             for options in REMIX_OPTIONS:
                 raw_format = "f32le" if "pcm_f32le" in options else "s16le"
                 theirs, ours = work / "ffmpeg.raw", work / "zffmpeg.raw"
@@ -1593,11 +1708,23 @@ def compare_remix(args, lines, failures):
                     problems.append(f"{label}: zffmpeg exited {code} ({first_line(text(err))})")
                 elif theirs.read_bytes() != ours.read_bytes():
                     if fixture.name in KNOWN_REMIX_DIFFERENCES:
-                        same += 1
+                        # The recorded input difference alone: FFmpeg's remix
+                        # of the input cut after its samples is ours.
+                        differed = True
+                        source = cut_after_samples(path, work)
+                        cut = source and run(args.ffmpeg, "-v", "error", "-nostdin", "-y", *input_args, "-i", source,
+                                             *options, "-bitexact", "-f", raw_format, theirs)
+                        if cut and cut.returncode == 0 and theirs.read_bytes() == ours.read_bytes():
+                            same += 1
+                        else:
+                            problems.append(f"{label}: the output differs from FFmpeg's for the input cut after its "
+                                            f"samples")
                     else:
                         problems.append(f"{label}: the output differs")
                 else:
                     same += 1
+            if fixture.name in KNOWN_REMIX_DIFFERENCES and not differed:
+                problems.append("listed in KNOWN_REMIX_DIFFERENCES, but every output now equals FFmpeg's")
             result = "pass" if not problems else "**FAIL**: " + "; ".join(problems)
             if not problems and fixture.name in KNOWN_REMIX_DIFFERENCES:
                 result = f"pass ({KNOWN_REMIX_DIFFERENCES[fixture.name]})"
@@ -1635,20 +1762,53 @@ def compare_pipes(args, lines, failures):
     record("zffprobe through a pipe", same, len(cases))
 
 
-# FLAC fixtures zffmpeg converts differently from the ffmpeg program (T26a).
+# FLAC fixtures zffmpeg converts to WAV differently from the ffmpeg program
+# (T26a): fixture -> (zffmpeg's status and error, whether zffmpeg's raw PCM
+# in the decoder's storage equals the program's, reason). The WAV conversion
+# must fail with exactly that status and error and leave no output while the
+# program succeeds; where the raw PCM is compared, the samples must equal the
+# program's, so the WAV header is all that differs; otherwise the raw
+# conversion must be refused with the same error. A listed fixture that
+# converts like the program fails as stale.
 KNOWN_FLAC_CONVERSION_DIFFERENCES = {
-    "flac_junk_between_frames": "FFmpeg's parser drops a valid frame after the junk, so the samples fall short "
-                                "of STREAMINFO's count, which zffmpeg writes in the WAV header first "
-                                "(`FrameCountMismatch`); FFmpeg rewrites its seekable output's header",
-    "flac_bps24": "no frames for STREAMINFO's 576 samples (`FrameCountMismatch`), as above",
-    "flac_no_total": "no sample count for the WAV header written first (`UnsupportedStreamingSize`); FFmpeg "
-                     "rewrites its header",
-    "flac_headerless": "no STREAMINFO, so no sample count for the WAV header written first, as above",
-    "flac_streaminfo_rate0": "no sample count in STREAMINFO without a rate, as above",
-    "flac_channel_change": "a mid-stream channel change, which the WAV header written first cannot follow "
-                           "(`UnsupportedFormat`); the ffmpeg program's filters convert it",
-    "flac_rate_change": "a mid-stream rate change, as above",
+    "flac_junk_between_frames": (2, "FrameCountMismatch", True,
+                                 "FFmpeg's parser drops a valid frame after the junk, so the samples fall short "
+                                 "of STREAMINFO's count, which zffmpeg writes in the WAV header first; FFmpeg "
+                                 "rewrites its seekable output's header"),
+    "flac_bps24": (2, "FrameCountMismatch", True, "no frames for STREAMINFO's 576 samples, as above"),
+    "flac_no_total": (3, "UnsupportedStreamingSize", True,
+                      "no sample count for the WAV header written first; FFmpeg rewrites its header"),
+    "flac_headerless": (3, "UnsupportedStreamingSize", True,
+                        "no STREAMINFO, so no sample count for the WAV header written first, as above"),
+    "flac_streaminfo_rate0": (3, "UnsupportedStreamingSize", True,
+                              "no sample count in STREAMINFO without a rate, as above"),
+    "flac_channel_change": (3, "UnsupportedFormat", False,
+                            "a mid-stream channel change, which the output written first cannot follow; the "
+                            "ffmpeg program's filters convert it"),
+    "flac_rate_change": (3, "UnsupportedFormat", False, "a mid-stream rate change, as above"),
 }
+
+
+def check_flac_conversion_difference(args, path, fixture, known, zr, fr, out_ours):
+    """A recorded FLAC-to-WAV difference (KNOWN_FLAC_CONVERSION_DIFFERENCES),
+    asserted; returns the problems."""
+    code, error, raw_equal, _ = known
+    problems = []
+    if fr.returncode != 0:
+        problems.append(f"the ffmpeg program fails: {first_line(text(fr.stderr))}")
+    if zr.returncode != code or tool_error(zr, "zffmpeg", path) != error or out_ours.exists():
+        problems.append(f"zffmpeg exited {zr.returncode} ({first_line(text(zr.stderr)) or 'no error'}), output "
+                        f"{'left' if out_ours.exists() else 'absent'}; recorded: status {code} with {error}, no output")
+    raw_format = "s32le" if fixture.bps > 16 else "s16le"
+    ours = run(args.zffmpeg, "-i", path, "-f", raw_format, "-")
+    theirs = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", path, "-f", raw_format, "-")
+    if raw_equal and (ours.returncode != 0 or theirs.returncode != 0 or ours.stdout != theirs.stdout):
+        problems.append(f"the {raw_format} samples differ from the ffmpeg program's (zffmpeg exit {ours.returncode}, "
+                        f"{len(ours.stdout)} and {len(theirs.stdout)} bytes)")
+    if not raw_equal and (ours.returncode != code or tool_error(ours, "zffmpeg", path) != error):
+        problems.append(f"zffmpeg's {raw_format} exited {ours.returncode} "
+                        f"({first_line(text(ours.stderr)) or 'no error'}); recorded: status {code} with {error}")
+    return problems
 
 
 def compare_flac(args, lines, failures):
@@ -1663,7 +1823,8 @@ def compare_flac(args, lines, failures):
         "| Fixture | zffprobe | FFmpeg | WAV conversion | Result |",
         "| --- | --- | --- | --- | --- |",
     ]
-    matched = total = 0
+    matched = total = understood = 0
+    converted = set()
     for fixture in generate.build_flac_fixtures():
         total += 1
         path = FIXTURES / "flac" / f"{fixture.name}.flac"
@@ -1679,7 +1840,9 @@ def compare_flac(args, lines, failures):
             failures.append(f"{fixture.name}: FFmpeg-made fixture differs from its recorded hash")
             continue
         theirs_detected = detected_format(args.ffprobe, path)
-        if theirs_detected != generate.ffmpeg_detect(data[:2048]):
+        # ffmpeg_detect models av_probe_input_buffer2's rounds itself, as the
+        # manifest's `detected` field does; it takes the whole file.
+        if theirs_detected != generate.ffmpeg_detect(data):
             problems.append(f"FFmpeg's probe picks {theirs_detected or 'nothing'}")
         conversion = "-"
         if fixture.reject:
@@ -1726,10 +1889,18 @@ def compare_flac(args, lines, failures):
                          "-flags:a", "+bitexact", out_theirs)
                 same = zr.returncode == 0 and fr.returncode == 0 and out_ours.read_bytes() == out_theirs.read_bytes()
                 known = KNOWN_FLAC_CONVERSION_DIFFERENCES.get(fixture.name)
-                if same:
+                converted.add(fixture.name)
+                if same and known:
+                    conversion = "identical"
+                    problems.append("listed in KNOWN_FLAC_CONVERSION_DIFFERENCES, but the WAV files are now identical")
+                elif same:
                     conversion = "identical"
                 elif known:
-                    conversion = f"known: {known}"
+                    known_problems = check_flac_conversion_difference(args, path, fixture, known, zr, fr, out_ours)
+                    problems += known_problems
+                    understood += not known_problems
+                    conversion = f"known: `{known[1]}` (exit {known[0]}): {known[3]}" + (
+                        "; the raw PCM equals the program's" if known[2] else "")
                 else:
                     conversion = "differs"
                     problems.append(f"zffmpeg exit {zr.returncode} ({first_line(text(zr.stderr))}), ffmpeg exit "
@@ -1738,35 +1909,128 @@ def compare_flac(args, lines, failures):
         result = "pass" if not problems else "**FAIL**: " + "; ".join(problems)
         lines.append(f"| `{fixture.name}` | {ours} | {theirs} | {conversion} | {result} |")
         failures.extend(f"{fixture.name}: {problem}" for problem in problems)
+    for name in KNOWN_FLAC_CONVERSION_DIFFERENCES.keys() - converted:
+        total += 1
+        failures.append(f"{name}: listed in KNOWN_FLAC_CONVERSION_DIFFERENCES, but no accepted FLAC fixture has the name")
     lines += ["", f"FLAC fixtures matching the contract and FFmpeg: {matched}/{total}."]
-    record("FLAC fixtures (T26a, T26b)", matched, total)
+    record("FLAC fixtures (T26a, T26b)", matched, total, understood=understood)
 
 
-# Fixtures whose hash text differs from the ffmpeg program's for an
-# understood reason, by (fixture, mode): (reason).
+# How a recorded hash difference is asserted (`check_known_hash`); each
+# accepts exactly the recorded difference and fails on anything else:
+#   "timestamps": both succeed, and the framecrc or framemd5 texts differ
+#       only in the packets' dts and pts columns (never for streamhash);
+#   "cut": the hash driver's text equals the program's for the input cut
+#       after its samples (`cut_after_samples`): what the port does not read
+#       is all that differs;
+#   ("header", prefix): it equals the program's without its header lines
+#       starting with `prefix`, of which there is at least one;
+#   "audio map": it equals the program's with `-map 0:a:0`, its audio stream
+#       alone;
+#   "decoder frames": its framecrc packets are libavcodec's decoded frames
+#       (samples, pts and Adler-32) as vectors/flac.txt records them, and
+#       its framemd5 and streamhash texts hash the same packets;
+#   ("refused", name): the hash driver refuses with `name` (status 2) and
+#       the program succeeds.
+#
+# Fixtures whose hash text differs from the ffmpeg program's, by (fixture,
+# mode): (check, reason). A listed (fixture, mode) whose texts all equal the
+# program's fails as stale.
 KNOWN_HASH_DIFFERENCES = {
-    ("flac_rate_streaminfo", "copy"): "its one packet has no timestamp, which the ffmpeg program makes 0",
-    ("flac_rate_streaminfo", "decode"): "its one frame has no timestamp, which the ffmpeg program drops",
-    ("au_trailing_bytes_after_data", "copy"): "FFmpeg reads the bytes after the declared data",
-    ("au_trailing_bytes_after_data", "decode"): "FFmpeg decodes the bytes after the declared data",
-    ("aiff_chan_after_ssnd", "copy"): "CHAN after SSND is not read",
-    ("aiff_chan_after_ssnd", "decode"): "CHAN after SSND is not read",
-    ("caf_chan_after_data", "copy"): "`chan` after `data` is not read",
-    ("caf_chan_after_data", "decode"): "`chan` after `data` is not read",
-    ("caf_chunks_around_data", "copy"): "FFmpeg keeps a `kuki` chunk as the stream's extradata",
-    ("flac_picture", "copy"): "FFmpeg makes the PICTURE block a second, attached-picture stream; the port keeps it "
-                              "as data",
-    ("flac_picture", "decode"): "the attached-picture stream, as above, which the ffmpeg program cannot encode "
-                                "in this build",
-    ("flac_channel_change", "decode"): "the ffmpeg program's filters convert a mid-stream change; the driver "
-                                       "hashes the decoder's frames",
-    ("flac_rate_change", "decode"): "a mid-stream rate change, as above",
+    ("flac_rate_streaminfo", "copy"): ("timestamps", "its one packet has no timestamp, which the ffmpeg program "
+                                                     "makes 0"),
+    ("flac_rate_streaminfo", "decode"): ("timestamps", "its one frame has no timestamp, which the ffmpeg program "
+                                                       "makes 0"),
+    ("au_trailing_bytes_after_data", "copy"): ("cut", "FFmpeg reads the bytes after the declared data"),
+    ("au_trailing_bytes_after_data", "decode"): ("cut", "FFmpeg decodes the bytes after the declared data"),
+    ("aiff_chan_after_ssnd", "copy"): ("cut", "CHAN after SSND is not read"),
+    ("aiff_chan_after_ssnd", "decode"): ("cut", "CHAN after SSND is not read"),
+    ("caf_chan_after_data", "copy"): ("cut", "`chan` after `data` is not read"),
+    ("caf_chan_after_data", "decode"): ("cut", "`chan` after `data` is not read"),
+    ("caf_chunks_around_data", "copy"): (("header", "#extradata"), "FFmpeg keeps a `kuki` chunk as the stream's "
+                                                                   "extradata"),
+    ("flac_picture", "copy"): ("audio map", "FFmpeg makes the PICTURE block a second, attached-picture stream; the "
+                                            "port keeps it as data"),
+    ("flac_picture", "decode"): ("audio map", "the attached-picture stream, as above, which the ffmpeg program "
+                                              "cannot encode in this build"),
+    ("flac_channel_change", "decode"): ("decoder frames", "the ffmpeg program's filters convert a mid-stream "
+                                                          "change; the driver hashes the decoder's frames"),
+    ("flac_rate_change", "decode"): ("decoder frames", "a mid-stream rate change, as above"),
     # The driver copies through the codec's raw format, and FFmpeg has none
     # for s64; the decoded stream is still compared.
-    ("s64_mono_8k_extensible", "copy"): "the hash driver has no raw format to copy s64 into",
-    ("caf_s64be_mono", "copy"): "the hash driver has no raw format to copy s64 into",
-    ("caf_s64le_mono", "copy"): "the hash driver has no raw format to copy s64 into",
+    ("s64_mono_8k_extensible", "copy"): (("refused", "NoRawFormat"), "the hash driver has no raw format to copy s64 "
+                                                                     "into"),
+    ("caf_s64be_mono", "copy"): (("refused", "NoRawFormat"), "the hash driver has no raw format to copy s64 into"),
+    ("caf_s64le_mono", "copy"): (("refused", "NoRawFormat"), "the hash driver has no raw format to copy s64 into"),
 }
+
+# Decoded FLAC frames as libavcodec gives them, from flac_vectors.c's `D`
+# lines: fixture -> [(samples, pts, Adler-32)], the pts as framecrc prints
+# AV_NOPTS_VALUE.
+AV_NOPTS_VALUE = -(1 << 63)
+
+
+def flac_decoded_frames():
+    frames, name = {}, None
+    for line in (HERE.parent / "vectors" / "flac.txt").read_text().splitlines():
+        fields = line.split()
+        if fields and fields[0] == "F":
+            name = fields[1]
+            frames[name] = []
+        elif fields and fields[0] == "D":
+            pts = AV_NOPTS_VALUE if fields[2] == "N" else int(fields[2])
+            frames[name].append((int(fields[1]), pts, int(fields[3], 16)))
+    return frames
+
+
+def check_known_hash(check, args, path, kind, mode, ours, theirs, rerun, work):
+    """Asserts one recorded hash difference (KNOWN_HASH_DIFFERENCES, and the
+    Ogg and MP3 copy tables) for a case whose texts differ. `rerun(input,
+    options)` runs the program's command for this case again, on another
+    input or with output options. Returns the problem, or None."""
+    if isinstance(check, tuple) and check[0] == "refused":
+        if tool_error(ours, "hash-driver", path) != check[1] or theirs.returncode != 0:
+            return (f"the hash driver exited {ours.returncode} ({first_line(text(ours.stderr)) or 'no error'}) and "
+                    f"ffmpeg {theirs.returncode}, where the hash driver must refuse with {check[1]}")
+        return None
+    if ours.returncode != 0:
+        return f"the hash driver fails: {first_line(text(ours.stderr)) or f'exit {ours.returncode}'}"
+    if check == "audio map":
+        reference = rerun(path, ["-map", "0:a:0"])
+        return None if reference.returncode == 0 and reference.stdout == ours.stdout else \
+            "differs from the program's audio stream alone (`-map 0:a:0`)"
+    if theirs.returncode != 0:
+        return f"ffmpeg fails: {first_line(text(theirs.stderr))}"
+    if check == "timestamps":
+        if kind != "streamhash" and packet_columns(ours.stdout, {1, 2}) == packet_columns(theirs.stdout, {1, 2}):
+            return None
+        return "differs from the program's in more than the packets' timestamps"
+    if check == "cut":
+        source = cut_after_samples(path, work)
+        if source is None:
+            return "differs, but nothing follows the input's samples"
+        reference = rerun(source, [])
+        return None if reference.returncode == 0 and reference.stdout == ours.stdout else \
+            "differs from the program's on the input cut after its samples"
+    if isinstance(check, tuple) and check[0] == "header":
+        kept = [line for line in theirs.stdout.splitlines(keepends=True) if not line.startswith(check[1].encode())]
+        if len(kept) < len(theirs.stdout.splitlines()) and b"".join(kept) == ours.stdout:
+            return None
+        return f"differs from the program's in more than its `{check[1]}` lines"
+    if check == "decoder frames":
+        expected = flac_decoded_frames().get(path.stem, [])
+        framecrc = ours if kind == "framecrc" else run(args.hasher, "framecrc", mode, str(path))
+        packets = [line for line in packet_columns(framecrc.stdout, set()) if not isinstance(line, str)]
+        got = [(int(p[3]), int(p[2]), int(p[5], 16)) for p in packets if int(p[1]) == int(p[2])]
+        if framecrc.returncode != 0 or len(got) != len(packets) or got != expected:
+            return "the framecrc packets are not libavcodec's decoded frames (vectors/flac.txt)"
+        mine = [line for line in packet_columns(ours.stdout, set()) if not isinstance(line, str)]
+        if kind == "framemd5" and [p[:5] for p in mine] != [p[:5] for p in packets]:
+            return "the framemd5 packets are not the framecrc ones"
+        if kind == "streamhash" and [p[1] for p in mine] != [str(sum(int(p[4]) for p in packets))]:
+            return "the streamhash size is not the framecrc packets' total"
+        return None
+    raise ValueError(f"unknown check {check!r}")
 
 
 def compare_hashes(args, lines, failures):
@@ -1792,30 +2056,55 @@ def compare_hashes(args, lines, failures):
             if fixture.accept is not None:
                 cases.append((FIXTURES / directory / f"{fixture.name}.{directory}", ("streamhash",)))
     same = known = total = 0
-    for path, kinds in cases:
-        for kind in kinds:
-            for mode in ("copy", "decode"):
-                decoder_codec = "pcm_s32le" if path.stem in s32_inputs else "pcm_s16le"
-                codec = ["-c", "copy"] if mode == "copy" else ["-c:a", decoder_codec]
-                theirs = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", str(path), "-fflags", "+bitexact",
-                             *codec, "-f", kind, "-")
-                ours = run(args.hasher, kind, mode, str(path))
-                total += 1
-                # Both refusing the input agrees too (an input only a forced
-                # format opens).
-                if (ours.returncode == 0) == (theirs.returncode == 0) and ours.stdout == theirs.stdout:
-                    same += 1
-                    continue
-                reason = KNOWN_HASH_DIFFERENCES.get((path.stem, mode))
-                if reason is not None:
-                    known += 1
-                    continue
-                if ours.returncode != 0:
-                    failures.append(f"{path.name}: the hash driver failed ({kind}, {mode}): {first_line(text(ours.stderr))}")
-                elif theirs.returncode != 0:
-                    failures.append(f"{path.name}: ffmpeg failed ({kind}, {mode}): {first_line(text(theirs.stderr))}")
-                else:
-                    failures.append(f"{path.name}: the {kind} text differs from ffmpeg's ({mode})")
+    differing = set()
+    with tempfile.TemporaryDirectory() as work:
+        for path, kinds in cases:
+            for kind in kinds:
+                for mode in ("copy", "decode"):
+                    decoder_codec = "pcm_s32le" if path.stem in s32_inputs else "pcm_s16le"
+                    codec = ["-c", "copy"] if mode == "copy" else ["-c:a", decoder_codec]
+
+                    def rerun(source, options, codec=codec, kind=kind):
+                        return run(args.ffmpeg, "-nostdin", "-v", "error", "-i", str(source), *options, "-fflags",
+                                   "+bitexact", *codec, "-f", kind, "-")
+
+                    theirs = rerun(path, [])
+                    ours = run(args.hasher, kind, mode, str(path))
+                    total += 1
+                    if ours.returncode == 0 and theirs.returncode == 0 and ours.stdout == theirs.stdout:
+                        same += 1
+                        continue
+                    if ours.returncode != 0 and theirs.returncode != 0:
+                        # Both refusing the input agrees too (an input only a
+                        # forced format opens), when the refusals are the
+                        # input's: the program cannot open it, and the hash
+                        # driver names zffprobe's error.
+                        refusal = tool_error(ours, "hash-driver", path)
+                        if ffmpeg_refuses_input(theirs) and refusal is not None and \
+                                refusal == tool_error(run(args.zffprobe, path), "zffprobe", path):
+                            same += 1
+                            continue
+                    differing.add((path.stem, mode))
+                    entry = KNOWN_HASH_DIFFERENCES.get((path.stem, mode))
+                    if entry is not None:
+                        problem = check_known_hash(entry[0], args, path, kind, mode, ours, theirs, rerun, work)
+                        if problem is None:
+                            known += 1
+                        else:
+                            failures.append(f"{path.name}: {kind} {mode}: {problem} (recorded: {entry[1]})")
+                        continue
+                    if ours.returncode != 0:
+                        failures.append(f"{path.name}: the hash driver failed ({kind}, {mode}): "
+                                        f"{first_line(text(ours.stderr)) or f'exit {ours.returncode}'}")
+                    elif theirs.returncode != 0:
+                        failures.append(f"{path.name}: ffmpeg failed ({kind}, {mode}): {first_line(text(theirs.stderr))}")
+                    else:
+                        failures.append(f"{path.name}: the {kind} text differs from ffmpeg's ({mode})")
+    for name, mode in KNOWN_HASH_DIFFERENCES:
+        if (name, mode) not in differing:
+            total += 1
+            failures.append(f"{name}: listed in KNOWN_HASH_DIFFERENCES ({mode}), but every hash text now equals the "
+                            f"program's")
     lines += [
         "",
         "## Frame and stream hashes",
@@ -1827,7 +2116,9 @@ def compare_hashes(args, lines, failures):
         "| --- | --- | --- |",
     ]
     record("Frame and stream hashes (T19b)", same + known, total, understood=known)
-    lines += [f"| `{name}` | {mode} | {reason} |" for (name, mode), reason in KNOWN_HASH_DIFFERENCES.items()]
+    for (name, mode), (check, reason) in KNOWN_HASH_DIFFERENCES.items():
+        how = check if isinstance(check, str) else " ".join(map(str, check))
+        lines.append(f"| `{name}` | {mode} | {reason} (checked: {how}) |")
 
 
 # tests/fate/flac.mak: (test, reference sample, encoder options, decoded codec).
@@ -2119,25 +2410,56 @@ FATE_VORBIS = ["1.0.1-test_small", "1.0-test_small", "beta3-test_small", "beta4-
 
 
 # Ogg decodes that differ from the ffmpeg program's for an understood
-# reason: (fixture, options or None for every output) -> reason.
+# reason: (fixture, options or None for every output) -> (check, reason).
+# "granules": both succeed, the two Ogg files are the same pages but for
+# their granule positions (and so their CRCs), and FFmpeg decodes both to
+# the same samples. ("refused", status, name): zffmpeg fails with that status
+# and error before creating the output file, and the program succeeds. A
+# listed cell whose outputs are equal fails as stale.
 KNOWN_OGG_DECODE_DIFFERENCES = {
-    ("ogg_chained_opus", "-f ogg"): "the same samples; the first page's granule differs: the chain's timestamps "
-                                    "restart and the program's muxing fixes them up (mux_fixup_ts, T53)",
-    ("ogg_opus_silk", "-f ogg"): "the same packets and samples; their timestamps differ: the program's decoded "
-                                 "frames keep the Opus packets' timestamps, with gaps where the SILK resampler "
-                                 "delays samples, and the Ogg muxer's granules follow them (the program's "
-                                 "timestamps, T53)",
-    ("ogg_opus_frame_counts", "-f ogg"): "the same samples; the last granule differs: the program's decoded frames "
-                                         "keep the packets' timestamps, so the packets the decoder refuses leave "
-                                         "gaps the Ogg muxer's granules follow (the program's timestamps, T53)",
-    ("ogg_opus_multistream", "-f ogg"): "the same samples; their timestamps differ: the program's decoded frames "
-                                        "keep the packets' timestamps, with gaps where the streams' sync buffers "
-                                        "shorten a frame, and the Ogg muxer's granules follow them (T53)",
-    ("ogg_opus_mapped", "-f ogg"): "the same samples; the last granule differs, as for ogg_opus_multistream (T53)",
-    ("ogg_page_without_granule", None): "the demuxer fails mid-stream (a granule above 2^62): the ffmpeg program "
-                                        "ends the input there and exits 0, zffmpeg fails (port.md: a late parse "
-                                        "error stays a failure), before any output from a file",
+    ("ogg_chained_opus", "-f ogg"): ("granules", "the same samples; the first page's granule differs: the chain's "
+                                                 "timestamps restart and the program's muxing fixes them up "
+                                                 "(mux_fixup_ts, T53)"),
+    ("ogg_opus_silk", "-f ogg"): ("granules", "the same packets and samples; their timestamps differ: the program's "
+                                              "decoded frames keep the Opus packets' timestamps, with gaps where the "
+                                              "SILK resampler delays samples, and the Ogg muxer's granules follow "
+                                              "them (the program's timestamps, T53)"),
+    ("ogg_opus_frame_counts", "-f ogg"): ("granules", "the same samples; the last granule differs: the program's "
+                                                      "decoded frames keep the packets' timestamps, so the packets "
+                                                      "the decoder refuses leave gaps the Ogg muxer's granules "
+                                                      "follow (the program's timestamps, T53)"),
+    ("ogg_opus_multistream", "-f ogg"): ("granules", "the same samples; their timestamps differ: the program's "
+                                                     "decoded frames keep the packets' timestamps, with gaps where "
+                                                     "the streams' sync buffers shorten a frame, and the Ogg muxer's "
+                                                     "granules follow them (T53)"),
+    ("ogg_opus_mapped", "-f ogg"): ("granules", "the same samples; the last granule differs, as for "
+                                                "ogg_opus_multistream (T53)"),
+    ("ogg_page_without_granule", None): (("refused", 2, "InvalidOgg"),
+                                         "the demuxer fails mid-stream (a granule above 2^62): the ffmpeg program "
+                                         "ends the input there and exits 0, zffmpeg fails (port.md: a late parse "
+                                         "error stays a failure), before any output from a file"),
 }
+
+
+def check_ogg_decode_difference(args, check, path, tp, zp, theirs, ours):
+    """Asserts one recorded Ogg decode difference; returns the problem, or None."""
+    if check == "granules":
+        if tp.returncode != 0 or zp.returncode != 0:
+            return f"FFmpeg exited {tp.returncode}, zffmpeg {zp.returncode} ({first_line(text(zp.stderr))})"
+        pages = ogg_without_granules(ours.read_bytes())
+        if pages is None or pages != ogg_without_granules(theirs.read_bytes()):
+            return "the Ogg pages differ in more than their granules"
+        decoded = [run(args.ffmpeg, "-nostdin", "-v", "error", "-i", f, "-c:a", "pcm_s32le", "-f", "s32le", "-")
+                   for f in (theirs, ours)]
+        if any(d.returncode != 0 for d in decoded) or decoded[0].stdout != decoded[1].stdout:
+            return "FFmpeg decodes the two Ogg files to different samples"
+        return None
+    _, code, error = check
+    if tp.returncode != 0 or zp.returncode != code or tool_error(zp, "zffmpeg", path) != error or ours.exists():
+        return (f"FFmpeg exited {tp.returncode}, zffmpeg {zp.returncode} "
+                f"({first_line(text(zp.stderr)) or 'no error'}), output {'created' if ours.exists() else 'absent'}; "
+                f"recorded: zffmpeg refuses with {error} (status {code}) and writes nothing")
+    return None
 
 
 def compare_opus_vectors(args, lines, failures):
@@ -2196,15 +2518,60 @@ def compare_opus_vectors(args, lines, failures):
     ] + rows
 
 
+def same_decode_refusal(ffmpeg_process, error):
+    """Whether zffmpeg's refusal `error` (`tool_error`) is the one the ffmpeg
+    program's failure shows: an input that does not open, or a decode error
+    rate past `-max_error_rate` (`DecodeErrorRate`)."""
+    if error is None:
+        return False
+    if ffmpeg_refuses_input(ffmpeg_process):
+        return True
+    return b"Decode error rate " in ffmpeg_process.stderr and error == "DecodeErrorRate"
+
+
+def check_ogg_pipe_decode(args, path, opts, known):
+    """zffmpeg decoding an Ogg fixture from standard input to raw PCM on
+    standard output against the ffmpeg program doing the same (M17): equal
+    bytes, or the same refusal (from a pipe, a junk prefix leaves FFmpeg's
+    probe nothing to detect, as it does zffmpeg's: no file name). A recorded
+    refusal must come with its status and error. Returns the problem, or None."""
+    data = path.read_bytes()
+    theirs = subprocess.run([str(part) for part in (args.ffmpeg, "-v", "error", "-i", "pipe:", "-bitexact", *opts,
+                                                    "-")], input=data, capture_output=True, timeout=120)
+    ours = subprocess.run([str(part) for part in (args.zffmpeg, "-i", "-", *opts, "-")], input=data,
+                          capture_output=True, timeout=120)
+    error = tool_error(ours, "zffmpeg", "-")
+    if known is not None and isinstance(known[0], tuple):
+        _, code, name = known[0]
+        if theirs.returncode != 0 or ours.returncode != code or error != name:
+            return (f"FFmpeg exited {theirs.returncode}, zffmpeg {ours.returncode} "
+                    f"({first_line(text(ours.stderr)) or 'no error'}); recorded: zffmpeg refuses with {name}")
+        return None
+    if theirs.returncode != 0:
+        if not same_decode_refusal(theirs, error):
+            return (f"FFmpeg refuses ({text(theirs.stderr).splitlines()[-1:]}), zffmpeg exited {ours.returncode} "
+                    f"({first_line(text(ours.stderr)) or 'no error'})")
+        if ffmpeg_refuses_input(theirs) and ours.stdout:
+            return "zffmpeg writes output for an input neither opens"
+        return None
+    if ours.returncode != 0 or ours.stdout != theirs.stdout:
+        return (f"zffmpeg exited {ours.returncode} ({first_line(text(ours.stderr)) or 'no error'}) with "
+                f"{len(ours.stdout)} bytes, FFmpeg's {len(theirs.stdout)} differ")
+    return None
+
+
 def compare_ogg_decode(args, lines, failures):
     """Ogg decoded (T27d, T28a): every Ogg fixture FFmpeg decodes (Vorbis,
     Opus, FLAC in Ogg) converted by zffmpeg and by the ffmpeg program with `-bitexact`
-    into each output, byte for byte; then FATE's Vorbis decode tests
-    (optional), as `tests/fate/vorbis.mak` runs them (s16le), byte for
-    byte against the ffmpeg program's."""
+    into each output, byte for byte, and each raw PCM output again with the
+    input on a pipe and the output on stdout, against the program doing the
+    same; then FATE's Vorbis decode tests (optional), as
+    `tests/fate/vorbis.mak` runs them (s16le), byte for byte against the
+    ffmpeg program's."""
     rows = []
     same = total = understood = 0
     understood_notes = set()
+    compared = set()
     with tempfile.TemporaryDirectory() as work:
         work = pathlib.Path(work)
         for path in sorted((FIXTURES / "ogg").glob("*.ogg")):
@@ -2224,24 +2591,49 @@ def compare_ogg_decode(args, lines, failures):
                 label = " ".join(opts)
                 known = (KNOWN_OGG_DECODE_DIFFERENCES.get((path.stem, label))
                          or KNOWN_OGG_DECODE_DIFFERENCES.get((path.stem, None)))
-                if known and (tp.returncode != 0 or zp.returncode != 0 or theirs.read_bytes() != ours.read_bytes()):
-                    same += 1
-                    understood += 1
-                    understood_notes.add(f"`{path.stem}`: {known}")
-                elif tp.returncode != 0 and zp.returncode != 0 and not ours.exists():
-                    # Both refuse (a decode error rate past -max_error_rate),
-                    # zffmpeg before any output.
-                    same += 1
+                equal = tp.returncode == 0 and zp.returncode == 0 and theirs.read_bytes() == ours.read_bytes()
+                if known and equal:
+                    problems.append(f"{label}: listed in KNOWN_OGG_DECODE_DIFFERENCES, but the outputs are now equal")
+                elif known:
+                    problem = check_ogg_decode_difference(args, known[0], path, tp, zp, theirs, ours)
+                    if problem is None:
+                        same += 1
+                        understood += 1
+                        understood_notes.add(f"`{path.stem}`: {known[1]}")
+                    else:
+                        problems.append(f"{label}: {problem}")
+                elif tp.returncode != 0 and zp.returncode != 0:
+                    # Both refuse, zffmpeg before any output and for the
+                    # program's reason (a decode error rate past
+                    # -max_error_rate).
+                    if not same_decode_refusal(tp, tool_error(zp, "zffmpeg", path)) or ours.exists():
+                        problems.append(f"{label}: FFmpeg refuses ({text(tp.stderr).splitlines()[-1:]}), zffmpeg "
+                                        f"exited {zp.returncode} ({first_line(text(zp.stderr)) or 'no error'}), "
+                                        f"output {'created' if ours.exists() else 'absent'}")
+                    else:
+                        same += 1
                 elif tp.returncode != 0 or zp.returncode != 0:
                     problems.append(f"{label}: FFmpeg {tp.returncode}, zffmpeg {zp.returncode} "
                                     f"({first_line(text(zp.stderr))})")
-                elif theirs.read_bytes() != ours.read_bytes():
+                elif not equal:
                     problems.append(f"{label}: the outputs differ")
                 else:
                     same += 1
+                if ext == "raw":
+                    # The same decode with the input on a pipe (non-seekable)
+                    # and the output on stdout, against the program's.
+                    total += 1
+                    problem = check_ogg_pipe_decode(args, path, opts, known)
+                    if problem is None:
+                        same += 1
+                    else:
+                        problems.append(f"{label} through pipes: {problem}")
             result = "pass" if not problems else "**FAIL**: " + "; ".join(problems)
             rows.append(f"| `{path.stem}` | {codec} | {result} |")
             failures.extend(f"Ogg decode {path.stem}: {p}" for p in problems)
+            compared.add((path.stem, None))
+            compared.update((path.stem, " ".join(opts)) for opts, _ in OGG_DECODE_OUTPUTS)
+    total += unmatched_entries(KNOWN_OGG_DECODE_DIFFERENCES, compared, "KNOWN_OGG_DECODE_DIFFERENCES", failures)
     record("Ogg decoding (T27d, T28a)", same, total, understood=understood)
     suite = pathlib.Path(args.fate_suite)
     fate_rows = []
@@ -2268,8 +2660,9 @@ def compare_ogg_decode(args, lines, failures):
         "",
         "## Ogg decoding (T27d, T28a)",
         "",
-        f"Ogg fixtures decoded by zffmpeg into WAV, AU, AIFF, FLAC, Ogg and raw PCM (and resampled, and downmixed) "
-        f"equal to the ffmpeg program's with `-bitexact`: {same}/{total}, {understood} of them as understood "
+        f"Ogg fixtures decoded by zffmpeg into WAV, AU, AIFF, FLAC, Ogg and raw PCM (and resampled, and downmixed), "
+        f"and into raw PCM from a pipe to stdout, equal to the ffmpeg program's with `-bitexact`: {same}/{total}, "
+        f"{understood} of them as understood "
         f"differences:",
         "",
     ] + [f"- {note}" for note in sorted(understood_notes)] + [
@@ -2287,37 +2680,77 @@ def compare_ogg_decode(args, lines, failures):
 
 
 # Ogg fixtures whose copy the ffmpeg program changes past libavformat
-# (T27a): ogg.txt holds what av_read_frame gives for every one.
+# (T27a): ogg.txt holds what av_read_frame gives for every one. Fixture ->
+# (check, reason), asserted by `check_known_hash`.
 KNOWN_OGG_COPY_DIFFERENCES = {
-    "ogg_multiplexed": "two audio streams: the ffmpeg program's choice of one is not modeled",
-    "ogg_chained_opus": "the chain's timestamps restart, and the program's muxing holds a non-increasing dts at the "
-                        "last one (mux_fixup_ts, T53)",
+    "ogg_multiplexed": (("refused", "SeveralAudioStreams"),
+                        "two audio streams: the ffmpeg program's choice of one is not modeled"),
+    "ogg_chained_opus": ("timestamps", "the chain's timestamps restart, and the program's muxing holds a "
+                                       "non-increasing dts at the last one (mux_fixup_ts, T53)"),
 }
 
 
 # MP3 stream copies that differ from the ffmpeg program's for an understood
-# reason.
-_MP3_START_SHIFT = ("the same packets; the program's copy shifts the timestamps by the stream's start time, "
-                    "the gapless skip (the program's timestamps, T53)")
+# reason: fixture -> (check, reason), asserted by `check_known_hash`. The
+# reference command takes `-copyts`, as the hash driver hashes the packets
+# with libavformat's timestamps (vectors/mp3.txt): without it the program
+# shifts every timestamp by the stream's start time, the gapless skip of a
+# Xing, Info or iTunSMPB header (the program's timestamps, T53).
 KNOWN_MP3_COPY_DIFFERENCES = {
-    "mp3_apic_chap": "FFmpeg's attached-picture stream, which the port does not model",
-    "mp3_info_lame": _MP3_START_SHIFT,
-    "mp3_itunsmpb": _MP3_START_SHIFT,
-    "mp3_xing_bad_crc": _MP3_START_SHIFT,
-    "mp3_xing_lame": _MP3_START_SHIFT,
-    "mp3_xing_lavf": _MP3_START_SHIFT,
-    "mp3_xing_mpeg2_mono": _MP3_START_SHIFT,
-    "mp3_xing_size_mismatch": _MP3_START_SHIFT,
+    "mp3_apic_chap": ("audio map", "FFmpeg's attached-picture stream, which the port does not model"),
 }
+MP3_COPY_OPTIONS = ("-copyts",)
+
+
+def unmatched_entries(table, compared, title, failures):
+    """Entries of a known-difference table, keyed by fixture or by (fixture,
+    cell), that name nothing the section compared: stale, each a failure.
+    Returns their count, for the section's total."""
+    stale = sorted(str(key) for key in table if key not in compared)
+    failures.extend(f"{key}: listed in {title}, but nothing compared has that name" for key in stale)
+    return len(stale)
+
+
+def check_framecrc_copy(args, path, known, probe, reference_options=()):
+    """The hash driver's stream copy against `ffmpeg -i <path> -c copy -f
+    framecrc` (with `reference_options` before `-i`): equal text, the
+    recorded difference `known` (asserted by `check_known_hash`), or the
+    same refusal: the program cannot open the input, and the hash driver
+    names the error zffprobe's run `probe` names. Returns the problems."""
+    def rerun(source, options):
+        return run(args.ffmpeg, "-nostdin", "-v", "error", *reference_options, "-i", source, *options, "-c", "copy",
+                   "-fflags", "+bitexact", "-f", "framecrc", "-")
+
+    ref = rerun(path, [])
+    mine = run(args.hasher, "framecrc", "copy", path)
+    if ref.returncode == 0 and ref.stdout:
+        equal = mine.returncode == 0 and mine.stdout == ref.stdout
+        if known is None:
+            return [] if equal else ["the framecrc copy differs" if mine.returncode == 0
+                                     else f"the hash driver fails: {first_line(text(mine.stderr)) or 'no error'}"]
+        if equal:
+            return ["listed as a known copy difference, but the framecrc copy now equals the program's"]
+        with tempfile.TemporaryDirectory() as work:
+            problem = check_known_hash(known[0], args, path, "framecrc", "copy", mine, ref, rerun, work)
+        return [] if problem is None else [f"framecrc copy: {problem} (recorded: {known[1]})"]
+    if known is not None:
+        return [f"listed as a known copy difference, but ffmpeg fails: {first_line(text(ref.stderr))}"]
+    if not ffmpeg_refuses_input(ref):
+        return [f"ffmpeg fails, not refusing the input: {text(ref.stderr).splitlines()[-1:]}"]
+    refusal = tool_error(mine, "hash-driver", path)
+    if refusal is None or refusal != tool_error(probe, "zffprobe", path):
+        return [f"FFmpeg refuses the input; the hash driver exited {mine.returncode} "
+                f"({first_line(text(mine.stderr)) or 'no error'}), not with zffprobe's error"]
+    return []
 
 
 def compare_mp3(args, lines, failures):
     """The MP3 fixtures (T29a): zffprobe against ffprobe's first audio
     stream (codec, sample format, channels, layout, rate, and the duration
     in the stream's time base), or the same refusal, and the hash driver's
-    stream copy against `ffmpeg -c copy -f framecrc`."""
+    stream copy against `ffmpeg -copyts -c copy -f framecrc`."""
     rows = []
-    passed = 0
+    passed = understood = 0
     fixtures = sorted((FIXTURES / "mp3").glob("*.mp3"))
     for path in fixtures:
         name = path.stem
@@ -2327,8 +2760,9 @@ def compare_mp3(args, lines, failures):
                      "default=nw=1", path)
         ours = run(args.zffprobe, path)
         if theirs.returncode != 0 or not theirs.stdout.strip():
-            if ours.returncode == 0:
-                problems.append("zffprobe accepts what ffprobe refuses")
+            if tool_error(ours, "zffprobe", path) is None:
+                problems.append(f"zffprobe exited {ours.returncode} ({first_line(text(ours.stderr)) or 'no error'}) "
+                                f"where ffprobe refuses")
         elif ours.returncode != 0:
             problems.append(f"zffprobe refuses: {first_line(text(ours.stderr))}")
         else:
@@ -2341,34 +2775,29 @@ def compare_mp3(args, lines, failures):
             for key, value in want.items():
                 if o.get(key) != value:
                     problems.append(f"{key}: zffprobe {o.get(key)}, ffprobe {value}")
-        ref = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", path, "-c", "copy", "-fflags", "+bitexact", "-f",
-                  "framecrc", "-")
-        mine = run(args.hasher, "framecrc", "copy", path)
-        if ref.returncode == 0 and ref.stdout:
-            if (mine.returncode != 0 or mine.stdout != ref.stdout) and name not in KNOWN_MP3_COPY_DIFFERENCES:
-                problems.append("the framecrc copy differs" if mine.returncode == 0
-                                else f"the hash driver fails: {first_line(text(mine.stderr))}")
-        elif mine.returncode == 0:
-            problems.append("the hash driver copies what FFmpeg refuses")
+        known = KNOWN_MP3_COPY_DIFFERENCES.get(name)
+        problems += check_framecrc_copy(args, path, known, ours, MP3_COPY_OPTIONS)
         if problems:
             failures.extend(f"mp3 {name}: {p}" for p in problems)
             rows.append(f"| `{name}` | **FAIL**: {'; '.join(problems)} |")
         else:
             passed += 1
-            note = KNOWN_MP3_COPY_DIFFERENCES.get(name)
-            rows.append(f"| `{name}` | pass{' (copy: ' + note + ')' if note else ''} |")
+            understood += known is not None
+            rows.append(f"| `{name}` | pass{' (copy: ' + known[1] + ')' if known else ''} |")
     lines += [
         "",
         "## MP3 fixtures (T29a)",
         "",
         f"MP3 fixtures whose zffprobe report equals ffprobe's (or both refuse) and whose copy equals "
-        f"`ffmpeg -c copy -f framecrc`: {passed}/{len(fixtures)} (vectors/mp3.txt holds every packet "
+        f"`ffmpeg -copyts -c copy -f framecrc`: {passed}/{len(fixtures)} (vectors/mp3.txt holds every packet "
         f"av_read_frame gives, vectors/seek_mp3.txt every seek).",
         "",
         "| Fixture | Result |",
         "| --- | --- |",
     ] + rows
-    record("MP3 fixtures (T29a)", passed, len(fixtures), understood=sum(1 for p in fixtures if p.stem in KNOWN_MP3_COPY_DIFFERENCES))
+    stale = unmatched_entries(KNOWN_MP3_COPY_DIFFERENCES, {p.stem for p in fixtures}, "KNOWN_MP3_COPY_DIFFERENCES",
+                              failures)
+    record("MP3 fixtures (T29a)", passed, len(fixtures) + stale, understood=understood)
 
 
 def compare_ogg(args, lines, failures):
@@ -2376,7 +2805,7 @@ def compare_ogg(args, lines, failures):
     stream (codec, sample format, channels, layout, rate, duration), and
     the hash driver's stream copy against `ffmpeg -c copy -f framecrc`."""
     rows = []
-    passed = 0
+    passed = understood = 0
     fixtures = sorted((FIXTURES / "ogg").glob("*.ogg"))
     for path in fixtures:
         name = path.stem
@@ -2386,8 +2815,9 @@ def compare_ogg(args, lines, failures):
                      "default=nw=1", path)
         ours = run(args.zffprobe, path)
         if theirs.returncode != 0 or not theirs.stdout.strip():
-            if ours.returncode == 0:
-                problems.append("zffprobe accepts what ffprobe refuses")
+            if tool_error(ours, "zffprobe", path) is None:
+                problems.append(f"zffprobe exited {ours.returncode} ({first_line(text(ours.stderr)) or 'no error'}) "
+                                f"where ffprobe refuses")
         elif ours.returncode != 0:
             problems.append(f"zffprobe refuses: {first_line(text(ours.stderr))}")
         else:
@@ -2399,25 +2829,15 @@ def compare_ogg(args, lines, failures):
             for key, value in want.items():
                 if o.get(key) != value:
                     problems.append(f"{key}: zffprobe {o.get(key)}, ffprobe {value}")
-        ref = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", path, "-c", "copy", "-fflags", "+bitexact", "-f",
-                  "framecrc", "-")
-        mine = run(args.hasher, "framecrc", "copy", path)
-        if ref.returncode == 0 and ref.stdout:
-            if mine.returncode != 0 or mine.stdout != ref.stdout:
-                if name in KNOWN_OGG_COPY_DIFFERENCES:
-                    pass
-                else:
-                    problems.append("the framecrc copy differs" if mine.returncode == 0
-                                    else f"the hash driver fails: {first_line(text(mine.stderr))}")
-        elif mine.returncode == 0 and mine.stdout.count(b"\n0,") > 0:
-            problems.append("the hash driver copies what FFmpeg refuses")
+        known = KNOWN_OGG_COPY_DIFFERENCES.get(name)
+        problems += check_framecrc_copy(args, path, known, ours)
         if problems:
             failures.extend(f"ogg {name}: {p}" for p in problems)
             rows.append(f"| `{name}` | **FAIL**: {'; '.join(problems)} |")
         else:
             passed += 1
-            note = KNOWN_OGG_COPY_DIFFERENCES.get(name)
-            rows.append(f"| `{name}` | pass{' (copy: ' + note + ')' if note else ''} |")
+            understood += known is not None
+            rows.append(f"| `{name}` | pass{' (copy: ' + known[1] + ')' if known else ''} |")
     lines += [
         "",
         "## Ogg fixtures (T27a)",
@@ -2428,7 +2848,9 @@ def compare_ogg(args, lines, failures):
         "| Fixture | Result |",
         "| --- | --- |",
     ] + rows
-    record("Ogg fixtures (T27a)", passed, len(fixtures), understood=sum(1 for p in fixtures if p.stem in KNOWN_OGG_COPY_DIFFERENCES))
+    stale = unmatched_entries(KNOWN_OGG_COPY_DIFFERENCES, {p.stem for p in fixtures}, "KNOWN_OGG_COPY_DIFFERENCES",
+                              failures)
+    record("Ogg fixtures (T27a)", passed, len(fixtures) + stale, understood=understood)
 
 
 def compare_fate(args, lines, failures):
