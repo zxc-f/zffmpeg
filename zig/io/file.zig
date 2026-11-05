@@ -15,7 +15,8 @@
 //! (notes.md "I/O and API"). Each call builds one adapter over the caller's
 //! `buffer` and keeps it for the whole stream, so read-ahead is never lost.
 //! Memory use is that buffer plus the parser's fixed 4 KiB of working storage:
-//! nothing is allocated, whatever the file size. Any buffer size works;
+//! nothing is allocated for the audio, whatever the file size (collected
+//! tags, T21c, are bounded by the parser's retained-bytes limit). Any buffer size works;
 //! `default_buffer_len` is the recommended size. To stream a long recording
 //! out, build a `wav.Writer` over `file.writerStreaming(...).interface`.
 //!

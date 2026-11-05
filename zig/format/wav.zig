@@ -9,9 +9,12 @@
 //! The same parser and writer handle Sony Wave64 (T21b), whose GUID chunk IDs
 //! and 64-bit sizes frame the same chunks (`Variant`).
 //!
-//! The parser is sequential and never seeks, so it works on pipes. It reads
-//! every field exactly into local arrays, keeps only the `fmt ` fields, and
-//! validates the whole declared RIFF extent, including the chunks after `data`.
+//! The parser reads sequentially, so it works on pipes; with a seeker it
+//! also seeks (`seekFrame`, T52a). It reads every field exactly into local
+//! arrays, keeps the `fmt ` fields and, only when the caller collects tags
+//! (`collectTags`, T21c), the tag chunks, within `Limits.max_retained_bytes`,
+//! and validates the whole declared RIFF extent, including the chunks after
+//! `data`.
 //! RF64 and BW64 carry 64-bit sizes; the unknown sizes streaming writers leave
 //! are rejected unless `Limits.unknown_length` opts in (T21b). Its accepted
 //! subset, error names and error precedence are the contract in
@@ -25,7 +28,8 @@
 //! writer afterward. The writer's frame-count errors (`IncompleteFrame`,
 //! `TooManyFrames`, `TooFewFrames`) write nothing and leave it usable. Errors
 //! found after samples were delivered still fail the stream; output is not
-//! atomic. Neither the parser nor the writer allocates.
+//! atomic. The parser allocates only the tags it is asked to collect, with
+//! the caller's allocator; the writer does not allocate.
 
 const std = @import("std");
 const audio = @import("../core/audio.zig");

@@ -15,8 +15,9 @@ tags as FFmpeg does. Codec and format registries name everything as FFmpeg
 does. The `zffprobe` tool detects WAV, Wave64, AU, AIFF or CAF from the content
 with FFmpeg's scored probes, and raw PCM from `-f` or a raw file extension,
 validates the file and reports its stream and tags. Both are checked against
-129 WAV, 41 AU, 57 AIFF, 25 raw PCM and 58 CAF fixtures and against a pinned
-FFmpeg build in CI (Linux). The `zffmpeg` tool converts and stream-copies
+129 WAV, 41 AU, 57 AIFF, 25 raw PCM and 58 CAF fixtures (with the FLAC, Ogg
+and MP3 fixtures counted below, 441 in all) and against a pinned FFmpeg
+build in CI (Linux). The `zffmpeg` tool converts and stream-copies
 between WAV, Wave64, AU, AIFF and raw PCM, and from CAF, carrying tags as FFmpeg does, through the
 library's synchronous pipeline (T13), which runs on packets, frames and
 send/receive stages (T14a), and FFmpeg reads every output it writes for the

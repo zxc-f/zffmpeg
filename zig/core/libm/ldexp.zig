@@ -12,8 +12,10 @@
 //! a subnormal result rounded once, to nearest even, by a final multiply.
 //! Zig 0.17's `std.math.ldexp` is not C's: it takes a zero for a subnormal
 //! and scales it (in f64, 2^(n - 1076) for 53 < n, infinity past 2099; in
-//! f32, from n = 25, infinity past 278), and in f32 it rounds some
-//! subnormal ties away from even (notes.md "Floating-point library").
+//! f32, from n = 25, infinity past 278), and in f32 and f64 it rounds some
+//! subnormal ties away from even: its tie test counts the exponent's zero
+//! bits when the mantissa is zero, so f64 `ldexp(2.0, -1076)` is 2^-1074,
+//! not 0 (notes.md "Floating-point library").
 //! glibc's `errno` (ERANGE) is not modeled.
 
 const std = @import("std");

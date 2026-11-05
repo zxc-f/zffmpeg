@@ -3,8 +3,9 @@
 // fftools/ffmpeg_opt.c at the pinned reference revision was read for the -y/-n
 // and same-file behavior; see port.md "zffmpeg command" for the differences.
 //! zffmpeg: converts or stream-copies one WAV, Wave64, AU, AIFF, CAF (input
-//! only), FLAC or raw PCM stream (TODO.md T13b, T21b, T22b, T22c, T22d,
-//! T26a, T26c).
+//! only), FLAC, Ogg (FLAC, Vorbis and Opus decoded as input, FLAC written)
+//! or raw PCM stream (TODO.md T13b, T21b, T22b, T22c, T22d, T26a, T26c,
+//! T27b, T27d, T28); MP3 is detected and refused until T29b decodes it.
 //!
 //!     zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate> | -ar <rate>]
 //!             [-ch_layout <layout> | -ac <channels>] -i <input | -> [-c copy|<encoder>]
@@ -59,11 +60,11 @@ const printError = status.printError;
 const usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout <layout>] -i <input | -> [-c copy|<encoder>] [-ar <rate>] [-ac <channels> | -ch_layout <layout>] [-dither_method <method>] [-dither_scale <scale>] [FLAC encoder options] [-f <format>] <output | ->\n";
 const help = usage ++
     \\
-    \\Converts one WAV, Wave64, AU, AIFF, CAF (input only), FLAC, Ogg (Vorbis
-    \\and FLAC input, FLAC output) or raw PCM stream (standard input or output
-    \\with -). The input container is detected
-    \\from content, or for raw PCM from the name (.sb, .ub, .al, .ul, .sw), or
-    \\forced with -f before -i.
+    \\Converts one WAV, Wave64, AU, AIFF, CAF (input only), FLAC, Ogg (Vorbis,
+    \\Opus and FLAC input, FLAC output) or raw PCM stream (standard input or
+    \\output with -); MP3 input is not decoded yet. The input container is
+    \\detected from content, or for raw PCM from the name (.sb, .ub, .al, .ul,
+    \\.sw), or forced with -f before -i.
     \\Before -i, -sample_rate (or -ar) and -ch_layout (or -ac) describe raw
     \\PCM input, 44100 Hz mono by default. The output container is the -f after
     \\-i, or the output name's extension (.wav, .w64, .au, .aif, .aiff, .afc,

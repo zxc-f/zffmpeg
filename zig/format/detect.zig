@@ -16,21 +16,21 @@
 //! format instead (`ffprobe -f`), which skips probing.
 //!
 //! FFmpeg reads more and probes again while the best score is at most 25
-//! (`AVPROBE_SCORE_RETRY`), accepting a low score only at the end of the
-//! input or of its largest probe buffer. Every registered probe reads a
-//! fixed number of bytes within the first `probe_len`, which this file
-//! checks at compile time, so the later rounds score every demuxer exactly
-//! as the first: the loop can delay a low-scoring winner, such as raw
-//! FLAC's 13 (T26a), but never change it. A probe that looks further must
-//! add the loop. A demuxer without a probe (a format without a content
-//! signature) is never chosen by content.
+//! (`AVPROBE_SCORE_RETRY`), doubling its probe buffer up to `probe_max`
+//! (1 MiB) and accepting a low score only at the end of the input or of that
+//! buffer (`av_probe_input_buffer2`); this file does the same since T29a,
+//! because MP3's probe looks as far as the buffer goes. Before scoring, a
+//! leading ID3v2 tag is skipped for every probe, as
+//! `av_probe_input_format3` skips it; only the mp3 demuxer then reads the tag
+//! (notes.md "A leading ID3v2 tag on other formats"). A demuxer without a
+//! probe (a format without a content signature) is never chosen by content.
 //!
 //! A file name, when the caller has one, adds FFmpeg's extension hints
 //! (`av_match_ext`): a demuxer without a probe whose extension matches scores
 //! 50 (`AVPROBE_SCORE_EXTENSION`), so the raw PCM formats (T22c) are chosen
 //! by name only when no content probe recognizes the stream, and a probing
 //! demuxer's match scores at least 1 (FLAC's `flac`). MIME types (HTTP only)
-//! and FFmpeg's skipping of a leading ID3v2 tag are not ported.
+//! are not ported.
 
 const std = @import("std");
 const audio = @import("../core/audio.zig");

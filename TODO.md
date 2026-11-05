@@ -3,13 +3,12 @@
 This is the execution checklist for [port.md](port.md). The plan explains the
 architecture and compatibility rules; this file records the work to do, from
 the finished first path to a port that covers most of what FFmpeg's users
-need. The repository tracks project documentation, the minimal Zig package and
-build (the `av` module, documented in [zig/README.md](zig/README.md)), the WAV
-and AU fixture contracts ([zig/testing/fixtures](zig/testing/fixtures/README.md))
-and two complete paths: PCM s16 kernels, audio/time types, bounded WAV and AU
-parsers and known-length writers, file and pipe adapters, content detection,
-a WAV/AU conversion pipeline and the `zffprobe` and `zffmpeg` tools. Linux CI builds and tests it in every mode and compares it with a pinned
-FFmpeg build ([zig/testing/reference](zig/testing/reference/README.md)).
+need. The repository tracks project documentation, the Zig package and build (the
+`av` module, documented in [zig/README.md](zig/README.md)), the fixture
+contracts ([zig/testing/fixtures](zig/testing/fixtures/README.md)), the
+verified tasks summarized below and the `zffprobe` and `zffmpeg` tools. Linux
+CI builds and tests it in every mode and compares it with a pinned FFmpeg
+build ([zig/testing/reference](zig/testing/reference/README.md)).
 Development is verified on Linux only; see the
 [platform policy](#platform-policy-linux-only-during-development). FFmpeg and
 zigimg are independent clones in ignored `.references/`; see
@@ -2442,8 +2441,10 @@ names, not as an empty framework.
     Comparison rule and intentional differences: the stream, every packet
       (size, pts, dts, duration, flags, Adler-32) and every decoded frame
       or error exact; decoded samples equal the encoded ones. Intentional:
-      metadata cut short is Truncated where FFmpeg may open the file; a
-      SEEKTABLE, CUESHEET or PICTURE before STREAMINFO is InvalidFlac; a
+      metadata cut short is Truncated where FFmpeg may open the file;
+      metadata without any STREAMINFO is InvalidFlac (a SEEKTABLE, CUESHEET
+      or PICTURE before STREAMINFO is read, as FFmpeg reads it; this card
+      said otherwise until the 2026-11-05 review); a
       conversion whose decoded count differs from STREAMINFO's fails
       (FrameCountMismatch) where FFmpeg rewrites its header; the parser's
       reads are 1024 bytes, not cut where FFmpeg's I/O buffer ends, and a
@@ -3166,11 +3167,14 @@ names, not as an empty framework.
     Limitations: no decoding (T29b, T29c): zffmpeg refuses MP3 input;
       APIC pictures and CHAP chapters not modeled; ID3v2 tags above
       64 MiB refused; MP3ADU, `usetoc` and fast seeking not ported.
+    ```
   - [ ] **T29b — Layer III decoder.** Needs T18c and T29a. Huffman decoding,
     requantization, stereo modes, IMDCT, alias reduction and polyphase
     synthesis.
-    Done when decoding matches the reference's float decoder within the FATE
-    conformance tolerance and gapless trimming matches.
+    Done when decoding equals the reference's float decoder bit for bit, as
+    T27d's and T28's decoders do (the libm functions it calls ported, as
+    T28a's are), FATE's conformance tolerance then holding as a consequence,
+    and gapless trimming matches.
   - [ ] **T29c — Layers I and II.** Needs T29b.
     Done when the required Layer I and II streams match within the same
     tolerance.
