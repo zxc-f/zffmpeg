@@ -841,8 +841,8 @@ elsewhere. Two sources of truth for one format will disagree on damaged input.
 
 | API | Pitfall | Use |
 | --- | --- | --- |
-| `std.Io.Reader.discardShort` / `discardAll` | `r.seek + n` is unchecked (`lib/std/Io/Reader.zig`): a skip near `maxInt(usize)` panics in safe builds and wraps backward in ReleaseFast. | The project's bounded skip helper for every untrusted length. |
-| `std.math.ldexp` | Wrong for a zero mantissa (`ldexp(0, n)` returns a large value or inf once `n` exceeds the mantissa width) and rounds subnormal ties up. | The project's C-equivalent `ldexp`. |
+| `std.Io.Reader.discardShort` / `discardAll` | `r.seek + n` is unchecked (`lib/std/Io/Reader.zig`): a skip near `maxInt(usize)` panics in safe builds and wraps backward in ReleaseFast. | `zig/io/skip.zig`'s `discardShort` / `discardAll` (`u64` lengths, steps of at most 1 GiB) for every untrusted length. |
+| `std.math.ldexp` | Wrong for a zero mantissa (`ldexp(0, n)` returns a large value or inf once `n` exceeds the mantissa width) and rounds subnormal ties up. | `libm.ldexp` (`zig/core/libm/ldexp.zig`, glibc's `__scalbn`); compute in f64 and `@floatCast` once where the C rounds once. |
 | `std.fs.path.extension(".ogg")` | Returns `""` for a name that is only an extension; FFmpeg's `av_match_ext` uses `strrchr('.')`. | Match FFmpeg's rule explicitly where extensions decide behavior. |
 | `Run.expectStdOutMatch("")` | Matches every output: `find(stdout, "")` is never null. | Assert real content, a size or a hash. |
 

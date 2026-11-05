@@ -76,7 +76,7 @@ every Zig change starts from the pinned toolchain's rules instead.
 - No union or owner field assigned from a fallible initializer in one expression: bind the result to a local, then assign. No owner stored in `self` while its `errdefer` is armed.
 - Input-derived values: `@intCast` only after a check; `@truncate` with a comment where the C truncates; `+%`/`-%` with the notes.md comment where the C's signed arithmetic wraps on the reference build.
 - No `std.debug.assert` as the only guard of a public contract, no `catch unreachable` / `else => unreachable` on an error input can cause, no `else => unreachable` over `anyerror`.
-- No `discardShort`/`discardAll` with an untrusted length (use the bounded skip helper), no `std.math.ldexp` on values that can be zero (use the project helper). See the guide's "std pitfalls".
+- No `discardShort`/`discardAll` with an untrusted length (use `zig/io/skip.zig`), no `std.math.ldexp` (use `libm.ldexp`). See the guide's "std pitfalls".
 - Work stays proportional to bytes present: no per-unit loop over a header-declared count, no `orderedRemove(0)` drain, no re-copy of a growing value per append.
 - A buffer that is written before its bound is checked is sized as FFmpeg sizes it; widths come from the value being written, not a second copy of the format.
 - Tests do not print to stdout. `expectEqual` needs no `@as`; peer type resolution types both arguments.
