@@ -25,6 +25,7 @@ const std = @import("std");
 const audio = @import("../core/audio.zig");
 const samples_storage = @import("../core/samples.zig");
 const pcm = @import("../codec/pcm.zig");
+const skip = @import("../io/skip.zig");
 
 /// Contract errors (see the AU fixture README), plus `IoFailure` for a failing
 /// reader.
@@ -194,7 +195,7 @@ pub const Parser = struct {
             if (size % frame_bytes != 0) return error.InvalidFormat;
         }
 
-        p.reader.discardAll(annotation_len) catch |err| return mapRead(err);
+        skip.discardAll(p.reader, annotation_len) catch |err| return mapRead(err);
         p.codec = codec;
         p.frame_bytes = frame_bytes;
         p.data_left = known_size;
@@ -254,7 +255,7 @@ pub const Parser = struct {
     pub fn finish(p: *Parser) Error!void {
         std.debug.assert(p.state == .data);
         if (p.data_left) |data_left| {
-            p.reader.discardAll(data_left) catch |err| return mapRead(err);
+            skip.discardAll(p.reader, data_left) catch |err| return mapRead(err);
         } else {
             const step = 1 << 16;
             // Counted modulo the frame size, so no total overflows.
@@ -323,7 +324,7 @@ pub fn decodeToRaw(reader: *std.Io.Reader, out: *std.Io.Writer, limits: Limits) 
 pub const HeaderError = error{
     /// AU does not carry the codec, or the format's storage is not the codec's.
     UnsupportedFormat,
-    /// A zero sample rate.
+    /// A zero sample rate, or no channels.
     InvalidFormat,
     /// The sample rate is above `Limits.max_sample_rate`, or the channels
     /// above `Limits.max_channels`.
@@ -370,7 +371,8 @@ pub const Writer = struct {
     fn encodeHeader(codec: pcm.Codec, format: audio.Format, frame_count: u64, limits: Limits) HeaderError![canonical_header_len]u8 {
         const encoding = encodingFor(codec) orelse return error.UnsupportedFormat;
         if (format.sample_format != codec.storage()) return error.UnsupportedFormat;
-        if (format.sample_rate == 0) return error.InvalidFormat;
+        // avcodec_open2 refuses an encoder without channels; frame sizes divide by the count.
+        if (format.sample_rate == 0 or format.channelCount() == 0) return error.InvalidFormat;
         if (format.sample_rate > limits.max_sample_rate) return error.LimitExceeded;
         if (format.channelCount() > limits.max_channels) return error.LimitExceeded;
         const sample_bytes: u32 = codec.bytesPerSample();
@@ -738,6 +740,11 @@ test "the writer checks every size and the codec before writing the header" {
     try std.testing.expectError(error.LimitExceeded, Writer.begin(&out, .s16be, fast, 0, .{}));
     const zero_rate: audio.Format = .{ .sample_rate = 0, .layout = .mono, .sample_format = .s16 };
     try std.testing.expectError(error.InvalidFormat, Writer.begin(&out, .s16be, zero_rate, 0, .{}));
+    // No channels: every frame size would divide by zero.
+    for ([_]audio.ChannelLayout{ .{ .unspecified = 0 }, .{ .native = 0 } }) |none| {
+        const no_channels: audio.Format = .{ .sample_rate = 8000, .layout = none, .sample_format = .s16 };
+        try std.testing.expectError(error.InvalidFormat, Writer.begin(&out, .s16be, no_channels, 0, .{}));
+    }
     const too_wide = try audio.Format.init(8000, max_channels + 1, .s16);
     try std.testing.expectError(error.LimitExceeded, Writer.begin(&out, .s16be, too_wide, 0, .{}));
     const planar = try audio.Format.init(8000, 1, .s16p);

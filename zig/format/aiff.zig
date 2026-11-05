@@ -30,6 +30,7 @@ const std = @import("std");
 const audio = @import("../core/audio.zig");
 const samples_storage = @import("../core/samples.zig");
 const pcm = @import("../codec/pcm.zig");
+const skip = @import("../io/skip.zig");
 const mov_chan = @import("mov_chan.zig");
 
 /// Contract errors (see the AIFF fixture README), plus `IoFailure` for a
@@ -264,7 +265,7 @@ pub const Parser = struct {
                 try p.checkExtent(header.size);
                 const version = try p.readArray(4);
                 p.version = std.mem.readInt(u32, &version, .big);
-                p.reader.discardAll(header.size - 4) catch |err| return mapRead(err);
+                skip.discardAll(p.reader, header.size - 4) catch |err| return mapRead(err);
                 p.extent_left -= header.size;
                 try p.skipPad(header.size);
             } else {
@@ -310,7 +311,7 @@ pub const Parser = struct {
     /// end of the FORM extent. Bytes after the extent are never read.
     pub fn finish(p: *Parser) Error!void {
         std.debug.assert(p.state == .data);
-        p.reader.discardAll64(p.data_left) catch |err| return mapRead(err);
+        skip.discardAll(p.reader, p.data_left) catch |err| return mapRead(err);
         p.data_left = 0;
         if (p.data_padded) try p.skipPad(1);
         while (try p.nextChunk()) |header| {
@@ -357,7 +358,7 @@ pub const Parser = struct {
             rest -= 4;
             break :codec codecForCompression(compression, bits) orelse return error.UnsupportedFormat;
         } else codecForBits(bits) orelse return error.UnsupportedFormat;
-        p.reader.discardAll(rest) catch |err| return mapRead(err);
+        skip.discardAll(p.reader, rest) catch |err| return mapRead(err);
         p.extent_left -= size;
         try p.skipPad(size);
         const sample_bytes: u32 = codec.bytesPerSample();
@@ -383,7 +384,7 @@ pub const Parser = struct {
         if (data_bytes % p.frame_bytes != 0) return error.InvalidFormat;
         const frame_count = data_bytes / p.frame_bytes;
         if (frame_count != p.declared_frames) return error.InvalidFormat;
-        p.reader.discardAll(offset) catch |err| return mapRead(err);
+        skip.discardAll(p.reader, offset) catch |err| return mapRead(err);
         p.extent_left -= size;
         p.data_left = data_bytes;
         p.data_padded = size % 2 == 1;
@@ -393,7 +394,7 @@ pub const Parser = struct {
 
     fn skipChunk(p: *Parser, size: u32) Error!void {
         try p.checkExtent(size);
-        p.reader.discardAll(size) catch |err| return mapRead(err);
+        skip.discardAll(p.reader, size) catch |err| return mapRead(err);
         p.extent_left -= size;
         try p.skipPad(size);
     }
@@ -401,7 +402,7 @@ pub const Parser = struct {
     /// A pad byte that would lie outside the extent is not read.
     fn skipPad(p: *Parser, size: u32) Error!void {
         if (size % 2 == 1 and p.extent_left > 0) {
-            p.reader.discardAll(1) catch |err| return mapRead(err);
+            skip.discardAll(p.reader, 1) catch |err| return mapRead(err);
             p.extent_left -= 1;
         }
     }
@@ -466,7 +467,7 @@ pub fn decodeToRaw(reader: *std.Io.Reader, out: *std.Io.Writer, limits: Limits) 
 pub const HeaderError = error{
     /// AIFF does not carry the codec, or the format's storage is not the codec's.
     UnsupportedFormat,
-    /// A zero sample rate.
+    /// A zero sample rate, or no channels.
     InvalidFormat,
     /// The sample rate is above `WriteOptions.max_sample_rate`, or the
     /// channels above `WriteOptions.max_channels`.
@@ -543,7 +544,8 @@ pub const Writer = struct {
     fn encodeHeader(codec: pcm.Codec, format: audio.Format, frame_count: u64, options: WriteOptions, out: *[max_header_len]u8) HeaderError![]const u8 {
         const compression = compressionFor(codec) orelse return error.UnsupportedFormat;
         if (format.sample_format != codec.storage()) return error.UnsupportedFormat;
-        if (format.sample_rate == 0) return error.InvalidFormat;
+        // avcodec_open2 refuses an encoder without channels; frame sizes divide by the count.
+        if (format.sample_rate == 0 or format.channelCount() == 0) return error.InvalidFormat;
         if (format.sample_rate > options.max_sample_rate) return error.LimitExceeded;
         if (format.channelCount() > options.max_channels) return error.LimitExceeded;
         const frames = std.math.cast(u32, frame_count) orelse return error.SizeOverflow;
@@ -922,6 +924,11 @@ test "the writer checks every size and the codec before writing the header" {
     try std.testing.expectError(error.LimitExceeded, Writer.begin(&out, .s16be, fast, 0, .{}));
     const zero_rate: audio.Format = .{ .sample_rate = 0, .layout = .mono, .sample_format = .s16 };
     try std.testing.expectError(error.InvalidFormat, Writer.begin(&out, .s16be, zero_rate, 0, .{}));
+    // No channels: every frame size would divide by zero.
+    for ([_]audio.ChannelLayout{ .{ .unspecified = 0 }, .{ .native = 0 } }) |none| {
+        const no_channels: audio.Format = .{ .sample_rate = 8000, .layout = none, .sample_format = .s16 };
+        try std.testing.expectError(error.InvalidFormat, Writer.begin(&out, .s16be, no_channels, 0, .{}));
+    }
     const too_wide = try audio.Format.init(8000, max_channels + 1, .s16);
     try std.testing.expectError(error.LimitExceeded, Writer.begin(&out, .s16be, too_wide, 0, .{}));
     const planar = try audio.Format.init(8000, 1, .s16p);
@@ -955,4 +962,12 @@ test "the writer reports write and flush failures" {
 test "a failing reader reports IoFailure" {
     var reader: std.Io.Reader = .failing;
     try std.testing.expectError(error.IoFailure, probe(&reader, .{}));
+}
+
+test "a chunk filling a 4 GiB FORM extent ends as truncation" {
+    // Skipping `junk` overflowed the reader's position on 32-bit targets.
+    const form = "FORM".* ++ [4]u8{ 0xff, 0xff, 0xff, 0xff } ++ "AIFF".* ++
+        "junk".* ++ [4]u8{ 0xff, 0xff, 0xff, 0xf3 } ++ @as([64]u8, @splat(0));
+    var reader: std.Io.Reader = .fixed(&form);
+    try std.testing.expectError(error.Truncated, probe(&reader, .{}));
 }

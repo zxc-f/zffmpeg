@@ -32,6 +32,7 @@ const audio = @import("../core/audio.zig");
 const samples_storage = @import("../core/samples.zig");
 const metadata = @import("../core/metadata.zig");
 const pcm = @import("../codec/pcm.zig");
+const skip = @import("../io/skip.zig");
 const seek = @import("seek.zig");
 const rational = @import("../core/rational.zig");
 
@@ -111,8 +112,26 @@ const tag_mulaw = 7;
 const tag_extensible = 0xFFFE;
 
 /// The KSDATAFORMAT subformat GUIDs share these last 12 bytes; the first 4
-/// are the format tag, little-endian.
+/// are the format tag, little-endian. The writer writes this family.
 const subformat_base = [12]u8{ 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 };
+
+/// Every base whose GUIDs `parse_waveformatex` (riffdec.c) reads as a format
+/// tag and its 12-byte suffix: KSDATAFORMAT (`FF_MEDIASUBTYPE_BASE_GUID`),
+/// the ambisonic B-format family (`FF_AMBISONIC_BASE_GUID`) and a shifted
+/// KSDATAFORMAT some writers emit (`FF_BROKEN_BASE_GUID`).
+const subformat_bases = [_][12]u8{
+    subformat_base,
+    .{ 0x21, 0x07, 0xd3, 0x11, 0x86, 0x44, 0xc8, 0xc1, 0xca, 0x00, 0x00, 0x00 },
+    .{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa },
+};
+
+/// Whether `suffix` ends a subformat GUID FFmpeg maps through its format tag.
+fn tagBasedSubformat(suffix: *const [12]u8) bool {
+    for (&subformat_bases) |*base| {
+        if (std.mem.eql(u8, suffix, base)) return true;
+    }
+    return false;
+}
 
 /// The writer's plain `fmt ` up to this rate, as `riffenc.c`.
 const max_plain_rate = 48_000;
@@ -460,7 +479,7 @@ pub const Parser = struct {
             p.state = .done;
             return;
         };
-        p.reader.discardAll64(data_left) catch |err| return mapRead(err);
+        skip.discardAll(p.reader, data_left) catch |err| return mapRead(err);
         p.data_left = 0;
         try p.skipPad(p.data_pad);
         while (try p.nextChunk()) |header| {
@@ -533,7 +552,7 @@ pub const Parser = struct {
             if (std.mem.readInt(u16, extension[0..2], .little) != 22) return error.UnsupportedFormat;
             valid_bits = std.mem.readInt(u16, extension[2..4], .little);
             mask = std.mem.readInt(u32, extension[4..8], .little);
-            if (!std.mem.eql(u8, extension[12..24], &subformat_base)) return error.UnsupportedFormat;
+            if (!tagBasedSubformat(extension[12..24])) return error.UnsupportedFormat;
             sub_tag = std.mem.readInt(u32, extension[8..12], .little);
         }
         switch (sub_tag) {
@@ -560,7 +579,7 @@ pub const Parser = struct {
                 const extension = try p.readArray(2);
                 if (std.mem.readInt(u16, &extension, .little) != 0) return error.UnsupportedFormat;
                 const rest: usize = @intCast(size - 18); // 0 or 6
-                p.reader.discardAll(rest) catch |err| return mapRead(err);
+                skip.discardAll(p.reader, rest) catch |err| return mapRead(err);
             }
         }
         p.consumeExtent(size);
@@ -617,7 +636,7 @@ pub const Parser = struct {
         const list_type = try p.readArray(4);
         p.consumeExtent(4);
         if (!std.mem.eql(u8, &list_type, "INFO")) {
-            p.reader.discardAll64(size - 4) catch |err| return mapRead(err);
+            skip.discardAll(p.reader, size - 4) catch |err| return mapRead(err);
             p.consumeExtent(size - 4);
             return p.skipPad(p.variant.padAfter(size));
         }
@@ -657,7 +676,7 @@ pub const Parser = struct {
 
     fn skipChunk(p: *Parser, size: u64) Error!void {
         try p.checkExtent(size);
-        p.reader.discardAll64(size) catch |err| return mapRead(err);
+        skip.discardAll(p.reader, size) catch |err| return mapRead(err);
         p.consumeExtent(size);
         try p.skipPad(p.variant.padAfter(size));
     }
@@ -667,7 +686,7 @@ pub const Parser = struct {
     fn skipPad(p: *Parser, pad: u8) Error!void {
         const len = if (p.extent_left) |left| @min(pad, left) else pad;
         if (len == 0) return;
-        p.reader.discardAll(len) catch |err| return mapRead(err);
+        skip.discardAll(p.reader, len) catch |err| return mapRead(err);
         p.consumeExtent(len);
     }
 
@@ -768,7 +787,7 @@ pub const Parser = struct {
         const chunk_len = 8 + body + body % 2;
         if (riff_size < 4 or riff_size - 4 < chunk_len) return error.InvalidRiff;
         if (table_len != 0) return error.UnsupportedFormat;
-        p.reader.discardAll64(body - 28 + body % 2) catch |err| return mapRead(err);
+        skip.discardAll(p.reader, body - 28 + body % 2) catch |err| return mapRead(err);
         p.extent_left = riff_size - 4 - chunk_len;
         // `ds64` counts toward the chunk limit like every other header.
         p.chunks = 1;
@@ -1067,7 +1086,8 @@ fn writeBext(out: *std.Io.Writer, tags: ?*const metadata.Dictionary, body_len: u
         try out.writeAll(history);
         try out.writeByte(0);
     };
-    try out.splatByteAll(0, body_len % 2);
+    const pad: usize = @intCast(body_len % 2);
+    try out.splatByteAll(0, pad);
 }
 
 /// `strtoll` base 10: leading space, a sign, then digits up to the first
@@ -1154,7 +1174,7 @@ pub fn decodeToRaw(reader: *std.Io.Reader, out: *std.Io.Writer, limits: Limits) 
 pub const HeaderError = error{
     /// WAV does not carry the codec, or the format's storage is not the codec's.
     UnsupportedFormat,
-    /// A zero sample rate.
+    /// A zero sample rate, or no channels.
     InvalidFormat,
     /// The sample rate is above `WriteOptions.max_sample_rate`.
     LimitExceeded,
@@ -1298,7 +1318,8 @@ pub const Writer = struct {
     fn encodeHeader(codec: pcm.Codec, format: audio.Format, frame_count: u64, options: WriteOptions) HeaderError!Header {
         const tag = tagFor(codec) orelse return error.UnsupportedFormat;
         if (format.sample_format != codec.storage()) return error.UnsupportedFormat;
-        if (format.sample_rate == 0) return error.InvalidFormat;
+        // avcodec_open2 refuses an encoder without channels; frame sizes divide by the count.
+        if (format.sample_rate == 0 or format.channelCount() == 0) return error.InvalidFormat;
         if (format.sample_rate > options.max_sample_rate) return error.LimitExceeded;
         if (format.channelCount() > options.max_channels) return error.LimitExceeded;
         const sample_bytes: u16 = codec.bytesPerSample();
@@ -1814,27 +1835,130 @@ test "odd data is followed by a pad byte, which both directions handle" {
     try std.testing.expectError(error.Truncated, decodeAll(&short, .{}, &storage));
 }
 
+/// Fuzz input: the stream, then the parser options. An option the input
+/// does not supply reads as 0 (`std.testing.Smith`), which is the default.
 fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
     _ = context;
     var input: [1024]u8 = undefined;
     const len = smith.slice(&input);
+    var limits: Limits = .{ .unknown_length = smith.value(bool) };
+    const collect_tags = smith.value(bool);
+    if (smith.value(bool)) {
+        // Tight limits reach every LimitExceeded path; the retained bound
+        // keeps tag allocations small.
+        limits.max_sample_rate = smith.value(u32);
+        limits.max_channels = smith.value(u16);
+        limits.max_chunks = smith.valueRangeAtMost(u32, 0, 64);
+        limits.max_retained_bytes = smith.valueRangeAtMost(u32, 0, 4096);
+    }
     var reader: std.Io.Reader = .fixed(input[0..len]);
-    // At most 1024 encoded bytes, stored in at most twice that.
-    var storage: [2048]u8 = undefined;
     // Any contract error is acceptable; the parser must not crash or overrun.
-    _ = decodeAll(&reader, .{}, &storage) catch {};
+    if (collect_tags) {
+        const gpa = std.testing.allocator;
+        var stored: metadata.Dictionary = .empty;
+        defer stored.deinit(gpa);
+        var parser: Parser = .init(&reader, limits);
+        parser.collectTags(.{ .gpa = gpa, .dictionary = &stored });
+        readAll(&parser) catch {};
+    } else {
+        // At most 1024 encoded bytes, stored in at most twice that.
+        var storage: [2048]u8 = undefined;
+        _ = decodeAll(&reader, limits, &storage) catch {};
+    }
 }
+
+/// A `fuzzOne` corpus entry: `stream` behind the length `Smith.slice`
+/// reads, then the unknown-length and tag options as the 8-byte values
+/// `Smith.value` reads.
+fn fuzzSeed(comptime stream: []const u8, comptime unknown_length: bool, comptime collect_tags: bool) []const u8 {
+    const seed = comptime seed: {
+        var len: [4]u8 = undefined;
+        std.mem.writeInt(u32, &len, stream.len, .little);
+        var options: [16]u8 = @splat(0);
+        options[0] = if (unknown_length) 1 else 0;
+        options[8] = if (collect_tags) 1 else 0;
+        break :seed len ++ stream[0..stream.len].* ++ options;
+    };
+    return &seed;
+}
+
+fn le64Bytes(comptime value: u64) [8]u8 {
+    var bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, &bytes, value, .little);
+    return bytes;
+}
+
+/// Wave64 with the unknown RIFF size, then a chunk declaring 2^64 - 2 bytes:
+/// with `unknown_length` no extent bounds the skip.
+const w64_unknown_huge_chunk = "riff".* ++ w64_riff_suffix ++ le64Bytes(std.math.maxInt(u64)) ++
+    w64Guid("wave") ++ w64Guid("fmt ") ++ le64Bytes(w64_chunk_header_len + 16) ++
+    [16]u8{ 1, 0, 1, 0, 0x40, 0x1f, 0, 0, 0x80, 0x3e, 0, 0, 2, 0, 16, 0 } ++
+    w64Guid("junk") ++ le64Bytes(std.math.maxInt(u64) - 1) ++ @as([32]u8, @splat(0));
 
 test "fuzz: arbitrary input never crashes the parser" {
     try std.testing.fuzz({}, fuzzOne, .{ .corpus = &.{
-        fixtures.bytes("mono_8k"),
-        fixtures.bytes("stereo_44k1"),
-        fixtures.bytes("unknown_chunks"),
-        fixtures.bytes("odd_final_chunk_pad_missing"),
-        fixtures.bytes("s24_stereo_48k_extensible"),
-        fixtures.bytes("f64_stereo_96k_extensible"),
-        fixtures.bytes("alaw_mono_8k"),
+        fuzzSeed(fixtures.bytes("mono_8k"), false, false),
+        fuzzSeed(fixtures.bytes("stereo_44k1"), false, false),
+        fuzzSeed(fixtures.bytes("unknown_chunks"), false, true),
+        fuzzSeed(fixtures.bytes("odd_final_chunk_pad_missing"), false, false),
+        fuzzSeed(fixtures.bytes("s24_stereo_48k_extensible"), true, false),
+        fuzzSeed(fixtures.bytes("f64_stereo_96k_extensible"), false, false),
+        fuzzSeed(fixtures.bytes("alaw_mono_8k"), false, false),
+        fuzzSeed(&w64_unknown_huge_chunk, true, false),
+        fuzzSeed(&w64_unknown_huge_chunk, true, true),
     } });
+}
+
+test "a chunk of nearly 2^64 bytes in an unknown Wave64 extent is truncation" {
+    // Reader.discardAll64 overflowed its buffer position on this skip.
+    var reader: std.Io.Reader = .fixed(&w64_unknown_huge_chunk);
+    try std.testing.expectError(error.Truncated, probe(&reader, .{ .unknown_length = true }));
+    var buffer: [7]u8 = undefined;
+    var source: std.testing.Reader = .init(&buffer, &.{.{ .buffer = &w64_unknown_huge_chunk }});
+    source.artificial_limit = .limited(5);
+    try std.testing.expectError(error.Truncated, probe(&source.interface, .{ .unknown_length = true }));
+    // Without the opt-in the unknown size is refused before any skip.
+    var refused: std.Io.Reader = .fixed(&w64_unknown_huge_chunk);
+    try std.testing.expectError(error.UnsupportedStreamingSize, probe(&refused, .{}));
+}
+
+/// Mono 16-bit extensible WAV, mask FC, subformat `tag` then `suffix`, with
+/// the samples 0, 1, -1, 32767.
+fn extensibleWav(comptime tag: u32, comptime suffix: [12]u8) [76]u8 {
+    var tag_bytes: [4]u8 = undefined;
+    std.mem.writeInt(u32, &tag_bytes, tag, .little);
+    return "RIFF".* ++ [4]u8{ 68, 0, 0, 0 } ++ "WAVEfmt ".* ++ [4]u8{ 40, 0, 0, 0 } ++
+        [16]u8{ 0xfe, 0xff, 1, 0, 0x40, 0x1f, 0, 0, 0x80, 0x3e, 0, 0, 2, 0, 16, 0 } ++
+        [8]u8{ 22, 0, 16, 0, 4, 0, 0, 0 } ++ tag_bytes ++ suffix ++
+        "data".* ++ [4]u8{ 8, 0, 0, 0 } ++ [8]u8{ 0, 0, 1, 0, 0xff, 0xff, 0xff, 0x7f };
+}
+
+test "extensible subformats of every base parse_waveformatex maps by tag" {
+    inline for (subformat_bases) |suffix| {
+        const file = extensibleWav(tag_pcm, suffix);
+        var reader: std.Io.Reader = .fixed(&file);
+        var storage: [16]u8 = undefined;
+        const decoded = try decodeAll(&reader, .{}, &storage);
+        // ffprobe: pcm_s16le, mono (the FC mask), 8000 Hz, 4 samples.
+        try std.testing.expectEqual(.s16le, decoded.info.codec);
+        try std.testing.expectEqual(audio.ChannelLayout.mono, decoded.info.format.layout);
+        try std.testing.expectEqual(4, decoded.info.frame_count);
+        try std.testing.expectEqualSlices(u8, &.{ 0, 0, 1, 0, 0xff, 0xff, 0xff, 0x7f }, decoded.raw);
+        // The tag still selects the codec: ADPCM is refused in any family.
+        const adpcm = extensibleWav(2, suffix);
+        var refused: std.Io.Reader = .fixed(&adpcm);
+        try std.testing.expectError(error.UnsupportedFormat, decodeAll(&refused, .{}, &storage));
+    }
+    // A GUID outside the three families (one suffix byte changed).
+    const other_suffix = comptime suffix: {
+        var changed = subformat_base;
+        changed[11] ^= 1;
+        break :suffix changed;
+    };
+    const other = extensibleWav(tag_pcm, other_suffix);
+    var reader: std.Io.Reader = .fixed(&other);
+    var storage: [16]u8 = undefined;
+    try std.testing.expectError(error.UnsupportedFormat, decodeAll(&reader, .{}, &storage));
 }
 
 /// Encodes the manifest's samples as `codec`, through T20a storage.
@@ -1971,6 +2095,11 @@ test "the writer checks every size and the codec before writing the header" {
     try std.testing.expectError(error.LimitExceeded, Writer.begin(&out, .s16le, fast, 0, .{}));
     const zero_rate: audio.Format = .{ .sample_rate = 0, .layout = .mono, .sample_format = .s16 };
     try std.testing.expectError(error.InvalidFormat, Writer.begin(&out, .s16le, zero_rate, 0, .{}));
+    // No channels: every frame size would divide by zero.
+    for ([_]audio.ChannelLayout{ .{ .unspecified = 0 }, .{ .native = 0 } }) |none| {
+        const no_channels: audio.Format = .{ .sample_rate = 8000, .layout = none, .sample_format = .s16 };
+        try std.testing.expectError(error.InvalidFormat, Writer.begin(&out, .s16le, no_channels, 0, .{}));
+    }
     // WAV does not carry big-endian encodings, and the storage must match.
     try std.testing.expectError(error.UnsupportedFormat, Writer.begin(&out, .s16be, mono, 0, .{}));
     const floats = try audio.Format.init(8000, 1, .flt);
@@ -2023,7 +2152,9 @@ test "RF64 past 4 GiB: the writer switches to it, and the parser reads it" {
     try std.testing.expectEqualStrings("RF64", header[0..4]);
     try std.testing.expectEqual(headerLen(.s16le, mono, .rf64), header.len);
     // ds64: the RIFF size (data plus the header after the first 8 bytes), then the data size.
-    try std.testing.expectEqual((5 << 30) + header.len - 8, std.mem.readInt(u64, header[20..28], .little));
+    const header_len: u64 = header.len;
+    const riff_size = (5 << 30) + header_len - 8;
+    try std.testing.expectEqual(riff_size, std.mem.readInt(u64, header[20..28], .little));
     try std.testing.expectEqual(5 << 30, std.mem.readInt(u64, header[28..36], .little));
     try std.testing.expectEqual(std.math.maxInt(u32), std.mem.readInt(u32, header[header.len - 4 ..][0..4], .little));
 
@@ -2138,7 +2269,8 @@ test "Wave64 sizes stay below 2^63, which FFmpeg reads as signed" {
     const stereo = try audio.Format.init(8000, 2, .dbl);
     const frame_bytes = 16;
     var buffer: [max_header_len]u8 = undefined;
-    const largest = (std.math.maxInt(i64) - headerLen(.f64le, stereo, .w64)) / frame_bytes;
+    const header_len: u64 = headerLen(.f64le, stereo, .w64);
+    const largest = (std.math.maxInt(i64) - header_len) / frame_bytes;
     _ = try writtenHeader(.f64le, stereo, largest, .{ .variant = .w64 }, &buffer);
     try std.testing.expectError(error.SizeOverflow, Writer.check(.f64le, stereo, largest + 1, .{ .variant = .w64 }));
     // rf64 has no effect on Wave64.

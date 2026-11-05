@@ -95,7 +95,7 @@ so most of the bounds rules here are stricter than FFmpeg's on purpose.
 | Bit depths that are not whole bytes | `UnsupportedFormat` (`fmt_bits12`): tag 1 takes 8, 16, 24, 32 or 64 bits, float 32 or 64, A-law and mu-law 8. | Rounds up to the next byte (12 bits reads as `pcm_s16le`). |
 | Extensible `wValidBitsPerSample` | 0 or equal to the container's bits (`extensible_valid_bits_zero`); anything else is `UnsupportedFormat` (`extensible_valid_bits_mismatch`). | Lets the valid bits override the container size. |
 | Channels and layout (T23b) | 1 to 64 channels (the default `Limits.max_channels`, libswresample's limit; above it `LimitExceeded`: `fmt_channels64`, `fmt_channels65`). The layout is FFmpeg's: an extensible mask naming exactly the channels is a native layout (`extensible_5point1`, `extensible_7point1_s24`, `extensible_mask_high`, whose position 20 WAVE does not define); a mask of 0 or with another channel count, and every plain header, leave it unspecified (`extensible_mask_zero`, `extensible_mask_mismatch`, `extensible_mask_extra`, `fmt_channels3`, `fmt_channels6`), which zffprobe reports as `unknown`, as ffprobe does. Each accepted stream records the layout ffprobe prints. | The same, without a channel limit. |
-| Extensible subformat | The KSDATAFORMAT GUID family with tag 1, 3, 6 or 7; another GUID or tag is `UnsupportedFormat` (`extensible_unknown_subformat`, `extensible_subformat_adpcm`). | Maps more GUIDs. |
+| Extensible subformat | Tag 1, 3, 6 or 7 in a GUID of the three families FFmpeg reads as a format tag (`parse_waveformatex`): KSDATAFORMAT, ambisonic B-format and FFmpeg's "broken" shifted KSDATAFORMAT; another GUID or tag is `UnsupportedFormat` (`extensible_unknown_subformat`, `extensible_subformat_adpcm`; the other two families are unit tests in `wav.zig`). | Maps more GUIDs. |
 | `fact` chunk | Skipped like any unknown chunk: the frame count comes from `data` (`fmt_float32` has none). | Uses it for the duration of non-PCM codecs. |
 | Odd `data` size | Possible for 8-bit mono and odd frame counts of 24-bit; the pad byte inside the extent is skipped like a chunk's, and the writer writes it. | Same pad rule. |
 | mu-law's negative zero (0x7F) | Decodes to 0 like 0xFF; the writer, like FFmpeg's encoder, writes 0 as 0xFF, so writer output never contains 0x7F. | Same. |
@@ -147,8 +147,8 @@ Within one structure, checks run in this order:
       ends early: `Truncated`.
 3. **`fmt ` fields**: format tag (not 1, 3, 6, 7 or 0xFFFE:
    `UnsupportedFormat`); for 0xFFFE, the chunk size (not 40) and `cbSize`
-   (not 22), then the subformat GUID (not the KSDATAFORMAT family with tag 1,
-   3, 6 or 7), each `UnsupportedFormat`; bits per sample for the (sub)format
+   (not 22), then the subformat GUID (not tag 1, 3, 6 or 7 in the
+   KSDATAFORMAT, ambisonic or "broken" family), each `UnsupportedFormat`; bits per sample for the (sub)format
    tag (see the encodings table; otherwise `UnsupportedFormat`), then for
    extensible the valid bits (not 0 or the container's: `UnsupportedFormat`);
    channels (0: `InvalidFormat`; above the limit: `LimitExceeded`; the

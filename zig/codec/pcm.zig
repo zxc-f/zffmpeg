@@ -223,15 +223,17 @@ pub const CodecError = error{
     IncompleteFrame,
     /// The destination cannot hold every frame.
     OutputTooSmall,
+    /// The source does not hold every frame asked for.
+    InputTooSmall,
 };
 
 /// Decodes `bytes`, whole frames of interleaved encoded samples, into `out`
-/// from frame `offset` (at most `out.layout.samples`), and returns the number
-/// of frames decoded. `out` must be in `codec.storage()`. On failure nothing
-/// is written.
+/// from frame `offset`, and returns the number of frames decoded. `out` must
+/// be in `codec.storage()`; frames past its end, an `offset` past it
+/// included, are `OutputTooSmall`. On failure nothing is written.
 pub fn decode(codec: Codec, bytes: []const u8, out: sample_buffers.Buffer, offset: u32) CodecError!u32 {
-    std.debug.assert(offset <= out.layout.samples);
     if (out.layout.format != codec.storage()) return error.FormatMismatch;
+    if (offset > out.layout.samples) return error.OutputTooSmall;
     const width: usize = codec.bytesPerSample();
     const frame_bytes = width * out.layout.channels;
     if (bytes.len % frame_bytes != 0) return error.IncompleteFrame;
@@ -253,12 +255,15 @@ pub fn decode(codec: Codec, bytes: []const u8, out: sample_buffers.Buffer, offse
 }
 
 /// Encodes `frames` frames of `in` from frame `offset` into the start of
-/// `out` and returns the encoded prefix. `in` must be in `codec.storage()`
-/// and hold those frames. On failure nothing is written.
+/// `out` and returns the encoded prefix. `in` must be in `codec.storage()`;
+/// frames past its end are `InputTooSmall`, a checked error as in `decode`
+/// because the kernel reads them without bounds checks in ReleaseFast. On
+/// failure nothing is written.
 pub fn encode(codec: Codec, in: sample_buffers.View, offset: u32, frames: u32, out: []u8) CodecError![]u8 {
-    const start: u64 = offset;
-    std.debug.assert(start + frames <= in.layout.samples);
     if (in.layout.format != codec.storage()) return error.FormatMismatch;
+    // Both are u32, so the sum cannot overflow u64.
+    const start: u64 = offset;
+    if (start + frames > in.layout.samples) return error.InputTooSmall;
     const frame_count: usize = frames;
     const count = frame_count * in.layout.channels;
     const out_len = count * codec.bytesPerSample();
@@ -808,4 +813,22 @@ test "s8 and u8 differ only by the offset of 128" {
     try std.testing.expectEqualSlices(u8, &.{ 0x80, 0xff, 0x00 }, &bytes);
     var out: [3]u8 = undefined;
     try std.testing.expectEqualSlices(u8, &.{ 0x80, 0xff, 0x00 }, try encode(.u8, buffer.view(), 0, 3, &out));
+}
+
+test "frames outside the buffer are errors, not reads or writes past it" {
+    const layout = try sample_buffers.Layout.init(.u8, 1, 3, .{ .line = 1 });
+    var bytes: [3]u8 = .{ 1, 2, 3 };
+    const buffer = try sample_buffers.Buffer.init(layout, &bytes);
+    var out: [8]u8 = @splat(0xaa);
+    try std.testing.expectError(error.InputTooSmall, encode(.u8, buffer.view(), 0, 4, &out));
+    try std.testing.expectError(error.InputTooSmall, encode(.u8, buffer.view(), 2, 2, &out));
+    try std.testing.expectError(error.InputTooSmall, encode(.u8, buffer.view(), std.math.maxInt(u32), std.math.maxInt(u32), &out));
+    try std.testing.expectEqualSlices(u8, &@as([8]u8, @splat(0xaa)), &out);
+    try std.testing.expectEqualSlices(u8, &.{3}, try encode(.u8, buffer.view(), 2, 1, &out));
+    try std.testing.expectEqual(0, (try encode(.u8, buffer.view(), 3, 0, &out)).len);
+
+    try std.testing.expectError(error.OutputTooSmall, decode(.u8, &.{}, buffer, 4));
+    try std.testing.expectError(error.OutputTooSmall, decode(.u8, &.{ 9, 9 }, buffer, 2));
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3 }, &bytes);
+    try std.testing.expectEqual(0, try decode(.u8, &.{}, buffer, 3));
 }

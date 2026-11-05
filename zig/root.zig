@@ -194,6 +194,7 @@ test {
     _ = @import("format/framehash.zig");
     _ = @import("format/seek.zig");
     _ = @import("format/mov_chan.zig");
+    _ = @import("io/skip.zig");
     _ = @import("resample/audioconvert.zig");
     _ = @import("resample/dither.zig");
     _ = @import("resample/rematrix.zig");

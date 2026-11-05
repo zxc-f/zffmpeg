@@ -6,8 +6,13 @@
 //! open `std.Io.File` and never close it. Path helpers (`probePath`,
 //! `writePath`) open, use and close their own handle, also on failure.
 //!
-//! Readers use `readerStreaming`, so pipes and other non-seekable files work;
-//! the parser never seeks. Each call builds one adapter over the caller's
+//! `decodeFile`, and `probeFile` on a pipe or terminal, read with
+//! `readerStreaming`, so non-seekable files work and nothing seeks.
+//! `probeFile` reads a regular file (`regularLength`) positionally from
+//! offset 0 instead, so Ogg's duration scan can seek back. That includes a
+//! standard input redirected from a regular file: it is read from its
+//! start, not from the descriptor's offset where FFmpeg's `pipe:` streams
+//! (notes.md "I/O and API"). Each call builds one adapter over the caller's
 //! `buffer` and keeps it for the whole stream, so read-ahead is never lost.
 //! Memory use is that buffer plus the parser's fixed 4 KiB of working storage:
 //! nothing is allocated, whatever the file size. Any buffer size works;
@@ -122,6 +127,8 @@ pub fn writePath(
 
 fn writeStream(out: *std.Io.Writer, format: audio.Format, samples: []const i16, options: wav.WriteOptions) wav.WriteError!void {
     const channels = format.channelCount();
+    // `Writer.begin` refuses it too, but the frame check divides by it first.
+    if (channels == 0) return error.InvalidFormat;
     if (samples.len % channels != 0) return error.IncompleteFrame;
     var writer = try wav.Writer.begin(out, .s16le, format, samples.len / channels, options);
     try writer.writeFrames(samples);
@@ -407,4 +414,15 @@ test "a failing write reports the file's own error" {
     const err = if (writeFile(io, file, &buffer, mono, &.{ 1, 2 }, .{})) |_| return error.TestExpectedError else |e| e;
     try std.testing.expect(err != error.WriteFailed);
     if (builtin.os.tag == .linux) try std.testing.expectEqual(error.NotOpenForWriting, err);
+}
+
+test "a format without channels is refused before anything is written" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [64]u8 = undefined;
+    const none: audio.Format = .{ .sample_rate = 8000, .layout = .{ .unspecified = 0 }, .sample_format = .s16 };
+    try std.testing.expectError(error.InvalidFormat, writePath(io, tmp.dir, "none.wav", &buffer, none, &.{ 1, 2 }, .{}));
+    const stat = try tmp.dir.statFile(io, "none.wav", .{});
+    try std.testing.expectEqual(0, stat.size);
 }

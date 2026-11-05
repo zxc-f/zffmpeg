@@ -24,6 +24,7 @@ const std = @import("std");
 const audio = @import("../core/audio.zig");
 const samples_storage = @import("../core/samples.zig");
 const pcm = @import("../codec/pcm.zig");
+const skip = @import("../io/skip.zig");
 const mov_chan = @import("mov_chan.zig");
 
 /// Contract errors (see the CAF fixture README), plus `IoFailure` for a
@@ -245,7 +246,7 @@ pub const Parser = struct {
         if (std.mem.eql(u8, &chunk.id, "desc")) return error.InvalidCaf;
         if (chunk.size < 0) return error.InvalidCaf;
         const size: u64 = @intCast(chunk.size);
-        p.reader.discardAll64(size) catch |err| return mapRead(err);
+        skip.discardAll(p.reader, size) catch |err| return mapRead(err);
     }
 
     /// The next chunk header, or null at the end of the input exactly
@@ -309,7 +310,7 @@ pub const Parser = struct {
     pub fn finish(p: *Parser) Error!void {
         std.debug.assert(p.state == .data);
         if (p.data_left) |data_left| {
-            p.reader.discardAll64(data_left) catch |err| return mapRead(err);
+            skip.discardAll(p.reader, data_left) catch |err| return mapRead(err);
             p.data_left = 0;
             while (try p.nextChunk()) |chunk| {
                 if (std.mem.eql(u8, &chunk.id, "data")) return error.InvalidCaf;
@@ -562,4 +563,16 @@ test "fuzz: arbitrary input never crashes the CAF parser" {
 test "a failing reader reports IoFailure" {
     var reader: std.Io.Reader = .failing;
     try std.testing.expectError(error.IoFailure, probe(&reader, .{}));
+}
+
+test "a chunk of 4 GiB ends as truncation" {
+    // Skipping `free` overflowed the reader's position on 32-bit targets.
+    // 8000 Hz (a big-endian f64), lpcm, flags 0, 2 bytes per packet, 1
+    // frame per packet, 1 channel, 16 bits.
+    const desc = [8]u8{ 0x40, 0xbf, 0x40, 0, 0, 0, 0, 0 } ++ "lpcm".* ++ [4]u8{ 0, 0, 0, 0 } ++
+        [4]u8{ 0, 0, 0, 2 } ++ [4]u8{ 0, 0, 0, 1 } ++ [4]u8{ 0, 0, 0, 1 } ++ [4]u8{ 0, 0, 0, 16 };
+    const file = "caff".* ++ [4]u8{ 0, 1, 0, 0 } ++ "desc".* ++ [8]u8{ 0, 0, 0, 0, 0, 0, 0, 32 } ++ desc ++
+        "free".* ++ [8]u8{ 0, 0, 0, 1, 0, 0, 0, 0 } ++ @as([64]u8, @splat(0));
+    var reader: std.Io.Reader = .fixed(&file);
+    try std.testing.expectError(error.Truncated, probe(&reader, .{}));
 }

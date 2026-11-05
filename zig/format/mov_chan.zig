@@ -23,6 +23,7 @@
 
 const std = @import("std");
 const channel_layout = @import("../core/channel_layout.zig");
+const skip = @import("../io/skip.zig");
 const Channel = channel_layout.Channel;
 const Layout = channel_layout.Layout;
 
@@ -297,7 +298,7 @@ pub fn read(reader: *std.Io.Reader, size: u64, current: Layout) Error!Layout {
             if (channelsOf(tag)) |channels| layout = canonical(channels);
         }
     }
-    reader.discardAll64(rest) catch |err| return mapRead(err);
+    skip.discardAll(reader, rest) catch |err| return mapRead(err);
     return layout;
 }
 
