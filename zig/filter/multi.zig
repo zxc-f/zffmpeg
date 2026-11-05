@@ -966,10 +966,8 @@ test "amix drains a long first-input queue in order, in part and at the end" {
 }
 
 /// Queues `n` one-sample frames on the first input of a two-input amix,
-/// then gives the second input as many samples at once and mixes them all:
-/// the nanoseconds this took. An arena keeps the debug allocator's
-/// bookkeeping out of the time.
-fn drainOneSampleFrames(n: u32) !i96 {
+/// then gives the second input as many samples at once and mixes them all.
+fn drainOneSampleFrames(n: u32) !void {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
@@ -984,7 +982,6 @@ fn drainOneSampleFrames(n: u32) !i96 {
     var silence = try Owned.alloc(gpa, format, n, null);
     @memset(silence.data, 0);
     try writeFrame(&r, 1, &silence, null);
-    const start = std.Io.Clock.awake.now(testing.io);
     var mixed: u32 = 0;
     while (true) {
         switch (try r.output()) {
@@ -996,21 +993,15 @@ fn drainOneSampleFrames(n: u32) !i96 {
             .none, .end => break,
         }
     }
-    const elapsed = start.durationTo(std.Io.Clock.awake.now(testing.io)).nanoseconds;
     try testing.expectEqual(n, mixed);
-    return elapsed;
 }
 
 test "amix's first-input queue drains in linear time" {
-    // af_amix.c's frame list drains in linear time: 8 times the frames take
-    // about 8 times as long. An array shifted per frame measured 32 times
-    // in Debug and 60 in ReleaseFast. The fastest of three runs keeps a
-    // busy machine from deciding.
-    var small: i96 = std.math.maxInt(i96);
-    var large: i96 = std.math.maxInt(i96);
-    for (0..3) |_| {
-        small = @min(small, try drainOneSampleFrames(8000));
-        large = @min(large, try drainOneSampleFrames(64000));
-    }
-    try testing.expect(large < 16 * @max(small, 1));
+    // af_amix.c's frame list drains in linear time. The queue is a deque,
+    // whose front removal is constant time; an array shifted per frame
+    // (`orderedRemove(0)`) took 32 times as long for 8 times the frames in
+    // Debug. The type is the guarantee: a timing ratio would make the test
+    // depend on the machine's load.
+    comptime std.debug.assert(@FieldType(MixRun, "frames") == std.Deque(MixRun.FrameInfo));
+    try drainOneSampleFrames(64000);
 }
