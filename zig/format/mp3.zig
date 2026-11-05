@@ -282,7 +282,11 @@ pub const Demuxer = struct {
         }
         try id3.finish();
         std.mem.swap(metadata.Dictionary, &d.tags, &id3.tags);
-        // A tag may claim more bytes than the input has.
+        // A tag may claim more bytes than the input has. The frame search
+        // then starts past the end and the input is InvalidMp3, where
+        // FFmpeg's seek fails and it resyncs from where its tag parser
+        // stopped (notes.md "An ID3v2 tag past the end of the input",
+        // an open question).
         if (d.pos > d.src.windowEnd()) {
             try d.src.fill(d.gpa, d.pos);
             d.src.drop(d.src.windowEnd());
@@ -647,7 +651,7 @@ fn parseSmpb(value: []const u8) ?SmpbCounts {
         f.* = if (negative) 0 -% v else v;
         if (at < value.len and std.ascii.isHex(value[at])) return null;
     }
-    const max: u64 = 1 << 51;
+    const max: u64 = 1 << 40; // SMPB_MAX_SAMPLES, demux_utils.c
     if (fields[1] > max or fields[2] > max or fields[3] > max) return null;
     return .{ .priming = @intCast(fields[1]), .remainder = @intCast(fields[2]), .samples = @intCast(fields[3]) };
 }
@@ -918,4 +922,22 @@ test "every MP3 fixture seeks as FFmpeg seeks it (vectors/seek_mp3.txt)" {
     }
     // Every seek of the fixtures FFmpeg opens, but the picture's.
     try testing.expectEqual(2106, compared);
+}
+
+test "iTunSMPB counts up to SMPB_MAX_SAMPLES (2^40) are kept, larger ones refuse the tag" {
+    const at_max = parseSmpb(" 00000000 0000010000000000 0000010000000000 0000010000000000").?;
+    try testing.expectEqual(1 << 40, at_max.priming);
+    try testing.expectEqual(1 << 40, at_max.remainder);
+    try testing.expectEqual(1 << 40, at_max.samples);
+    const typical = parseSmpb(" 00000000 00000210 0000097C 0000000000254D04").?;
+    try testing.expectEqual(0x210, typical.priming);
+    try testing.expectEqual(0x97c, typical.remainder);
+    try testing.expectEqual(0x254d04, typical.samples);
+    // The reserved field is not bounded.
+    try testing.expect(parseSmpb(" FFFFFFFFFFFFFFFF 00000210 0000097C 0000000000254D04") != null);
+    try testing.expectEqual(null, parseSmpb(" 00000000 0000010000000001 00000000 00000000"));
+    try testing.expectEqual(null, parseSmpb(" 00000000 00000000 0000010000000001 00000000"));
+    try testing.expectEqual(null, parseSmpb(" 00000000 00000000 00000000 0000010000000001"));
+    // 2^51, which the port accepted before.
+    try testing.expectEqual(null, parseSmpb(" 00000000 00000210 0000097C 0008000000000000"));
 }

@@ -259,7 +259,11 @@ pub const Parser = struct {
                     const threshold: i32 = @intFromBool(ctx.codec != f.codec);
                     if (state & same_header_mask != p.header & same_header_mask and p.header != 0) p.header_count = -3;
                     p.header = state;
-                    p.header_count += 1;
+                    // An int in FFmpeg: after 2^31 matching headers it
+                    // wraps to INT_MIN as the reference build computes it
+                    // (notes.md "Follow the reference build"), and the
+                    // context stops updating until it climbs back.
+                    p.header_count +%= 1;
                     p.frame_size = f.frame_size - 4;
                     if (p.header_count > threshold) {
                         ctx.sample_rate = f.sample_rate;
@@ -313,4 +317,16 @@ test "headers decode as FFmpeg's: sizes of each layer and version, free format, 
     try testing.expectEqual(null, decodeHeader(0xFFF99000));
     try testing.expectEqual(null, decodeHeader(0xFFFBF000));
     try testing.expectEqual(null, decodeHeader(0xFFFB9C00));
+}
+
+test "the parser's header count wraps after 2^31 matching headers, as the reference build's int" {
+    const gpa = testing.allocator;
+    var p: Parser = .{ .header = 0xFFFB9264, .header_count = std.math.maxInt(i32) };
+    defer p.deinit(gpa);
+    var ctx: Context = .{};
+    // One header like the last: the count wraps instead of overflowing,
+    // so the context is not updated from it.
+    _ = try p.parse(gpa, &ctx, &.{ 0xFF, 0xFB, 0x92, 0x64 });
+    try testing.expectEqual(std.math.minInt(i32), p.header_count);
+    try testing.expectEqual(0, ctx.sample_rate);
 }
