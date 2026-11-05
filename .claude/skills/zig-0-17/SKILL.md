@@ -141,6 +141,7 @@ Repository checks, from CLAUDE.md:
   Fuzz entries vary the limits, not only the defaults.
 - A new or changed parser, demuxer or decoder has its fuzz entry and an
   allocation-failure sweep with remap failures (TODO.md G3) in the same
-  change, not at a later gate.
+  change, not at a later gate. Its corpus uses `hostile.fuzzSeed`, so the
+  seeds reach the parser; raw bytes are read as a length prefix.
 - Nothing breaks the compile-only cross build for x86_64-windows-gnu,
   aarch64-linux-musl and aarch64-macos.

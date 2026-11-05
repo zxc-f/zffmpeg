@@ -1115,6 +1115,12 @@ test "empty input" {
   `zig build --fuzz`. `testOne` receives `*std.testing.Smith`. Fill a bounded
   buffer with `smith.bytes` / `smith.slice`, then parse `Reader.fixed` of that
   buffer. Do not start with a libFuzzer harness.
+- A corpus seed is read the way `testOne` reads the `Smith`: `smith.slice`
+  takes a 4-byte little-endian length first, then `smith.value` calls take
+  their bytes. Raw fixture bytes as a seed run as a garbage length and almost
+  no input, and the entry silently tests nothing. Build seeds with
+  `zig/testing/hostile.zig`'s `fuzzSeed(bytes, values)`, and keep a test that
+  each seed reaches the parser (packets read, a stream opened).
 
 `builtin.is_test` comes from `@import("builtin")`.
 
