@@ -670,8 +670,9 @@ clang 23 build" were a port defect, not the compiler's. FFmpeg's
 `av_clip_int16(lrintf(x))` narrows `lrintf`'s 64-bit result to `int` before
 clipping, so NaN and infinities give 0, not -32768, and finite products from
 2^31 to 2^63 wrap (notes.md "Undefined C cases"). The run, locally on Linux
-x86-64 with clang 23.1.4 for the reference build, reported every required
-case passing, **6346/6346** with none missing, the optional cases **61/61**,
+x86-64 with clang 23.1.4 for the reference build at `1777a5f`, reported
+every required case passing, **6406/6406** with none missing (new fixtures
+and stricter checks included), the optional cases **61/61**,
 and every vector generator reproducing its committed file, including the new
 `edge` sample conversions, the dither cases with huge `dither_scale` and the
 remix cases with custom matrices.

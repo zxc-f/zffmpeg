@@ -282,7 +282,14 @@ merged. Fixed in the round, with regression tests that fail on the old code:
   comments and help; notes.md rows for every refusal the review found
   unrecorded; the `zig-0-17` skill's rules for each defect class above.
 
-Gates re-run at the round's last commit: CHECKS_PLACEHOLDER
+Gates re-run at `1777a5f`, locally on Linux x86-64 (the reference build
+with clang 23.1.4; no CI run link): zig fmt, the fixture check (57 FLAC, 37
+Ogg and 43 MP3 fixtures among 447), zig build test 461/461 in Debug,
+ReleaseSafe and ReleaseFast (258 steps), the three cross builds, every
+vector generator reproducing its committed file (with the new `edge`
+conversions, dither and remix cases, and the new fixtures' Ogg, MP3, FLAC
+and seek vectors), and compare.py: required 6406 passed, 0 failed, 0
+missing; optional 61/61, none skipped.
 
 Left open, each with the task it must land before:
 
