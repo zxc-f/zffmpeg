@@ -318,6 +318,7 @@ Left open, each with the task it must land before:
 | A damaged Ogg FLAC frame shifts later timestamps; empty FLAC packets lose the start time | `demux.zig` | T65a |
 | Ogg's duration scan creates streams (notes.md "Length scan restore" says it does not) | `ogg.zig` | T65c |
 | A data offset of 0 is never replaced (`demux.c:350`) | `demux.zig` | T52b, T53c |
+| Decoded Ogg and MP3 inputs decode the stream twice from a file (a counting pass for the output header, raw, FLAC and Ogg outputs included): 45% of the conversion (zig-io analysis, "Findings for the codebase") | `oggdecode.zig`, `mp3decode.zig`, `convert.zig` | T57 |
 | CUESHEET chapter ends are not `compute_chapters_end`'s (library) | `flac.zig` | any time |
 | The allocation-free FLAC `readHeader` keeps its own channel-mask scanner | `flac.zig` | T65a |
 | `oggdecode` refuses a decoder that reconfigures its channel count (FFmpeg reallocates the frame) | `oggdecode.zig` | T33a, T35a |
@@ -4007,6 +4008,14 @@ optimization, concurrency, fuzz duration and corpus breadth.
   these measurements; optimized kernels also need T58's scalar comparison.
   Done when every implemented codec has a recorded baseline and regressions are
   reported, without failing CI until the numbers are stable.
+  Groundwork (2026-11-06, the zig-io skill): `bench/build-ffmpeg-native.sh`
+  builds the asm-enabled comparison FFmpeg (the pinned components, NASM,
+  `-march=native`), and `bench/e2e_codecs.sh` times zffmpeg against it, the
+  pinned build and a distribution build on every implemented codec, with
+  CPU time, instructions and peak memory, on all cores and on one. The
+  first run (analysis "Machine B") found, besides SIMD (T58): the decoded
+  readers' double decoding, the FLAC parser's header scoring (40% of FLAC
+  decoding) and the FLAC encoder at 2.5× the reference's instructions.
 
 - [ ] **T58 — SIMD kernels.** Needs T57. Reference: `libavcodec/x86/`,
   `aarch64/` (algorithms only), `tests/checkasm/`.

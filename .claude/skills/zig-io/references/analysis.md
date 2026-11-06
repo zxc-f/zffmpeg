@@ -12,7 +12,7 @@ file and line at the pinned revisions; every number comes from
 | Source | Revision | Where |
 | --- | --- | --- |
 | FFmpeg | `5d5a38a7e46be296eab75982c0986054f731e19e` | `.references/ffmpeg` |
-| Zig standard library | the 0.17.0 release's `lib/std` | the toolchain (`zig env` prints `lib_dir`), or `.references/zig/lib` |
+| Zig standard library | the 0.17.0 release's `lib/std`; tag `0.17.0` (`7647adab80dd088f4de3610fd245915a912eb6ad`) for its tests and history | the toolchain (`zig env` prints `lib_dir`); `.references/zig`, a clone read at the tag ("The Zig source" below) |
 | zio | `1814bacf54ca2ebdb140c3e521860ef3320f76dd` | `.references/zio` |
 | ZLS | `c275dd2ec457e6ae302d98a6116e69c6d595c24c` | `.references/zls` |
 | zig-cookbook | `ed1772059f236c1721af57c785b4d94684951be5` | `.references/zig-cookbook` |
@@ -112,6 +112,41 @@ Paths are relative to `lib/std/`.
   `Io.VTable` does not have, so any program that instantiates it fails to
   compile. There is no usable event-driven std backend in this release.
 
+## The Zig source: the installed lib/std or a clone
+
+Checked on 2026-11-06 against a full clone of the Zig repository
+(`.references/zig`, then on `master`, `0.17.0-953-g155ec6090`):
+
+- **The installed `lib/std` is the 0.17.0 source.** Every file of the
+  release's `lib/std` equals the tag's, except the standard library's own
+  tests: the release ships each `test.zig` empty (`Io/test.zig`,
+  `fs/test.zig`, `Io/Threaded/test.zig` and 7 more) and leaves out their
+  test data (139 files). The API reading above, and every line cited in
+  this file, is the same in both.
+- **`master` is not 0.17.0.** 953 commits later, 223 files of `lib/std`
+  changed (23,788 lines added, 13,435 removed). Reading
+  `.references/zig/lib` on `master` as if it were the pinned library gives
+  wrong answers; read the clone at the tag:
+  `git -C .references/zig show 0.17.0:lib/std/Io/Reader.zig`, or a worktree
+  at the tag.
+- **What the clone adds.** The std's own tests at the tag, which document
+  behavior the release no longer carries; `git log` and `git blame`, which
+  give the reason for a rule and show what changed after the release; the
+  compiler (`src/`), the language reference (`doc/langref.html.in`) and the
+  behavior tests (`test/`). The 0.17.x branch has a 0.17.1 tag (209
+  commits after 0.17.0); its `std.Io` changes that could touch zffmpeg:
+  `975d74f654` maps `EACCES` from a file read to `AccessDenied` (in 0.17.0
+  it reaches `unexpectedErrno`, `error.Unexpected` with a stack trace in
+  Debug); `a4b8ba9836` makes a flush of the `failing` test `Io` fail
+  instead of spinning (test-only). `Io.Evented` still does not compile with
+  0.17.1's `lib`: the `processReplacePath` field is gone, and `Io/Uring.zig`
+  now switches on an `Io.Operation` tag `net_accept` that does not exist
+  (built with the 0.17.0 compiler and `--zig-lib-dir`).
+- **So:** the installed `lib/std` stays the authority for what compiles
+  (CLAUDE.md pins 0.17.0); the clone, read at the tag, is the source for
+  the std's tests and the history, and for checking a patch release before
+  the toolchain moves.
+
 ## What zffmpeg does today
 
 - The CLI reads a regular input file positionally and anything else
@@ -129,6 +164,12 @@ Paths are relative to `lib/std/`.
 - Everything runs on one thread; there are no queues yet (T53d, T59).
 
 ## Measurements
+
+Two machines. The tables keep their original names (R1 to E2E) so the runs
+compare; machine B adds the codec paths (E2E-C) and an FFmpeg built with
+assembly.
+
+### Machine A: a virtual machine (runs 1 and 2)
 
 One Linux x86-64 virtual machine: Intel Xeon @ 2.10 GHz, 4 logical cores,
 AVX2 and FMA, 15 GiB, kernel 6.18, ext4 on a virtio disk; Zig 0.17.0; files
@@ -232,28 +273,146 @@ made 310,343 syscalls on 9 threads (16,389 reads of 32 KiB, 2050 writes,
 with `--disable-x86asm` (zig/testing/reference/README.md); these PCM paths do
 no SIMD work, so the gap is the I/O and threading design.
 
+### Machine B: a desktop (run 3)
+
+AMD Ryzen 7 5700X3D, 8 cores and 16 threads, AVX2, 31 GiB, kernel 7.2,
+Zig 0.17.0, zffmpeg at `574bd16` in ReleaseFast for the native CPU; the
+work directory on tmpfs, W1 and C1 again on ext4 (a USB-attached NVMe);
+governor `powersave` with `balance_performance` (amd-pstate). Three FFmpeg
+builds: **pinned**, the reference oracle (clang, `--disable-x86asm`);
+**native**, the same components with NASM assembly and `-march=native`
+([../bench/build-ffmpeg-native.sh](../bench/build-ffmpeg-native.sh)); and
+**system**, Arch Linux's n9.0.2 (GCC, LTO, assembly). The full report is
+[results/2026-11-06-ryzen-5700x3d.md](results/2026-11-06-ryzen-5700x3d.md).
+
+- **R1**: no buffer with 4 KiB requests 4883 MiB/s, a 64 KiB buffer
+  11142–13373, 1 MiB buffers no faster (10878–11580); positional and
+  streaming within 3%.
+- **R2**: `readSliceAll` 1266–1640 MiB/s, `takeArray` 2928–4809,
+  `takeInt` 2937–4705: 2.3–3×.
+- **R3** (positional against streaming): 60 KiB skips 22,847 against
+  11,824 MiB/s (1.9×), 1 MiB 192,702 against 12,130 (16×), 16 MiB
+  2,538,650 against 12,199 (208×). **S1**: 511 `preadv` against 8162
+  `readv`, as on A.
+- **R4**: pipes run at 11.7–13.6 GiB/s from a 64 KiB buffer on, 3.8 GiB/s
+  with no buffer and 4 KiB requests: here the buffer matters for pipes too
+  (A's virtualized pipe capped every cell near 1.4 GiB/s).
+- **W1**: unbuffered 64-byte writes 87 MiB/s on tmpfs and 34 MiB/s on
+  ext4, against 2699 and 2425 with a 64 KiB buffer (31× and 71×); 1 MiB
+  writes 3.1–5.1 GiB/s with any buffer.
+- **C1**: `streamRemaining` 2708–2730 MiB/s against a read/write loop's
+  2348–2477 on tmpfs (+10–16%), 4141 against 3351 on ext4 (+24%), each in
+  2 `copy_file_range` calls.
+- **Q1**: 4 KiB packets with work, serial 902 MiB/s against 798–812
+  through a queue; 64 KiB with work, 906 against 955–961 (+6%); without
+  work the queue loses at every size.
+
+**E2E on B**, the PCM paths (median wall time of 5, 512 MiB):
+
+| Operation | zffmpeg | pinned | native | system |
+| --- | ---: | ---: | ---: | ---: |
+| WAV stream copy to WAV | 0.283 s | 0.358 s | 0.356 s | 0.348 s |
+| WAV s16le to AU s16be | 0.398 s | 0.364 s | 0.363 s | 0.353 s |
+| WAV to raw s16le | 0.407 s | 0.365 s | 0.365 s | 0.352 s |
+| WAV from a pipe to AU | 0.402 s | 0.372 s | 0.369 s | 0.359 s |
+| WAV to raw s16le on a pipe | 0.300 s | 0.177 s | 0.171 s | 0.226 s |
+
+zffmpeg is faster only for the stream copy (1.26×); FFmpeg is 8–12% faster
+transcoding and 1.7× faster into a pipe, where its reader and writer
+threads overlap the read with the writes `cat` waits for. Resources for WAV
+to AU are A's: zffmpeg 0.36 s of CPU, 15,536 syscalls, one thread; FFmpeg
+0.83–0.86 s of CPU and 257,000–281,000 syscalls (236,000–263,000 `futex`)
+on 9 threads; 13 MiB peak (the system build 54 MiB, shared libraries).
+
+**E2E-C on B**, the codec paths (`e2e_codecs.sh`: 10 minutes of tones over
+pink noise, s16 stereo 48 kHz, decoded or encoded to a WAV or raw file;
+median wall time of 5; instructions retired, all threads):
+
+| Operation | zffmpeg | pinned | native | system | zffmpeg, one core | pinned, one core | native, one core | Instructions: zffmpeg / pinned / native |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| WAV to FLAC | 1.344 s | 0.653 s | 0.494 s | 0.573 s | 1.351 s | 1.218 s | 1.016 s | 19.5 / 7.8 / 5.8 G |
+| FLAC to WAV | 0.682 s | 0.174 s | 0.138 s | 0.175 s | 0.686 s | 0.739 s | 0.698 s | 6.2 / 4.2 / 3.1 G |
+| Ogg Vorbis to WAV | 1.411 s | 0.627 s | 0.388 s | 0.411 s | 1.407 s | 2.039 s | 1.457 s | 17.4 / 7.4 / 4.0 G |
+| Ogg Opus to WAV | 2.105 s | 0.989 s | 0.803 s | 0.889 s | 2.105 s | 2.790 s | 2.490 s | 21.5 / 10.6 / 7.4 G |
+| MP3 to WAV | 1.353 s | 0.531 s | 0.463 s | 0.503 s | 1.347 s | 1.751 s | 1.617 s | 16.8 / 6.9 / 4.6 G |
+| Resample 48 to 44.1 kHz | 0.680 s | 0.583 s | 0.181 s | 0.287 s | 0.679 s | 1.085 s | 0.568 s | 9.4 / 9.2 / 3.0 G |
+| s16 to f32le, 512 MiB | 0.738 s | 0.661 s | 0.675 s | 0.546 s | 0.742 s | 1.958 s | 1.907 s | 3.5 / 3.5 / 2.0 G |
+
+The one-core columns run every command under `taskset -c 4`. Three effects
+separate in this table:
+
+1. **zffmpeg decodes Ogg and MP3 twice from a file.** The decoded reader's
+   counting pass (`format/oggdecode.zig`, `format/mp3decode.zig`) decodes
+   the whole stream once to know the sample count before the header, for
+   every output, raw ones included. From a pipe, which has no counting
+   pass, the same decodes take 0.707 s (MP3) and 0.742 s (Vorbis) instead of
+   1.272 s and 1.339 s (raw f32le). Halved, zffmpeg's instructions per
+   decode are close to the C reference's: Opus 10.8 against 10.6 G, Vorbis
+   8.7 against 7.4, MP3 8.4 against 6.9. FLAC is read with STREAMINFO's
+   count and decoded once.
+2. **FFmpeg's assembly removes 25–70% of the C's instructions**: the
+   resampler 3.1×, Vorbis 1.9×, MP3 1.5×, Opus 1.45×, FLAC 1.35×, the
+   s16-to-float conversion 1.8×. zffmpeg's scalar code matches the C
+   reference, not the assembly (T58).
+3. **FFmpeg's threads turn the same CPU time into 2–5× less wall time on 16
+   threads, and cost it on one core.** All cores: FFmpeg spends about as
+   much CPU as zffmpeg (MP3 1.43 s pinned against 1.35 s) but finishes in a
+   third of the time. One core: zffmpeg is faster than every build for
+   every decode, even decoding twice (FFmpeg's system time rises to
+   1.0–1.6 s of thread switching), and slower only for FLAC encoding and
+   the assembly resampler.
+
+Two of zffmpeg's own costs stand out beyond these: the FLAC encoder runs
+2.5× the reference's instructions (a profile puts 42% in
+`flacmux.Writer.drain`, where the encoder is inlined, and 12% in MD5), and
+FLAC decoding 1.5× (40% in `flac_parser.Parser.scoreHeader`, 13% in the
+demuxer's `parsePacketAt`).
+
 ## Conclusions
+
+Each holds on both machines unless it says otherwise.
 
 1. **Positional reader for regular files, streaming for everything else.**
    Equal for sequential reads (R1); 2× to 260× faster for skips (R3, S1)
    and the only way to seek back. zffmpeg's CLI and probe already do this.
 2. **64 KiB buffers.** Reads peak at 16–64 KiB (R1), small writes need
-   64 KiB or more (W1), pipes are kernel-bound (R4). FFmpeg's 32 KiB, 64 KiB
-   on pipes, is the same choice.
+   64 KiB or more (W1: 31–71× over unbuffered 64-byte writes), and on B a
+   pipe needs one too (R4). FFmpeg's 32 KiB, 64 KiB on pipes, is the same
+   choice.
 3. **`readSliceAll` for fields, bigger reads or `take` in hot loops.** The
    per-call cost (R2) is negligible for headers and visible in per-packet
    loops; `take` needs guaranteed capacity.
 4. **Read large payloads straight into their destination.** std's vectored
    read already avoids the extra copy that FFmpeg's direct read avoids.
 5. **Stream copy of whole files through `streamRemaining`.** The kernel
-   copies (C1, S1).
-6. **No threads in the audio pipeline until a measurement shows a gain.**
-   Small packets lose to handoffs (Q1), and FFmpeg's thread-per-component
-   design is the main reason it used 4× the CPU and 20× the syscalls of
-   zffmpeg here (E2E).
-7. **`std.Io.Threaded` is the backend.** `Io.Evented` does not compile in
-   0.17.0; event loops (zio, libxev) would only matter for many concurrent
-   network streams, which are not planned (TODO.md "Not planned").
+   copies, 10–37% faster (C1, S1).
+6. **zffmpeg is not faster than FFmpeg in general.** On A (4 vCPUs) it was
+   1.15–1.74× faster on the PCM paths; on B (16 threads) it is faster only
+   for the stream copy, 8–12% slower transcoding PCM, 1.7× slower into a
+   pipe and 2–5× slower on the codec paths (E2E-C). Its single thread uses
+   the least CPU and the fewest syscalls on every path but FLAC encoding,
+   and wins on one core; FFmpeg's thread per component wins wall time when
+   cores are free. Report which machine and core budget a comparison ran
+   on, and compare instructions or CPU time for the code itself.
+7. **Synchronous until T59, then measure the pipeline with real codecs on a
+   multi-core machine.** Q1's byte hash shows that a handoff costs
+   microseconds and small packets lose; E2E-C shows that with a codec as the
+   work, overlapping demux, decode and output gains 2–5× wall time on 16
+   threads. Neither number decides T59 alone: batch handoffs (Q1) and
+   measure the wall time and the CPU time (E2E-C), on one core and on all.
+8. **Decode once.** A decoded input must not decode the stream ahead to
+   count its samples (E2E-C, effect 1); write the header with a
+   placeholder and rewrite it at the end on a seekable output, as FFmpeg's
+   muxers do (`wavenc.c`, `au.c`, `aiffenc.c`), and skip any count for an
+   output that needs none.
+9. **Compare against the assembly build too.** The pinned build is the
+   oracle for output; for speed, T57 needs both it (the same C algorithms)
+   and an assembly build (what users run), since assembly removes 25–70%
+   of the instructions (E2E-C, effect 2).
+10. **`std.Io.Threaded` is the backend.** `Io.Evented` does not compile in
+    0.17.0, nor with 0.17.1's library; event loops (zio, libxev) would
+    only matter for many concurrent network streams, which are not planned
+    (TODO.md "Not planned").
 
 ## Concurrency for T53d and T59
 
@@ -262,8 +421,12 @@ no SIMD work, so the gap is the I/O and threading design.
   scheduler needs bounded queues for flow control between several inputs and
   outputs, not threads; implement it with the same synchronous calls first.
 - When T59 adds threads, put them where one stage is much heavier than a
-  handoff: frame or slice threading inside a codec (FFmpeg does it only for
-  FLAC decoding among the ported codecs), or independent outputs. Use
+  handoff: the pipeline between components (on B, FFmpeg's 2–5× wall-time
+  gain on the codec paths comes from decoding on one thread while another
+  converts and writes; with no codec work, E2E's PCM paths, it gains little
+  or loses), frame or slice threading inside a codec (FFmpeg does it only
+  for FLAC decoding among the ported codecs), or independent outputs. Hand
+  frames over in batches, so the handoff stays small against the work. Use
   `io.concurrent` for a task that must run beside the caller (a producer and a
   consumer on one bounded queue deadlock if `io.async` runs one inline), move
   batches through `Io.Queue` (`put`/`get` with a minimum count), and measure
@@ -274,12 +437,30 @@ no SIMD work, so the gap is the I/O and threading design.
 
 ## Findings for the codebase
 
-- `av.file.decodeFile` (`zig/io/file.zig:86-94`) opens every file with
+- **The decoded readers decode twice** (E2E-C, effect 1):
+  `format/oggdecode.zig` and `format/mp3decode.zig` run a counting pass
+  over the whole stream when the input can seek, for every output, raw,
+  FLAC and Ogg ones included, which then drop the count. It costs 45% of an
+  Ogg or MP3 conversion from a file. Conclusion 8 says how to remove it;
+  the count also checks that the stream decodes to what was announced
+  (`FrameCountMismatch`), which a header rewritten at the end makes
+  unnecessary.
+- **FLAC decoding spends 53% in the parser and demuxer**
+  (`flac_parser.Parser.scoreHeader` 40%, `Demuxer.parsePacketAt` 13%,
+  perf on B): 1.5× the reference's instructions for the same algorithm.
+  Look first at `checkHeaderMismatch` and the CRCs it computes over the
+  bytes between candidate headers.
+- **The FLAC encoder runs 2.5× the reference's instructions**: 42% in
+  `flacmux.Writer.drain` (the encoder inlined: residual coding and the bit
+  writer), 12% in MD5.
+- **No SIMD yet** (T58): against the assembly build the largest gaps are
+  the resampler (3.1×), Vorbis (1.9×), the s16-to-float conversion (1.8×)
+  and MP3 (1.5×).
+- `av.file.decodeFile` (`zig/io/file.zig`) opens every file with
   `readerStreaming`. For a regular file a positional reader would skip
   chunks and annotations without reading them (R3). The CLI does not use
   this helper, so nothing user-visible is slow; change it with the next
   change to that file.
-- Nothing else in the current I/O paths contradicts the measurements.
 
 ## Other references
 
@@ -302,10 +483,13 @@ no SIMD work, so the gap is the I/O and threading design.
 
 ## Limits of this analysis
 
-- One machine, page cache only; disk-bound and cold-cache behavior is in
-  reproduce.md's variants, not measured here.
-- Q1's work is a byte-hash loop, not a codec; the end-to-end runs cover PCM
-  paths, where I/O dominates. Codec-heavy paths (FLAC encoding, Vorbis and
-  Opus decoding) are CPU-bound and not compared here.
-- The FFmpeg comparison uses the project's minimal reference build, not a
-  distribution build with assembly and every component.
+- Two machines, page cache (or tmpfs) only; disk-bound and cold-cache
+  behavior is in reproduce.md's variants, not measured here. B's governor
+  was `powersave` with `balance_performance`.
+- Q1's work is a byte-hash loop; E2E-C covers the codecs end to end but not
+  a reader and decoder split inside zffmpeg, which T59 must measure.
+- E2E-C's inputs are synthetic (tones over pink noise, 10 minutes; Vorbis,
+  Opus and MP3 encoded by libvorbis, libopus and LAME at 128–192 kbit/s);
+  real music changes the FLAC numbers most.
+- The system FFmpeg is a newer release (n9.0.2) with other compiler flags;
+  the native build is the like-for-like assembly comparison.

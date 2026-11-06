@@ -19,12 +19,18 @@ another machine with [bench/run_all.sh](bench/run_all.sh).
    I/O choices. CLAUDE.md wins over both.
 2. Find the row below for what you are writing. Read the analysis section it
    names before deviating from it.
-3. Check FFmpeg's behavior for the format first (`libavformat/<format>.c`,
+3. Read the std as the installed `lib/std` (`zig env` prints `lib_dir`): it
+   is the 0.17.0 source. For the std's own tests (the release ships them
+   empty) and its history, read the `.references/zig` clone at the tag,
+   `git -C .references/zig show 0.17.0:lib/std/<path>`, never its `master`
+   (223 `lib/std` files changed since; analysis "The Zig source").
+4. Check FFmpeg's behavior for the format first (`libavformat/<format>.c`,
    `aviobuf.c`): what it reads, skips, seeks and rewrites. Match its observable
    behavior; the I/O mechanism is ours.
-4. Run the checklist on every changed hunk. A claim that one way is faster
-   needs a measurement with `bench/io_bench.zig` or `run_all.sh`, recorded in
-   the analysis; do not reason from syscall counts alone.
+5. Run the checklist on every changed hunk. A claim that one way is faster
+   needs a measurement with `bench/io_bench.zig`, `run_all.sh` or
+   `e2e_codecs.sh`, recorded in the analysis; do not reason from syscall
+   counts alone.
 
 ## Which tool
 
@@ -32,7 +38,7 @@ another machine with [bench/run_all.sh](bench/run_all.sh).
 | --- | --- | --- |
 | Input that is a regular file | `file.reader(io, buffer)` (positional) | Skips and seeks cost no syscall; the streaming reader reads every skipped byte (R3, S1). It falls back to streaming by itself if `pread` fails. |
 | Pipe, standard input, or unknown kind | `file.readerStreaming(io, buffer)` | Never seeks; no failed `pread` first. Decide with `stat().kind == .file` (`av.file.regularLength`), as `zig/cli/ffmpeg.zig` does. Standard input that is a regular file is read positionally from offset 0, an open question in notes.md (FFmpeg's `pipe:` never seeks). |
-| Reader and writer buffers | 64 KiB (`av.file.default_buffer_len`) | 16 to 64 KiB is the measured optimum for reads (R1), writes need 64 KiB or more (W1), pipes are capped by the kernel (R4). FFmpeg uses 32 KiB, 64 KiB for pipes. Bigger is not faster. |
+| Reader and writer buffers | 64 KiB (`av.file.default_buffer_len`) | 16 to 64 KiB is the measured optimum for reads (R1), writes need 64 KiB or more (W1: 31–71× over unbuffered 64-byte writes), and a fast pipe needs one too (R4 on machine B: 3.8 against 13 GiB/s). FFmpeg uses 32 KiB, 64 KiB for pipes. Bigger is not faster. |
 | Header fields | `readSliceAll` into a local array, then `std.mem.readInt` | Works with any buffer size, including 0. About 4 ns a call (R2): fine for headers. |
 | Per-packet or per-sample loops | One `readSliceAll` of the whole header or block, or `take`/`peek` when the adapter guarantees the capacity | `takeArray`/`takeInt` are 2.5–5× cheaper per call (R2) but assert `buffer.len >= n`. |
 | Large reads (packets, payload) | `readSliceAll`/`readSliceShort` straight into the destination | One `readv` fills the destination and tops up the buffer: FFmpeg's direct read plus read-ahead (analysis "Zig 0.17.0's std.Io", Reader). |
@@ -40,8 +46,10 @@ another machine with [bench/run_all.sh](bench/run_all.sh).
 | Seeking an input | `av.seek.Seeker.file(&reader)` on a positional reader | `seekTo` only moves the logical position; streaming readers cannot seek back. |
 | Output file | Create with `.exclusive = true` first, `writerStreaming`, flush at `finish`; seek back (header rewrite) only when `stat().kind == .file` | FFmpeg rewrites sizes only on seekable output (`wavenc.c`, `au.c`, `flacenc.c`, `aiffenc.c`); CLAUDE.md's cleanup rules. Writer mode does not change speed (W1). |
 | Whole-file copy with no re-mux | `reader.interface.streamRemaining(&writer.interface)` | Reaches `File.Writer.sendFile`: `copy_file_range`, 2 syscalls for 512 MiB, 5–37% faster than a read/write loop (C1, S1). |
-| Concurrency | Synchronous by default. `io.concurrent` (never `io.async`) for a task that must run beside the caller; `Io.Queue` with batches | Each queue handoff costs microseconds; a reader/decoder split of small audio packets halved throughput (Q1). 291,661 of FFmpeg's 310,343 syscalls on a WAV to AU conversion were `futex` calls of its thread-per-component scheduler; zffmpeg made 15,481 on one thread (E2E). |
-| Event-driven backend | None: `std.Io.Threaded` from `std.process.Init` | `std.Io.Evented` (io_uring) does not compile in Zig 0.17.0. Libraries (zio, libxev) are references, not dependencies (notes.md). |
+| Concurrency | Synchronous until T59. Then `io.concurrent` (never `io.async`) for a task that must run beside the caller, and `Io.Queue` with batches of frames | A handoff costs microseconds: small packets with little work lose to serial code (Q1). With codec work, FFmpeg's thread per component gives 2–5× less wall time on 16 threads at about the same CPU time, and loses on one core (E2E-C); zffmpeg's one thread makes 15,500 syscalls where FFmpeg makes 257,000–310,000, mostly `futex` (E2E). |
+| A decoded input whose output header needs the sample count | Decode once: write the header with a placeholder and rewrite it at the end on a seekable output (FFmpeg's muxers), and no count at all for raw, FLAC and Ogg outputs | A counting pass decodes the stream twice: 45% of an Ogg or MP3 conversion from a file (E2E-C, "Findings for the codebase"). |
+| A speed comparison | Wall time and CPU time or instructions, on all cores and on one (`taskset`), against the pinned build and an assembly build (`bench/build-ffmpeg-native.sh`) | The pinned build runs the same C algorithms; assembly removes 25–70% of their instructions; FFmpeg's threads change wall time, not work (E2E-C). On 4 vCPUs zffmpeg won the PCM paths, on 16 threads it lost all but stream copy (E2E). |
+| Event-driven backend | None: `std.Io.Threaded` from `std.process.Init` | `std.Io.Evented` (io_uring) does not compile in Zig 0.17.0, nor with 0.17.1's library. Libraries (zio, libxev) are references, not dependencies (notes.md). |
 
 ## Checklist before sending I/O code
 
@@ -65,7 +73,10 @@ another machine with [bench/run_all.sh](bench/run_all.sh).
   4 KiB goes through a buffer of at least 64 KiB (W1: 150 MiB/s unbuffered
   64-byte writes against 2.8 GiB/s buffered).
 - No thread or queue without a measurement showing a gain on the target
-  workload (Q1). Bounded queues carry batches, not single small packets.
+  workload, wall time and CPU time, on one core and on all (Q1, E2E-C).
+  Bounded queues carry batches, not single small packets.
+- No pass over the input only to count what a header needs: rewrite the
+  header at the end where the output seeks (E2E-C).
   `Io.Group.async` may run inline; a producer and consumer joined by a bounded
   queue use `io.concurrent`, or they can deadlock.
 - Tests cover `Reader.fixed`, one-byte reads (`std.testing.Reader` with
@@ -84,4 +95,4 @@ another machine with [bench/run_all.sh](bench/run_all.sh).
 | `AVIO_SEEKABLE_NORMAL` checked before header rewrites | `stat().kind == .file` before using `av.seek.OutputSeeker` |
 | `ff_check_interrupt` before every transfer | Cancelation points inside `std.Io` syscalls; `error.Canceled` via `.err` |
 | `av_probe_input_buffer2` and `ffio_rewind_with_probe_data` (probe 2048 bytes, doubling; replay them) | `zig/format/detect.zig` with its `Replay` reader (`zig/format/replay.zig`) |
-| `ffmpeg_sched.c`: a thread per component, queues of 2 | Not adopted; see Q1 and the analysis' "Concurrency" before T53d/T59 |
+| `ffmpeg_sched.c`: a thread per component, queues of 2 | Not adopted yet; it wins wall time on many cores with codec work (E2E-C). See the analysis' "Concurrency" before T53d/T59 |

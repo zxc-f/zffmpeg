@@ -3,21 +3,29 @@
 # the machine's details first, so results from another machine can be
 # compared with references/analysis.md.
 #
-#   run_all.sh <work-dir> <zig> [<zffmpeg> <ffmpeg>]
+#   run_all.sh <work-dir> <zig> [<zffmpeg> [<label>=]<ffmpeg>...]
 #
-# <work-dir> needs about 1.6 GiB free (a 512 MiB test file, a 512 MiB WAV and
-# their outputs); it is created if missing and left in place. <zig> is the
-# Zig 0.17.0 compiler. With <zffmpeg> (ReleaseFast: `zig build
-# -Doptimize=ReleaseFast`) and <ffmpeg> (zig/testing/reference/build-ffmpeg.sh),
-# the end-to-end comparison runs too. strace, when installed, adds the
-# syscall counts. Every number is a median: 5 runs, 3 for writes and copies.
+# <work-dir> needs about 2 GiB free (a 512 MiB test file, a 512 MiB WAV, the
+# codec inputs and their outputs); it is created if missing and left in
+# place. <zig> is the Zig 0.17.0 compiler. With <zffmpeg> (ReleaseFast:
+# `zig build -Doptimize=ReleaseFast`) and one or more FFmpeg builds (the
+# pinned reference from zig/testing/reference/build-ffmpeg.sh first; an
+# unlabeled one is "reference"), the end-to-end comparisons run too: the PCM
+# paths (e2e.sh) against each build, then the codec paths (e2e_codecs.sh,
+# which needs hyperfine). strace, when installed, adds the syscall counts.
+# Every number is a median: 5 runs, 3 for writes and copies.
 set -euo pipefail
-work=$1 zig=$2 zffmpeg=${3:-} ffmpeg=${4:-}
+work=$1 zig=$2 zffmpeg=${3:-}
+shift 2
+[ $# -gt 0 ] && shift
+ffmpegs=("$@")
+ffmpeg=""
+if [ ${#ffmpegs[@]} -gt 0 ]; then ffmpeg=${ffmpegs[0]#*=}; fi
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 mkdir -p "$work"
-cp "$here"/io_bench.zig "$here"/med.sh "$here"/pipe_med.sh "$here"/e2e.sh "$here"/rss.py "$work"/
+cp "$here"/io_bench.zig "$here"/med.sh "$here"/pipe_med.sh "$here"/e2e.sh "$here"/e2e_codecs.sh "$here"/hyperfine_table.py "$here"/rss.py "$work"/
 cd "$work"
-chmod +x med.sh pipe_med.sh e2e.sh
+chmod +x med.sh pipe_med.sh e2e.sh e2e_codecs.sh
 
 echo "# zig-io measurements"
 echo
@@ -26,10 +34,18 @@ echo "kernel: $(uname -srm)"
 echo "cpu: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | sed 's/^ //'), $(nproc) logical cores"
 echo "cpu flags: $(grep -o -m2 -w 'avx2\|fma' /proc/cpuinfo | sort -u | tr '\n' ' ')"
 echo "memory: $(free -g | awk '/^Mem:/ {print $2 " GiB"}')"
+echo "cpu governor: $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2> /dev/null || echo unknown), energy preference: $(cat /sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference 2> /dev/null || echo unknown)"
 echo "filesystem: $(df -T . | awk 'NR==2 {print $2 " on " $1}')"
 echo "pipe max size: $(cat /proc/sys/fs/pipe-max-size)"
 echo "zig: $("$zig" version)"
 if command -v strace > /dev/null; then echo "strace: $(strace -V | head -1)"; else echo "strace: not installed"; fi
+if command -v hyperfine > /dev/null; then echo "hyperfine: $(hyperfine --version)"; else echo "hyperfine: not installed"; fi
+for spec in "${ffmpegs[@]}"; do
+    label=reference bin=$spec
+    if [[ $spec == *=* ]]; then label=${spec%%=*} bin=${spec#*=}; fi
+    echo "ffmpeg $label: $("$bin" -hide_banner -version | head -1)"
+    echo "  $("$bin" -hide_banner -version | grep -m1 '^configuration:' | cut -c1-400)"
+done
 echo
 
 "$zig" build-exe -OReleaseFast io_bench.zig
@@ -113,10 +129,21 @@ if command -v strace > /dev/null; then
 fi
 
 if [ -n "$zffmpeg" ] && [ -n "$ffmpeg" ]; then
-    echo "## E2E zffmpeg against the reference FFmpeg (median wall time of 5 runs)"
     [ -f big.wav ] || "$zffmpeg" -f s16le -ar 48000 -ac 2 -i data.bin big.wav
-    ./e2e.sh "$zffmpeg" "$ffmpeg" big.wav 5
-    echo
+    labeled=()
+    for spec in "${ffmpegs[@]}"; do
+        label=reference bin=$spec
+        if [[ $spec == *=* ]]; then label=${spec%%=*} bin=${spec#*=}; fi
+        labeled+=("$label=$bin")
+        echo "## E2E zffmpeg against FFmpeg \"$label\" (median wall time of 5 runs)"
+        ./e2e.sh "$zffmpeg" "$bin" big.wav 5
+        echo
+    done
+    if command -v hyperfine > /dev/null; then
+        echo "## E2E codecs (e2e_codecs.sh)"
+        echo
+        ./e2e_codecs.sh "$work" "$zffmpeg" "${labeled[@]}"
+    fi
     echo "## E2E resources, WAV to AU, one run each"
     echo "zffmpeg: $(python3 -I rss.py "$zffmpeg" -y -i big.wav out.au)"
     echo "ffmpeg:  $(python3 -I rss.py "$ffmpeg" -nostdin -v error -y -i big.wav out.au)"

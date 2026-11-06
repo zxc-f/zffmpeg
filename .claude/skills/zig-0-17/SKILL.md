@@ -25,7 +25,10 @@ every Zig change starts from the pinned toolchain's rules instead.
    pinned std; consult them before re-deriving one.
 3. **Trust the installed std over memory.** When the guide, port.md and memory
    do not settle an API, read Zig 0.17.0's installed `lib/std` (`zig env`
-   prints `lib_dir`) or compile a minimal check with the pinned compiler. If
+   prints `lib_dir`) or compile a minimal check with the pinned compiler.
+   The release ships the std's own tests empty: read them, and the history,
+   in the `.references/zig` clone at the tag
+   (`git -C .references/zig show 0.17.0:lib/std/<path>`), never at `master`. If
    the std contradicts the guide, fix `references/guide.md` in the same change.
 4. **Design before syntax.** Identify closed value sets, operation errors,
    state-specific payloads, ownership and external numeric or string

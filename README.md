@@ -169,10 +169,19 @@ git -C .references/zig-cookbook fetch --depth 1 origin ed1772059f236c1721af57c78
 git -C .references/zig-cookbook checkout --detach ed1772059f236c1721af57c785b4d94684951be5
 ```
 
-Zig's standard library is the fourth I/O reference and needs no clone: it is
-the `lib/std` of the pinned 0.17.0 toolchain (`zig env` prints `lib_dir`). To
-keep a copy next to the others, copy that `lib` directory to
-`.references/zig/lib`.
+Zig's standard library is the fourth I/O reference: the `lib/std` of the
+pinned 0.17.0 toolchain (`zig env` prints `lib_dir`) is the 0.17.0 source,
+but the release ships the library's own tests empty and has no history. For
+those, clone Zig and read it at the release tag, not at `master`, which has
+moved on (the zig-io analysis, "The Zig source"):
+
+```text
+git clone https://codeberg.org/ziglang/zig.git .references/zig
+git -C .references/zig checkout --detach 0.17.0
+```
+
+`git -C .references/zig show 0.17.0:lib/std/<path>` reads the tag from any
+checkout.
 
 Do not rerun clone over an existing directory. To inspect an existing setup,
 run `git -C .references/<name> rev-parse HEAD` for each clone. Refresh
@@ -188,7 +197,7 @@ ZLS, zig-cookbook and the standard library).
 | [zio](https://github.com/lalinsky/zio.git) | `1814bacf54ca2ebdb140c3e521860ef3320f76dd` | A second `std.Io` implementation; its tests document the interface's contract (cancellation, groups, pipes). |
 | [ZLS](https://github.com/zigtools/zls.git) | `c275dd2ec457e6ae302d98a6116e69c6d595c24c` | A long-running Zig 0.17 program using `Io.Group`. |
 | [zig-cookbook](https://github.com/zigcc/zig-cookbook.git) | `ed1772059f236c1721af57c785b4d94684951be5` | Short `std.Io` recipes (Zig 0.16): tasks, groups, queues, files. |
-| Zig standard library | the 0.17.0 release | The authority for every `std.Io` API. |
+| Zig standard library | the 0.17.0 release; [Zig](https://codeberg.org/ziglang/zig.git) at tag `0.17.0` | The authority for every `std.Io` API; the clone at the tag for the library's tests and history. |
 
 The local source map is `.references/ffmpeg/libavcodec/`,
 `.references/ffmpeg/libavformat/`, and the other upstream directories documented

@@ -229,8 +229,9 @@ FFmpeg and zigimg are independent clones under the ignored `.references/`
 directory; clone both at the pinned revisions using
 [README.md](README.md#clone-the-reference-repositories) before source research.
 For I/O work, the same section pins zio, ZLS and zig-cookbook, and the
-toolchain's own `lib/std` is the standard-library reference (the `zig-io`
-skill).
+toolchain's own `lib/std` is the standard-library reference, with a Zig
+clone read at the `0.17.0` tag for the library's tests and history, never
+its `master` (the `zig-io` skill).
 Do not commit their files, Git metadata or gitlinks; they are not submodules.
 zigimg is a Zig implementation reference, never a build dependency.
 
