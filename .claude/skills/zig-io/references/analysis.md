@@ -142,7 +142,11 @@ Checked on 2026-11-06 against a full clone of the Zig repository
   instead of spinning (test-only). `Io.Evented` still does not compile with
   0.17.1's `lib`: the `processReplacePath` field is gone, and `Io/Uring.zig`
   now switches on an `Io.Operation` tag `net_accept` that does not exist
-  (built with the 0.17.0 compiler and `--zig-lib-dir`).
+  (built with the 0.17.0 compiler and `--zig-lib-dir`). The Zig devlog of
+  2026-02-13 announced the io_uring and Grand Central Dispatch
+  implementations as experimental (error handling, logging, a performance
+  regression and stack sizing still to do); they did not keep up with
+  0.17's `Io.VTable`.
 - **So:** the installed `lib/std` stays the authority for what compiles
   (CLAUDE.md pins 0.17.0); the clone, read at the tag, is the source for
   the std's tests and the history, and for checking a patch release before

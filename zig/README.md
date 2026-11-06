@@ -21,6 +21,20 @@ CI also fails when `zig version` is not `0.17.0`. Upgrade deliberately: change
 all three files, the CI workflow and the docs together after validating the new
 compiler.
 
+What the next upgrade is known to touch (checked 2026-11-06 against the Zig
+devlog and the `0.17.0`, `0.17.1` and `master` source; the zig-io analysis,
+"The Zig source"):
+
+- **0.17.1** (2026-11-02) is the 0.17 branch's patch release. Its `std.Io`
+  fixes include `EACCES` from a file read becoming `AccessDenied` (0.17.0
+  reports `Unexpected`); `std.Io.Evented` still does not compile with it.
+- **After 0.17 (`master`)**: mixed operators without a defined precedence
+  are compile errors (the `zig-0-17` guide, "Operator precedence after
+  0.17"); `zig build --fetch` fetches every dependency without configuring
+  (`--configure` is the old behavior) and `--print-tree` prints the package
+  tree, neither of which the build or CI uses; dependency metadata and hash
+  checks change, which a package without dependencies does not see.
+
 ## Commands
 
 Run from the repository root. No C compiler, reference clone or network

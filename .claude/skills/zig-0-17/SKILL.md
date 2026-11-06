@@ -82,6 +82,12 @@ every Zig change starts from the pinned toolchain's rules instead.
 - No `@trunc`/`@intFromFloat` into an integer, and no `@round`, on a float not proven in range: C's `lrint`/`lrintf`/`rint` and float-to-int stores go through `core/cconv.zig`. Check the receiving C function's parameter width (`av_clip_int16(int)` narrows a `long` first) and keep C's accumulator widths.
 - Replacing an owned field builds the new value in a local before freeing the old one; one cleanup per owner per path (no `errdefer` plus `defer` on the same value). Freeing a buffer resets every view into it, tests and fuzz callbacks included.
 - A ported `try` matches what the C does with that error: a loop FFmpeg ends on error (the stream-info read-ahead) ends, it does not fail.
+- Mixed operators that Zig after 0.17 rejects are parenthesized: bitwise
+  or shift with anything else, `orelse`/`catch` with anything else, `and`
+  with `or`, `%` with `*` or `/` (guide "Operator precedence after 0.17").
+- A view into an `std.ArrayList` that outlives the call is guarded with
+  `lockPointers`/`unlockPointers` where tests can reach it (guide "Cleanup
+  on every path").
 - A constant copied from C keeps its expression and precedence, derived from the same named values (`(8 + 3) << 4`, not `8 + 2`).
 - No `std.debug.assert` as the only guard of a public contract, no `catch unreachable` / `else => unreachable` on an error input can cause, no `else => unreachable` over `anyerror`.
 - No `discardShort`/`discardAll` with an untrusted length (use `zig/io/skip.zig`), no `std.math.ldexp` (use `libm.ldexp`). See the guide's "std pitfalls".

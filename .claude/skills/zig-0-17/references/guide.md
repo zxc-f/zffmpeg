@@ -930,6 +930,17 @@ source in `lib/std` before using it on input.
   snapshot, the caller's `errdefer` must not free it again.
 - Test failure cleanup with `std.testing.allocator` and a writer or seeker
   that fails: a 16-byte fixed writer makes a header write fail.
+- A view into an `std.ArrayList`'s items that outlives the call that made
+  it (a frame the parser cuts from its combine buffer, a packet borrowed
+  until the next call) dies with any growth, and with `orderedRemove` or
+  `pop`, which move items without reallocating. Since 0.17.0 the list can
+  say so: `list.lockPointers()` when the view is handed out and
+  `list.unlockPointers()` when the next call takes it back make a growth,
+  `orderedRemove` or `pop` in between panic at its cause instead of
+  corrupting a later read (`std/array_list.zig`; the Zig devlog,
+  2026-08-27). The lock is a zero-bit field outside safe builds, so it
+  costs nothing in ReleaseFast; locks nest (`lockShared`), each
+  `lockPointers` needs its `unlockPointers`.
 
 ### Tests that reach these paths
 
@@ -1049,6 +1060,20 @@ change existing `{}` sites.
 
 Alignment is byte alignment, not Unicode grapheme width. Do not depend on `{s}`
 padding to line up non-ASCII text.
+
+### Operator precedence after 0.17
+
+Zig's master branch (2026-10-24, after 0.17.x; the Zig devlog "Partial
+Operator Precedence") gives only some operator mixes a precedence and
+rejects the rest with "ambiguous operator precedence". Arithmetic, then
+comparisons, then `and`/`or` keep theirs (`x + y * z`, `a == b or c`). The
+mixes that need parentheses there: bitwise and shift operators with any
+other operator (`(a & mask) == b`, `(b + c) >> e`), `orelse` and `catch`
+with any other (`(x orelse y) == z`), `and` with `or`, and `%` with `*`,
+`/` or another `%`. Write those parentheses in 0.17 code too: it compiles
+the same, reads without the precedence table, and the upgrade needs no
+`zig fmt --upgrade` (master's one-cycle rewriter, whose output still needs
+a review; parenthesizing can expose a precedence bug).
 
 ## Types, literals, and declarations
 
