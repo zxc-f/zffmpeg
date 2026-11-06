@@ -331,6 +331,40 @@ Left open, each with the task it must land before:
 | CI's reference job runs without `pipefail` | `ci.yml` | T53d |
 | Refusals of `.opus` output and of remix cells name the input, not the output | `cli/ffmpeg.zig` | T53a (decide which path a request refusal names) |
 
+#### The review of `22fc36d` (2026-11-05, before T29b)
+
+A review of the current checkout found two defects that every test mode
+passed, both fixed in `b0716df`, with regression tests that fail on the old
+code:
+
+- **Ogg FLAC rate changes** (T27b/T27d): `oggdecode.DecodedReader` checked
+  only a decoded frame's channel count, so `flac_rate_change`'s packets in
+  Ogg (44.1 kHz, then a 48 kHz frame) converted with status 0 and all 1152
+  samples labeled 44.1 kHz. Native and Ogg FLAC now refuse a channel, rate
+  or storage change with `UnsupportedFormat` through one check
+  (`flacdec.Opened.keeps`; notes.md "FLAC conversion", port.md's Ogg
+  conversion row). Tested with the native fixtures remuxed into Ogg, seekable
+  and sequential, and zffmpeg_cases from a file and a pipe.
+- **Probe buffer leak** (T16, T22c): `detect.Input.open` armed its
+  `errdefer` only inside the probing branch, so the raw-option check after
+  it (`UnusedOption`) leaked a probe buffer grown past 2048 bytes. One guard
+  now covers every failure after initialization; a detect test and a
+  zffmpeg_cases run (a 5000-byte file with a large leading ID3v2 tag, named
+  `.mp3`, with `-ar`) check it.
+
+Gates re-run at `b0716df`, local Windows x86-64 with Zig 0.17.0: zig fmt,
+the fixture check (fixtures unchanged), zig build test 464/464 in Debug,
+ReleaseSafe and ReleaseFast (258 steps), and the three cross builds. Not
+run in this round: the vector generators and compare.py.
+
+Left open:
+
+| Finding | Where | Before |
+| --- | --- | --- |
+| No committed Ogg fixture or compare.py cell for an Ogg FLAC rate or channel change (its ogg.txt, seek_ogg.txt and opus.txt blocks need the reference build) | `generate.py`, `compare.py` | T33a |
+| A second `av_reduce` in the resampler beside `core/rational.zig`'s | `resample.zig` | T65g |
+| MP3's `Check.frame_size` carries the -1/-2 sentinels `check_seek_failed`/`check_wrong_header` | `mp3.zig` | T65c |
+
 ## Completed preparation
 
 - [x] Inspect the FFmpeg source layout and record the reference revision.
@@ -3915,7 +3949,7 @@ optimization, concurrency, fuzz duration and corpus breadth.
   recorded retirement condition, or a repeated data path whose copies drift
   apart. They are structural: each keeps every output byte-identical, re-runs
   the gates of the tasks whose code it moves, and lands separately from bug
-  fixes. Checked when T65a–T65f are.
+  fixes. Checked when T65a–T65g are.
   - [ ] **T65a — FLAC on libavformat's generic layer.** **Start with** T30a
     (ADTS, the next full-raw parser), ideally before T29b's decoded MP3
     reader. `format/flac.zig` keeps its own read-ahead, timestamps, parse
@@ -3948,8 +3982,11 @@ optimization, concurrency, fuzz duration and corpus breadth.
     `got_start` and `curidx`, return values for the `sid` out-pointers, one
     union for the per-codec mapping state, a page-state-only snapshot (the
     duration scan must not create streams), and a Vorbis setup state that
-    keeps the skip handshake across `flush()`. Done when T27a, T27d and T28's
-    gates pass unchanged.
+    keeps the skip handshake across `flush()`. MP3's header check
+    (`mp3.zig`'s `Check`, whose `frame_size` carries the -1 and -2 sentinels)
+    returns a tagged result with the same retry, skipped-header and
+    end-of-window outcomes (raised by the review of `22fc36d`). Done when
+    T27a, T27d, T28 and T29a's gates pass unchanged.
   - [ ] **T65d — Filter dispatch and one timestamp helper.** **Start with**
     T53b (`-af`, `-filter_complex`). Derive the per-filter dispatch from the
     `Filter` union (adding a filter touches seven places today) and give
@@ -3970,6 +4007,14 @@ optimization, concurrency, fuzz duration and corpus breadth.
     `audio.SampleFormat` to its Zig element type with load and store, used by
     audioconvert, dither, rematrix, resample and pcm instead of their own
     switches. Done when T20a, T23 and T24's vectors pass unchanged.
+  - [ ] **T65g — One `av_reduce`.** **Start with** T24's next change or
+    T58. `resample/resample.zig`'s `reduce` is a second port of `av_reduce`
+    beside `core/rational.zig`'s (raised by the review of `22fc36d`). Use the
+    core one, with an adapter for the resampler's `i64` results, after
+    checking its result widths and `max` semantics over the resampler's
+    domain. Done when T24's resample vectors, the exact/inexact decisions,
+    extreme rate ratios and filter selection pass unchanged in all three
+    modes.
 
 ## Milestone 12 (long-term): platforms and release
 
