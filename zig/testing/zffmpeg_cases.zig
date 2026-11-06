@@ -414,6 +414,37 @@ pub fn main(init: std.process.Init) !u8 {
         } else |err| h.fail(named, "take.wav: {t}", .{err});
     }
 
+    // Ogg FLAC whose second frame changes the rate is refused, as native
+    // FLAC is, not converted with every sample at the first rate: from a
+    // file (the counting pass, before the output exists) and through a pipe
+    // (at the second frame).
+    {
+        const case = "an Ogg FLAC rate change is refused";
+        const native = try fixture_dir.readFileAlloc(io, "flac" ++ std.fs.path.sep_str ++ "flac_rate_change.flac", h.gpa, .limited(1 << 16));
+        defer h.gpa.free(native);
+        const ogg = try oggFromFlac(h.gpa, native);
+        defer h.gpa.free(ogg);
+        try h.write("rate.ogg", ogg);
+        h.expect(case, try h.run(&.{ "-i", "rate.ogg", "rate.wav" }, .ignore, null), 3, "rate.ogg: UnsupportedFormat");
+        h.expectAbsent(case, "rate.wav");
+        const piped = "an Ogg FLAC rate change through a pipe is refused";
+        h.expect(piped, try h.runPiped(&.{ "-i", "-", "-f", "s16le", "-" }, ogg), 3, "zffmpeg: -: UnsupportedFormat");
+    }
+
+    // Raw parameters refused after probing grew its buffer past the first
+    // 2048 bytes: a leading ID3v2 tag declaring a 10000-byte body keeps the
+    // scores low until the extension chooses MP3. Debug's allocator logs a
+    // leak of the probe buffer to stderr at exit.
+    {
+        const case = "raw parameters refused after a long probe";
+        var tagged: [5000]u8 = @splat(0);
+        @memcpy(tagged[0..10], &[_]u8{ 'I', 'D', '3', 4, 0, 0, 0, 0, 78, 16 });
+        try h.write("tagged.mp3", &tagged);
+        const outcome = try h.run(&.{ "-ar", "8000", "-i", "tagged.mp3", "-f", "wav", "-" }, .ignore, null);
+        h.expect(case, outcome, 1, "zffmpeg: tagged.mp3: -sample_rate and -ch_layout apply only to raw PCM input\n");
+        h.expectLacking(case, outcome, "leaked");
+    }
+
     // A long stream converts through files with exact frame counts.
     {
         const case = "a long stream converts";
@@ -448,6 +479,27 @@ fn hugeDeclaredWav() [144]u8 {
     @memcpy(bytes[36..40], "data");
     std.mem.writeInt(u32, bytes[40..44], 0xFFFF_FF00, .little);
     return bytes;
+}
+
+/// A native FLAC file's packets remuxed into Ogg, owned by the caller.
+fn oggFromFlac(gpa: std.mem.Allocator, flac_bytes: []const u8) ![]u8 {
+    var reader: std.Io.Reader = .fixed(flac_bytes);
+    var d = try av.flac.Demuxer.init(gpa, &reader);
+    defer d.deinit();
+    const streaminfo = d.info.extradata orelse return error.NoStreamInfo;
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    var mux = try av.oggmux.Muxer.init(gpa, &out.writer, &.{.{ .codec = .flac, .sample_rate = d.info.sample_rate, .extradata = &streaminfo }}, .{});
+    defer mux.deinit();
+    try mux.writeHeader();
+    var pts: i64 = 0;
+    while (try d.next()) |p| {
+        const duration = p.duration orelse 0;
+        try mux.writePacket(0, p.data, pts, duration);
+        pts += duration;
+    }
+    try mux.finish();
+    return out.toOwnedSlice();
 }
 
 /// A mono AIFF of `frames` silent frames of `codec` at `rate`.

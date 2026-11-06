@@ -225,24 +225,19 @@ pub const Input = struct {
     /// 1 MiB); that buffer comes from `source.gpa`, without which such a
     /// stream is `OutOfMemory`. `deinit` frees it.
     pub fn open(input: *Input, reader_in: *std.Io.Reader, source: Source) error{ IoFailure, UnknownFormat, UnusedOption, OutOfMemory }!void {
-        if (source.format) |container| {
-            input.* = .{
-                .head_buffer = undefined,
-                .replay = .init(&.{}, reader_in),
-                .container = container,
-                .forced = true,
-                .source = source,
-            };
-        } else {
-            input.* = .{
-                .head_buffer = undefined,
-                .gpa = source.gpa,
-                .replay = undefined,
-                .container = undefined,
-                .forced = false,
-                .source = source,
-            };
-            errdefer input.deinit();
+        input.* = .{
+            .head_buffer = undefined,
+            // A forced format reads nothing, so it never needs the allocator.
+            .gpa = if (source.format == null) source.gpa else null,
+            .replay = .init(&.{}, reader_in),
+            .container = source.format orelse undefined,
+            .forced = source.format != null,
+            .source = source,
+        };
+        // One guard for every failure from here on: the raw-option check
+        // below runs after probing may have grown `extra`.
+        errdefer input.deinit();
+        if (source.format == null) {
             var rounds: Rounds = .{};
             var end_seen = false;
             const chosen = while (true) {
@@ -745,6 +740,24 @@ test "a raw input takes FFmpeg's defaults, the given parameters, and its length"
     // Raw parameters for a format with a header are refused.
     var wav_input: std.Io.Reader = .fixed(fixtures.bytes("mono_8k"));
     try std.testing.expectError(error.UnusedOption, probeWith(&wav_input, .{}, .{ .source = .{ .raw = params } }));
+}
+
+test "raw parameters refused after a grown probe buffer free it" {
+    // A leading ID3v2 tag declaring a 10000-byte body keeps every score at
+    // or below 25, so probing reads past `probe_len` before the `.mp3`
+    // extension chooses MP3; the raw parameters are then refused.
+    var bytes: [5000]u8 = @splat(0);
+    @memcpy(bytes[0..10], &[_]u8{ 'I', 'D', '3', 4, 0, 0, 0, 0, 78, 16 });
+    var reader: std.Io.Reader = .fixed(&bytes);
+    var input: Input = undefined;
+    try std.testing.expectError(error.UnusedOption, input.open(&reader, .{
+        .file_name = "x.mp3",
+        .raw = .{},
+        .gpa = std.testing.allocator,
+    }));
+    // A forced non-raw format with raw parameters is refused the same way.
+    var forced: std.Io.Reader = .fixed(&bytes);
+    try std.testing.expectError(error.UnusedOption, input.open(&forced, .{ .format = .wav, .raw = .{}, .gpa = std.testing.allocator }));
 }
 
 test "a forced format parses what probing would not detect, and only that format" {

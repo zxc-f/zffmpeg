@@ -98,7 +98,13 @@ pub const DecodedReader = struct {
     demuxer: ?*ogg.Demuxer = null,
     layer: ?Layer = null,
     stream: usize = 0,
-    decoder: union(enum) { none, vorbis: vorbis.Decoder, opus: opusdec.Decoder, flac: flacdec.Decoder } = .none,
+    decoder: union(enum) {
+        none,
+        vorbis: vorbis.Decoder,
+        opus: opusdec.Decoder,
+        /// With the format STREAMINFO opened, which every frame must keep.
+        flac: struct { decoder: flacdec.Decoder, opened: flacdec.Opened },
+    } = .none,
     channels: u8 = 0,
     /// Vorbis' output planes, blocksize[1] / 2 samples each, or Opus'
     /// (`opusdec.max_frame`).
@@ -145,7 +151,7 @@ pub const DecodedReader = struct {
             .none => {},
             .vorbis => |*d| d.deinit(),
             .opus => |*d| d.deinit(),
-            .flac => |*d| d.deinit(),
+            .flac => |*d| d.decoder.deinit(),
         }
         r.gpa.free(r.plane_storage);
         if (r.layer) |*l| l.deinit();
@@ -238,7 +244,10 @@ pub const DecodedReader = struct {
                     error.OutOfMemory => error.OutOfMemory,
                     error.InvalidData => error.UnsupportedFormat,
                 };
-                r.decoder = .{ .flac = decoder };
+                r.decoder = .{ .flac = .{
+                    .decoder = decoder,
+                    .opened = .{ .channels = info.channels, .sample_rate = si.sample_rate, .s32 = si.bps > 16 },
+                } };
                 if (si.channels > flac.max_channels or si.sample_rate == 0) return error.UnsupportedFormat;
                 const storage: audio.SampleFormat = if (si.bps > 16) .s32 else .s16;
                 const format = audio.Format.initLayout(si.sample_rate, flac.channelLayout(si.channels), storage) catch return error.UnsupportedFormat;
@@ -321,8 +330,8 @@ pub const DecodedReader = struct {
         const layer = &r.layer.?;
         while (true) {
             switch (r.decoder) {
-                .flac => |*dec| {
-                    const frame = dec.receive() catch |err| switch (err) {
+                .flac => |*state| {
+                    const frame = state.decoder.receive() catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         error.InvalidData => {
                             diagnostics.report(r.sink, .err, "Decoding error: Invalid data found when processing input", .{});
@@ -332,7 +341,10 @@ pub const DecodedReader = struct {
                     };
                     if (frame) |f| {
                         r.frames_decoded += 1;
-                        if (f.channels != r.channels) return error.UnsupportedFormat;
+                        // A channel, rate or storage change is refused, as
+                        // native FLAC refuses it: delivering the frame would
+                        // give its samples the opened rate.
+                        if (!state.opened.keeps(f)) return error.UnsupportedFormat;
                         r.pending = switch (f.samples) {
                             .s16 => |s| .{ .s16 = s },
                             .s32 => |s| .{ .s32 = s },
@@ -365,7 +377,7 @@ pub const DecodedReader = struct {
             if (p.stream != r.stream) continue;
             switch (r.decoder) {
                 .none => unreachable,
-                .flac => |*dec| dec.send(p.data, p.pts),
+                .flac => |*state| state.decoder.send(p.data, p.pts),
                 .vorbis => |*dec| {
                     // The planes allocated at open: a decoder whose channels
                     // or block sizes changed since refuses them (`planesFit`),
@@ -526,6 +538,64 @@ test "a decoder that refuses the headers fails opening without freeing its unset
     }
 }
 
+/// A native FLAC file's packets remuxed into Ogg by the port's Ogg muxer,
+/// owned by the caller: the Ogg FLAC form of a native FLAC fixture.
+fn oggFromFlac(gpa: std.mem.Allocator, flac_bytes: []const u8) ![]u8 {
+    var reader: std.Io.Reader = .fixed(flac_bytes);
+    var d = try flac_format.Demuxer.init(gpa, &reader);
+    defer d.deinit();
+    const streaminfo = d.info.extradata orelse return error.TestUnexpectedResult;
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    var mux = try oggmux.Muxer.init(gpa, &out.writer, &.{.{ .codec = .flac, .sample_rate = d.info.sample_rate, .extradata = &streaminfo }}, .{});
+    defer mux.deinit();
+    try mux.writeHeader();
+    var pts: i64 = 0;
+    while (try d.next()) |p| {
+        const duration = p.duration orelse 0;
+        try mux.writePacket(0, p.data, pts, duration);
+        pts += duration;
+    }
+    try mux.finish();
+    return out.toOwnedSlice();
+}
+
+test "Ogg FLAC refuses a frame that changes the rate or channels, as native FLAC does" {
+    const gpa = testing.allocator;
+    // The remux itself keeps every frame: a stream without a change
+    // decodes whole.
+    const steady = try oggFromFlac(gpa, fixtures.flac.bytes("flac_constant_mono_8k"));
+    defer gpa.free(steady);
+    var steady_reader: std.Io.Reader = .fixed(steady);
+    var whole = DecodedReader.init(gpa, &steady_reader, .fixed(&steady_reader), null);
+    defer whole.deinit();
+    var samples: std.ArrayList(u8) = .empty;
+    defer samples.deinit(gpa);
+    _ = try decodeAll(&whole, &samples);
+    try testing.expectEqual(256, whole.delivered);
+
+    // 44.1 kHz, then a 48 kHz frame; mono, then a stereo frame. Delivering
+    // the second frame would give its samples the opened format.
+    inline for (.{ "flac_rate_change", "flac_channel_change" }) |name| {
+        const bytes = try oggFromFlac(gpa, fixtures.flac.bytes(name));
+        defer gpa.free(bytes);
+        for ([_]bool{ false, true }) |seekable| {
+            var reader: std.Io.Reader = .fixed(bytes);
+            var r = DecodedReader.init(gpa, &reader, if (seekable) .fixed(&reader) else null, null);
+            defer r.deinit();
+            var out: std.ArrayList(u8) = .empty;
+            defer out.deinit(gpa);
+            try testing.expectError(error.UnsupportedFormat, decodeAll(&r, &out));
+            // Seekable, the counting pass refuses it while opening;
+            // otherwise only the first frame was delivered.
+            const delivered: u64 = if (seekable) 0 else 576;
+            try testing.expectEqual(delivered, r.delivered);
+        }
+    }
+}
+
+const flac_format = @import("flac.zig");
+const oggmux = @import("oggmux.zig");
 const hostile = @import("../testing/hostile.zig");
 
 const SweepInput = struct { bytes: []const u8, seekable: bool };

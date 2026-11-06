@@ -1173,12 +1173,12 @@ pub const DecodedReader = struct {
                 },
             };
             if (frame) |f| {
-                if (f.channels != r.channels or f.sample_rate != r.sample_rate) return error.UnsupportedFormat;
                 // The decoder's sample size is fixed once known, but a
                 // headerless stream's header took it from a frame header
-                // the decoder may have skipped as junk.
-                const header_s32 = r.bps > 16;
-                if (header_s32 != (f.samples == .s32)) return error.UnsupportedFormat;
+                // the decoder may have skipped as junk, so storage is
+                // checked with the channels and rate.
+                const opened: flacdec.Opened = .{ .channels = r.channels, .sample_rate = r.sample_rate, .s32 = r.bps > 16 };
+                if (!opened.keeps(f)) return error.UnsupportedFormat;
                 r.pending = f.samples;
                 return true;
             }

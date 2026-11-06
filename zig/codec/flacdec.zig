@@ -54,6 +54,22 @@ pub const Frame = struct {
     pts: ?i64,
 };
 
+/// The format a reader opened a stream with, which its decoded frames must
+/// keep. The decoder follows a channel or rate change, as FFmpeg's does;
+/// the port's decoded readers refuse one (notes.md "FLAC conversion"), so
+/// that native and Ogg FLAC apply one policy.
+pub const Opened = struct {
+    channels: u8,
+    sample_rate: u32,
+    /// s32 storage (17 to 32 bits per sample); s16 otherwise.
+    s32: bool,
+
+    /// Whether `f` has the opened channel count, rate and storage.
+    pub fn keeps(o: Opened, f: Frame) bool {
+        return f.channels == o.channels and f.sample_rate == o.sample_rate and o.s32 == (f.samples == .s32);
+    }
+};
+
 /// Why a frame failed, FFmpeg's log message for it.
 pub const Problem = enum {
     frame_header,
