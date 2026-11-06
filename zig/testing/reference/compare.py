@@ -51,6 +51,7 @@ independent source as the committed fixtures.
 """
 
 import argparse
+import collections
 import hashlib
 import pathlib
 import re
@@ -65,7 +66,21 @@ sys.path.insert(0, str(FIXTURES))
 import generate  # noqa: E402
 
 # zffprobe exit status for each contract error (port.md "Initial probe output").
+# The statuses zffprobe and zffmpeg give each error (port.md "Diagnostics and
+# statuses"; zig/cli/status.zig): an error not listed is an I/O failure, 4.
 EXIT_STATUS = {
+    "InvalidOgg": 2,
+    "InvalidVorbis": 2,
+    "InvalidOpus": 2,
+    "DecodeErrorRate": 2,
+    "UnsupportedOperation": 3,
+    "UnsupportedLayout": 3,
+    "SizeOverflow": 5,
+    "OutOfMemory": 5,
+    "SystemResources": 5,
+    "ProcessFdQuotaExceeded": 5,
+    "SystemFdQuotaExceeded": 5,
+    "Canceled": 6,
     "InvalidRiff": 2,
     "InvalidAu": 2,
     "InvalidAiff": 2,
@@ -474,12 +489,19 @@ def tool_error(process, tool, path):
 
 
 def refusal_name(code, stderr, tool, path):
-    """`tool_error` for an exit status and stderr bytes (`zffprobe_raw`'s)."""
+    """`tool_error` for an exit status and stderr bytes (`zffprobe_raw`'s).
+    For zffprobe and zffmpeg the status must also be the one their contract
+    gives the named error (`EXIT_STATUS`), so the right name with the wrong
+    status is no refusal."""
     if code < 2:
         return None
     match = re.fullmatch(rf"{re.escape(tool)}: {re.escape(str(path))}: ([A-Z][A-Za-z0-9]*)\n",
                          stderr.decode(errors="replace"))
-    return match.group(1) if match else None
+    if not match:
+        return None
+    if tool in ("zffprobe", "zffmpeg") and code != EXIT_STATUS.get(match.group(1), 4):
+        return None
+    return match.group(1)
 
 
 # The ffmpeg program's last line when an input's own bytes stop it opening
@@ -1716,7 +1738,7 @@ def compare_remix(args, lines, failures):
                     # Both refuse the mix itself: libswresample has no matrix
                     # for the layouts, and zffmpeg names it UnsupportedLayout.
                     # Any other failure of either side is a problem.
-                    if REMIX_REFUSAL.search(text(process.stderr)) and \
+                    if REMIX_REFUSAL.search(text(process.stderr)) and code == 3 and \
                             refusal_name(code, err, "zffmpeg", path) == "UnsupportedLayout" and not ours.exists():
                         refused += 1
                     else:
@@ -2234,6 +2256,20 @@ FLAC_OUTPUT_OPTIONS = [[]] + [["-compression_level", str(level)] for level in ra
 ]
 
 
+def flac_pipe_problem(tpipe, zpipe):
+    """Why two piped FLAC outputs do not match, or None. Both commands must
+    succeed with a FLAC stream: two failures with empty output would
+    otherwise compare equal."""
+    if tpipe.returncode != 0 or zpipe.returncode != 0:
+        return (f"piped: FFmpeg {tpipe.returncode}, zffmpeg {zpipe.returncode} "
+                f"({first_line(text(zpipe.stderr))})")
+    if not zpipe.stdout.startswith(b"fLaC") or not tpipe.stdout.startswith(b"fLaC"):
+        return "piped: no FLAC stream on standard output"
+    if tpipe.stdout != zpipe.stdout:
+        return "the piped output differs"
+    return None
+
+
 def compare_flac_output(args, lines, failures):
     """zffmpeg's FLAC output (T26c) against the ffmpeg program's with
     `-bitexact`: the same bytes, as a file (STREAMINFO rewritten at the
@@ -2269,8 +2305,9 @@ def compare_flac_output(args, lines, failures):
                 tpipe = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", source, "-bitexact", "-c:a", "flac", *opts,
                             "-f", "flac", "-")
                 zpipe = run(args.zffmpeg, "-i", source, *opts, "-f", "flac", "-")
-                if tpipe.stdout != zpipe.stdout:
-                    problems.append(f"{label}: the piped output differs")
+                pipe_problem = flac_pipe_problem(tpipe, zpipe)
+                if pipe_problem:
+                    problems.append(f"{label}: {pipe_problem}")
                     continue
                 # FFmpeg decodes ours to the samples the encoder took: those
                 # of the same conversion to pcm_s32le, shifted as the stream
@@ -2315,8 +2352,10 @@ def compare_flac_output(args, lines, failures):
             name = pathlib.Path(fixture).stem
             if tp.returncode != 0 or zp.returncode != 0:
                 problem = f"FFmpeg {tp.returncode}, zffmpeg {zp.returncode} ({first_line(text(zp.stderr))})"
-            elif theirs.read_bytes() != ours.read_bytes() or tpipe.stdout != zpipe.stdout:
-                problem = "the files or piped outputs differ"
+            elif theirs.read_bytes() != ours.read_bytes():
+                problem = "the files differ"
+            elif flac_pipe_problem(tpipe, zpipe):
+                problem = flac_pipe_problem(tpipe, zpipe)
             else:
                 problem = None
                 same += 1
@@ -2428,7 +2467,7 @@ def compare_ogg_output(args, lines, failures):
                  work / "theirs.opus")
         zp = run(args.zffmpeg, "-y", "-i", inputs["s16_stereo_44k1"], work / "ours.opus")
         experimental = "The encoder 'opus' is experimental but experimental codecs are not enabled"
-        if tp.returncode != 0 and experimental in text(tp.stderr) and \
+        if tp.returncode != 0 and experimental in text(tp.stderr) and zp.returncode == 3 and \
                 tool_error(zp, "zffmpeg", inputs["s16_stereo_44k1"]) == "UnsupportedOperation" and \
                 not (work / "ours.opus").exists():
             same += 1
@@ -3222,7 +3261,26 @@ def compare_registries(args, lines, failures):
     record("Registries (T16)", entries - min(len(problems), entries), entries)
 
 
+def check_oracle_predicates():
+    """Fault injection for the predicates that decide a pass: each must reject
+    a wrong status or a failed command, or a broken tool could pass."""
+    Done = collections.namedtuple("Done", "returncode stdout stderr")
+    line = b"zffmpeg: in.wav: UnsupportedLayout\n"
+    assert refusal_name(3, line, "zffmpeg", "in.wav") == "UnsupportedLayout"
+    for wrong in (-6, 0, 1, 2, 4, 5, 6):
+        assert refusal_name(wrong, line, "zffmpeg", "in.wav") is None, wrong
+    assert refusal_name(3, b"zffmpeg: other.wav: UnsupportedLayout\n", "zffmpeg", "in.wav") is None
+    assert refusal_name(4, b"zffmpeg: in.wav: ReadFailed\n", "zffmpeg", "in.wav") == "ReadFailed"
+    good = Done(0, b"fLaC" + bytes(40), b"")
+    failed = Done(1, b"", b"error\n")
+    assert flac_pipe_problem(good, good) is None
+    for theirs, ours in ((failed, failed), (good, failed), (failed, good), (Done(0, b"", b""), Done(0, b"", b""))):
+        assert flac_pipe_problem(theirs, ours), (theirs, ours)
+    assert flac_pipe_problem(good, Done(0, b"fLaC" + bytes(41), b""))
+
+
 def main():
+    check_oracle_predicates()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--ffmpeg", required=True)
     parser.add_argument("--ffprobe", required=True)

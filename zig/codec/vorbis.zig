@@ -1523,8 +1523,12 @@ fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
         const n = smith.slice(&packet);
         if (!d.planesFit(planes[0..d.channels])) {
             const capacity = d.blocksize[1] / 2;
+            // Every view into the old storage goes with it, not only the
+            // current channels': a later header can restore more channels,
+            // whose stale views would otherwise still fit.
             gpa.free(storage);
             storage = &.{};
+            planes = @splat(&.{});
             storage = try gpa.alloc(f32, @as(usize, capacity) * d.channels);
             for (0..d.channels) |c| planes[c] = storage[c * capacity ..][0..capacity];
         }
@@ -1576,7 +1580,13 @@ test "fuzz: the Vorbis decoder on arbitrary headers and packets" {
     var bigger: [30]u8 = t22.packets[0].items[0..30].*;
     bigger[28] = (bigger[28] & 0x0f) | 13 << 4;
 
-    var seeds: [5][]u8 = undefined;
+    // Mono with an 8192 block, then stereo again: the plane storage shrinks
+    // to one channel and the old second view must not survive.
+    var mono_big: [30]u8 = t22.packets[0].items[0..30].*;
+    mono_big[11] = 1;
+    mono_big[28] = (mono_big[28] & 0x0f) | 13 << 4;
+
+    var seeds: [6][]u8 = undefined;
     var made: usize = 0;
     defer for (seeds[0..made]) |s| gpa.free(s);
     seeds[0] = try fuzzSeed(gpa, t22.extradata, t22.audio(), &.{}, &.{});
@@ -1589,5 +1599,27 @@ test "fuzz: the Vorbis decoder on arbitrary headers and packets" {
     made += 1;
     seeds[4] = try fuzzSeed(gpa, bad_setup.extradata, bad_setup.audio(), &.{}, &.{});
     made += 1;
+    seeds[5] = try fuzzSeed(gpa, t22.extradata, t22.audio()[0..1], &.{}, &.{ &mono_big, t22.packets[0].items, t22.packets[2].items, t22.audio()[0].items });
+    made += 1;
     try testing.fuzz({}, fuzzOne, .{ .corpus = &seeds });
+}
+
+test "the fuzz entry's planes survive a channel count that shrinks, then grows back" {
+    // An in-stream mono identification header with an 8192 block replaces
+    // the output storage with one plane; the stereo header after it fits
+    // the old lengths again. A plane view left from the first storage
+    // would then be written after its memory was freed.
+    const gpa = testing.allocator;
+    var t = try TestStream.init(gpa, fixture_22k, 5);
+    defer t.deinit(gpa);
+    var mono_big: [30]u8 = t.packets[0].items[0..30].*;
+    mono_big[11] = 1;
+    mono_big[28] = (mono_big[28] & 0x0f) | 13 << 4;
+    const seed = try fuzzSeed(gpa, t.extradata, t.audio()[0..1], &.{}, &.{
+        &mono_big,          t.packets[0].items,
+        t.packets[2].items, t.audio()[0].items,
+    });
+    defer gpa.free(seed);
+    var smith: std.testing.Smith = .{ .in = seed };
+    try fuzzOne({}, &smith);
 }
