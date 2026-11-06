@@ -1022,6 +1022,10 @@ fn addConvertCase(
     if (case.stderr) |text| run.expectStdErrEqual(text);
     if (case.stderr_contains) |text| expectStdErrContains(run, case.name, text);
     if (case.output_file) |name| {
+        // The output directory survives in the cache (and in CI's restored
+        // cache), so a re-run finds its own file there: -y lets it replace it
+        // instead of failing with PathAlreadyExists.
+        run.addArg("-y");
         const output = run.addOutputFileArg(name);
         const check = b.addCheckFile(output, .{ .expected_exact = case.output_bytes.? });
         test_step.dependOn(&check.step);
