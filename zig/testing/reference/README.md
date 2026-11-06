@@ -111,7 +111,12 @@ does, reads a packet, seeks (`av_seek_frame` on stream 0 and on the
 default stream, with and without `AVSEEK_FLAG_BACKWARD` and
 `AVSEEK_FLAG_ANY`, by byte position, and `avformat_seek_file` as the
 ffmpeg program's `-ss` calls it), and prints the next packet and its
-first decoded samples; every seek starts from a freshly opened file:
+first decoded samples; every seek starts from a freshly opened file. Like
+the other generators that take fixture files (`flac_vectors.c`,
+`ogg_vectors.c`, `mp3_vectors.c`, `vorbis_vectors.c`, `opus_vectors.c`), it
+sorts its arguments in byte order first, because the shell expands a glob in
+its own locale's collation (`LC_ALL=C` on the command does not reach the
+glob), so the output is the same on every machine:
 
 ```bash
 clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/seek_vectors.c .references/ffmpeg-install/lib/libavformat.a .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o seek-vectors

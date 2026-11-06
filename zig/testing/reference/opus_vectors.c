@@ -22,6 +22,7 @@
 #include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "libavcodec/avcodec.h"
@@ -130,9 +131,18 @@ static void run(const char *path)
     avformat_close_input(&fmt);
 }
 
+/* Files in byte order (strcmp), whatever order the shell expanded a glob
+ * in: a glob follows the shell's locale, so the committed output would
+ * otherwise depend on the machine that generated it. */
+static int by_name(const void *a, const void *b)
+{
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
 int main(int argc, char **argv)
 {
     av_log_set_level(AV_LOG_QUIET);
+    qsort(argv + 1, argc - 1, sizeof(*argv), by_name);
     for (int i = 1; i < argc; i++)
         run(argv[i]);
     return 0;

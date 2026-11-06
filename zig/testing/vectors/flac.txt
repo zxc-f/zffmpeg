@@ -42,6 +42,10 @@ D 256 0 0x07cad5e8
 P 844 256 256 256 0x1 0xa61293c0
 D 256 256 0x67d50a10
 R EOF
+F flac_bps3
+O ok
+S flac 0 0 0 channels 0 1/44100 576 N none
+E INVALIDDATA
 F flac_bps32_left_side_fixed
 O ok
 S flac 96000 2 stereo 32 1/96000 384 0 s32
@@ -72,10 +76,6 @@ S flac 32000 1 mono 32 1/32000 256 N s32
 P 880 0 0 256 0x1 0xd7649311
 D 256 0 0xfdf4fdef
 R EOF
-F flac_bps3
-O ok
-S flac 0 0 0 channels 0 1/44100 576 N none
-E INVALIDDATA
 F flac_bps4_mono
 O ok
 S flac 8000 1 mono 4 1/8000 384 0 s16
