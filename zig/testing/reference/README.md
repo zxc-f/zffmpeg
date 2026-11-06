@@ -14,7 +14,11 @@ binaries are never committed.
 
 ## Reproduce
 
-Linux x86-64 with Git, Clang, GNU Make, Python 3 and Zig 0.17.0. Run from the
+Linux x86-64 with glibc 2.44 or newer, Git, Clang, GNU Make, Python 3 and Zig
+0.17.0. The C library is part of the reference: FFmpeg's output depends on
+glibc's `sscanf` (an iTunSMPB field of a bare `0x` is a matching failure from
+2.44 on, so `mp3_itunsmpb_bare_0x` keeps no gapless counts) and on its math
+functions, and the committed vectors are what glibc 2.44 gives. Run from the
 repository root:
 
 ```bash
@@ -239,7 +243,8 @@ angle CELT's spreading rotation can take, and of the fifteen double
 functions `core/libm.zig` ports over eight input distributions, inputs
 from 1e8 up on lines of their own (glibc 2.39 reduces sin, cos and tan's
 there differently) and sinh, cosh and tanh on `C` lines (correctly rounded
-since 2.44); with an older glibc CI leaves those lines out:
+since 2.44). CI's glibc is 2.44, so every line is compared; on an older
+glibc the step leaves those lines out, with a notice:
 
 ```bash
 clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/celt_vectors.c .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o celt-vectors
@@ -394,10 +399,14 @@ On Windows (MSYS2 UCRT64 clang) link with `-lm -lbcrypt` instead of
 
 CI runs the same steps in the `reference` job of
 [ci.yml](../../../.github/workflows/ci.yml) and appends the report to the job
-summary. The installed reference is cached under a key made from the runner
-image, the Clang version line and the hash of `build-ffmpeg.sh`, so changing
-the script or the compiler rebuilds it (about 51 seconds for the WAV-only
-configuration). A cache is saved only when the job passes.
+summary. The job runs in a `fedora:45` container pinned by digest, for its
+glibc 2.44 (the `ubuntu-24.04` runner's own glibc is 2.39), installs Clang,
+GCC, Make, Git, Python 3 and rsync from Fedora's repositories, and fails
+early on a glibc older than 2.44. The installed reference is cached under a
+key made from the image, the Clang version line and the hash of
+`build-ffmpeg.sh`, so changing the script or the compiler rebuilds it (about
+51 seconds for the WAV-only configuration). A cache is saved only when the job
+passes.
 
 ## Configuration
 
