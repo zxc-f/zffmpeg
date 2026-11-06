@@ -119,6 +119,12 @@ pub const SourcePacket = struct {
     new_metadata: ?[]const u8 = null,
 };
 
+/// The bytes after a packet's data that `Packet.tail` keeps: a decoder's
+/// checked reader stops 8 bits past the end and reads 4 bytes there, so
+/// MPEG audio sees up to 5 bytes past a frame (FFmpeg's buffers have 64,
+/// AV_INPUT_BUFFER_PADDING_SIZE).
+pub const tail_len = 8;
+
 /// A packet as `av_read_frame` returns it: borrowed until the next call.
 pub const Packet = struct {
     stream: usize,
@@ -132,6 +138,12 @@ pub const Packet = struct {
     skip: ?[2]u32 = null,
     new_extradata: ?[]const u8 = null,
     new_metadata: ?[]const u8 = null,
+    /// What FFmpeg's memory holds after `data`, which a decoder reading
+    /// past the end sees: zeros (a packet's padding) except for the first
+    /// frame the mpegaudio parser cuts from a raw packet without copying
+    /// it (parse_packet then references the raw packet, `out_pkt->data ==
+    /// pkt->data`), which is followed by the rest of that raw packet.
+    tail: [tail_len]u8 = @splat(0),
 };
 
 pub const key_flag: u32 = 1;
@@ -148,6 +160,7 @@ const Held = struct {
     skip: ?[2]u32,
     new_extradata: ?[]u8,
     new_metadata: ?[]u8,
+    tail: [tail_len]u8 = @splat(0),
 
     fn deinit(h: *Held, gpa: std.mem.Allocator) void {
         gpa.free(h.data);
@@ -523,6 +536,7 @@ pub fn Layer(comptime Source: type) type {
                 .skip = h.skip,
                 .new_extradata = h.new_extradata,
                 .new_metadata = h.new_metadata,
+                .tail = h.tail,
             };
         }
 
@@ -645,6 +659,15 @@ pub fn Layer(comptime Source: type) type {
                     .new_metadata = null,
                 };
                 errdefer h.deinit(l.gpa);
+                // A frame at the very start of the raw packet that the
+                // parser did not copy (`out_pkt->data == pkt->data`):
+                // FFmpeg's packet references the raw one, so the rest of
+                // it follows the frame. Others are copied, then zeros.
+                if (frame.len != 0 and frame.ptr == data_in.ptr) {
+                    const rest = data_in[frame.len..];
+                    const n = @min(rest.len, tail_len);
+                    @memcpy(h.tail[0..n], rest[0..n]);
+                }
                 if (ctx.sample_rate > 0 and p.parser.duration > 0) {
                     h.duration = rational.rescaleQRnd(p.parser.duration, .{ .num = 1, .den = @intCast(ctx.sample_rate) }, setup.time_base, .{ .mode = .down });
                 }

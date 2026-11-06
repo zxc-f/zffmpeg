@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Derived from FFmpeg's libavutil/float_dsp.c (vector_fmul_window_c,
-// vector_fmac_scalar_c, vector_fmul_scalar_c) at the pinned reference
-// revision. Copyright 2005 Balatoni Denes, copyright 2006 Loren Merritt.
+// vector_fmac_scalar_c, vector_fmul_scalar_c, butterflies_float_c) at the
+// pinned reference revision. Copyright 2005 Balatoni Denes, copyright 2006
+// Loren Merritt.
 // FFmpeg is free software; you can redistribute it and/or modify it under
 // the terms of the GNU Lesser General Public License as published by the
 // Free Software Foundation; either version 2.1 of the License, or (at your
 // option) any later version.
-//! libavutil's float DSP kernels that more than one decoder calls (Vorbis,
-//! Opus), as their C versions compute them: the reference build has no
-//! assembly, and the same operation order keeps every result bit-exact.
+//! libavutil's float DSP kernels the decoders call (Vorbis, Opus, MP3), as
+//! their C versions compute them: the reference build has no assembly, and
+//! the same operation order keeps every result bit-exact.
 //! The slices may alias where the C callers' pointers do.
 
 const std = @import("std");
@@ -42,6 +43,16 @@ pub fn fmulScalar(dst: []f32, src: []const f32, mul: f32) void {
     for (dst, src[0..dst.len]) |*d, s| d.* = s * mul;
 }
 
+/// butterflies_float_c: `v1[i]` becomes the sum and `v2[i]` the
+/// difference of the two (the MP3 decoder's M/S stereo).
+pub fn butterflies(v1: []f32, v2: []f32) void {
+    for (v1, v2[0..v1.len]) |*a, *b| {
+        const t = a.* - b.*;
+        a.* += b.*;
+        b.* = t;
+    }
+}
+
 const testing = std.testing;
 
 test "the window overlap-add in place equals it out of place" {
@@ -61,4 +72,12 @@ test "the scalar kernels" {
     try testing.expectEqualSlices(f32, &.{ 1.5, 2.5, 4 }, &d);
     fmulScalar(&d, &d, 2);
     try testing.expectEqualSlices(f32, &.{ 3, 5, 8 }, &d);
+}
+
+test "butterflies give the sum and the difference" {
+    var a: [3]f32 = .{ 1, -2, 0.5 };
+    var b: [3]f32 = .{ 3, 2, 0.5 };
+    butterflies(&a, &b);
+    try testing.expectEqualSlices(f32, &.{ 4, 0, 1 }, &a);
+    try testing.expectEqualSlices(f32, &.{ -2, -4, 0 }, &b);
 }
