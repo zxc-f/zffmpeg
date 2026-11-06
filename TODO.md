@@ -3414,8 +3414,14 @@ names, not as an empty framework.
       decode every frame, each damaged frame is INVALIDDATA, the gapless
       stream trims 576 and 1104 samples. mp3.txt and seek_mp3.txt gain the
       new fixtures' blocks, unchanged elsewhere; compare.py 6425/0/0.
-    Remaining work or blocker / next action: part 1, the tables, side
-      information, scalefactors, Huffman decoding and requantization.
+      Part 1a: core/libm/cbrt.zig ports glibc's cbrt (not correctly
+      rounded; musl's, std.math.cbrt, differs for 3346 of the 8208
+      integers the power tables take), checked by libm.txt's new D cbrt
+      and I cbrt lines (7e3bb04); exp2 of the LSF intensity table's
+      quarter exponents already equals glibc's.
+    Remaining work or blocker / next action: parts 1b and 2, the decoder
+      (tables, side information, scalefactors, Huffman decoding,
+      requantization, stereo, IMDCT and synthesis) against mp3_decode.txt.
     ```
   - [ ] **T29c — Layers I and II.** Needs T29b.
     Done when the required Layer I and II streams match within the same
