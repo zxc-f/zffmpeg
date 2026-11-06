@@ -2033,7 +2033,7 @@ test "FFmpeg's Vorbis decoder opens the encoded fixtures and refuses the synthet
 const vorbis_vectors = @embedFile("../testing/vectors/vorbis.txt");
 
 /// libavcodec's discarding, shared with the decoded reader.
-const Discard = @import("oggdecode.zig").Discard;
+const Discard = @import("decoded.zig").Discard;
 
 fn vorbisBlock(name: []const u8) ?[]const u8 {
     const marker = "F ";

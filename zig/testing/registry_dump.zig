@@ -27,11 +27,30 @@ pub fn main(init: std.process.Init) u8 {
     return 0;
 }
 
+/// `avcodec_find_decoder` / `avcodec_find_encoder` by codec: any
+/// implementation of `codec`.
+fn hasImplementation(list: []const av.codecs.Implementation, codec: av.codecs.Codec) bool {
+    for (list) |i| if (i.codec.eql(codec)) return true;
+    return false;
+}
+
+/// show_codecs' ` (decoders: ...)` or ` (encoders: ...)`: every
+/// implementation of the codec, when one is named otherwise than the codec.
+fn printImplementations(out: *std.Io.Writer, label: []const u8, list: []const av.codecs.Implementation, d: *const av.codecs.Descriptor) std.Io.Writer.Error!void {
+    const renamed = for (list) |i| {
+        if (i.codec.eql(d.codec) and !std.mem.eql(u8, i.name, d.name())) break true;
+    } else false;
+    if (!renamed) return;
+    try out.print(" ({s}:", .{label});
+    for (list) |i| if (i.codec.eql(d.codec)) try out.print(" {s}", .{i.name});
+    try out.writeByte(')');
+}
+
 fn write(out: *std.Io.Writer) std.Io.Writer.Error!void {
     for (&av.codecs.descriptors) |*d| {
         const flags = [6]u8{
-            flag(av.codecs.findDecoder(d.name()) != null, 'D'),
-            flag(av.codecs.findEncoder(d.name()) != null, 'E'),
+            flag(hasImplementation(&av.codecs.decoders, d.codec), 'D'),
+            flag(hasImplementation(&av.codecs.encoders, d.codec), 'E'),
             switch (d.media_type) {
                 .audio => 'A',
             },
@@ -39,7 +58,10 @@ fn write(out: *std.Io.Writer) std.Io.Writer.Error!void {
             flag(d.props.lossy, 'L'),
             flag(d.props.lossless, 'S'),
         };
-        try out.print("codec {s} {s} {s}\n", .{ d.name(), &flags, d.long_name });
+        try out.print("codec {s} {s} {s}", .{ d.name(), &flags, d.long_name });
+        try printImplementations(out, "decoders", &av.codecs.decoders, d);
+        try printImplementations(out, "encoders", &av.codecs.encoders, d);
+        try out.writeByte('\n');
     }
     for (&av.formats.formats) |*format| {
         try out.print("format {s} {c}{c} {s}\n", .{

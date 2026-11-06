@@ -111,7 +111,8 @@ pub const descriptors = [_]Descriptor{
     // Named by the Ogg demuxer (T27a); not decoded.
     .{ .codec = .vorbis, .media_type = .audio, .long_name = "Vorbis", .props = .{ .intra_only = true, .lossy = true } },
     .{ .codec = .opus, .media_type = .audio, .long_name = "Opus (Opus Interactive Audio Codec)", .props = .{ .intra_only = true, .lossy = true } },
-    // Named by the MP3 demuxer's parser (T29a); not decoded yet.
+    // Named by the MP3 demuxer's parser (T29a); MP3 decoded (T29b), MP1 and
+    // MP2 not yet (T29c).
     .{ .codec = .mp1, .media_type = .audio, .long_name = "MP1 (MPEG audio layer 1)", .props = .{ .intra_only = true, .lossy = true } },
     .{ .codec = .mp2, .media_type = .audio, .long_name = "MP2 (MPEG audio layer 2)", .props = .{ .intra_only = true, .lossy = true } },
     .{ .codec = .mp3, .media_type = .audio, .long_name = "MP3 (MPEG audio layer 3)", .props = .{ .intra_only = true, .lossy = true } },
@@ -157,12 +158,14 @@ fn pcmImplementations() [pcm_count]Implementation {
     return list;
 }
 
-/// The PCM decoders, then FLAC's (T26a), Vorbis' (T27d) and Opus' (T28),
+/// The PCM decoders, then FLAC's (T26a), Vorbis' (T27d), Opus' (T28) and
+/// MP3's (T29b: mp3float, the float decoder the reference build enables),
 /// which have their own APIs.
 pub const decoders = pcmImplementations() ++ [_]Implementation{
     .{ .name = "flac", .codec = .flac },
     .{ .name = "vorbis", .codec = .vorbis },
     .{ .name = "opus", .codec = .opus },
+    .{ .name = "mp3float", .codec = .mp3 },
 };
 /// The PCM encoders, then FLAC's (T26c).
 pub const encoders = pcmImplementations() ++ [_]Implementation{.{ .name = "flac", .codec = .flac }};
@@ -226,4 +229,7 @@ test "every PCM codec has a decoder and an encoder" {
     // FLAC decodes (T26a) and encodes (T26c).
     try std.testing.expect(findDecoder("flac").?.codec.eql(.flac));
     try std.testing.expect(findEncoder("flac").?.codec.eql(.flac));
+    // MP3 decodes (T29b); MP1 and MP2 wait for T29c.
+    try std.testing.expect(findDecoder("mp3float").?.codec.eql(.mp3));
+    try std.testing.expectEqual(null, findDecoder("mp2float"));
 }

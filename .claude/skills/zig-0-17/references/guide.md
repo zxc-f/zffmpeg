@@ -941,7 +941,13 @@ source in `lib/std` before using it on input.
   (`resize_fail_index`), destroying the object after every failure. Feed
   inputs that reach the replacement paths: two comment packets, a second
   metadata block, a seek, a reconfiguring header. Valid fixtures alone
-  never free an owner twice.
+  never free an owner twice. `hostile.checkAllocationFailuresWith(.both)`
+  can fail with `NondeterministicMemoryUsage` on a long input in one mode
+  only: whether a growing buffer's remap succeeds in place depends on the
+  testing allocator's heap after the earlier runs, so the run that fails
+  the last allocation may not make it. That is the harness, not the code
+  under test (confirm that `.fail`, every remap failing, is deterministic);
+  run that input with `.fail`.
 - A path that only one tool reaches needs that tool's process case:
   zffprobe never builds a decoder, so a decoder refusal needs a
   `convert_cases` entry, not only a `probe_cases` one.

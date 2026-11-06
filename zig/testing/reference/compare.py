@@ -2532,18 +2532,48 @@ KNOWN_OGG_DECODE_DIFFERENCES = {
 }
 
 
+def ogg_packets(args, path):
+    """An Ogg file's packets without their timestamps, as ffprobe reads
+    them: size, duration and data hash, one line each; None when ffprobe
+    fails or finds none."""
+    p = run(args.ffprobe, "-v", "error", "-show_data_hash", "md5", "-show_entries", "packet=size,duration,data_hash",
+            "-of", "csv=p=0", path)
+    return text(p.stdout) if p.returncode == 0 and p.stdout else None
+
+
 def check_ogg_decode_difference(args, check, path, tp, zp, theirs, ours):
-    """Asserts one recorded Ogg decode difference; returns the problem, or None."""
-    if check == "granules":
+    """Asserts one recorded decode difference into Ogg or another output;
+    returns the problem, or None. "granules": both succeed and the Ogg pages
+    differ only in their granule positions; "timestamps": both succeed with
+    the same packets (sizes, durations, data) in other pages, timestamps
+    aside; both with the same samples decoded. ("refused", status, name):
+    the program succeeds, zffmpeg refuses before any output. ("other
+    refusal", the program's last line, status, name): both refuse, each for
+    the reason recorded, zffmpeg before any output."""
+    if check in ("granules", "timestamps"):
         if tp.returncode != 0 or zp.returncode != 0:
             return f"FFmpeg exited {tp.returncode}, zffmpeg {zp.returncode} ({first_line(text(zp.stderr))})"
-        pages = ogg_without_granules(ours.read_bytes())
-        if pages is None or pages != ogg_without_granules(theirs.read_bytes()):
-            return "the Ogg pages differ in more than their granules"
+        if check == "granules":
+            pages = ogg_without_granules(ours.read_bytes())
+            if pages is None or pages != ogg_without_granules(theirs.read_bytes()):
+                return "the Ogg pages differ in more than their granules"
+        else:
+            packets = ogg_packets(args, ours)
+            if packets is None or packets != ogg_packets(args, theirs):
+                return "the Ogg packets differ in more than their timestamps"
         decoded = [run(args.ffmpeg, "-nostdin", "-v", "error", "-i", f, "-c:a", "pcm_s32le", "-f", "s32le", "-")
                    for f in (theirs, ours)]
         if any(d.returncode != 0 for d in decoded) or decoded[0].stdout != decoded[1].stdout:
             return "FFmpeg decodes the two Ogg files to different samples"
+        return None
+    if check[0] == "other refusal":
+        _, reason, code, error = check
+        last = text(tp.stderr).splitlines()[-1:]
+        if (tp.returncode == 0 or last != [reason] or zp.returncode != code
+                or tool_error(zp, "zffmpeg", path) != error or ours.exists()):
+            return (f"FFmpeg exited {tp.returncode} ({last}), zffmpeg {zp.returncode} "
+                    f"({first_line(text(zp.stderr)) or 'no error'}), output {'created' if ours.exists() else 'absent'}; "
+                    f"recorded: FFmpeg fails with {reason!r}, zffmpeg refuses with {error} (status {code})")
         return None
     _, code, error = check
     if tp.returncode != 0 or zp.returncode != code or tool_error(zp, "zffmpeg", path) != error or ours.exists():
@@ -2611,17 +2641,20 @@ def compare_opus_vectors(args, lines, failures):
 
 def same_decode_refusal(ffmpeg_process, error):
     """Whether zffmpeg's refusal `error` (`tool_error`) is the one the ffmpeg
-    program's failure shows: an input that does not open, or a decode error
-    rate past `-max_error_rate` (`DecodeErrorRate`)."""
-    if error is None:
+    program's failure shows: an input that does not open, a decode error
+    rate past `-max_error_rate` (`DecodeErrorRate`), or a stream without a
+    decoder in the reference build, MP1 and MP2 (`UnsupportedOperation`)."""
+    if error is None or ffmpeg_process.returncode == 0:
         return False
     if ffmpeg_refuses_input(ffmpeg_process):
         return True
+    if b"Decoding requested, but no decoder found for: " in ffmpeg_process.stderr:
+        return error == "UnsupportedOperation"
     return b"Decode error rate " in ffmpeg_process.stderr and error == "DecodeErrorRate"
 
 
-def check_ogg_pipe_decode(args, path, opts, known):
-    """zffmpeg decoding an Ogg fixture from standard input to raw PCM on
+def check_pipe_decode(args, path, opts, known):
+    """zffmpeg decoding an Ogg or MP3 fixture from standard input to raw PCM on
     standard output against the ffmpeg program doing the same (M17): equal
     bytes, or the same refusal (from a pipe, a junk prefix leaves FFmpeg's
     probe nothing to detect, as it does zffmpeg's: no file name). A recorded
@@ -2632,7 +2665,7 @@ def check_ogg_pipe_decode(args, path, opts, known):
     ours = subprocess.run([str(part) for part in (args.zffmpeg, "-i", "-", *opts, "-")], input=data,
                           capture_output=True, timeout=120)
     error = tool_error(ours, "zffmpeg", "-")
-    if known is not None and isinstance(known[0], tuple):
+    if known is not None and isinstance(known[0], tuple) and known[0][0] == "refused":
         _, code, name = known[0]
         if theirs.returncode != 0 or ours.returncode != code or error != name:
             return (f"FFmpeg exited {theirs.returncode}, zffmpeg {ours.returncode} "
@@ -2651,26 +2684,21 @@ def check_ogg_pipe_decode(args, path, opts, known):
     return None
 
 
-def compare_ogg_decode(args, lines, failures):
-    """Ogg decoded (T27d, T28a): every Ogg fixture FFmpeg decodes (Vorbis,
-    Opus, FLAC in Ogg) converted by zffmpeg and by the ffmpeg program with `-bitexact`
-    into each output, byte for byte, and each raw PCM output again with the
-    input on a pipe and the output on stdout, against the program doing the
-    same; then FATE's Vorbis decode tests (optional), as
-    `tests/fate/vorbis.mak` runs them (s16le), byte for byte against the
-    ffmpeg program's."""
+def decode_cells(args, paths, known_table, table_name, label_prefix, failures):
+    """The decoded-input cells for `paths` ((fixture, codec) pairs): each
+    fixture converted by zffmpeg and by the ffmpeg program with `-bitexact`
+    into every `OGG_DECODE_OUTPUTS` output, byte for byte, and each raw PCM
+    output again through pipes (`check_pipe_decode`); a cell in
+    `known_table` must show the difference it records. Returns the rows,
+    the equal and total cells, the understood ones with their notes, and
+    the (fixture, options) keys compared."""
     rows = []
     same = total = understood = 0
     understood_notes = set()
     compared = set()
     with tempfile.TemporaryDirectory() as work:
         work = pathlib.Path(work)
-        for path in sorted((FIXTURES / "ogg").glob("*.ogg")):
-            probe = run(args.ffprobe, "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name",
-                        "-of", "default=nw=1:nk=1", path)
-            codec = text(probe.stdout).strip()
-            if probe.returncode != 0 or codec not in ("vorbis", "flac", "opus") or path.stem == "ogg_multiplexed":
-                continue
+        for path, codec in paths:
             problems = []
             for opts, ext in OGG_DECODE_OUTPUTS:
                 total += 1
@@ -2680,11 +2708,11 @@ def compare_ogg_decode(args, lines, failures):
                 tp = run(args.ffmpeg, "-nostdin", "-v", "error", "-y", "-i", path, "-bitexact", *opts, theirs)
                 zp = run(args.zffmpeg, "-y", "-i", path, *opts, ours)
                 label = " ".join(opts)
-                known = (KNOWN_OGG_DECODE_DIFFERENCES.get((path.stem, label))
-                         or KNOWN_OGG_DECODE_DIFFERENCES.get((path.stem, None)))
+                known = (known_table.get((path.stem, label))
+                         or known_table.get((path.stem, None)))
                 equal = tp.returncode == 0 and zp.returncode == 0 and theirs.read_bytes() == ours.read_bytes()
                 if known and equal:
-                    problems.append(f"{label}: listed in KNOWN_OGG_DECODE_DIFFERENCES, but the outputs are now equal")
+                    problems.append(f"{label}: listed in {table_name}, but the outputs are now equal")
                 elif known:
                     problem = check_ogg_decode_difference(args, known[0], path, tp, zp, theirs, ours)
                     if problem is None:
@@ -2714,16 +2742,37 @@ def compare_ogg_decode(args, lines, failures):
                     # The same decode with the input on a pipe (non-seekable)
                     # and the output on stdout, against the program's.
                     total += 1
-                    problem = check_ogg_pipe_decode(args, path, opts, known)
+                    problem = check_pipe_decode(args, path, opts, known)
                     if problem is None:
                         same += 1
                     else:
                         problems.append(f"{label} through pipes: {problem}")
             result = "pass" if not problems else "**FAIL**: " + "; ".join(problems)
             rows.append(f"| `{path.stem}` | {codec} | {result} |")
-            failures.extend(f"Ogg decode {path.stem}: {p}" for p in problems)
+            failures.extend(f"{label_prefix} {path.stem}: {p}" for p in problems)
             compared.add((path.stem, None))
             compared.update((path.stem, " ".join(opts)) for opts, _ in OGG_DECODE_OUTPUTS)
+    return rows, same, total, understood, understood_notes, compared
+
+
+def compare_ogg_decode(args, lines, failures):
+    """Ogg decoded (T27d, T28a): every Ogg fixture FFmpeg decodes (Vorbis,
+    Opus, FLAC in Ogg) converted by zffmpeg and by the ffmpeg program with `-bitexact`
+    into each output, byte for byte, and each raw PCM output again with the
+    input on a pipe and the output on stdout, against the program doing the
+    same; then FATE's Vorbis decode tests (optional), as
+    `tests/fate/vorbis.mak` runs them (s16le), byte for byte against the
+    ffmpeg program's."""
+    paths = []
+    for path in sorted((FIXTURES / "ogg").glob("*.ogg")):
+        probe = run(args.ffprobe, "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name",
+                    "-of", "default=nw=1:nk=1", path)
+        codec = text(probe.stdout).strip()
+        if probe.returncode != 0 or codec not in ("vorbis", "flac", "opus") or path.stem == "ogg_multiplexed":
+            continue
+        paths.append((path, codec))
+    rows, same, total, understood, understood_notes, compared = decode_cells(
+        args, paths, KNOWN_OGG_DECODE_DIFFERENCES, "KNOWN_OGG_DECODE_DIFFERENCES", "Ogg decode", failures)
     total += unmatched_entries(KNOWN_OGG_DECODE_DIFFERENCES, compared, "KNOWN_OGG_DECODE_DIFFERENCES", failures)
     record("Ogg decoding (T27d, T28a)", same, total, understood=understood)
     suite = pathlib.Path(args.fate_suite)
@@ -2768,6 +2817,58 @@ def compare_ogg_decode(args, lines, failures):
         "| Test | Result |",
         "| --- | --- |",
     ] + fate_rows
+
+
+# MP3 decodes that differ from the ffmpeg program's for an understood reason:
+# (fixture, options or None for every output) -> (check, reason), as
+# KNOWN_OGG_DECODE_DIFFERENCES.
+MP3_OGG_GRANULES = ("granules", "the same samples; the last granule differs: the program's decoded frames keep "
+                                "the packets' timestamps, so the frames the decoder refuses leave gaps the Ogg "
+                                "muxer's granules follow (the program's timestamps, T53)")
+MP3_APIC = (("other refusal", "Error opening output files: Encoder not found", 2, "DecodeErrorRate"),
+            "the program maps the attached picture to a video stream, which AIFF, FLAC and Ogg can carry, and the "
+            "reference build has no encoder for it; zffmpeg converts the audio stream alone and fails on the decode "
+            "error rate the program reaches into WAV, AU and raw PCM (notes.md \"MP3 decoding\")")
+KNOWN_MP3_DECODE_DIFFERENCES = {
+    ("mp3_l3_bad_big_values", "-f ogg"): MP3_OGG_GRANULES,
+    ("mp3_l3_bad_block_type", "-f ogg"): MP3_OGG_GRANULES,
+    ("mp3_mpeg2_l3_16k_mono", "-f ogg"): MP3_OGG_GRANULES,
+    ("mp3_mpeg2_l3_22k", "-f ogg"): MP3_OGG_GRANULES,
+    ("mp3_xing_mpeg2_mono", "-f ogg"): MP3_OGG_GRANULES,
+    ("mp3_mpeg25_l3_12k", "-f ogg"): ("timestamps", "the same packets and samples; their timestamps differ, as for "
+                                                    "the granules above, and so the pages they fill (T53)"),
+    ("mp3_mpeg25_l3_8k", "-f ogg"): ("timestamps", "the same packets and samples; their timestamps differ, as for "
+                                                   "the granules above, and so the pages they fill (T53)"),
+    ("mp3_apic_chap", "-f aiff"): MP3_APIC,
+    ("mp3_apic_chap", "-f flac"): MP3_APIC,
+    ("mp3_apic_chap", "-f ogg"): MP3_APIC,
+}
+
+
+def compare_mp3_decode(args, lines, failures):
+    """MP3 decoded (T29b): every MP3 fixture converted by zffmpeg and by the
+    ffmpeg program with `-bitexact` into each output, byte for byte, and each
+    raw PCM output again through pipes; MP1 and MP2 streams, which the
+    reference build has no decoder for, and damaged streams past the decode
+    error rate are refused by both."""
+    paths = [(path, "mp3") for path in sorted((FIXTURES / "mp3").glob("*.mp3"))]
+    rows, same, total, understood, understood_notes, compared = decode_cells(
+        args, paths, KNOWN_MP3_DECODE_DIFFERENCES, "KNOWN_MP3_DECODE_DIFFERENCES", "MP3 decode", failures)
+    total += unmatched_entries(KNOWN_MP3_DECODE_DIFFERENCES, compared, "KNOWN_MP3_DECODE_DIFFERENCES", failures)
+    record("MP3 decoding (T29b)", same, total, understood=understood)
+    lines += [
+        "",
+        "## MP3 decoding (T29b)",
+        "",
+        f"MP3 fixtures decoded by zffmpeg into WAV, AU, AIFF, FLAC, Ogg and raw PCM (and resampled, and "
+        f"downmixed), and into raw PCM from a pipe to stdout, equal to the ffmpeg program's with `-bitexact`, "
+        f"or refused by both: {same}/{total}, {understood} of them as understood differences:",
+        "",
+    ] + [f"- {note}" for note in sorted(understood_notes)] + [
+        "",
+        "| Fixture | Codec | Result |",
+        "| --- | --- | --- |",
+    ] + rows
 
 
 # Ogg fixtures whose copy the ffmpeg program changes past libavformat
@@ -3129,8 +3230,6 @@ KNOWN_REGISTRY_DIFFERENCES = {
                           "the port has no Vorbis encoder"),
     ("codec", "opus"): (("D.AIL.", "DEAIL."), "FFmpeg's native Opus encoder makes the Opus fixtures (T28a); "
                         "the port has no Opus encoder"),
-    ("codec", "mp3"): (("..AIL.", "D.AIL."), "the reference build's mp3float decoder (T29b part 0); the port "
-                       "decodes MP3 from T29b part 3"),
 }
 
 
@@ -3279,6 +3378,14 @@ def check_oracle_predicates():
     for theirs, ours in ((failed, failed), (good, failed), (failed, good), (Done(0, b"", b""), Done(0, b"", b""))):
         assert flac_pipe_problem(theirs, ours), (theirs, ours)
     assert flac_pipe_problem(good, Done(0, b"fLaC" + bytes(41), b""))
+    no_decoder = Done(234, b"", b"[aist#0:0/mp1] Decoding requested, but no decoder found for: mp1\n"
+                                b"Error opening output files: Invalid argument\n")
+    assert same_decode_refusal(no_decoder, "UnsupportedOperation")
+    for error in (None, "DecodeErrorRate", "InvalidMp3"):
+        assert not same_decode_refusal(no_decoder, error), error
+    assert not same_decode_refusal(no_decoder._replace(returncode=0), "UnsupportedOperation")
+    rate = Done(69, b"", b"Decode error rate 0.958333 exceeds maximum 0.666667\n")
+    assert same_decode_refusal(rate, "DecodeErrorRate") and not same_decode_refusal(rate, "UnsupportedOperation")
 
 
 def main():
@@ -3369,6 +3476,7 @@ def main():
     compare_ogg(args, lines, failures)
     compare_mp3(args, lines, failures)
     compare_ogg_decode(args, lines, failures)
+    compare_mp3_decode(args, lines, failures)
     compare_opus_vectors(args, lines, failures)
     compare_hashes(args, lines, failures)
     compare_fate(args, lines, failures)

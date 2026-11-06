@@ -31,6 +31,7 @@ const opusdec = @import("../codec/opusdec.zig");
 const ogg = @import("ogg.zig");
 const demux = @import("demux.zig");
 const seek = @import("seek.zig");
+const decoded = @import("decoded.zig");
 
 /// What reading the samples can fail with.
 pub const ReadError = ogg.Error || error{
@@ -52,41 +53,7 @@ pub const Error = ReadError || error{
     UnsupportedOperation,
 };
 
-/// libavcodec's decode.c around a decoder (discard_samples): the samples
-/// still to skip, from the decoder (its first frame) or a packet's
-/// skip-samples side data, and the end padding a packet asks to drop.
-pub const Discard = struct {
-    skip: i64 = 0,
-
-    /// The kept part of a decoded frame of `n` samples, as [start, end);
-    /// null when the whole frame is dropped.
-    pub fn apply(x: *Discard, n: u32, side: ?[2]u32) ?[2]u32 {
-        var padding: u32 = 0;
-        if (side) |s| {
-            const skip: i32 = @bitCast(s[0]);
-            if (skip != 0) x.skip = skip;
-            x.skip = @max(0, x.skip);
-            padding = s[1];
-        }
-        var start: u32 = 0;
-        var count = n;
-        if (x.skip > 0) {
-            if (count <= x.skip) {
-                x.skip -= count;
-                return null;
-            }
-            start = @intCast(x.skip);
-            count -= start;
-            x.skip = 0;
-        }
-        if (padding > 0 and padding <= n) {
-            const drop = @min(padding, count);
-            if (drop == count) return null;
-            count -= drop;
-        }
-        return .{ start, start + count };
-    }
-};
+const Discard = decoded.Discard;
 
 const Layer = demux.Layer(ogg.Demuxer);
 
@@ -123,22 +90,10 @@ pub const DecodedReader = struct {
     max_frame: u32 = 0,
     /// This reader is the counting pass of another.
     counting: bool = false,
-    /// The ffmpeg program's decoder statistics: frames returned and
-    /// packets the decoder refused.
-    frames_decoded: u64 = 0,
-    decode_errors: u64 = 0,
+    /// The ffmpeg program's decoder statistics.
+    errors: decoded.ErrorRate = .{},
 
-    pub const Header = struct {
-        /// The stream's codec.
-        stream: codecs.Codec,
-        /// The encoding of the bytes `readData` gives.
-        codec: pcm.Codec,
-        format: audio.Format,
-        /// The stream's duration, when known.
-        frame_count: ?u64,
-        /// The decoded samples' bits (`bits_per_raw_sample` for an encoder).
-        bits: u8,
-    };
+    pub const Header = decoded.Header;
 
     /// Reads `reader` from its start; `seeker`, when the input can seek,
     /// moves it there and lets the demuxer scan for the durations.
@@ -173,7 +128,7 @@ pub const DecodedReader = struct {
             var scratch: [4096]u8 = undefined;
             while ((try pass.readData(&scratch)).len != 0) {}
             // A decoding the program fails, failed before any output.
-            try pass.checkErrorRate();
+            try pass.errors.check();
             counted = pass.delivered;
         }
         if (r.seeker) |sk| {
@@ -299,12 +254,7 @@ pub const DecodedReader = struct {
         }
         switch (r.pending) {
             .planes => |*range| {
-                for (0..frames) |f| {
-                    for (0..r.channels) |c| {
-                        const v = r.planes[c][range[0] + f];
-                        std.mem.writeInt(u32, output[(f * r.channels + c) * 4 ..][0..4], @bitCast(v), .little);
-                    }
-                }
+                decoded.interleave(output, r.planes[0..r.channels], range[0], frames);
                 range[0] += @intCast(frames);
             },
             .s16 => |*s| {
@@ -335,12 +285,12 @@ pub const DecodedReader = struct {
                         error.OutOfMemory => return error.OutOfMemory,
                         error.InvalidData => {
                             diagnostics.report(r.sink, .err, "Decoding error: Invalid data found when processing input", .{});
-                            r.decode_errors += 1;
+                            r.errors.decode_errors += 1;
                             continue;
                         },
                     };
                     if (frame) |f| {
-                        r.frames_decoded += 1;
+                        r.errors.frames_decoded += 1;
                         // A channel, rate or storage change is refused, as
                         // native FLAC refuses it: delivering the frame would
                         // give its samples the opened rate.
@@ -366,7 +316,7 @@ pub const DecodedReader = struct {
                         };
                         if (n == 0) return false;
                         const kept = r.discard.apply(n, null) orelse return false;
-                        r.frames_decoded += 1;
+                        r.errors.frames_decoded += 1;
                         r.pending = .{ .planes = kept };
                         return true;
                     },
@@ -386,7 +336,7 @@ pub const DecodedReader = struct {
                         error.OutOfMemory => return error.OutOfMemory,
                         error.InvalidData => {
                             diagnostics.report(r.sink, .err, "Decoding error: Invalid data found when processing input", .{});
-                            r.decode_errors += 1;
+                            r.errors.decode_errors += 1;
                             continue;
                         },
                     };
@@ -394,7 +344,7 @@ pub const DecodedReader = struct {
                     // avctx->internal->skip_samples, set by the first frame.
                     if (dec.takeSkip()) |skip| r.discard.skip = skip;
                     const kept = r.discard.apply(n, p.skip) orelse continue;
-                    r.frames_decoded += 1;
+                    r.errors.frames_decoded += 1;
                     r.pending = .{ .planes = kept };
                     return true;
                 },
@@ -402,14 +352,14 @@ pub const DecodedReader = struct {
                     const n = dec.decodePacket(p.data, r.planes[0..r.channels]) catch |err| switch (err) {
                         error.InvalidData => {
                             diagnostics.report(r.sink, .err, "Decoding error: Invalid data found when processing input", .{});
-                            r.decode_errors += 1;
+                            r.errors.decode_errors += 1;
                             continue;
                         },
                         error.OutOfMemory => return error.OutOfMemory,
                     };
                     if (n == 0) continue;
                     const kept = r.discard.apply(n, p.skip) orelse continue;
-                    r.frames_decoded += 1;
+                    r.errors.frames_decoded += 1;
                     r.pending = .{ .planes = kept };
                     return true;
                 },
@@ -417,20 +367,11 @@ pub const DecodedReader = struct {
         }
     }
 
-    /// The ffmpeg program's check at the end of decoding: the share of
-    /// failed decodes, in single precision, above `-max_error_rate`.
-    fn checkErrorRate(r: *const DecodedReader) ReadError!void {
-        if (r.frames_decoded == 0 and r.decode_errors == 0) return;
-        const errors: f32 = @floatFromInt(r.decode_errors);
-        const all: f32 = @floatFromInt(r.frames_decoded + r.decode_errors);
-        if (errors / all > @as(f32, 2.0 / 3.0)) return error.DecodeErrorRate;
-    }
-
     /// Checks the decoding's error rate, and that the stream decoded to
     /// the count found ahead.
     pub fn finish(r: *DecodedReader) ReadError!void {
         std.debug.assert(r.pendingFrames() == 0);
-        try r.checkErrorRate();
+        try r.errors.check();
         if (r.expected) |expected| {
             if (r.delivered != expected) return error.FrameCountMismatch;
         }

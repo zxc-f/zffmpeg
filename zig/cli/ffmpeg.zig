@@ -3,9 +3,9 @@
 // fftools/ffmpeg_opt.c at the pinned reference revision was read for the -y/-n
 // and same-file behavior; see port.md "zffmpeg command" for the differences.
 //! zffmpeg: converts or stream-copies one WAV, Wave64, AU, AIFF, CAF (input
-//! only), FLAC, Ogg (FLAC, Vorbis and Opus decoded as input, FLAC written)
-//! or raw PCM stream (TODO.md T13b, T21b, T22b, T22c, T22d, T26a, T26c,
-//! T27b, T27d, T28); MP3 is detected and refused until T29b decodes it.
+//! only), FLAC, Ogg (FLAC, Vorbis and Opus decoded as input, FLAC written),
+//! MP3 (Layer III decoded as input) or raw PCM stream (TODO.md T13b, T21b,
+//! T22b, T22c, T22d, T26a, T26c, T27b, T27d, T28, T29b).
 //!
 //!     zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate> | -ar <rate>]
 //!             [-ch_layout <layout> | -ac <channels>] -i <input | -> [-c copy|<encoder>]
@@ -61,8 +61,8 @@ const usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch
 const help = usage ++
     \\
     \\Converts one WAV, Wave64, AU, AIFF, CAF (input only), FLAC, Ogg (Vorbis,
-    \\Opus and FLAC input, FLAC output) or raw PCM stream (standard input or
-    \\output with -); MP3 input is not decoded yet. The input container is
+    \\Opus and FLAC input, FLAC output), MP3 (input only) or raw PCM stream
+    \\(standard input or output with -). The input container is
     \\detected from content, or for raw PCM from the name (.sb, .ub, .al, .ul,
     \\.sw), or forced with -f before -i.
     \\Before -i, -sample_rate (or -ar) and -ch_layout (or -ac) describe raw

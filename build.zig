@@ -769,16 +769,25 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "Ogg Opus to WAV", .set = .ogg, .args = &.{"-i"}, .input = "ogg_opus_ffmpeg_stereo", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt ", .stderr = "" },
     .{ .name = "Ogg Opus from a pipe to raw PCM", .set = .ogg, .args = &.{ "-i", "-" }, .stdin_input = "ogg_opus_ffmpeg_mono", .tail = &.{ "-f", "f32le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stdout_raw = .{ .args = &.{ "-f", "f32le", "-ch_layout", "mono", "-sample_rate", "48000" }, .nb_samples = 15000 }, .stderr = "" },
     .{ .name = "Ogg Opus with hybrid frames to WAV", .set = .ogg, .args = &.{"-i"}, .input = "ogg_opus_frame_counts", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt ", .stderr = "" },
-    .{ .name = "MP3 is not decoded yet", .set = .mp3, .args = &.{"-i"}, .input = "mp3_mpeg1_l3_stereo", .tail = &.{ "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
+    // MP3 decoded (T29b): from a file and from a pipe, the same samples
+    // (no gapless trim in this stream); MP1 has no decoder in the reference
+    // build; a stream whose frames mostly fail stops at the ffmpeg
+    // program's error rate, before any output.
+    .{ .name = "MP3 to WAV", .set = .mp3, .args = &.{"-i"}, .input = "mp3_l3_long_stereo", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt ", .stderr = "" },
+    .{ .name = "MP3 from a pipe to raw PCM", .set = .mp3, .args = &.{ "-i", "-" }, .stdin_input = "mp3_l3_long_stereo", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stdout_raw = .{ .args = &.{ "-f", "s16le", "-ch_layout", "stereo", "-sample_rate", "44100" }, .nb_samples = 27648 }, .stderr = "" },
+    .{ .name = "MP3 from a pipe has no count for WAV", .set = .mp3, .args = &.{ "-i", "-" }, .stdin_input = "mp3_l3_long_stereo", .tail = &.{ "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedStreamingSize\n" },
+    .{ .name = "MP1 has no decoder", .set = .mp3, .args = &.{"-i"}, .input = "mp1_layer1_44k", .tail = &.{ "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
+    .{ .name = "MP3 whose frames mostly fail to decode", .set = .mp3, .args = &.{"-i"}, .input = "mp3_rate_change", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stdout = "", .stderr_contains = ": DecodeErrorRate\n" },
     // A decoder that refuses the headers fails cleanly, before any output,
     // from a file (after the counting pass) and from a pipe.
     .{ .name = "Ogg Vorbis whose setup header the decoder refuses", .set = .ogg, .args = &.{"-i"}, .input = "ogg_vorbis_stereo", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stdout = "", .stderr_contains = ": InvalidVorbis\n" },
     .{ .name = "Ogg Vorbis from a pipe whose setup header the decoder refuses", .set = .ogg, .args = &.{ "-i", "-" }, .stdin_input = "ogg_vorbis_stereo", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 2, .stdout = "", .stderr_contains = ": InvalidVorbis\n" },
     // A file whose frames sit inside the probe buffer, and one needing
     // several probe rounds: the demuxer opens from the start (M7), as from
-    // a pipe.
-    .{ .name = "a short MP3 file opens from its start", .set = .mp3, .args = &.{"-i"}, .input = "mp3_six_frames", .tail = &.{ "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = "mp3_six_frames.mp3: UnsupportedOperation\n" },
-    .{ .name = "an MP3 file after a large ID3v2 tag opens from its start", .set = .mp3, .args = &.{"-i"}, .input = "mp3_large_id3v2", .tail = &.{ "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = "mp3_large_id3v2.mp3: UnsupportedOperation\n" },
+    // a pipe, and decodes their frames, whose arbitrary payloads mostly
+    // fail, as in the ffmpeg program.
+    .{ .name = "a short MP3 file opens from its start", .set = .mp3, .args = &.{"-i"}, .input = "mp3_six_frames", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stdout = "", .stderr_contains = "mp3_six_frames.mp3: DecodeErrorRate\n" },
+    .{ .name = "an MP3 file after a large ID3v2 tag opens from its start", .set = .mp3, .args = &.{"-i"}, .input = "mp3_large_id3v2", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stdout = "", .stderr_contains = "mp3_large_id3v2.mp3: DecodeErrorRate\n" },
     .{ .name = "Ogg FLAC whose frames all fail to decode", .set = .ogg, .args = &.{"-i"}, .input = "ogg_lost_continued_page", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stdout = "", .stderr_contains = ": DecodeErrorRate\n" },
     // A packet the mapping refuses during the stream-info read-ahead ends
     // it, and the input decodes from the next packet on, as the ffmpeg

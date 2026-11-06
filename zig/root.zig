@@ -65,7 +65,9 @@
 //!   bit for bit (`codec/mp3dec.zig`, with `codec/mp3_tab.zig` and
 //!   `codec/mpadsp.zig`).
 //! - `oggdecode`: an Ogg stream decoded as the ffmpeg program decodes it
-//!   (`format/oggdecode.zig`).
+//!   (`format/oggdecode.zig`, with `format/decoded.zig`).
+//! - `mp3decode`: an MP3 stream decoded as the ffmpeg program decodes it
+//!   (`format/mp3decode.zig`).
 //! - `framehash`: FFmpeg's framecrc, framemd5 and streamhash muxers' text
 //!   for one audio stream (`format/framehash.zig`).
 //! - `seek`: the seek API, FFmpeg's `av_seek_frame` and
@@ -128,6 +130,7 @@ pub const vlc = @import("codec/vlc.zig");
 pub const vorbis = @import("codec/vorbis.zig");
 pub const opusdec = @import("codec/opusdec.zig");
 pub const oggdecode = @import("format/oggdecode.zig");
+pub const mp3decode = @import("format/mp3decode.zig");
 pub const mp3 = @import("format/mp3.zig");
 pub const mpegaudio = @import("codec/mpegaudio.zig");
 pub const mp3dec = @import("codec/mp3dec.zig");
@@ -188,6 +191,8 @@ test {
     _ = @import("format/demux.zig");
     _ = @import("format/oggmux.zig");
     _ = @import("format/oggdecode.zig");
+    _ = @import("format/decoded.zig");
+    _ = @import("format/mp3decode.zig");
     _ = @import("codec/tx.zig");
     _ = @import("codec/vlc.zig");
     _ = @import("codec/xiph.zig");

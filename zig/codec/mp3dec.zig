@@ -1008,7 +1008,7 @@ const testing = std.testing;
 const fixtures = @import("../testing/fixtures.zig");
 const mp3 = @import("../format/mp3.zig");
 const demux = @import("../format/demux.zig");
-const oggdecode = @import("../format/oggdecode.zig");
+const decoded = @import("../format/decoded.zig");
 const decode_vectors = @embedFile("../testing/vectors/mp3_decode.txt");
 
 /// One fixture's block of mp3_decode.txt, after its `F` line.
@@ -1060,12 +1060,12 @@ fn decodeVectorLines(gpa: std.mem.Allocator, bytes: []const u8, out: *std.ArrayL
     const d = try gpa.create(Decoder);
     defer gpa.destroy(d);
     d.* = .init;
-    var discard: oggdecode.Discard = .{};
+    var discard: decoded.Discard = .{};
     while (try layer.next()) |p| {
         var data = p.data;
         var sent = false;
         while (data.len != 0) {
-            const decoded = d.decodeFrame(data, &p.tail) catch |err| {
+            const got = d.decodeFrame(data, &p.tail) catch |err| {
                 if (!sent) {
                     try out.print(gpa, "P {d} INVALIDDATA\n", .{p.data.len});
                     sent = true;
@@ -1073,8 +1073,8 @@ fn decodeVectorLines(gpa: std.mem.Allocator, bytes: []const u8, out: *std.ArrayL
                 try testing.expectEqual(error.InvalidData, err);
                 break;
             };
-            data = data[@min(decoded.consumed, data.len)..];
-            const frame = decoded.frame orelse continue;
+            data = data[@min(got.consumed, data.len)..];
+            const frame = got.frame orelse continue;
             const kept = discard.apply(frame.samples, p.skip) orelse continue;
             if (!sent) {
                 try out.print(gpa, "P {d} 0\n", .{p.data.len});

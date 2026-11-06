@@ -718,6 +718,8 @@ fn strtol0(text: []const u8) struct { value: i64, len: usize } {
 
 const testing = std.testing;
 const fixtures = @import("../testing/fixtures.zig");
+const mp3dec = @import("../codec/mp3dec.zig");
+const decoded = @import("decoded.zig");
 const vectors = @embedFile("../testing/vectors/mp3.txt");
 
 /// The vector lines of one fixture, after its `F` line.
@@ -845,15 +847,45 @@ fn seekBlock(name: []const u8) ?[]const u8 {
     return if (start) |s| seek_vectors[s..] else null;
 }
 
-/// The next packet's lines, as seek_vectors.c prints them, without its
-/// `D` line: the frame the reference's mp3float decoder makes of that
-/// packet is compared once the port decodes MPEG audio (T29b part 3).
+/// The next packet's lines, as seek_vectors.c prints them: the packet, its
+/// skip-samples side data, and the frame a fresh mp3float decoder makes of
+/// it (`D`): avcodec_send_packet decodes the packet's frames until one
+/// survives the discarding, then the frame's sample count and its first 16
+/// sample frames' bytes as the oracle reads them, from `data[0]` only (the
+/// first plane: 32 floats of it for stereo). Past the kept samples the plane
+/// still holds what decode.c's in-place move left there.
 fn nextAfterSeek(gpa: std.mem.Allocator, layer: anytype, out: *std.ArrayList(u8)) !void {
     const p = try layer.next() orelse return out.appendSlice(gpa, "P EOF\n");
     try out.appendSlice(gpa, "P");
     try writeTs(out, gpa, p.pts);
     try out.print(gpa, " {d} {d}\n", .{ p.pos, p.data.len });
     if (p.skip) |skip| try out.print(gpa, "Z {d} {d}\n", .{ skip[0], skip[1] });
+    // MP1 and MP2 streams have no decoder in the reference build.
+    if ((try layer.codecParams(0)).mpa_codec orelse .mp3 != .mp3) return out.appendSlice(gpa, "D none\n");
+    const d = try gpa.create(mp3dec.Decoder);
+    defer gpa.destroy(d);
+    d.* = .init;
+    var discard: decoded.Discard = .{};
+    var data = p.data;
+    while (data.len != 0) {
+        const got = d.decodeFrame(data, &p.tail) catch break;
+        data = data[got.consumed..];
+        const frame = got.frame orelse continue;
+        const kept = discard.apply(frame.samples, p.skip) orelse continue;
+        const count = kept[1] - kept[0];
+        const plane = &d.output[0];
+        try out.print(gpa, "D {d} ", .{count});
+        const floats = @min(count, 16) * @as(u32, frame.channels);
+        for (0..floats) |i| {
+            // av_samples_copy moved the kept samples to the start.
+            const v = if (i < count) plane[kept[0] + i] else plane[i];
+            var le: [4]u8 = undefined;
+            std.mem.writeInt(u32, &le, @bitCast(v), .little);
+            try out.print(gpa, "{x}", .{&le});
+        }
+        return out.append(gpa, '\n');
+    }
+    try out.appendSlice(gpa, "D none\n");
 }
 
 test "every MP3 fixture seeks as FFmpeg seeks it (vectors/seek_mp3.txt)" {
@@ -890,11 +922,6 @@ test "every MP3 fixture seeks as FFmpeg seeks it (vectors/seek_mp3.txt)" {
                 if (std.mem.eql(u8, ret, "0")) {
                     while (pending) |next_line| {
                         if (next_line.len == 0 or next_line[0] == 'K') break;
-                        // The decoded frame: compared from T29b part 3.
-                        if (next_line[0] == 'D') {
-                            pending = lines.next();
-                            continue;
-                        }
                         try expected.appendSlice(gpa, next_line);
                         try expected.append(gpa, '\n');
                         pending = lines.next();
