@@ -25,6 +25,9 @@
 //                              and tan's argument differently
 //   C <function> ...           the same for sinh, cosh and tanh, which
 //                              glibc computes correctly rounded since 2.44
+//   I cbrt <count> <md5>       cbrt of every integer below count, the
+//                              values FFmpeg's MP3 decoder tables take
+//                              (T29b)
 //
 // Each MD5 covers the results as float32 (or float64 for D lines)
 // little-endian, in order (sinf before cosf). See zig/testing/reference/README.md for the build commands.
@@ -171,6 +174,7 @@ int main(void)
         { "asin", asin, NULL, 'D' },   { "acos", acos, NULL, 'D' },   { "log", log, NULL, 'D' },
         { "pow", NULL, pow, 'D' },     { "atan2", NULL, atan2, 'D' }, { "hypot", NULL, hypot, 'D' },
         { "sinh", sinh, NULL, 'C' },   { "cosh", cosh, NULL, 'C' },   { "tanh", tanh, NULL, 'C' },
+        { "cbrt", cbrt, NULL, 'D' },
     };
     struct AVMD5 *large = av_md5_alloc();
     for (size_t fi = 0; fi < sizeof(funcs) / sizeof(funcs[0]); fi++)
@@ -208,6 +212,13 @@ int main(void)
             printf("\n");
         }
     av_freep(&large);
+
+    /* T29b: the cube roots of mpegaudio_tablegen.h and
+     * mpegaudiodec_common_tablegen.h. */
+    av_md5_init(md5);
+    for (int v = 0; v < 8208; v++)
+        put_double(md5, cbrt((double)v));
+    print("I cbrt 8208", md5);
 
     av_freep(&md5);
     return 0;

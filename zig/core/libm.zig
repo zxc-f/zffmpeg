@@ -13,7 +13,7 @@
 //! library"): single-precision `exp2f`, `sinf` and `cosf` here, and in
 //! libm/ the double functions FFmpeg's code paths here call: `sin`, `cos`,
 //! `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `exp2`, `log`, `pow`,
-//! `hypot`, `sinh`, `cosh`, `tanh` and `ldexp`. Zig's `@exp2` and `@sin`
+//! `hypot`, `sinh`, `cosh`, `tanh`, `cbrt` and `ldexp`. Zig's `@exp2` and `@sin`
 //! follow musl's older code and differ from glibc in the last bit for about
 //! one float in 12,000 and for 1579 of CELT's rotation angles.
 //!
@@ -43,6 +43,8 @@ pub const atan2 = @import("libm/atan2.zig").atan2;
 pub const log = @import("libm/log.zig").log;
 pub const pow = @import("libm/pow.zig").pow;
 pub const hypot = @import("libm/hypot.zig").hypot;
+/// Not correctly rounded; musl's, `std.math.cbrt`, differs (T29b).
+pub const cbrt = @import("libm/cbrt.zig").cbrt;
 /// Exact apart from one rounding (libm/ldexp.zig: std.math.ldexp
 /// mis-scales a zero); checked against glibc's in its tests.
 pub const ldexp = @import("libm/ldexp.zig").ldexp;
@@ -153,6 +155,7 @@ fn expectLine(line: []const u8, head: []const u8, md5: *Md5) !void {
 
 test {
     _ = @import("libm/ldexp.zig");
+    _ = @import("libm/cbrt.zig");
 }
 
 test "exp2f, sinf and cosf return glibc's results (vectors/libm.txt)" {
@@ -245,7 +248,7 @@ test "the double functions return glibc's results (vectors/libm.txt)" {
         .{ .name = "log", .kind = 'D', .one = log },     .{ .name = "pow", .kind = 'D', .two = pow },
         .{ .name = "atan2", .kind = 'D', .two = atan2 }, .{ .name = "hypot", .kind = 'D', .two = hypot },
         .{ .name = "sinh", .kind = 'C', .one = sinh },   .{ .name = "cosh", .kind = 'C', .one = cosh },
-        .{ .name = "tanh", .kind = 'C', .one = tanh },
+        .{ .name = "tanh", .kind = 'C', .one = tanh },   .{ .name = "cbrt", .kind = 'D', .one = cbrt },
     };
     var lines = std.mem.splitScalar(u8, @embedFile("../testing/vectors/libm.txt"), '\n');
     for (0..3) |_| _ = lines.next();
@@ -281,6 +284,16 @@ test "the double functions return glibc's results (vectors/libm.txt)" {
             try testing.expectEqualStrings(lines.next().?, got);
         }
     }
+    // The cube roots FFmpeg's MP3 tables take, every integer below 8208 (T29b).
+    var cubes: Md5 = .init(.{});
+    for (0..8208) |v| {
+        const x: f64 = @floatFromInt(v);
+        putDouble(&cubes, cbrt(x));
+    }
+    var dc: [16]u8 = undefined;
+    cubes.final(&dc);
+    const got = try std.fmt.bufPrint(&text, "I cbrt 8208 {x}", .{dc});
+    try testing.expectEqualStrings(lines.next().?, got);
 }
 
 /// pvq.c's celt_exp_rotation angle, as the vectors compute it.
