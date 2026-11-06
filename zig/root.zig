@@ -55,8 +55,8 @@
 //!   (`format/demux.zig`).
 //! - `tx`: FFmpeg's float FFT and MDCT for power-of-two lengths, bit for
 //!   bit its C codelets (`codec/tx.zig`).
-//! - `vlc`: FFmpeg's VLC decoding tables and lookup, for the LSB-first
-//!   reader in `bits` (`codec/vlc.zig`).
+//! - `vlc`: FFmpeg's VLC decoding tables and lookup, for either reader in
+//!   `bits` (`codec/vlc.zig`).
 //! - `vorbis`: FFmpeg's Vorbis decoder, bit for bit (`codec/vorbis.zig`).
 //! - `opusdec`: FFmpeg's Opus decoder, CELT, SILK and hybrid frames and
 //!   multistream packets, bit for bit (`codec/opusdec.zig`, with
@@ -177,6 +177,7 @@ test {
     _ = @import("format/id3v1.zig");
     _ = @import("format/id3v2.zig");
     _ = @import("codec/mpegaudio.zig");
+    _ = @import("codec/mp3_tab.zig");
     _ = @import("format/mp3.zig");
     _ = @import("format/demux.zig");
     _ = @import("format/oggmux.zig");

@@ -227,12 +227,15 @@ pub const Vlc = struct {
     /// `output_le`): the symbol, or -1 for a code the table lacks, which
     /// consumes nothing at its level.
     pub fn get(v: *const Vlc, r: *bits.LsbReader, max_depth: u2) i32 {
-        return lookup(v.table, r, v.nb_bits, max_depth);
+        return lookup(bits.LsbReader, v.table, r, v.nb_bits, max_depth);
     }
 };
 
-/// GET_VLC over `table`, whose first level has `nb_bits` bits.
-pub fn lookup(table: []const Elem, r: *bits.LsbReader, nb_bits: u5, max_depth: u2) i32 {
+/// GET_VLC over `table`, whose first level has `nb_bits` bits, read by
+/// `Reader`: `bits.BitReader` for a table built MSB-first (MPEG audio's),
+/// `bits.LsbReader` for one built with `output_le` (Vorbis').
+pub fn lookup(comptime Reader: type, table: []const Elem, r: *Reader, nb_bits: u5, max_depth: u2) i32 {
+    comptime std.debug.assert(Reader == bits.BitReader or Reader == bits.LsbReader);
     var index: usize = r.peek(nb_bits);
     var code: i32 = table[index].sym;
     var n: i32 = table[index].len;

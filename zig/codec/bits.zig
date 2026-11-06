@@ -90,6 +90,15 @@ pub const BitReader = struct {
         r.index = @min(r.size + 8, r.index + @min(n, r.size + 8));
     }
 
+    /// `skip_bits_long` with a count of either sign: the count moves by `n`
+    /// clipped to [0, size + 8], as FFmpeg's checked reader clips it.
+    pub fn skipLong(r: *BitReader, n: i64) void {
+        const index: i64 = @intCast(r.index);
+        const top: i64 = @intCast(r.size + 8);
+        const moved = std.math.clamp(n, -index, top - index);
+        r.index = @intCast(index + moved);
+    }
+
     /// `get_bits_long`: the next `n` bits (0 to 32).
     pub fn bits(r: *BitReader, n: u6) u32 {
         const value = r.peek(n);
@@ -670,4 +679,21 @@ test "the LSB-first reader reads zeros past the end and stops counting 8 bits on
     var empty = try LsbReader.init(&.{});
     try testing.expectEqual(0, empty.bits(32));
     try testing.expectEqual(8, empty.count());
+}
+
+test "skip_bits_long moves either way, clipped to the start and 8 bits past the end" {
+    const bytes = [_]u8{ 0xA5, 0x5A };
+    var r = try BitReader.init(&bytes);
+    r.skipLong(3);
+    try testing.expectEqual(3, r.count());
+    r.skipLong(-2);
+    try testing.expectEqual(1, r.count());
+    r.skipLong(-100);
+    try testing.expectEqual(0, r.count());
+    r.skipLong(1000);
+    try testing.expectEqual(24, r.count());
+    try testing.expectEqual(-8, r.left());
+    r.skipLong(-20);
+    try testing.expectEqual(4, r.count());
+    try testing.expectEqual(0x5, r.bits(4));
 }
