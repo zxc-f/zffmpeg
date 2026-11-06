@@ -845,15 +845,15 @@ fn seekBlock(name: []const u8) ?[]const u8 {
     return if (start) |s| seek_vectors[s..] else null;
 }
 
-/// The next packet's lines, as seek_vectors.c prints them; the reference
-/// build has no MPEG audio decoder (`D none`).
+/// The next packet's lines, as seek_vectors.c prints them, without its
+/// `D` line: the frame the reference's mp3float decoder makes of that
+/// packet is compared once the port decodes MPEG audio (T29b part 3).
 fn nextAfterSeek(gpa: std.mem.Allocator, layer: anytype, out: *std.ArrayList(u8)) !void {
     const p = try layer.next() orelse return out.appendSlice(gpa, "P EOF\n");
     try out.appendSlice(gpa, "P");
     try writeTs(out, gpa, p.pts);
     try out.print(gpa, " {d} {d}\n", .{ p.pos, p.data.len });
     if (p.skip) |skip| try out.print(gpa, "Z {d} {d}\n", .{ skip[0], skip[1] });
-    try out.appendSlice(gpa, "D none\n");
 }
 
 test "every MP3 fixture seeks as FFmpeg seeks it (vectors/seek_mp3.txt)" {
@@ -890,6 +890,11 @@ test "every MP3 fixture seeks as FFmpeg seeks it (vectors/seek_mp3.txt)" {
                 if (std.mem.eql(u8, ret, "0")) {
                     while (pending) |next_line| {
                         if (next_line.len == 0 or next_line[0] == 'K') break;
+                        // The decoded frame: compared from T29b part 3.
+                        if (next_line[0] == 'D') {
+                            pending = lines.next();
+                            continue;
+                        }
                         try expected.appendSlice(gpa, next_line);
                         try expected.append(gpa, '\n');
                         pending = lines.next();

@@ -317,10 +317,6 @@ pub const Probed = struct {
     /// Sample frames in the stream; null for data of unknown length
     /// (`unknown_length`). Raw PCM is counted while validating.
     frame_count: ?u64,
-    /// False for a stream no decoder of the port reads yet (MPEG audio,
-    /// T29a): FFmpeg's reference build has none either, so its sample
-    /// format is unknown.
-    decoded: bool = true,
     /// For a stream whose time base is not 1/rate (MPEG audio's
     /// 1/14112000): its duration in that time base, ffprobe's
     /// `duration_ts`; `frame_count` is it in samples, rounded.
@@ -505,10 +501,12 @@ fn probeMp3(reader: *std.Io.Reader, input: *Input, options: Options) Error!Probe
     return .{
         .container = .mp3,
         .codec = codec,
-        // No decoder: the sample format is unknown (`decoded` false).
-        .format = audio.Format.initLayout(params.sample_rate, .default(params.channels), .s16) catch return error.UnsupportedFormat,
+        // fltp, the sample format the reference build's mp3float decoder
+        // sets when avformat_find_stream_info opens it, for MP1 and MP2 as
+        // well: the demuxer starts every stream as mp3 and the parser names
+        // the layer only after that open (notes.md "MP3").
+        .format = audio.Format.initLayout(params.sample_rate, .default(params.channels), .fltp) catch return error.UnsupportedFormat,
         .frame_count = if (duration >= 0) @intCast(rational.rescale(duration, params.sample_rate, mp3.time_base.den)) else null,
-        .decoded = false,
         .time_base_duration = if (duration >= 0) .{ .ts = duration, .den = @intCast(mp3.time_base.den) } else null,
     };
 }

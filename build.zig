@@ -465,10 +465,11 @@ const probe_cases = [_]ProbeCase{
     .{ .name = "Ogg Opus", .set = .ogg, .fixture = "ogg_opus_stereo", .exit_code = 0, .stdout = "format=ogg\ncodec=opus\nsample_fmt=fltp\nchannels=2\nchannel_layout=stereo\nsample_rate=48000\nnb_samples=11520\nduration_num=11520\nduration_den=48000\n", .stderr = "" },
     .{ .name = "Ogg Opus mono", .set = .ogg, .fixture = "ogg_opus_ffmpeg_mono", .exit_code = 0, .stdout_contains = "sample_fmt=fltp\nchannels=1\nchannel_layout=mono\n", .stderr = "" },
     .{ .name = "Ogg Opus from a pipe", .set = .ogg, .args = &.{"-"}, .stdin_fixture = "ogg_opus_stereo", .exit_code = 0, .stdout_contains = "nb_samples=N/A\n", .stderr = "" },
-    // T29a: MPEG audio, not decoded: no sample format, the duration in the
-    // demuxer's 1/14112000 time base.
-    .{ .name = "MP3 with a Xing tag", .set = .mp3, .fixture = "mp3_xing_lame", .exit_code = 0, .stdout = "format=mp3\ncodec=mp3\nsample_fmt=unknown\nchannels=2\nchannel_layout=stereo\nsample_rate=44100\nnb_samples=32880\nduration_num=10521600\nduration_den=14112000\n", .stderr = "" },
-    .{ .name = "MP2 is named by its layer", .set = .mp3, .fixture = "mp2_layer2_mpeg2_24k", .exit_code = 0, .stdout_contains = "codec=mp2\nsample_fmt=unknown\nchannels=1\nchannel_layout=mono\nsample_rate=24000\n", .stderr = "" },
+    // T29a: MPEG audio, with the sample format the reference's mp3float
+    // decoder opens with (T29b), the duration in the demuxer's 1/14112000
+    // time base.
+    .{ .name = "MP3 with a Xing tag", .set = .mp3, .fixture = "mp3_xing_lame", .exit_code = 0, .stdout = "format=mp3\ncodec=mp3\nsample_fmt=fltp\nchannels=2\nchannel_layout=stereo\nsample_rate=44100\nnb_samples=32880\nduration_num=10521600\nduration_den=14112000\n", .stderr = "" },
+    .{ .name = "MP2 is named by its layer", .set = .mp3, .fixture = "mp2_layer2_mpeg2_24k", .exit_code = 0, .stdout_contains = "codec=mp2\nsample_fmt=fltp\nchannels=1\nchannel_layout=mono\nsample_rate=24000\n", .stderr = "" },
     .{ .name = "MP3 ID3v2 tags", .set = .mp3, .fixture = "mp3_id3v22_tags", .exit_code = 0, .stdout_contains = "tag:title=v2.2 title\ntag:artist=v2.2 artist\n", .stderr = "" },
     .{ .name = "MP3 from a pipe", .set = .mp3, .args = &.{"-"}, .stdin_fixture = "mp3_xing_lame", .exit_code = 0, .stdout_contains = "codec=mp3\n", .stderr = "" },
     // Named .mp3, it is MP3 by the extension hint at the end of the input,

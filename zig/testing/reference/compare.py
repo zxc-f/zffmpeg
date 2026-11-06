@@ -3129,6 +3129,8 @@ KNOWN_REGISTRY_DIFFERENCES = {
                           "the port has no Vorbis encoder"),
     ("codec", "opus"): (("D.AIL.", "DEAIL."), "FFmpeg's native Opus encoder makes the Opus fixtures (T28a); "
                         "the port has no Opus encoder"),
+    ("codec", "mp3"): (("..AIL.", "D.AIL."), "the reference build's mp3float decoder (T29b part 0); the port "
+                       "decodes MP3 from T29b part 3"),
 }
 
 

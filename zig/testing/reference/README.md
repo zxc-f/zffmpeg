@@ -417,10 +417,12 @@ with the install prefix and:
 ```text
 --cc=clang --disable-everything --disable-autodetect --disable-doc
 --disable-network --disable-x86asm --disable-ffplay --disable-avdevice
---enable-protocol=file,pipe --enable-demuxer=wav,w64,au,aiff,caf,flac,$pcm_formats
---enable-decoder=$pcm_codecs,flac --enable-encoder=$pcm_codecs,flac
---enable-muxer=wav,w64,au,aiff,flac,framecrc,framemd5,streamhash,$pcm_formats
---enable-parser=flac --enable-filter=aresample,volume,asetpts,amix,pan,channelmap,channelsplit,asplit
+--enable-protocol=file,pipe --enable-demuxer=wav,w64,au,aiff,caf,flac,ogg,mp3,$pcm_formats
+--enable-decoder=$pcm_codecs,flac,vorbis,opus,mp3float
+--enable-encoder=$pcm_codecs,flac,vorbis,opus
+--enable-muxer=wav,w64,au,aiff,flac,ogg,oga,opus,framecrc,framemd5,streamhash,$pcm_formats
+--enable-parser=flac,mpegaudio
+--enable-filter=aresample,volume,asetpts,amix,pan,channelmap,channelsplit,asplit
 
 pcm_codecs=pcm_u8,pcm_s8,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,
   pcm_s32be,pcm_s64le,pcm_s64be,pcm_f32le,pcm_f32be,pcm_f64le,pcm_f64be,
@@ -446,7 +448,12 @@ T25a, T25b and T25c graph vectors run (`anull`, `aformat` and
 `atrim` come with the program, which
 selects the few other filters it always needs), and since T26a the FLAC
 demuxer, parser, decoder, encoder (for the five FFmpeg-made fixtures) and
-muxer, and the `framecrc`, `framemd5` and `streamhash` muxers T19b compares. There are no GPL, nonfree, external-library or
+muxer, and the `framecrc`, `framemd5` and `streamhash` muxers T19b compares,
+the Ogg demuxer and the ogg, oga and opus muxers (T27a, T27b), the Vorbis
+and Opus decoders with FFmpeg's native encoders, which make their fixtures
+(T27d, T28), the mp3 demuxer with the mpegaudio parser (T29a), and mp3float,
+FFmpeg's float MP3 decoder and the ffmpeg program's default for MP3 (T29b).
+There are no GPL, nonfree, external-library or
 hardware components, and autodetection is off. `--disable-x86asm` keeps the C
 code paths as the reference and avoids a NASM dependency; inline assembly
 stays, so the FLAC encoder's autocorrelation runs `x86/lpc_init.c`'s SSE2

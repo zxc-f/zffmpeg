@@ -3344,6 +3344,65 @@ names, not as an empty framework.
     T27d's and T28's decoders do (the libm functions it calls ported, as
     T28a's are), FATE's conformance tolerance then holding as a consequence,
     and gapless trimming matches.
+
+    ```text
+    ID / parent: T29b / T29
+    State: implementing (part 0)
+    Supported behavior and explicit exclusions: FFmpeg's mp3float decoder
+      (mpegaudiodec_float.c over mpegaudiodec_template.c), the ffmpeg
+      program's default for MP3: MPEG-1, 2 and 2.5 Layer III, mono, stereo,
+      joint stereo (M/S and intensity), long, short and mixed blocks, the
+      bit reservoir across frames, CRC skipped as FFmpeg skips it, fltp
+      output; its errors and concealment as decode_frame gives them;
+      libavcodec's decode.c around it (skip samples and discard padding,
+      the gapless trim T29a's demuxer sets); MP3 as a zffmpeg input to
+      every PCM output and to FLAC, and zffprobe's fltp. Excluded: Layers
+      I and II (T29c), the fixed-point decoders, mp3adu and mp3on4, the
+      float DSP's x86 and ARM kernels.
+    Needs (verified) / lands with / verified after: T18c, T29a; lands with
+      the demux layer's codec parameters from the decoder (the 2026-11-05
+      review's open "parameters_from_context" finding).
+    Contract and source provenance: port.md's MP3 contract gains decoding;
+      mpegaudiodec_template.c, mpegaudiodec_common.c (the Huffman and
+      scalefactor tables), mpegaudiodata.c, mpegaudio_tablegen.h (the
+      power tables, through cbrt and exp2 as the reference build computes
+      them), mpegaudiodsp_template.c and mpegaudiodsp_data.c (the
+      windows, IMDCT and polyphase synthesis), dct32_template.c,
+      libavutil/float_dsp.c.
+    Required fixtures / optional corpus: generate.py writes Layer III
+      streams that decode to real audio (the reference build has no MP3
+      encoder): side information and scalefactors of every kind, spectra
+      coded with FFmpeg's Huffman tables, count1 tables A and B, every
+      block type with mixed blocks, M/S and intensity stereo, MPEG-2 and
+      2.5 scalefactor partitions, preflag, subblock gain, the reservoir,
+      plus damaged variants (a reservoir pointing before the stream, a
+      Huffman overrun, a truncated frame); FATE's mp3-conformance samples
+      as optional coverage.
+    Ownership, state transitions and limits: one decoder per stream owning
+      its reservoir and synthesis state; flush as FFmpeg's (the reservoir
+      and overlap cleared).
+    Comparison rule and intentional differences: every decoded frame's
+      sample count and samples bit for bit, or the error, as an oracle
+      printing them through libavcodec gives them (mp3_decode_vectors.c);
+      the ffmpeg program's conversions in compare.py.
+    Plan: part 0, the reference build enables mp3float, the contract, the
+      fixture generator and the oracle; part 1, the tables, side
+      information, scalefactors, Huffman decoding and requantization;
+      part 2, stereo processing, reordering, antialiasing, the IMDCT and
+      the polyphase synthesis; part 3, decode.c around it, MP3 in demux,
+      av.convert, zffmpeg and zffprobe, seek_mp3.txt's decoded frames and
+      compare.py; part 4, G3 (allocation sweeps, fuzz entries) and G5.
+    Evidence so far: part 0a: build-ffmpeg.sh enables mp3float. With it,
+      mp3.txt is unchanged; ffprobe reports fltp for every MPEG audio
+      stream, MP1 and MP2 included (the decoder's open sets it, and the
+      demuxer starts every stream as mp3), so zffprobe does too; seek_mp3.txt
+      now holds a decoded frame after each seek (`D` lines; the 42 fixtures'
+      arbitrary payloads decode to silence), which mp3.zig's seek test
+      leaves out until part 3; compare.py records the registry's missing
+      mp3 decoder until part 3 (notes.md "Sample format at open").
+    Remaining work or blocker / next action: part 0b, the fixture generator
+      and mp3_decode_vectors.c.
+    ```
   - [ ] **T29c — Layers I and II.** Needs T29b.
     Done when the required Layer I and II streams match within the same
     tolerance.

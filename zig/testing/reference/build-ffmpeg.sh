@@ -30,7 +30,9 @@ build="$root/.references/ffmpeg-build"
 # T19b), the Ogg demuxer (T27a), the ogg, oga and opus muxers (T27b), the
 # Vorbis decoder and FFmpeg's native Vorbis encoder, which makes the Vorbis
 # fixtures (T27d), the Opus decoder and FFmpeg's native Opus encoder, which
-# makes the Opus fixtures (T28), and the audio filters T24-T25 compare. The ffmpeg program
+# makes the Opus fixtures (T28), FFmpeg's float MP3 decoder, mp3float, the
+# ffmpeg program's default for MP3 (T29b), and the audio filters T24-T25
+# compare. The ffmpeg program
 # selects the few filters it always needs. No GPL, nonfree, external or
 # hardware components.
 pcm_codecs=pcm_u8,pcm_s8,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,pcm_s32be,pcm_s64le,pcm_s64be,pcm_f32le,pcm_f32be,pcm_f64le,pcm_f64be,pcm_alaw,pcm_mulaw
@@ -46,7 +48,7 @@ configure_args=(
     --disable-avdevice
     --enable-protocol=file,pipe
     --enable-demuxer=wav,w64,au,aiff,caf,flac,ogg,mp3,"$pcm_formats"
-    --enable-decoder="$pcm_codecs",flac,vorbis,opus
+    --enable-decoder="$pcm_codecs",flac,vorbis,opus,mp3float
     --enable-encoder="$pcm_codecs",flac,vorbis,opus
     --enable-muxer=wav,w64,au,aiff,flac,ogg,oga,opus,framecrc,framemd5,streamhash,"$pcm_formats"
     --enable-parser=flac,mpegaudio

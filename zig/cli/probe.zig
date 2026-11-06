@@ -158,8 +158,7 @@ fn writeStream(out: *std.Io.Writer, info: av.detect.Probed) std.Io.Writer.Error!
     , .{
         info.container.name(),
         info.codec.name(),
-        // As ffprobe without a decoder for the codec (MPEG audio, T29a).
-        if (info.decoded) format.sample_format.name() else "unknown",
+        format.sample_format.name(),
         format.channelCount(),
     });
     // As ffprobe: `unknown` for an unspecified layout, else FFmpeg's description.
