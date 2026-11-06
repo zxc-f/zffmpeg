@@ -916,6 +916,13 @@ source in `lib/std` before using it on input.
   but freeing first and then assigning `try make()` leaves a freed owner in
   the field when `make` fails, which `deinit` frees again (Ogg's metadata
   update did this: `toOwnedSlice` allocates after a failed remap).
+- Freeing a buffer invalidates every slice into it, not only the ones about
+  to be rebuilt. Reset the whole array of views (`planes = @splat(&.{})`)
+  when its storage goes: a view left for a channel the stream dropped can
+  "fit" again when a later header restores the channel, and is then written
+  after its memory was freed (the Vorbis fuzz harness did this). Tests and
+  fuzz callbacks follow this too; a harness bug makes a fuzz finding
+  unattributable.
 - One owner, one cleanup per path: never both an `errdefer` and a `defer`
   (or a `deinit` in the caller) for the same value. A branch that takes
   ownership of a parsed packet must not leave the outer `errdefer` armed.
@@ -944,6 +951,13 @@ source in `lib/std` before using it on input.
   records (an error name, a shifted timestamp with everything else equal); a
   table keyed only by fixture name counts any failure, including a crash of
   our own tool, as understood.
+- In compare.py, compare two commands' outputs only after both succeeded
+  (status 0) and produced the expected kind of output: two failures with
+  empty stdout compare equal. A recorded refusal checks the exact status
+  and the exact diagnostic together; a helper that accepts "any failure
+  status" with the right spelling weakens the contract it checks.
+  `check_oracle_predicates` fault-injects these predicates; extend it with
+  each new one.
 - An oracle vector set covers the inputs C leaves unspecified when the port
   picks the reference build's value: NaN, ±inf, products past 2^31 and 2^63,
   ties, options at their extremes (`dither_scale` 1000, a pan gain of 1e5).

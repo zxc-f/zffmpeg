@@ -291,6 +291,20 @@ conversions, dither and remix cases, and the new fixtures' Ogg, MP3, FLAC
 and seek vectors), and compare.py: required 6406 passed, 0 failed, 0
 missing; optional 61/61, none skipped.
 
+A review of the round's own changes (`1d21eda` to `e5d1280`) found three
+defects in the new validation code, fixed in a follow-up: the Vorbis fuzz
+callback kept plane views into freed storage when a stream's channel count
+shrank and grew back (a crash attributable to the harness, not the decoder;
+now a regression test and a corpus seed); compare.py's decoded-input FLAC
+cells compared piped outputs without checking either command's status, so
+two failures with empty output passed; and its recorded refusals accepted
+any failure status with the right diagnostic. `refusal_name` now requires
+each error's documented status (`EXIT_STATUS`, from port.md and
+`cli/status.zig`) for zffprobe and zffmpeg, and `check_oracle_predicates`
+fault-injects these predicates on every run. Checks after it: zig build
+test 462/462 in all three modes; compare.py 6406/0/0 required, 61/61
+optional.
+
 Left open, each with the task it must land before:
 
 | Finding | Where | Before |

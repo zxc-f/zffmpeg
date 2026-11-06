@@ -77,7 +77,7 @@ every Zig change starts from the pinned toolchain's rules instead.
 - No union or owner field assigned from a fallible initializer in one expression: bind the result to a local, then assign. No owner stored in `self` while its `errdefer` is armed.
 - Input-derived values: `@intCast` only after a check; `@truncate` with a comment where the C truncates; `+%`/`-%` with the notes.md comment where the C's signed arithmetic wraps on the reference build.
 - No `@trunc`/`@intFromFloat` into an integer, and no `@round`, on a float not proven in range: C's `lrint`/`lrintf`/`rint` and float-to-int stores go through `core/cconv.zig`. Check the receiving C function's parameter width (`av_clip_int16(int)` narrows a `long` first) and keep C's accumulator widths.
-- Replacing an owned field builds the new value in a local before freeing the old one; one cleanup per owner per path (no `errdefer` plus `defer` on the same value).
+- Replacing an owned field builds the new value in a local before freeing the old one; one cleanup per owner per path (no `errdefer` plus `defer` on the same value). Freeing a buffer resets every view into it, tests and fuzz callbacks included.
 - A ported `try` matches what the C does with that error: a loop FFmpeg ends on error (the stream-info read-ahead) ends, it does not fail.
 - A constant copied from C keeps its expression and precedence, derived from the same named values (`(8 + 3) << 4`, not `8 + 2`).
 - No `std.debug.assert` as the only guard of a public contract, no `catch unreachable` / `else => unreachable` on an error input can cause, no `else => unreachable` over `anyerror`.
