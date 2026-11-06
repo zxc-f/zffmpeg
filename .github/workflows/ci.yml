@@ -315,6 +315,16 @@ jobs:
             -lm -pthread -o vorbis-vectors
           LC_ALL=C ./vorbis-vectors zig/testing/fixtures/ogg/*vorbis*.ogg | diff -u zig/testing/vectors/vorbis.txt -
 
+      # The committed T29b oracle must be what this build's mp3float decoder
+      # makes of every MP3 fixture.
+      - name: Check the MP3 decoder vectors (T29b)
+        run: |
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/mp3_decode_vectors.c \
+            .references/ffmpeg-install/lib/libavformat.a .references/ffmpeg-install/lib/libavcodec.a \
+            .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a \
+            -lm -pthread -o mp3-decode-vectors
+          LC_ALL=C ./mp3-decode-vectors zig/testing/fixtures/mp3/*.mp3 | diff -u zig/testing/vectors/mp3_decode.txt -
+
       # The committed T28a oracle must be what this build's Opus decoder
       # makes of every Ogg fixture's first Opus stream.
       - name: Check the Opus decoder vectors (T28a)

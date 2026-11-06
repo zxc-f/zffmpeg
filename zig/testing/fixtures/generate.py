@@ -3550,6 +3550,569 @@ def mpa_frames(count, seed=1, pad_every=3, **header):
             for i in range(count)]
 
 
+# --- Layer III streams that decode to audio (T29b) -------------------------
+#
+# The reference build has no MP3 encoder, so these streams are written here:
+# side information, scalefactors and spectra coded with FFmpeg's own
+# Huffman tables (mpegaudiodec_common.c at the pinned revision, transcribed
+# below), laid out in frames with the bit reservoir as ISO 11172-3 and
+# 13818-3 define it. Nothing here models a psychoacoustic encoder: the
+# spectra are pseudo-random within each Huffman table's range, chosen so that
+# every table, block type, stereo mode and scalefactor layout the decoder
+# reads appears. What FFmpeg's mp3float decoder makes of each stream is
+# mp3_decode_vectors.c's (vectors/mp3_decode.txt).
+
+# mpegaudiodec_common.c's Layer III tables, transcribed (FFmpeg 5d5a38a; LGPL-2.1-or-later,
+# copyright the FFmpeg authors): code lengths and symbols per Huffman table in
+# ff_vlc_init_from_lengths order, table sizes, ff_mpa_huff_data's (table,
+# linbits) by table_select, the count1 tables, scalefactor sizes, the LSF
+# scalefactor partitions and the scalefactor band sizes by sample rate index.
+MPA_HUFFLENS = (
+    3, 3, 2, 1, 6, 6, 5, 5, 5, 3, 3, 3, 1, 6, 6, 5, 5, 5, 3, 2, 2, 2, 8, 8, 7, 6, 7, 7, 7, 7, 6, 6, 6, 6, 3, 3,
+    3, 1, 7, 7, 6, 6, 6, 5, 5, 5, 5, 4, 4, 4, 3, 2, 3, 3, 10, 10, 10, 10, 9, 9, 9, 9, 8, 8, 9, 9, 8, 9, 9, 8, 8,
+    7, 7, 7, 8, 8, 8, 8, 7, 7, 7, 7, 6, 5, 6, 6, 4, 3, 3, 1, 11, 11, 10, 9, 10, 10, 9, 9, 9, 8, 8, 9, 9, 9, 9,
+    8, 8, 8, 7, 8, 8, 8, 8, 8, 8, 8, 8, 6, 6, 6, 4, 4, 2, 3, 3, 2, 9, 9, 8, 8, 9, 9, 8, 8, 8, 8, 7, 7, 7, 8, 8,
+    7, 7, 7, 7, 6, 6, 6, 6, 5, 5, 6, 6, 5, 5, 4, 4, 4, 3, 3, 3, 3, 11, 11, 11, 11, 11, 11, 10, 10, 10, 10, 10,
+    10, 10, 11, 11, 10, 9, 9, 10, 10, 9, 9, 10, 10, 9, 10, 10, 8, 8, 9, 9, 10, 10, 9, 9, 10, 10, 8, 8, 8, 9, 9,
+    9, 9, 9, 9, 8, 8, 8, 8, 8, 8, 7, 7, 7, 7, 6, 6, 6, 6, 4, 3, 3, 1, 10, 10, 10, 10, 10, 10, 10, 11, 11, 10,
+    10, 9, 9, 9, 10, 10, 10, 10, 8, 8, 9, 9, 7, 8, 8, 8, 8, 8, 9, 9, 9, 9, 8, 7, 8, 8, 7, 7, 8, 8, 8, 9, 9, 8,
+    8, 8, 8, 8, 8, 7, 7, 6, 6, 7, 7, 6, 5, 4, 5, 5, 3, 3, 3, 2, 10, 10, 9, 9, 9, 9, 9, 9, 9, 8, 8, 9, 9, 8, 8,
+    8, 8, 8, 8, 9, 9, 8, 8, 8, 8, 8, 9, 9, 7, 7, 7, 8, 8, 8, 8, 8, 8, 7, 7, 7, 7, 8, 8, 7, 7, 7, 6, 6, 6, 6, 7,
+    7, 6, 5, 5, 5, 4, 4, 5, 5, 4, 3, 3, 3, 19, 19, 18, 17, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 17, 17, 15,
+    15, 16, 16, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 16, 16, 15, 16, 16, 14, 14, 15, 15, 15, 15, 14, 14, 14,
+    14, 14, 14, 14, 14, 14, 14, 14, 15, 15, 14, 13, 14, 14, 13, 13, 14, 14, 13, 14, 14, 13, 14, 14, 13, 14, 14,
+    13, 13, 14, 14, 12, 12, 12, 13, 13, 13, 13, 13, 13, 12, 13, 13, 12, 12, 13, 13, 13, 13, 13, 13, 13, 13, 13,
+    13, 13, 13, 12, 12, 13, 13, 12, 12, 12, 12, 13, 13, 13, 13, 12, 13, 13, 12, 11, 12, 12, 12, 12, 12, 12, 12,
+    12, 11, 11, 11, 11, 12, 12, 11, 11, 12, 12, 11, 12, 12, 12, 12, 11, 11, 12, 12, 11, 12, 12, 11, 12, 12, 11,
+    12, 12, 10, 10, 10, 11, 11, 11, 11, 11, 11, 11, 11, 10, 10, 10, 10, 11, 11, 10, 11, 11, 10, 11, 11, 11, 11,
+    10, 10, 11, 11, 10, 10, 11, 11, 11, 11, 11, 11, 9, 9, 10, 10, 10, 10, 10, 11, 11, 9, 9, 9, 10, 10, 9, 9, 10,
+    10, 10, 10, 10, 10, 10, 10, 10, 10, 8, 9, 9, 9, 9, 9, 9, 10, 10, 9, 9, 9, 8, 8, 9, 9, 9, 9, 9, 9, 8, 7, 8,
+    8, 8, 8, 7, 7, 7, 7, 7, 6, 6, 6, 6, 4, 4, 3, 1, 13, 13, 13, 13, 12, 13, 13, 13, 13, 13, 13, 12, 13, 13, 12,
+    12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 13, 13, 11, 11, 12,
+    12, 12, 12, 11, 11, 11, 11, 11, 11, 12, 12, 11, 11, 11, 11, 11, 11, 11, 11, 12, 12, 11, 11, 11, 11, 11, 11,
+    11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 12, 12, 11, 11, 11, 11, 11, 11,
+    10, 11, 11, 11, 11, 11, 11, 10, 10, 11, 11, 10, 10, 10, 10, 11, 11, 10, 10, 10, 10, 10, 10, 10, 11, 11, 10,
+    10, 10, 10, 10, 11, 11, 9, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 9, 10, 10, 10, 10, 9, 10, 10, 9,
+    10, 10, 10, 10, 10, 10, 10, 10, 9, 9, 9, 9, 9, 9, 9, 10, 10, 9, 9, 9, 9, 9, 9, 10, 10, 9, 9, 9, 9, 9, 9, 8,
+    9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 8, 8, 8, 8, 9, 9, 9, 9, 9, 9, 9, 9, 8, 8, 8, 8, 8, 8, 9, 9, 8, 8, 8, 8, 8, 8,
+    8, 9, 9, 8, 7, 8, 8, 7, 7, 7, 7, 8, 8, 7, 7, 7, 7, 7, 6, 7, 7, 6, 6, 7, 7, 6, 6, 6, 5, 5, 5, 5, 5, 3, 4, 4,
+    3, 11, 11, 11, 11, 11, 11, 11, 11, 10, 11, 11, 11, 11, 10, 10, 10, 10, 10, 8, 10, 10, 9, 9, 9, 9, 10, 16,
+    17, 17, 15, 15, 16, 16, 14, 15, 15, 14, 14, 15, 15, 14, 14, 15, 15, 15, 15, 14, 15, 15, 14, 13, 8, 9, 9, 8,
+    8, 13, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 13, 13, 14, 14, 14, 14, 13, 14, 14, 13, 13, 13, 14, 14, 14,
+    14, 13, 13, 14, 14, 13, 14, 14, 12, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 12, 13, 13, 13,
+    13, 13, 13, 12, 13, 13, 12, 12, 13, 13, 11, 12, 12, 12, 12, 12, 12, 12, 13, 13, 11, 12, 12, 12, 12, 11, 12,
+    12, 12, 12, 12, 12, 12, 12, 11, 12, 12, 11, 11, 11, 11, 12, 12, 12, 12, 12, 12, 12, 12, 11, 12, 12, 11, 12,
+    12, 11, 12, 12, 11, 12, 12, 11, 10, 10, 11, 11, 11, 11, 11, 11, 10, 10, 11, 11, 10, 10, 11, 11, 11, 11, 11,
+    11, 11, 11, 10, 11, 11, 10, 10, 10, 11, 11, 10, 10, 11, 11, 10, 10, 11, 11, 10, 9, 9, 10, 10, 10, 10, 10,
+    10, 9, 9, 9, 10, 10, 9, 10, 10, 9, 9, 8, 9, 9, 9, 9, 9, 9, 9, 9, 8, 8, 9, 9, 8, 8, 7, 7, 8, 8, 7, 6, 6, 6,
+    6, 4, 4, 3, 1, 8, 8, 8, 8, 8, 8, 8, 8, 7, 8, 8, 7, 7, 8, 8, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 8, 8, 9, 11,
+    11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11,
+    4, 11, 11, 11, 11, 12, 12, 11, 10, 11, 11, 10, 10, 10, 10, 11, 11, 10, 10, 10, 10, 11, 11, 10, 10, 10, 10,
+    10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10,
+    10, 10, 10, 10, 10, 10, 10, 10, 11, 11, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 11, 11, 10, 11,
+    11, 10, 9, 10, 10, 10, 10, 11, 11, 10, 9, 9, 10, 10, 9, 10, 10, 10, 10, 9, 9, 10, 10, 9, 9, 9, 9, 9, 9, 9,
+    9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 10, 10, 9, 9, 9, 10,
+    10, 8, 9, 9, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 9, 9, 8, 8, 8, 8, 8, 8, 9, 9, 7, 8, 8, 7, 7, 7, 7, 7, 8,
+    8, 7, 7, 6, 6, 7, 7, 6, 5, 5, 6, 6, 4, 4, 4, 4,
+)
+MPA_HUFFSYMBOLS = (
+    0x11, 0x01, 0x10, 0x00, 0x22, 0x02, 0x12, 0x21, 0x20, 0x11, 0x01, 0x10, 0x00, 0x22, 0x02, 0x12, 0x21, 0x20,
+    0x10, 0x11, 0x01, 0x00, 0x33, 0x23, 0x32, 0x31, 0x13, 0x03, 0x30, 0x22, 0x12, 0x21, 0x02, 0x20, 0x11, 0x01,
+    0x10, 0x00, 0x33, 0x03, 0x23, 0x32, 0x30, 0x13, 0x31, 0x22, 0x02, 0x12, 0x21, 0x20, 0x01, 0x11, 0x10, 0x00,
+    0x55, 0x45, 0x54, 0x53, 0x35, 0x44, 0x25, 0x52, 0x15, 0x51, 0x05, 0x34, 0x50, 0x43, 0x33, 0x24, 0x42, 0x14,
+    0x41, 0x40, 0x04, 0x23, 0x32, 0x03, 0x13, 0x31, 0x30, 0x22, 0x12, 0x21, 0x02, 0x20, 0x11, 0x01, 0x10, 0x00,
+    0x55, 0x54, 0x45, 0x53, 0x35, 0x44, 0x25, 0x52, 0x05, 0x15, 0x51, 0x34, 0x43, 0x50, 0x33, 0x24, 0x42, 0x14,
+    0x41, 0x04, 0x40, 0x23, 0x32, 0x13, 0x31, 0x03, 0x30, 0x22, 0x02, 0x20, 0x12, 0x21, 0x11, 0x01, 0x10, 0x00,
+    0x55, 0x45, 0x35, 0x53, 0x54, 0x05, 0x44, 0x25, 0x52, 0x15, 0x51, 0x34, 0x43, 0x50, 0x04, 0x24, 0x42, 0x33,
+    0x40, 0x14, 0x41, 0x23, 0x32, 0x13, 0x31, 0x03, 0x30, 0x22, 0x02, 0x12, 0x21, 0x20, 0x11, 0x01, 0x10, 0x00,
+    0x77, 0x67, 0x76, 0x57, 0x75, 0x66, 0x47, 0x74, 0x56, 0x65, 0x37, 0x73, 0x46, 0x55, 0x54, 0x63, 0x27, 0x72,
+    0x64, 0x07, 0x70, 0x62, 0x45, 0x35, 0x06, 0x53, 0x44, 0x17, 0x71, 0x36, 0x26, 0x25, 0x52, 0x15, 0x51, 0x34,
+    0x43, 0x16, 0x61, 0x60, 0x05, 0x50, 0x24, 0x42, 0x33, 0x04, 0x14, 0x41, 0x40, 0x23, 0x32, 0x03, 0x13, 0x31,
+    0x30, 0x22, 0x12, 0x21, 0x02, 0x20, 0x11, 0x01, 0x10, 0x00, 0x77, 0x67, 0x76, 0x75, 0x66, 0x47, 0x74, 0x57,
+    0x55, 0x56, 0x65, 0x37, 0x73, 0x46, 0x45, 0x54, 0x35, 0x53, 0x27, 0x72, 0x64, 0x07, 0x71, 0x17, 0x70, 0x36,
+    0x63, 0x60, 0x44, 0x25, 0x52, 0x05, 0x15, 0x62, 0x26, 0x06, 0x16, 0x61, 0x51, 0x34, 0x50, 0x43, 0x33, 0x24,
+    0x42, 0x14, 0x41, 0x04, 0x40, 0x23, 0x32, 0x13, 0x31, 0x03, 0x30, 0x22, 0x21, 0x12, 0x02, 0x20, 0x11, 0x01,
+    0x10, 0x00, 0x77, 0x67, 0x76, 0x57, 0x75, 0x66, 0x47, 0x74, 0x65, 0x56, 0x37, 0x73, 0x55, 0x27, 0x72, 0x46,
+    0x64, 0x17, 0x71, 0x07, 0x70, 0x36, 0x63, 0x45, 0x54, 0x44, 0x06, 0x05, 0x26, 0x62, 0x61, 0x16, 0x60, 0x35,
+    0x53, 0x25, 0x52, 0x15, 0x51, 0x34, 0x43, 0x50, 0x04, 0x24, 0x42, 0x14, 0x33, 0x41, 0x23, 0x32, 0x40, 0x03,
+    0x30, 0x13, 0x31, 0x22, 0x12, 0x21, 0x02, 0x20, 0x00, 0x11, 0x01, 0x10, 0xFE, 0xFC, 0xFD, 0xED, 0xFF, 0xEF,
+    0xDF, 0xEE, 0xCF, 0xDE, 0xBF, 0xFB, 0xCE, 0xDC, 0xAF, 0xE9, 0xEC, 0xDD, 0xFA, 0xCD, 0xBE, 0xEB, 0x9F, 0xF9,
+    0xEA, 0xBD, 0xDB, 0x8F, 0xF8, 0xCC, 0xAE, 0x9E, 0x8E, 0x7F, 0x7E, 0xF7, 0xDA, 0xAD, 0xBC, 0xCB, 0xF6, 0x6F,
+    0xE8, 0x5F, 0x9D, 0xD9, 0xF5, 0xE7, 0xAC, 0xBB, 0x4F, 0xF4, 0xCA, 0xE6, 0xF3, 0x3F, 0x8D, 0xD8, 0x2F, 0xF2,
+    0x6E, 0x9C, 0x0F, 0xC9, 0x5E, 0xAB, 0x7D, 0xD7, 0x4E, 0xC8, 0xD6, 0x3E, 0xB9, 0x9B, 0xAA, 0x1F, 0xF1, 0xF0,
+    0xBA, 0xE5, 0xE4, 0x8C, 0x6D, 0xE3, 0xE2, 0x2E, 0x0E, 0x1E, 0xE1, 0xE0, 0x5D, 0xD5, 0x7C, 0xC7, 0x4D, 0x8B,
+    0xB8, 0xD4, 0x9A, 0xA9, 0x6C, 0xC6, 0x3D, 0xD3, 0x7B, 0x2D, 0xD2, 0x1D, 0xB7, 0x5C, 0xC5, 0x99, 0x7A, 0xC3,
+    0xA7, 0x97, 0x4B, 0xD1, 0x0D, 0xD0, 0x8A, 0xA8, 0x4C, 0xC4, 0x6B, 0xB6, 0x3C, 0x2C, 0xC2, 0x5B, 0xB5, 0x89,
+    0x1C, 0xC1, 0x98, 0x0C, 0xC0, 0xB4, 0x6A, 0xA6, 0x79, 0x3B, 0xB3, 0x88, 0x5A, 0x2B, 0xA5, 0x69, 0xA4, 0x78,
+    0x87, 0x94, 0x77, 0x76, 0xB2, 0x1B, 0xB1, 0x0B, 0xB0, 0x96, 0x4A, 0x3A, 0xA3, 0x59, 0x95, 0x2A, 0xA2, 0x1A,
+    0xA1, 0x0A, 0x68, 0xA0, 0x86, 0x49, 0x93, 0x39, 0x58, 0x85, 0x67, 0x29, 0x92, 0x57, 0x75, 0x38, 0x83, 0x66,
+    0x47, 0x74, 0x56, 0x65, 0x73, 0x19, 0x91, 0x09, 0x90, 0x48, 0x84, 0x72, 0x46, 0x64, 0x28, 0x82, 0x18, 0x37,
+    0x27, 0x17, 0x71, 0x55, 0x07, 0x70, 0x36, 0x63, 0x45, 0x54, 0x26, 0x62, 0x35, 0x81, 0x08, 0x80, 0x16, 0x61,
+    0x06, 0x60, 0x53, 0x44, 0x25, 0x52, 0x05, 0x15, 0x51, 0x34, 0x43, 0x50, 0x24, 0x42, 0x33, 0x14, 0x41, 0x04,
+    0x40, 0x23, 0x32, 0x13, 0x31, 0x03, 0x30, 0x22, 0x12, 0x21, 0x02, 0x20, 0x11, 0x01, 0x10, 0x00, 0xFF, 0xEF,
+    0xFE, 0xDF, 0xEE, 0xFD, 0xCF, 0xFC, 0xDE, 0xED, 0xBF, 0xFB, 0xCE, 0xEC, 0xDD, 0xAF, 0xFA, 0xBE, 0xEB, 0xCD,
+    0xDC, 0x9F, 0xF9, 0xEA, 0xBD, 0xDB, 0x8F, 0xF8, 0xCC, 0x9E, 0xE9, 0x7F, 0xF7, 0xAD, 0xDA, 0xBC, 0x6F, 0xAE,
+    0x0F, 0xCB, 0xF6, 0x8E, 0xE8, 0x5F, 0x9D, 0xF5, 0x7E, 0xE7, 0xAC, 0xCA, 0xBB, 0xD9, 0x8D, 0x4F, 0xF4, 0x3F,
+    0xF3, 0xD8, 0xE6, 0x2F, 0xF2, 0x6E, 0xF0, 0x1F, 0xF1, 0x9C, 0xC9, 0x5E, 0xAB, 0xBA, 0xE5, 0x7D, 0xD7, 0x4E,
+    0xE4, 0x8C, 0xC8, 0x3E, 0x6D, 0xD6, 0xE3, 0x9B, 0xB9, 0x2E, 0xAA, 0xE2, 0x1E, 0xE1, 0x0E, 0xE0, 0x5D, 0xD5,
+    0x7C, 0xC7, 0x4D, 0x8B, 0xD4, 0xB8, 0x9A, 0xA9, 0x6C, 0xC6, 0x3D, 0xD3, 0xD2, 0x2D, 0x0D, 0x1D, 0x7B, 0xB7,
+    0xD1, 0x5C, 0xD0, 0xC5, 0x8A, 0xA8, 0x4C, 0xC4, 0x6B, 0xB6, 0x99, 0x0C, 0x3C, 0xC3, 0x7A, 0xA7, 0xA6, 0xC0,
+    0x0B, 0xC2, 0x2C, 0x5B, 0xB5, 0x1C, 0x89, 0x98, 0xC1, 0x4B, 0xB4, 0x6A, 0x3B, 0x79, 0xB3, 0x97, 0x88, 0x2B,
+    0x5A, 0xB2, 0xA5, 0x1B, 0xB1, 0xB0, 0x69, 0x96, 0x4A, 0xA4, 0x78, 0x87, 0x3A, 0xA3, 0x59, 0x95, 0x2A, 0xA2,
+    0x1A, 0xA1, 0x0A, 0xA0, 0x68, 0x86, 0x49, 0x94, 0x39, 0x93, 0x77, 0x09, 0x58, 0x85, 0x29, 0x67, 0x76, 0x92,
+    0x91, 0x19, 0x90, 0x48, 0x84, 0x57, 0x75, 0x38, 0x83, 0x66, 0x47, 0x28, 0x82, 0x18, 0x81, 0x74, 0x08, 0x80,
+    0x56, 0x65, 0x37, 0x73, 0x46, 0x27, 0x72, 0x64, 0x17, 0x55, 0x71, 0x07, 0x70, 0x36, 0x63, 0x45, 0x54, 0x26,
+    0x62, 0x16, 0x06, 0x60, 0x35, 0x61, 0x53, 0x44, 0x25, 0x52, 0x15, 0x51, 0x05, 0x50, 0x34, 0x43, 0x24, 0x42,
+    0x33, 0x41, 0x14, 0x04, 0x23, 0x32, 0x40, 0x03, 0x13, 0x31, 0x30, 0x22, 0x12, 0x21, 0x02, 0x20, 0x11, 0x01,
+    0x10, 0x00, 0xEF, 0xFE, 0xDF, 0xFD, 0xCF, 0xFC, 0xBF, 0xFB, 0xAF, 0xFA, 0x9F, 0xF9, 0xF8, 0x8F, 0x7F, 0xF7,
+    0x6F, 0xF6, 0xFF, 0x5F, 0xF5, 0x4F, 0xF4, 0xF3, 0xF0, 0x3F, 0xCE, 0xEC, 0xDD, 0xDE, 0xE9, 0xEA, 0xD9, 0xEE,
+    0xED, 0xEB, 0xBE, 0xCD, 0xDC, 0xDB, 0xAE, 0xCC, 0xAD, 0xDA, 0x7E, 0xAC, 0xCA, 0xC9, 0x7D, 0x5E, 0xBD, 0xF2,
+    0x2F, 0x0F, 0x1F, 0xF1, 0x9E, 0xBC, 0xCB, 0x8E, 0xE8, 0x9D, 0xE7, 0xBB, 0x8D, 0xD8, 0x6E, 0xE6, 0x9C, 0xAB,
+    0xBA, 0xE5, 0xD7, 0x4E, 0xE4, 0x8C, 0xC8, 0x3E, 0x6D, 0xD6, 0x9B, 0xB9, 0xAA, 0xE1, 0xD4, 0xB8, 0xA9, 0x7B,
+    0xB7, 0xD0, 0xE3, 0x0E, 0xE0, 0x5D, 0xD5, 0x7C, 0xC7, 0x4D, 0x8B, 0x9A, 0x6C, 0xC6, 0x3D, 0x5C, 0xC5, 0x0D,
+    0x8A, 0xA8, 0x99, 0x4C, 0xB6, 0x7A, 0x3C, 0x5B, 0x89, 0x1C, 0xC0, 0x98, 0x79, 0xE2, 0x2E, 0x1E, 0xD3, 0x2D,
+    0xD2, 0xD1, 0x3B, 0x97, 0x88, 0x1D, 0xC4, 0x6B, 0xC3, 0xA7, 0x2C, 0xC2, 0xB5, 0xC1, 0x0C, 0x4B, 0xB4, 0x6A,
+    0xA6, 0xB3, 0x5A, 0xA5, 0x2B, 0xB2, 0x1B, 0xB1, 0x0B, 0xB0, 0x69, 0x96, 0x4A, 0xA4, 0x78, 0x87, 0xA3, 0x3A,
+    0x59, 0x2A, 0x95, 0x68, 0xA1, 0x86, 0x77, 0x94, 0x49, 0x57, 0x67, 0xA2, 0x1A, 0x0A, 0xA0, 0x39, 0x93, 0x58,
+    0x85, 0x29, 0x92, 0x76, 0x09, 0x19, 0x91, 0x90, 0x48, 0x84, 0x75, 0x38, 0x83, 0x66, 0x28, 0x82, 0x47, 0x74,
+    0x18, 0x81, 0x80, 0x08, 0x56, 0x37, 0x73, 0x65, 0x46, 0x27, 0x72, 0x64, 0x55, 0x07, 0x17, 0x71, 0x70, 0x36,
+    0x63, 0x45, 0x54, 0x26, 0x62, 0x16, 0x61, 0x06, 0x60, 0x53, 0x35, 0x44, 0x25, 0x52, 0x51, 0x15, 0x05, 0x34,
+    0x43, 0x50, 0x24, 0x42, 0x33, 0x14, 0x41, 0x04, 0x40, 0x23, 0x32, 0x13, 0x31, 0x03, 0x30, 0x22, 0x12, 0x21,
+    0x02, 0x20, 0x11, 0x01, 0x10, 0x00, 0xEF, 0xFE, 0xDF, 0xFD, 0xCF, 0xFC, 0xBF, 0xFB, 0xFA, 0xAF, 0x9F, 0xF9,
+    0xF8, 0x8F, 0x7F, 0xF7, 0x6F, 0xF6, 0x5F, 0xF5, 0x4F, 0xF4, 0x3F, 0xF3, 0x2F, 0xF2, 0xF1, 0x1F, 0xF0, 0x0F,
+    0xEE, 0xDE, 0xED, 0xCE, 0xEC, 0xDD, 0xBE, 0xEB, 0xCD, 0xDC, 0xAE, 0xEA, 0xBD, 0xDB, 0xCC, 0x9E, 0xE9, 0xAD,
+    0xDA, 0xBC, 0xCB, 0x8E, 0xE8, 0x9D, 0xD9, 0x7E, 0xE7, 0xAC, 0xFF, 0xCA, 0xBB, 0x8D, 0xD8, 0x0E, 0xE0, 0x0D,
+    0xE6, 0x6E, 0x9C, 0xC9, 0x5E, 0xBA, 0xE5, 0xAB, 0x7D, 0xD7, 0xE4, 0x8C, 0xC8, 0x4E, 0x2E, 0x3E, 0x6D, 0xD6,
+    0xE3, 0x9B, 0xB9, 0xAA, 0xE2, 0x1E, 0xE1, 0x5D, 0xD5, 0x7C, 0xC7, 0x4D, 0x8B, 0xB8, 0xD4, 0x9A, 0xA9, 0x6C,
+    0xC6, 0x3D, 0xD3, 0x2D, 0xD2, 0x1D, 0x7B, 0xB7, 0xD1, 0x5C, 0xC5, 0x8A, 0xA8, 0x99, 0x4C, 0xC4, 0x6B, 0xB6,
+    0xD0, 0x0C, 0x3C, 0xC3, 0x7A, 0xA7, 0x2C, 0xC2, 0x5B, 0xB5, 0x1C, 0x89, 0x98, 0xC1, 0x4B, 0xC0, 0x0B, 0x3B,
+    0xB0, 0x0A, 0x1A, 0xB4, 0x6A, 0xA6, 0x79, 0x97, 0xA0, 0x09, 0x90, 0xB3, 0x88, 0x2B, 0x5A, 0xB2, 0xA5, 0x1B,
+    0xB1, 0x69, 0x96, 0xA4, 0x4A, 0x78, 0x87, 0x3A, 0xA3, 0x59, 0x95, 0x2A, 0xA2, 0xA1, 0x68, 0x86, 0x77, 0x49,
+    0x94, 0x39, 0x93, 0x58, 0x85, 0x29, 0x67, 0x76, 0x92, 0x19, 0x91, 0x48, 0x84, 0x57, 0x75, 0x38, 0x83, 0x66,
+    0x28, 0x82, 0x18, 0x47, 0x74, 0x81, 0x08, 0x80, 0x56, 0x65, 0x17, 0x07, 0x70, 0x73, 0x37, 0x27, 0x72, 0x46,
+    0x64, 0x55, 0x71, 0x36, 0x63, 0x45, 0x54, 0x26, 0x62, 0x16, 0x61, 0x06, 0x60, 0x35, 0x53, 0x44, 0x25, 0x52,
+    0x15, 0x05, 0x50, 0x51, 0x34, 0x43, 0x24, 0x42, 0x33, 0x14, 0x41, 0x04, 0x40, 0x23, 0x32, 0x13, 0x31, 0x03,
+    0x30, 0x22, 0x12, 0x21, 0x02, 0x20, 0x11, 0x01, 0x10, 0x00,
+)
+MPA_HUFF_SIZES = (4, 9, 9, 16, 16, 36, 36, 36, 64, 64, 64, 256, 256, 256, 256)
+MPA_HUFF_DATA = ((0, 0), (1, 0), (2, 0), (3, 0), (0, 0), (4, 0), (5, 0), (6, 0), (7, 0), (8, 0), (9, 0), (10, 0), (11, 0), (12, 0), (0, 0), (13, 0), (14, 1), (14, 2), (14, 3), (14, 4), (14, 6), (14, 8), (14, 10), (14, 13), (15, 4), (15, 5), (15, 6), (15, 7), (15, 8), (15, 9), (15, 11), (15, 13))
+MPA_QUAD_CODES = (
+    (1, 5, 4, 5, 6, 5, 4, 4, 7, 3, 6, 0, 7, 2, 3, 1,),
+    (15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,),
+)
+MPA_QUAD_BITS = (
+    (1, 4, 4, 5, 4, 6, 5, 6, 4, 5, 5, 6, 5, 6, 6, 6,),
+    (4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,),
+)
+MPA_SLEN = (
+    (0, 0, 0, 0, 3, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4,),
+    (0, 1, 2, 3, 0, 1, 2, 3, 1, 2, 3, 1, 2, 3, 2, 3,),
+)
+MPA_LSF_NSF = (
+    ((6, 5, 5, 5), (9, 9, 9, 9), (6, 9, 9, 9)),
+    ((6, 5, 7, 3), (9, 9, 12, 6), (6, 9, 12, 6)),
+    ((11, 10, 0, 0), (18, 18, 0, 0), (15, 18, 0, 0)),
+    ((7, 7, 7, 0), (12, 12, 12, 0), (6, 15, 12, 0)),
+    ((6, 6, 6, 3), (12, 9, 9, 6), (6, 12, 9, 6)),
+    ((8, 8, 5, 0), (15, 12, 9, 0), (6, 18, 9, 0)),
+)
+MPA_BAND_SIZE_LONG = (
+    (4, 4, 4, 4, 4, 4, 6, 6, 8, 8, 10, 12, 16, 20, 24, 28, 34, 42, 50, 54, 76, 158,),
+    (4, 4, 4, 4, 4, 4, 6, 6, 6, 8, 10, 12, 16, 18, 22, 28, 34, 40, 46, 54, 54, 192,),
+    (4, 4, 4, 4, 4, 4, 6, 6, 8, 10, 12, 16, 20, 24, 30, 38, 46, 56, 68, 84, 102, 26,),
+    (6, 6, 6, 6, 6, 6, 8, 10, 12, 14, 16, 20, 24, 28, 32, 38, 46, 52, 60, 68, 58, 54,),
+    (6, 6, 6, 6, 6, 6, 8, 10, 12, 14, 16, 18, 22, 26, 32, 38, 46, 54, 62, 70, 76, 36,),
+    (6, 6, 6, 6, 6, 6, 8, 10, 12, 14, 16, 20, 24, 28, 32, 38, 46, 52, 60, 68, 58, 54,),
+    (6, 6, 6, 6, 6, 6, 8, 10, 12, 14, 16, 20, 24, 28, 32, 38, 46, 52, 60, 68, 58, 54,),
+    (6, 6, 6, 6, 6, 6, 8, 10, 12, 14, 16, 20, 24, 28, 32, 38, 46, 52, 60, 68, 58, 54,),
+    (12, 12, 12, 12, 12, 12, 16, 20, 24, 28, 32, 40, 48, 56, 64, 76, 90, 2, 2, 2, 2, 2,),
+)
+MPA_BAND_SIZE_SHORT = (
+    (4, 4, 4, 4, 6, 8, 10, 12, 14, 18, 22, 30, 56,),
+    (4, 4, 4, 4, 6, 6, 10, 12, 14, 16, 20, 26, 66,),
+    (4, 4, 4, 4, 6, 8, 12, 16, 20, 26, 34, 42, 12,),
+    (4, 4, 4, 6, 6, 8, 10, 14, 18, 26, 32, 42, 18,),
+    (4, 4, 4, 6, 8, 10, 12, 14, 18, 24, 32, 44, 12,),
+    (4, 4, 4, 6, 8, 10, 12, 14, 18, 24, 30, 40, 18,),
+    (4, 4, 4, 6, 8, 10, 12, 14, 18, 24, 30, 40, 18,),
+    (4, 4, 4, 6, 8, 10, 12, 14, 18, 24, 30, 40, 18,),
+    (8, 8, 8, 12, 16, 20, 24, 28, 36, 2, 2, 2, 26,),
+)
+MPA_PRETAB = (
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,),
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 3, 3, 3, 2, 0,),
+)
+
+
+def mpa_huff_codes(table):
+    """Huffman table `table` (1-15, the decoder's ff_huff_vlc index) as
+    {(x, y): (code, bits)}, with the codes ff_vlc_init_from_lengths assigns:
+    in table order, each the next left-aligned 32-bit code of its length."""
+    start = sum(MPA_HUFF_SIZES[:table - 1])
+    codes = {}
+    code = 0
+    for i in range(MPA_HUFF_SIZES[table - 1]):
+        length, symbol = MPA_HUFFLENS[start + i], MPA_HUFFSYMBOLS[start + i]
+        codes[(symbol >> 4, symbol & 15)] = (code >> (32 - length), length)
+        code += 1 << (32 - length)
+    assert code == 1 << 32, table
+    return codes
+
+
+MPA_HUFF_CODES = {t: mpa_huff_codes(t) for t in range(1, 16)}
+# The largest |value| each table_select codes: its table's largest symbol,
+# plus its linbits beyond 15 (0 for the empty tables 0, 4 and 14).
+MPA_TABLE_MAX = tuple(
+    0 if not table else (15 + (1 << linbits) - 1 if max(x for x, _ in MPA_HUFF_CODES[table]) == 15 else
+                         max(x for x, _ in MPA_HUFF_CODES[table]))
+    for table, linbits in MPA_HUFF_DATA)
+MPA_BAND_INDEX_LONG = tuple(tuple(sum(size >> 1 for size in row[:j]) for j in range(23)) for row in MPA_BAND_SIZE_LONG)
+
+
+class Lcg:
+    """A 32-bit LCG (Numerical Recipes), stable across Python versions."""
+
+    def __init__(self, seed):
+        self.state = seed & 0xFFFFFFFF
+
+    def next(self):
+        self.state = (self.state * 1664525 + 1013904223) & 0xFFFFFFFF
+        return self.state
+
+    def below(self, n):
+        return (self.next() >> 8) % n
+
+    def chance(self, numerator, denominator):
+        return self.below(denominator) < numerator
+
+
+def mpa_crc16(data, crc=0xFFFF):
+    """ISO 11172-3's CRC-16 (polynomial 0x8005), MSB first."""
+    for b in data:
+        crc ^= b << 8
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x8005) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
+    return crc
+
+
+class L3Granule:
+    """One granule of one channel: its side information and spectrum."""
+
+    def __init__(self):
+        self.block_type = 0
+        self.window_switching = False
+        self.mixed = False
+        self.table_select = [0, 0, 0]
+        self.subblock_gain = [0, 0, 0]
+        self.region0 = 0  # region_address1 (long blocks)
+        self.region1 = 0  # region_address2
+        self.global_gain = 160
+        self.scalefac_compress = 0
+        self.scalefac_scale = 0
+        self.preflag = 0
+        self.count1table = 0
+        self.scalefactors = []  # (bits, value) in bitstream order
+        self.values = [0] * 576  # quantized spectrum, bitstream order
+        self.big_values = 0
+        self.count1_end = 0  # samples covered by big values and count1 quads
+        self.part2_3_length = None  # set by `encode`, or forced
+        self.bits = None
+
+
+def l3_regions(g, rate_index):
+    """region_size[0..2] in pairs, as the decoder's init_*_region and
+    region_offset2size compute them from the side information."""
+    if g.window_switching:
+        if g.block_type == 2:
+            sizes = [72 // 2 if rate_index == 8 else 36 // 2, 576 // 2]
+        elif rate_index <= 2:
+            sizes = [36 // 2, 576 // 2]
+        elif rate_index != 8:
+            sizes = [54 // 2, 576 // 2]
+        else:
+            sizes = [108 // 2, 576 // 2]
+    else:
+        index = MPA_BAND_INDEX_LONG[rate_index]
+        sizes = [index[g.region0 + 1], index[min(g.region0 + g.region1 + 2, 22)]]
+    sizes.append(576 // 2)
+    out, j = [], 0
+    for s in sizes:
+        k = min(s, g.big_values)
+        out.append(k - j)
+        j = k
+    return out
+
+
+def l3_encode(g, rate_index):
+    """The granule's part 2 and 3 (scalefactors, then the Huffman-coded
+    spectrum) as a BitWriter, in the order huffman_decode reads it."""
+    w = BitWriter()
+    for bits, value in g.scalefactors:
+        w.put(bits, value)
+    s = 0
+    for region, pairs in enumerate(l3_regions(g, rate_index)):
+        table, linbits = MPA_HUFF_DATA[g.table_select[region]]
+        for _ in range(pairs):
+            x, y = g.values[s], g.values[s + 1]
+            s += 2
+            if not table:
+                assert x == 0 and y == 0, "a value in a region of an empty table"
+                continue
+            ax, ay = abs(x), abs(y)
+            assert max(ax, ay) <= MPA_TABLE_MAX[g.table_select[region]], (g.table_select[region], ax, ay)
+            code, length = MPA_HUFF_CODES[table][(min(ax, 15), min(ay, 15))]
+            w.put(length, code)
+            for v, a in ((x, ax), (y, ay)):
+                if a >= 15 and linbits:
+                    w.put(linbits, a - 15)
+                if a:
+                    w.put(1, 1 if v < 0 else 0)
+    while s < g.count1_end:
+        quad = g.values[s:s + 4]
+        assert all(abs(v) <= 1 for v in quad)
+        q = sum(1 << (3 - i) for i, v in enumerate(quad) if v)
+        w.put(MPA_QUAD_BITS[g.count1table][q], MPA_QUAD_CODES[g.count1table][q])
+        for v in quad:
+            if v:
+                w.put(1, 1 if v < 0 else 0)
+        s += 4
+    return w
+
+
+def l3_side_info(granules, lsf, channels, main_data_begin, scfsi, private=0):
+    """The side information as mp_decode_layer3 reads it."""
+    w = BitWriter()
+    if lsf:
+        w.put(8, main_data_begin)
+        w.put(channels, private)
+    else:
+        w.put(9, main_data_begin)
+        w.put(5 if channels == 1 else 3, private)
+        for ch in range(channels):
+            w.put(4, scfsi[ch])
+    for gr in granules:
+        for g in gr:
+            w.put(12, g.part2_3_length)
+            w.put(9, g.big_values)
+            w.put(8, g.global_gain)
+            w.put(9 if lsf else 4, g.scalefac_compress)
+            w.put(1, 1 if g.window_switching else 0)
+            if g.window_switching:
+                w.put(2, g.block_type)
+                w.put(1, 1 if g.mixed else 0)
+                for t in g.table_select[:2]:
+                    w.put(5, t)
+                for sb in g.subblock_gain:
+                    w.put(3, sb)
+            else:
+                for t in g.table_select:
+                    w.put(5, t)
+                w.put(4, g.region0)
+                w.put(3, g.region1)
+            if not lsf:
+                w.put(1, g.preflag)
+            w.put(1, g.scalefac_scale)
+            w.put(1, g.count1table)
+    w.align()
+    return w.bytes()
+
+
+def l3_scalefactors(rng, g, lsf, gr, scfsi, intensity_ch1=False, is_scale=0, shared=None):
+    """Chooses `g.scalefac_compress` and its scalefactors, written into
+    `g.scalefactors`. For MPEG-1 granule 1, `scfsi`'s groups are not sent
+    (the decoder copies granule 0's)."""
+    g.scalefactors = []
+    if not lsf:
+        g.scalefac_compress = rng.below(16)
+        slen1, slen2 = MPA_SLEN[0][g.scalefac_compress], MPA_SLEN[1][g.scalefac_compress]
+        if g.block_type == 2:
+            for count, slen in ((17 if g.mixed else 18, slen1), (18, slen2)):
+                g.scalefactors += [(slen, rng.below(1 << slen) if slen else 0) for _ in range(count) if slen]
+            return
+        for k, n in enumerate((6, 5, 5, 5)):
+            if gr == 1 and scfsi & (8 >> k):
+                continue
+            slen = slen1 if k < 2 else slen2
+            if slen:
+                g.scalefactors += [(slen, rng.below(1 << slen)) for _ in range(n)]
+        return
+    # MPEG-2 and 2.5: a case of the decoder's split, then scalefactor
+    # sizes within its moduli, composed into the 9-bit scalefac_compress
+    # lsf_sf_expand splits again (a modulus of 1 is a size of 0).
+    tindex = (2 if g.mixed else 1) if g.block_type == 2 else 0
+    if intensity_ch1:
+        cases = ((0, (5, 6, 6, 1), 3), (180, (4, 4, 4, 1), 4), (244, (4, 3, 1, 1), 5))
+    else:
+        cases = ((0, (5, 5, 4, 4), 0), (400, (5, 5, 4, 1), 1), (500, (4, 3, 1, 1), 2))
+    base, moduli, tindex2 = cases[rng.below(3)]
+    slen = [rng.below(m) for m in moduli]
+    sf = slen[0]
+    for v, m in zip(slen[1:], moduli[1:]):
+        if m > 1:
+            sf = sf * m + v
+    sf += base
+    g.scalefac_compress = sf << 1 | is_scale if intensity_ch1 else sf
+    if tindex2 == 2:
+        g.preflag = 1  # the decoder sets it for this case
+    for k in range(4):
+        n, sl = MPA_LSF_NSF[tindex2][tindex][k], slen[k]
+        if sl:
+            g.scalefactors += [(sl, rng.below(1 << sl)) for _ in range(n)]
+
+
+def l3_spectrum(rng, g, rate_index, budget_bits, peak):
+    """Fills `g`'s spectrum, tables and regions within `budget_bits` of
+    part 2 and 3: big values whose size decays with frequency, up to `peak`,
+    then count1 quads. Shrinks until it fits."""
+    nonzero = min(576, max(8, budget_bits // 3))
+    while True:
+        g.values = [0] * 576
+        bv = min(288, nonzero // 2)
+        g.big_values = bv
+        for i in range(2 * bv):
+            top = max(1, peak * (2 * bv - i) // (2 * bv) // (1 + i // 64))
+            v = rng.below(top + 1) if rng.chance(3, 4) else 0
+            g.values[i] = -v if v and rng.chance(1, 2) else v
+        quads = min((576 - 2 * bv) // 4, rng.below(24) if bv < 288 else 0)
+        g.count1_end = 2 * bv + 4 * quads
+        for i in range(2 * bv, g.count1_end):
+            g.values[i] = (-1 if rng.chance(1, 2) else 1) if rng.chance(1, 3) else 0
+        regions = l3_regions(g, rate_index)
+        s = 0
+        for r, pairs in enumerate(regions):
+            # Now and then a silent region, coded by an empty table (0, 4
+            # or 14); otherwise the smallest table that fits or any other.
+            if r and pairs and rng.chance(1, 5):
+                g.values[s:s + 2 * pairs] = [0] * (2 * pairs)
+            top = max((abs(v) for v in g.values[s:s + 2 * pairs]), default=0)
+            fits = [t for t in range(32) if MPA_TABLE_MAX[t] >= top]
+            smallest = min(fits, key=lambda t: (MPA_TABLE_MAX[t], t))
+            g.table_select[r] = smallest if rng.chance(1, 2) else fits[rng.below(len(fits))]
+            s += 2 * pairs
+        bits = l3_encode(g, rate_index)
+        if bits.count <= budget_bits or nonzero <= 8:
+            g.bits = bits
+            g.part2_3_length = bits.count
+            return
+        nonzero = nonzero * 3 // 4
+        peak = max(1, peak * 3 // 4)
+
+
+def mpa_l3_stream(count, seed, version="1", bitrate=9, rate=0, mode=0, mode_ext=0, crc=False, pad_every=3,
+                  reservoir=True, blocks="long", peak=40, fill=(9, 10), scfsi=True, damage=None):
+    """`count` decodable Layer III frames. `blocks` is "long", "switch"
+    (long, start, short, stop windows in turn, some mixed) or "short";
+    `fill` the fraction of each frame's main data a frame's granules use
+    (alternating values let the reservoir carry bits over); `damage`
+    {frame index: kind} breaks single frames: "big_values" (over 288),
+    "block_type" (window switching with type 0), "long_part" (a
+    part2_3_length past the data), "short_part" (one cut short),
+    "main_data_begin" (a reservoir reaching before the stream)."""
+    rng = Lcg(seed)
+    lsf = version != "1"
+    channels = 1 if mode == 3 else 2
+    granules_per_frame = 1 if lsf else 2
+    rate_index = rate + 3 * (lsf + (version == "2.5"))
+    side_size = (9 if channels == 1 else 17) if lsf else (17 if channels == 1 else 32)
+    limit = 255 if lsf else 511
+    damage = damage or {}
+    frames, payloads, begins = [], [], []
+    stream_pos = 0  # main-data bytes before this frame's slot
+    used_end = 0  # end of the main data already placed
+    window = ("long", "start", "short", "stop")
+    sequence = 0
+    for k in range(count):
+        padding = 1 if pad_every and k % pad_every == 0 else 0
+        size = mpa_frame_size(version, 3, bitrate, rate, padding)
+        capacity = size - 4 - (2 if crc else 0) - side_size
+        # The frame's main data may start where the reservoir allows, and
+        # must end within its own slot.
+        begin = max(used_end, stream_pos - limit) if reservoir else max(used_end, stream_pos)
+        available = stream_pos + capacity - begin
+        f = fill[k % len(fill)]
+        budget = available * 8 * f // 10 // (granules_per_frame * channels)
+        frame_scfsi = [rng.below(16) if scfsi and not lsf and blocks == "long" and rng.chance(1, 2) else 0
+                       for _ in range(channels)]
+        granules = []
+        for gr in range(granules_per_frame):
+            kind = "long"
+            if blocks == "switch":
+                kind = window[sequence % 4]
+                sequence += 1
+            elif blocks == "short":
+                kind = "short"
+            row = []
+            for ch in range(channels):
+                g = L3Granule()
+                if kind != "long":
+                    g.window_switching = True
+                    g.block_type = {"start": 1, "short": 2, "stop": 3}[kind]
+                    g.mixed = g.block_type == 2 and rng.chance(1, 3)
+                    g.subblock_gain = [rng.below(8) for _ in range(3)]
+                else:
+                    g.region0, g.region1 = rng.below(16), rng.below(8)
+                g.global_gain = 150 + rng.below(30)
+                g.scalefac_scale = rng.below(2)
+                g.preflag = 0 if lsf else rng.below(2)
+                g.count1table = rng.below(2)
+                intensity_ch1 = lsf and mode == 1 and mode_ext & 1 and ch == 1
+                l3_scalefactors(rng, g, lsf, gr, frame_scfsi[ch] if gr == 1 else 0, intensity_ch1, rng.below(2))
+                part2 = sum(bits for bits, _ in g.scalefactors)
+                # With intensity stereo the right channel's upper bands are
+                # left empty for the decoder to fill from the left.
+                ch_peak = peak if not (mode == 1 and mode_ext & 1 and ch == 1) else max(1, peak // 4)
+                l3_spectrum(rng, g, rate_index, max(part2 + 16, budget) - part2, ch_peak)
+                if mode == 1 and mode_ext & 1 and ch == 1:
+                    cut = 2 * (g.big_values // 3)
+                    for i in range(cut, 576):
+                        g.values[i] = 0
+                    g.big_values = cut // 2
+                    g.count1_end = cut
+                    g.bits = l3_encode(g, rate_index)
+                    g.part2_3_length = g.bits.count
+                row.append(g)
+            granules.append(row)
+        kind = damage.get(k)
+        data = BitWriter()
+        for row in granules:
+            for g in row:
+                data.put(g.bits.count, g.bits.value)
+        data.align()
+        main = data.bytes()
+        if kind == "big_values":
+            granules[0][0].big_values = 289
+        elif kind == "block_type":
+            granules[0][0].window_switching = True
+            granules[0][0].block_type = 0
+        elif kind == "long_part":
+            granules[-1][-1].part2_3_length = min(4095, granules[-1][-1].part2_3_length + 400)
+        elif kind == "short_part":
+            granules[0][0].part2_3_length = granules[0][0].part2_3_length // 2
+        assert begin + len(main) <= stream_pos + capacity, (k, begin, len(main), stream_pos, capacity)
+        main_data_begin = stream_pos - begin
+        if kind == "main_data_begin":
+            main_data_begin = min(limit, main_data_begin + 200)
+        used_end = begin + len(main)
+        payloads.append((begin, main))
+        side = l3_side_info(granules, lsf, channels, main_data_begin, frame_scfsi, private=0)
+        header = mpa_header(version=version, layer=3, bitrate=bitrate, rate=rate, padding=padding, mode=mode,
+                            mode_ext=mode_ext, crc=crc)
+        frames.append((header, side, capacity))
+        stream_pos += capacity
+    # Lay the main data out across the frames' slots.
+    main_stream = bytearray(stream_pos)
+    for begin, main in payloads:
+        main_stream[begin:begin + len(main)] = main
+    out, pos = [], 0
+    for header, side, capacity in frames:
+        crc_bytes = b""
+        if crc:
+            crc_bytes = struct.pack(">H", mpa_crc16(header[2:4] + side))
+        out.append(header + crc_bytes + side + bytes(main_stream[pos:pos + capacity]))
+        pos += capacity
+    return out
+
+
 def crc16_arc(data):
     """FFmpeg's ff_crcA001_update from 0: CRC-16/ARC, the LAME tag's CRC."""
     crc = 0
@@ -3857,6 +4420,57 @@ def build_mp3_fixtures():
     ok("mp3_short", "Three frames only: the probe's lowest scores.", j(mpa_frames(3, seed=40)), group="damaged")
     ok("mp3_six_frames", "Six frames: below the seven a first-run score needs.", j(mpa_frames(6, seed=41)),
        group="damaged")
+    # T29b: streams that decode to audio, then damaged ones.
+    def l3(name, rule, group="decoded", **kw):
+        ok(name, rule, j(mpa_l3_stream(**kw)), group=group)
+
+    l3("mp3_l3_long_stereo", "Decodable MPEG-1 Layer III, 44100 Hz, 128 kbit/s stereo: long blocks, every "
+       "Huffman table, both count1 tables, scfsi, preflag and scalefac_scale.", count=24, seed=101)
+    l3("mp3_l3_reservoir_mono", "Decodable MPEG-1 Layer III, 48000 Hz, 64 kbit/s mono: frames alternately use "
+       "40% and all of the space left, so the bit reservoir carries data across frames.",
+       count=24, seed=102, rate=1, bitrate=5, mode=3, fill=(4, 10))
+    l3("mp3_l3_window_switching", "Decodable MPEG-1 Layer III stereo: long, start, short and stop windows in "
+       "turn, some short granules mixed, with subblock gains.", count=24, seed=103, blocks="switch")
+    l3("mp3_l3_short_ms", "Decodable MPEG-1 Layer III, 32000 Hz, joint stereo with M/S only: short blocks.",
+       count=16, seed=104, rate=2, bitrate=8, blocks="short", mode=1, mode_ext=2)
+    l3("mp3_l3_intensity_ms", "Decodable MPEG-1 Layer III joint stereo with intensity and M/S stereo: the "
+       "right channel's upper bands empty.", count=16, seed=105, mode=1, mode_ext=3)
+    l3("mp3_l3_intensity", "Decodable MPEG-1 Layer III joint stereo with intensity stereo only, window "
+       "switching.", count=16, seed=106, mode=1, mode_ext=1, blocks="switch")
+    l3("mp3_l3_mpeg2_22k_intensity", "Decodable MPEG-2 Layer III, 22050 Hz, 64 kbit/s joint stereo with "
+       "intensity stereo: the LSF intensity scalefactor partitions.", count=24, seed=107, version="2",
+       bitrate=8, mode=1, mode_ext=1)
+    l3("mp3_l3_mpeg2_24k_switch", "Decodable MPEG-2 Layer III, 24000 Hz stereo, window switching: the LSF "
+       "short and mixed partitions.", count=24, seed=108, version="2", rate=1, bitrate=9, blocks="switch")
+    l3("mp3_l3_mpeg2_16k_mono", "Decodable MPEG-2 Layer III, 16000 Hz, 32 kbit/s mono, long blocks.",
+       count=24, seed=109, version="2", rate=2, bitrate=4, mode=3)
+    l3("mp3_l3_mpeg25_8k_switch", "Decodable MPEG-2.5 Layer III, 8000 Hz mono, window switching: the 8 kHz "
+       "regions and band tables (FFmpeg logs its switch-point request).", count=24, seed=110, version="2.5",
+       rate=2, bitrate=2, mode=3, blocks="switch")
+    l3("mp3_l3_mpeg25_11k_ms", "Decodable MPEG-2.5 Layer III, 11025 Hz joint stereo with M/S.", count=24,
+       seed=111, version="2.5", bitrate=4, mode=1, mode_ext=2)
+    l3("mp3_l3_crc_linbits", "Decodable MPEG-1 Layer III, 320 kbit/s, CRC-protected frames, values up to "
+       "3000 (escape tables with up to 13 linbits).", count=12, seed=112, crc=True, peak=3000, bitrate=14)
+    gapless = mpa_l3_stream(count=30, seed=113)
+    ok("mp3_l3_gapless", "Decodable MPEG-1 Layer III after an Info tag with LAME's delays (576 and 1104): "
+       "the decoder's output is trimmed at both ends.",
+       j([xing_frame(114, tag=b"Info", frames=30, size=sum(map(len, gapless)) + 418, delay=576, padding=1104)]
+         + gapless), group="decoded")
+    l3("mp3_l3_bad_big_values", "Decodable Layer III whose sixth frame declares 289 big-value pairs: that "
+       "frame fails to decode.", group="decoded, damaged", count=12, seed=115, damage={5: "big_values"})
+    l3("mp3_l3_bad_block_type", "Decodable Layer III whose sixth frame switches windows with block type 0: "
+       "that frame fails to decode.", group="decoded, damaged", count=12, seed=116, damage={5: "block_type"})
+    l3("mp3_l3_long_part", "Decodable Layer III whose fifth frame's last granule declares 400 bits more than "
+       "its data: the Huffman decoding reads into the next frame's data.", group="decoded, damaged",
+       count=12, seed=117, damage={4: "long_part"})
+    l3("mp3_l3_short_part", "Decodable Layer III whose fifth frame's first granule declares half its bits: "
+       "the decoding stops early and the next granule starts mid-data.", group="decoded, damaged",
+       count=12, seed=118, damage={4: "short_part"})
+    l3("mp3_l3_reservoir_missing", "Decodable Layer III whose first frame's main data begins 200 bytes "
+       "before the stream: its granules decode as silence.", group="decoded, damaged", count=12, seed=119,
+       damage={0: "main_data_begin"})
+    ok("mp3_l3_truncated", "Decodable Layer III cut in its last frame's main data.",
+       j(mpa_l3_stream(count=12, seed=120))[:-200], group="decoded, damaged")
     bad("mp3_free_format", "Free-format frames (bit rate index 0), whose size FFmpeg's header decoding does not "
         "compute: no frame is recognized.",
         j(mpa_header(bitrate=0) + mpa_payload(42 + i, 400) for i in range(20)), "INVALIDDATA")

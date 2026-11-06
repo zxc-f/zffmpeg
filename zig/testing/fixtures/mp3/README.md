@@ -57,6 +57,25 @@ libavformat; port.md's "MP3 contract" says which behavior the port follows.
 | `mp3_header_emulation` | damaged | yes | Frames whose payload holds copies of the header: the probe stops counting a run where more than two emulate it. |
 | `mp3_short` | damaged | yes | Three frames only: the probe's lowest scores. |
 | `mp3_six_frames` | damaged | yes | Six frames: below the seven a first-run score needs. |
+| `mp3_l3_long_stereo` | decoded | yes | Decodable MPEG-1 Layer III, 44100 Hz, 128 kbit/s stereo: long blocks, every Huffman table, both count1 tables, scfsi, preflag and scalefac_scale. |
+| `mp3_l3_reservoir_mono` | decoded | yes | Decodable MPEG-1 Layer III, 48000 Hz, 64 kbit/s mono: frames alternately use 40% and all of the space left, so the bit reservoir carries data across frames. |
+| `mp3_l3_window_switching` | decoded | yes | Decodable MPEG-1 Layer III stereo: long, start, short and stop windows in turn, some short granules mixed, with subblock gains. |
+| `mp3_l3_short_ms` | decoded | yes | Decodable MPEG-1 Layer III, 32000 Hz, joint stereo with M/S only: short blocks. |
+| `mp3_l3_intensity_ms` | decoded | yes | Decodable MPEG-1 Layer III joint stereo with intensity and M/S stereo: the right channel's upper bands empty. |
+| `mp3_l3_intensity` | decoded | yes | Decodable MPEG-1 Layer III joint stereo with intensity stereo only, window switching. |
+| `mp3_l3_mpeg2_22k_intensity` | decoded | yes | Decodable MPEG-2 Layer III, 22050 Hz, 64 kbit/s joint stereo with intensity stereo: the LSF intensity scalefactor partitions. |
+| `mp3_l3_mpeg2_24k_switch` | decoded | yes | Decodable MPEG-2 Layer III, 24000 Hz stereo, window switching: the LSF short and mixed partitions. |
+| `mp3_l3_mpeg2_16k_mono` | decoded | yes | Decodable MPEG-2 Layer III, 16000 Hz, 32 kbit/s mono, long blocks. |
+| `mp3_l3_mpeg25_8k_switch` | decoded | yes | Decodable MPEG-2.5 Layer III, 8000 Hz mono, window switching: the 8 kHz regions and band tables (FFmpeg logs its switch-point request). |
+| `mp3_l3_mpeg25_11k_ms` | decoded | yes | Decodable MPEG-2.5 Layer III, 11025 Hz joint stereo with M/S. |
+| `mp3_l3_crc_linbits` | decoded | yes | Decodable MPEG-1 Layer III, 320 kbit/s, CRC-protected frames, values up to 3000 (escape tables with up to 13 linbits). |
+| `mp3_l3_gapless` | decoded | yes | Decodable MPEG-1 Layer III after an Info tag with LAME's delays (576 and 1104): the decoder's output is trimmed at both ends. |
+| `mp3_l3_bad_big_values` | decoded, damaged | yes | Decodable Layer III whose sixth frame declares 289 big-value pairs: that frame fails to decode. |
+| `mp3_l3_bad_block_type` | decoded, damaged | yes | Decodable Layer III whose sixth frame switches windows with block type 0: that frame fails to decode. |
+| `mp3_l3_long_part` | decoded, damaged | yes | Decodable Layer III whose fifth frame's last granule declares 400 bits more than its data: the Huffman decoding reads into the next frame's data. |
+| `mp3_l3_short_part` | decoded, damaged | yes | Decodable Layer III whose fifth frame's first granule declares half its bits: the decoding stops early and the next granule starts mid-data. |
+| `mp3_l3_reservoir_missing` | decoded, damaged | yes | Decodable Layer III whose first frame's main data begins 200 bytes before the stream: its granules decode as silence. |
+| `mp3_l3_truncated` | decoded, damaged | yes | Decodable Layer III cut in its last frame's main data. |
 | `mp3_free_format` | rejected | `INVALIDDATA` | Free-format frames (bit rate index 0), whose size FFmpeg's header decoding does not compute: no frame is recognized. |
 | `mp3_no_frames` | rejected | `INVALIDDATA` | Arbitrary bytes and no frame. |
 <!-- END GENERATED FIXTURE TABLE -->

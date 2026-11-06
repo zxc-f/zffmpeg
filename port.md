@@ -1120,7 +1120,11 @@ reads it on libavformat's generic layer with the `mpegaudio` parser
 `avformat_open_input` reads first (`id3v2.c`) and the ID3v1 tag at the end
 (`id3v1.c`), without decoding (T29b and T29c decode). The fixtures are
 [zig/testing/fixtures/mp3/](zig/testing/fixtures/mp3/README.md), written by
-`generate.py`, and [mp3.txt](zig/testing/vectors/mp3.txt), printed by
+`generate.py`; since T29b part 0 they include `mp3_l3_*` Layer III streams
+that decode to audio (side information, scalefactors and spectra coded with
+FFmpeg's Huffman tables, every block type, stereo mode and scalefactor
+layout, the bit reservoir, and damaged frames), whose decoding by the
+reference's mp3float is [mp3_decode.txt](zig/testing/vectors/mp3_decode.txt), and [mp3.txt](zig/testing/vectors/mp3.txt), printed by
 [mp3_vectors.c](zig/testing/reference/mp3_vectors.c) from the pinned
 libavformat, is the oracle for every fixture's streams, tags, chapters and
 packets (ogg.txt's fields, with each stream's bit rate and ReplayGain, the

@@ -3400,8 +3400,22 @@ names, not as an empty framework.
       arbitrary payloads decode to silence), which mp3.zig's seek test
       leaves out until part 3; compare.py records the registry's missing
       mp3 decoder until part 3 (notes.md "Sample format at open").
-    Remaining work or blocker / next action: part 0b, the fixture generator
-      and mp3_decode_vectors.c.
+      Part 0b: generate.py writes 20 Layer III streams that decode to
+      audio (mpa_l3_stream: FFmpeg's Huffman tables transcribed, every
+      table_select 0-31, count1 tables A and B, long, start, short, stop
+      and mixed blocks with subblock gains, scfsi, preflag, M/S and
+      intensity stereo, MPEG-1, 2 and 2.5 scalefactor layouts, the 8 kHz
+      regions, the bit reservoir, CRC, an Info tag's gapless delays) and
+      damaged ones (289 big-value pairs, block type 0, part2_3_length too
+      long and too short, a reservoir before the stream, a cut last
+      frame): 62 MP3 fixtures. mp3_decode_vectors.c (vorbis_vectors.c for
+      mp3float) prints every fixture's decoded frames, vectors/
+      mp3_decode.txt, checked in CI and local-ci.sh: the clean streams
+      decode every frame, each damaged frame is INVALIDDATA, the gapless
+      stream trims 576 and 1104 samples. mp3.txt and seek_mp3.txt gain the
+      new fixtures' blocks, unchanged elsewhere; compare.py 6425/0/0.
+    Remaining work or blocker / next action: part 1, the tables, side
+      information, scalefactors, Huffman decoding and requantization.
     ```
   - [ ] **T29c — Layers I and II.** Needs T29b.
     Done when the required Layer I and II streams match within the same

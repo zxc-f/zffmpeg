@@ -927,7 +927,7 @@ test "every MP3 fixture seeks as FFmpeg seeks it (vectors/seek_mp3.txt)" {
         }
     }
     // Every seek of the fixtures FFmpeg opens, but the picture's.
-    try testing.expectEqual(2160, compared);
+    try testing.expectEqual(3186, compared);
 }
 
 test "iTunSMPB counts up to SMPB_MAX_SAMPLES (2^40) are kept, larger ones refuse the tag" {

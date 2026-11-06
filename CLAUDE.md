@@ -64,7 +64,7 @@ stream-copy pipeline) and `file` (file and pipe adapters). Two tools sit on it:
 converts and stream-copies between them (CAF as input only; Ogg Vorbis, Opus
 and FLAC decoded as input, FLAC written as output), carrying tags,
 with `-c:a`, FFmpeg's dither options and its FLAC encoder options. Tests cover 129 WAV,
-41 AU, 57 AIFF, 25 raw PCM, 58 CAF, 57 FLAC, 37 Ogg and 43 MP3 fixtures, process runs of both tools, and a CI comparison against a
+41 AU, 57 AIFF, 25 raw PCM, 58 CAF, 57 FLAC, 37 Ogg and 62 MP3 fixtures, process runs of both tools, and a CI comparison against a
 pinned FFmpeg build that also reads every `zffmpeg` output. Verification is
 Linux-only during development; Windows and ARM wait for T62–T63. T13, T14a
 (packets, frames and stages), T17b (the metadata dictionary), T20a (decoded

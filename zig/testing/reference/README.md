@@ -255,6 +255,18 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/libm_vector
 ./libm-vectors | diff -u zig/testing/vectors/libm.txt -
 ```
 
+`mp3_decode_vectors.c` is `vorbis_vectors.c` for MP3 (T29b): every MP3
+fixture opened as the ffmpeg program opens it, its packets sent to FFmpeg's
+mp3float decoder, each frame's sample count and MD5 after libavcodec's
+discarding (the gapless trim); a stream the parser names MP1 or MP2 has no
+decoder in this build. The fixtures that decode to audio are generate.py's
+`mp3_l3_*` streams (the reference build has no MP3 encoder):
+
+```bash
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/mp3_decode_vectors.c .references/ffmpeg-install/lib/libavformat.a .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o mp3-decode-vectors
+LC_ALL=C ./mp3-decode-vectors zig/testing/fixtures/mp3/*.mp3 | diff -u zig/testing/vectors/mp3_decode.txt -
+```
+
 `opus_vectors.c` is `vorbis_vectors.c` for Opus: the first Opus stream of
 every Ogg fixture opened as the ffmpeg program opens it, its packets sent
 to FFmpeg's Opus decoder, each frame's sample count and MD5 after

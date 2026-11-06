@@ -208,6 +208,101 @@
         .expected = .accept,
     },
     .{
+        .name = "mp3_l3_long_stereo",
+        .sha256 = "c2cf4fb5e2f9ac1d09d9142995ef7e91916e8fd91cfb43415dde2e692ec0b041",
+        .expected = .accept,
+    },
+    .{
+        .name = "mp3_l3_reservoir_mono",
+        .sha256 = "7b30625a0e8e18ecbb490a2d47d033a5b12aa8a1b01924773196fb689b671401",
+        .expected = .accept,
+    },
+    .{
+        .name = "mp3_l3_window_switching",
+        .sha256 = "3f180b88227d62ec8edf908f60ff0b61ef65908d3313a2f6f597958ab6ffbdaa",
+        .expected = .accept,
+    },
+    .{
+        .name = "mp3_l3_short_ms",
+        .sha256 = "40aa8e3ceffbab45a376ab480549d8060cbd99ab9f2284251f558d6a301ba0bc",
+        .expected = .accept,
+    },
+    .{
+        .name = "mp3_l3_intensity_ms",
+        .sha256 = "f6a4294d09b4ece5da34423dde14aa24097743b94055f70665ef5c1a63ca22cb",
+        .expected = .accept,
+    },
+    .{
+        .name = "mp3_l3_intensity",
+        .sha256 = "7a787436e2930e7e789fba8dc7b40630e928e1604b71c6a26155c270babe6499",
+        .expected = .accept,
+    },
+    .{
+        .name = "mp3_l3_mpeg2_22k_intensity",
+        .sha256 = "809708fe850f9f6f88200dcacd97b5850d8107da4a01977fecdec5cd7e974f44",
+        .expected = .accept,
+    },
+    .{
+        .name = "mp3_l3_mpeg2_24k_switch",
+        .sha256 = "b40b152748013339a1898f5c1e3f69b3db336d78aaab50ba253c9c493a4db94d",
+        .expected = .accept,
+    },
+    .{
+        .name = "mp3_l3_mpeg2_16k_mono",
+        .sha256 = "7ec518e4dbe0de8990737ae76d1d2861c592970a32c64066c77c5723e0484025",
+        .expected = .accept,
+    },
+    .{
+        .name = "mp3_l3_mpeg25_8k_switch",
+        .sha256 = "2a83ed9e54f6464e9a8c96e1eb48b4523d888cf2aaa3cc3cf03b18eee64befc0",
+        .expected = .accept,
+    },
+    .{
+        .name = "mp3_l3_mpeg25_11k_ms",
+        .sha256 = "1a244973e6fa641a6d313c52c524645365e7b33f53a9e7d09f27c664f732167a",
+        .expected = .accept,
+    },
+    .{
+        .name = "mp3_l3_crc_linbits",
+        .sha256 = "e81ffb8d157539807c20fd6d3422d4c8ac86f2988ae167c4c7dc03d05112712c",
+        .expected = .accept,
+    },
+    .{
+        .name = "mp3_l3_gapless",
+        .sha256 = "588955f5b36082dce432d226a7cd554cf6691a70ffd307689d08bc247432463b",
+        .expected = .accept,
+    },
+    .{
+        .name = "mp3_l3_bad_big_values",
+        .sha256 = "75afa9039017876ba4dec3c47aa1968acccd305191572a2736a135decb1c2534",
+        .expected = .accept,
+    },
+    .{
+        .name = "mp3_l3_bad_block_type",
+        .sha256 = "ba2d2cc4102d02fabf22ce6475498439aa1853b47c32a4b8e5623f0bca24f0a2",
+        .expected = .accept,
+    },
+    .{
+        .name = "mp3_l3_long_part",
+        .sha256 = "89fd47b6bc8b227a2e809b211321a0f23e95563218a1fcbe0102b79a8d07e7b6",
+        .expected = .accept,
+    },
+    .{
+        .name = "mp3_l3_short_part",
+        .sha256 = "91fa04bf7b54c999ab1de5a469f5a339a6daeaa4c6152cbf890ac64e2a2851b1",
+        .expected = .accept,
+    },
+    .{
+        .name = "mp3_l3_reservoir_missing",
+        .sha256 = "bc6864650dc54c181cc714656ffdc0ca6a3c5129eb3abaa9fbd9597bb46c7a48",
+        .expected = .accept,
+    },
+    .{
+        .name = "mp3_l3_truncated",
+        .sha256 = "f099aa386d10a20be63ec156c8f4b59c546c5ad0f0ec77368478f6e2cd5f81f1",
+        .expected = .accept,
+    },
+    .{
         .name = "mp3_free_format",
         .sha256 = "ad87b1092fd71763a54ad28ecc102d0f11093929953f988afb477712767e610e",
         .expected = .reject,
