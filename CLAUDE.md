@@ -107,6 +107,15 @@ Once per session is enough to load it; re-read the guide sections a later
 change touches. Agents that cannot load skills read the two files directly.
 Where the skill and this file differ, this file wins.
 
+For I/O code, also invoke the project skill `zig-io`
+([.claude/skills/zig-io/SKILL.md](.claude/skills/zig-io/SKILL.md)): opening,
+reading, writing, skipping, seeking or copying files, pipes and standard
+streams; a demuxer's, muxer's or parser's read or write path; buffer sizes;
+header rewrites; stream copy; threads, queues and cancellation (T53d, T59).
+It says which `std.Io` tool to use where, from FFmpeg's C I/O layer and
+measurements; a change that departs from it needs a measurement with its
+benchmarks, recorded in its analysis.
+
 ## Commands
 
 Toolchain: Zig **0.17.0** exactly. `build.zig` stops with a compile error on any
@@ -206,12 +215,20 @@ document does not widen support.
   `@as` versus real casts, the 0.15/0.16 I/O breaks, containers, removed
   builtins, formatting, tests and the build graph. Use it for every Zig change
   (see "Writing Zig" above); where it differs from this file, this file wins.
+- [.claude/skills/zig-io/](.claude/skills/zig-io/SKILL.md): the project skill
+  for I/O code. `SKILL.md` holds the decision table and checklist;
+  `references/analysis.md` the FFmpeg and std.Io sources (file and line) and
+  the measurements; `references/reproduce.md` and `bench/run_all.sh` rerun
+  them on another machine; `references/results/` keeps each run.
 
 ## References
 
 FFmpeg and zigimg are independent clones under the ignored `.references/`
 directory; clone both at the pinned revisions using
 [README.md](README.md#clone-the-reference-repositories) before source research.
+For I/O work, the same section pins zio, ZLS and zig-cookbook, and the
+toolchain's own `lib/std` is the standard-library reference (the `zig-io`
+skill).
 Do not commit their files, Git metadata or gitlinks; they are not submodules.
 zigimg is a Zig implementation reference, never a build dependency.
 

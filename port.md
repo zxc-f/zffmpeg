@@ -462,6 +462,16 @@ The following choices were checked against the installed `std/Io/Reader.zig`,
   cleanup/flush, then call `std.process.exit(status)` when needed. `cleanExit(io)`
   is success-only, not a general status-code API; process exit skips defers.
 
+- Measured on Linux x86-64 against FFmpeg's `libavformat` I/O layer (the
+  [`zig-io` skill's analysis](.claude/skills/zig-io/references/analysis.md),
+  rerun with its `bench/run_all.sh`): read regular files positionally and
+  pipes streaming, since a streaming reader's skips read every byte; 64 KiB
+  buffers; large reads straight into their destination (one vectored read
+  also refills the buffer); whole-file copies through `Reader.stream`, which
+  reaches `copy_file_range`; no threads in the conversion pipeline until a
+  measurement shows a gain. `std.Io.Threaded` is the backend:
+  `std.Io.Evented` does not compile in 0.17.0.
+
 Use native I/O cancellation where available and map it explicitly; no new
 cancellation framework is required for the first path. Prefer the pinned
 library over old examples: `std.ArrayList(T)` starts at `.empty` and takes an

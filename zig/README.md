@@ -4,7 +4,8 @@ This directory holds the native Zig sources. The package is defined by
 [build.zig](../build.zig) and [build.zig.zon](../build.zig.zon) at the
 repository root. Write new code following
 the project's [`zig-0-17` skill](../.claude/skills/zig-0-17/SKILL.md) and its
-[guide](../.claude/skills/zig-0-17/references/guide.md).
+[guide](../.claude/skills/zig-0-17/references/guide.md), and I/O code also
+following the [`zig-io` skill](../.claude/skills/zig-io/SKILL.md).
 
 ## Compiler
 

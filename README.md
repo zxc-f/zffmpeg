@@ -93,6 +93,10 @@ the [unplanned features](TODO.md#not-planned).
 - [.claude/skills/zig-0-17/](.claude/skills/zig-0-17/SKILL.md): the project skill for writing
   Zig 0.17 here (workflow, checklist and [guide](.claude/skills/zig-0-17/references/guide.md));
   Claude Code uses it for every Zig change.
+- [.claude/skills/zig-io/](.claude/skills/zig-io/SKILL.md): the project skill for I/O code:
+  which `std.Io` tool to use where, from FFmpeg's C I/O layer and measurements
+  ([analysis](.claude/skills/zig-io/references/analysis.md)), with a benchmark kit that
+  reruns them on another machine ([reproduce](.claude/skills/zig-io/references/reproduce.md)).
 - [build.zig](build.zig), [build.zig.zon](build.zig.zon): the package and build;
   [zig/README.md](zig/README.md) documents commands, version policy and layout.
 - [zig/root.zig](zig/root.zig): root of the `av` library module.
@@ -135,8 +139,10 @@ submodules nor native package dependencies.
 
 ## Clone the reference repositories
 
-Clone **both repositories** before source research or reference comparisons.
-Run these commands from the zffmpeg project root in a fresh checkout:
+Clone FFmpeg and zigimg before source research or reference comparisons; the
+three Zig I/O references are needed only for I/O work (the
+[`zig-io` skill](.claude/skills/zig-io/SKILL.md)). Run these commands from the
+zffmpeg project root in a fresh checkout:
 
 ```text
 git clone --depth 1 --no-checkout https://github.com/FFmpeg/FFmpeg.git .references/ffmpeg
@@ -146,17 +152,40 @@ git -C .references/ffmpeg checkout --detach 5d5a38a7e46be296eab75982c0986054f731
 git clone --depth 1 --no-checkout https://github.com/zigimg/zigimg.git .references/zigimg
 git -C .references/zigimg fetch --depth 1 origin 083d0304840a3f5fd547c2e2005148a18886c401
 git -C .references/zigimg checkout --detach 083d0304840a3f5fd547c2e2005148a18886c401
+
+git clone --depth 1 --no-checkout https://github.com/lalinsky/zio.git .references/zio
+git -C .references/zio fetch --depth 1 origin 1814bacf54ca2ebdb140c3e521860ef3320f76dd
+git -C .references/zio checkout --detach 1814bacf54ca2ebdb140c3e521860ef3320f76dd
+
+git clone --depth 1 --no-checkout https://github.com/zigtools/zls.git .references/zls
+git -C .references/zls fetch --depth 1 origin c275dd2ec457e6ae302d98a6116e69c6d595c24c
+git -C .references/zls checkout --detach c275dd2ec457e6ae302d98a6116e69c6d595c24c
+
+git clone --depth 1 --no-checkout https://github.com/zigcc/zig-cookbook.git .references/zig-cookbook
+git -C .references/zig-cookbook fetch --depth 1 origin ed1772059f236c1721af57c785b4d94684951be5
+git -C .references/zig-cookbook checkout --detach ed1772059f236c1721af57c785b4d94684951be5
 ```
 
+Zig's standard library is the fourth I/O reference and needs no clone: it is
+the `lib/std` of the pinned 0.17.0 toolchain (`zig env` prints `lib_dir`). To
+keep a copy next to the others, copy that `lib` directory to
+`.references/zig/lib`.
+
 Do not rerun clone over an existing directory. To inspect an existing setup,
-run `git -C .references/ffmpeg rev-parse HEAD` and
-`git -C .references/zigimg rev-parse HEAD`. Refresh revisions deliberately and
-update the corresponding analysis and verification evidence.
+run `git -C .references/<name> rev-parse HEAD` for each clone. Refresh
+revisions deliberately and update the corresponding analysis and verification
+evidence ([doc/zigimg-reference.md](doc/zigimg-reference.md) for zigimg,
+[the zig-io analysis](.claude/skills/zig-io/references/analysis.md) for zio,
+ZLS, zig-cookbook and the standard library).
 
 | Reference | Pinned revision | Role |
 | --- | --- | --- |
 | [FFmpeg](https://github.com/FFmpeg/FFmpeg.git) | `5d5a38a7e46be296eab75982c0986054f731e19e` | Multimedia algorithms, behavior and differential testing. |
 | [zigimg](https://github.com/zigimg/zigimg.git) | `083d0304840a3f5fd547c2e2005148a18886c401` | Modern Zig I/O, ownership, build and metaprogramming examples. |
+| [zio](https://github.com/lalinsky/zio.git) | `1814bacf54ca2ebdb140c3e521860ef3320f76dd` | A second `std.Io` implementation; its tests document the interface's contract (cancellation, groups, pipes). |
+| [ZLS](https://github.com/zigtools/zls.git) | `c275dd2ec457e6ae302d98a6116e69c6d595c24c` | A long-running Zig 0.17 program using `Io.Group`. |
+| [zig-cookbook](https://github.com/zigcc/zig-cookbook.git) | `ed1772059f236c1721af57c785b4d94684951be5` | Short `std.Io` recipes (Zig 0.16): tasks, groups, queues, files. |
+| Zig standard library | the 0.17.0 release | The authority for every `std.Io` API. |
 
 The local source map is `.references/ffmpeg/libavcodec/`,
 `.references/ffmpeg/libavformat/`, and the other upstream directories documented
