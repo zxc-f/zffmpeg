@@ -32,6 +32,7 @@ const samples_storage = @import("../core/samples.zig");
 const pcm = @import("../codec/pcm.zig");
 const skip = @import("../io/skip.zig");
 const mov_chan = @import("mov_chan.zig");
+const seek = @import("seek.zig");
 
 /// Contract errors (see the AIFF fixture README), plus `IoFailure` for a
 /// failing reader.
@@ -485,6 +486,9 @@ pub const WriteError = std.Io.Writer.Error || HeaderError || error{
     TooFewFrames,
 };
 
+/// `Writer.rewriteHeader`'s failures: the header's, or moving the output.
+pub const RewriteError = WriteError || error{IoFailure};
+
 pub const WriteOptions = struct {
     max_sample_rate: u32 = 192_000,
     max_channels: u16 = max_channels,
@@ -523,6 +527,10 @@ pub const Writer = struct {
     format: audio.Format,
     frames_expected: u32,
     frames_written: u32 = 0,
+    /// Begun by `beginDeferred`: frames up to COMM's 32-bit count, the
+    /// header rewritten.
+    deferred: bool = false,
+    options: WriteOptions,
 
     /// Checks every size, then writes the header. Nothing is written when a
     /// check fails. `format.sample_format` must be `codec.storage()`.
@@ -531,7 +539,32 @@ pub const Writer = struct {
         const bytes = try encodeHeader(codec, format, frame_count, options, &header);
         try out.writeAll(bytes);
         // encodeHeader checked that the frame count fits in u32.
-        return .{ .out = out, .codec = codec, .format = format, .frames_expected = @intCast(frame_count) };
+        return .{ .out = out, .codec = codec, .format = format, .frames_expected = @intCast(frame_count), .options = options };
+    }
+
+    /// `begin` for a stream whose length is unknown until its end: the
+    /// header says no frames until `rewriteHeader`. A stream whose FORM size
+    /// passes 32 bits fails there (`SizeOverflow`).
+    pub fn beginDeferred(out: *std.Io.Writer, codec: pcm.Codec, format: audio.Format, options: WriteOptions) WriteError!Writer {
+        var w = try begin(out, codec, format, 0, options);
+        w.frames_expected = std.math.maxInt(u32);
+        w.deferred = true;
+        return w;
+    }
+
+    /// After `finish` (a no-op unless deferred): the header encoded for the
+    /// frames written, over the provisional one (`seeker` moves `out`), then
+    /// back to the end. The header's length does not depend on the count.
+    pub fn rewriteHeader(w: *Writer, seeker: seek.OutputSeeker) RewriteError!void {
+        // A known-length header is already right.
+        if (!w.deferred) return;
+        var header: [max_header_len]u8 = undefined;
+        const bytes = try encodeHeader(w.codec, w.format, w.frames_written, w.options, &header);
+        const end = seeker.position();
+        try seeker.seekTo(0);
+        try w.out.writeAll(bytes);
+        try seeker.seekTo(end);
+        try w.out.flush();
     }
 
     /// Runs `begin`'s checks without writing, so a caller can reject an
@@ -631,7 +664,7 @@ pub const Writer = struct {
     /// Verifies that every declared frame was written, writes the pad byte
     /// odd data needs, then flushes `out`.
     pub fn finish(w: *Writer) WriteError!void {
-        if (w.frames_written != w.frames_expected) return error.TooFewFrames;
+        if (!w.deferred and w.frames_written != w.frames_expected) return error.TooFewFrames;
         const sample_bytes: u64 = w.codec.bytesPerSample();
         const data_bytes = w.frames_written * sample_bytes * w.format.channelCount();
         if (data_bytes % 2 == 1) try w.out.writeAll(&.{0});
@@ -970,6 +1003,37 @@ test "a chunk filling a 4 GiB FORM extent ends as truncation" {
         "junk".* ++ [4]u8{ 0xff, 0xff, 0xff, 0xf3 } ++ @as([64]u8, @splat(0));
     var reader: std.Io.Reader = .fixed(&form);
     try std.testing.expectError(error.Truncated, probe(&reader, .{}));
+}
+
+test "a deferred AIFF header, rewritten at the end, equals the known-length header" {
+    const stereo = try audio.Format.init(8000, 2, .s16);
+    // s8 mono: an odd data size takes a pad byte.
+    const mono = try audio.Format.init(8000, 1, .u8);
+    const Case = struct { codec: pcm.Codec, format: audio.Format, frames: u32 };
+    for ([_]Case{ .{ .codec = .s16be, .format = stereo, .frames = 3 }, .{ .codec = .s8, .format = mono, .frames = 5 } }) |case| {
+        const data = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
+        const bytes = data[0 .. case.frames * case.format.channelCount() * case.codec.bytesPerSample()];
+        var known_buffer: [128]u8 = undefined;
+        var known: std.Io.Writer = .fixed(&known_buffer);
+        var w = try Writer.begin(&known, case.codec, case.format, case.frames, .{});
+        try w.writeData(bytes);
+        try w.finish();
+
+        var deferred_buffer: [128]u8 = undefined;
+        var deferred: std.Io.Writer = .fixed(&deferred_buffer);
+        var d = try Writer.beginDeferred(&deferred, case.codec, case.format, .{});
+        try d.writeData(bytes);
+        try d.finish();
+        try d.rewriteHeader(.fixed(&deferred));
+        try std.testing.expectEqualSlices(u8, known.buffered(), deferred.buffered());
+    }
+    // A FORM size past 32 bits fails at the rewrite.
+    var buffer: [128]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&buffer);
+    var d = try Writer.beginDeferred(&out, .s16be, stereo, .{});
+    try d.finish();
+    d.frames_written = std.math.maxInt(u32);
+    try std.testing.expectError(error.SizeOverflow, d.rewriteHeader(.fixed(&out)));
 }
 
 const hostile = @import("../testing/hostile.zig");

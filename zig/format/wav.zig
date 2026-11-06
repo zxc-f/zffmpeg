@@ -1195,6 +1195,9 @@ pub const WriteError = std.Io.Writer.Error || HeaderError || error{
     TooFewFrames,
 };
 
+/// `Writer.rewriteHeader`'s failures: the header's, or moving the output.
+pub const RewriteError = WriteError || error{IoFailure};
+
 /// When the writer emits RF64 (64-bit sizes in a `ds64` chunk), as FFmpeg's
 /// `-rf64` option names it.
 pub const Rf64 = enum {
@@ -1287,9 +1290,12 @@ fn useExtensible(codec: pcm.Codec, format: audio.Format) bool {
     return named_order or format.sample_rate > max_plain_rate or (bits > 16 and tagFor(codec) != tag_float);
 }
 
-/// Writes one known-length WAV or Wave64 stream to a borrowed writer: the
-/// header with exact sizes (RIFF, or RF64 as `WriteOptions.rf64` decides, or
-/// Wave64), then the samples. No seeking and no placeholder sizes.
+/// Writes one WAV or Wave64 stream to a borrowed writer: the header with
+/// exact sizes (RIFF, or RF64 as `WriteOptions.rf64` decides, or Wave64),
+/// then the samples. With a known length (`begin`) nothing seeks. Without one
+/// (`beginDeferred`, a seekable output) the header is written for no frames
+/// and `rewriteHeader` writes the real sizes over it at the end, as FFmpeg's
+/// muxer rewrites a seekable output's header.
 pub const Writer = struct {
     out: *std.Io.Writer,
     codec: pcm.Codec,
@@ -1297,6 +1303,10 @@ pub const Writer = struct {
     variant: Variant,
     frames_expected: u64,
     frames_written: u64 = 0,
+    /// Begun by `beginDeferred`: any number of frames, the header rewritten.
+    deferred: bool = false,
+    /// For `rewriteHeader`; its tags are borrowed until then.
+    options: WriteOptions,
 
     /// Checks every size, then writes the header. Nothing is written when a
     /// check fails. `format.sample_format` must be `codec.storage()`.
@@ -1310,7 +1320,39 @@ pub const Writer = struct {
             try writeInfoList(out, options.tags orelse unreachable, header.info_len);
         }
         try out.writeAll(header.bytes[header.data_at..header.len]);
-        return .{ .out = out, .codec = codec, .format = format, .variant = options.variant, .frames_expected = frame_count };
+        return .{ .out = out, .codec = codec, .format = format, .variant = options.variant, .frames_expected = frame_count, .options = options };
+    }
+
+    /// `begin` for a stream whose length is unknown until its end: the header
+    /// says no frames until `rewriteHeader`. `options.tags` must stay valid
+    /// until then.
+    pub fn beginDeferred(out: *std.Io.Writer, codec: pcm.Codec, format: audio.Format, options: WriteOptions) WriteError!Writer {
+        var w = try begin(out, codec, format, 0, options);
+        w.frames_expected = std.math.maxInt(u64);
+        w.deferred = true;
+        return w;
+    }
+
+    /// After `finish` (a no-op unless deferred): the header encoded for the
+    /// frames written, over the provisional one (`seeker` moves `out`), then
+    /// back to the end. Only the sizes change; a stream that needs RF64
+    /// where the provisional header is RIFF cannot be rewritten in place
+    /// (`SizeOverflow`).
+    pub fn rewriteHeader(w: *Writer, seeker: seek.OutputSeeker) RewriteError!void {
+        // A known-length header is already right.
+        if (!w.deferred) return;
+        const provisional = try encodeHeader(w.codec, w.format, 0, w.options);
+        const header = try encodeHeader(w.codec, w.format, w.frames_written, w.options);
+        if (header.len != provisional.len) return error.SizeOverflow;
+        // The tag chunks between the header's two parts keep their bytes.
+        const bext_len: u64 = if (header.bext_body) |body| 8 + body + body % 2 else 0;
+        const end = seeker.position();
+        try seeker.seekTo(0);
+        try w.out.writeAll(header.bytes[0..header.data_at]);
+        try seeker.seekTo(header.data_at + bext_len + header.info_len);
+        try w.out.writeAll(header.bytes[header.data_at..header.len]);
+        try seeker.seekTo(end);
+        try w.out.flush();
     }
 
     /// Runs `begin`'s checks without writing, so a caller can reject an
@@ -1480,8 +1522,9 @@ pub const Writer = struct {
     /// the data needs (one after odd RIFF data, up to 7 in Wave64), then
     /// flushes `out`.
     pub fn finish(w: *Writer) WriteError!void {
-        if (w.frames_written != w.frames_expected) return error.TooFewFrames;
-        // begin checked that the data size fits in u64.
+        if (!w.deferred and w.frames_written != w.frames_expected) return error.TooFewFrames;
+        // begin checked that the data size fits in u64; a deferred stream's
+        // frames were written, so their bytes fit too.
         const data_bytes = w.frames_written * w.codec.bytesPerSample() * w.format.channelCount();
         try w.out.splatByteAll(0, w.variant.padAfter(data_bytes));
         try w.out.flush();
@@ -2063,6 +2106,58 @@ test "writeFrames takes frames wider than its encoding chunk allows evenly" {
     for (samples, 0..) |sample, i| {
         try std.testing.expectEqual(sample, std.mem.readInt(i16, decoded.raw[2 * i ..][0..2], .little));
     }
+}
+
+test "a deferred header, rewritten at the end, equals the known-length header" {
+    const gpa = std.testing.allocator;
+    var tags: metadata.Dictionary = .empty;
+    defer tags.deinit(gpa);
+    try tags.put(gpa, "title", "Deferred", .replace);
+    try tags.put(gpa, "description", "bext body", .replace);
+    const Case = struct { codec: pcm.Codec, frames: u32, options: WriteOptions };
+    const cases = [_]Case{
+        // Odd u8 data (a pad byte), with LIST/INFO and bext chunks between
+        // the header's two parts.
+        .{ .codec = .u8, .frames = 7, .options = .{ .tags = &tags, .bext = true } },
+        // Float: a `fact` chunk holds the count too.
+        .{ .codec = .f32le, .frames = 5, .options = .{} },
+        .{ .codec = .s24le, .frames = 3, .options = .{ .rf64 = .always } },
+        .{ .codec = .s16le, .frames = 9, .options = .{ .variant = .w64 } },
+    };
+    for (cases) |case| {
+        const format = try audio.Format.init(8000, 2, case.codec.storage());
+        var data: [9 * 2 * 4]u8 = undefined;
+        for (&data, 0..) |*b, i| b.* = @truncate(i * 7);
+        const bytes = data[0 .. case.frames * 2 * case.codec.bytesPerSample()];
+
+        var known_buffer: [2048]u8 = undefined;
+        var known: std.Io.Writer = .fixed(&known_buffer);
+        var w = try Writer.begin(&known, case.codec, format, case.frames, case.options);
+        try w.writeData(bytes);
+        try w.finish();
+
+        var deferred_buffer: [2048]u8 = undefined;
+        var deferred: std.Io.Writer = .fixed(&deferred_buffer);
+        var d = try Writer.beginDeferred(&deferred, case.codec, format, case.options);
+        // In two pieces: the deferred writer takes any count.
+        const half = (case.frames / 2) * 2 * case.codec.bytesPerSample();
+        try d.writeData(bytes[0..half]);
+        try d.writeData(bytes[half..]);
+        try d.finish();
+        try d.rewriteHeader(.fixed(&deferred));
+        try std.testing.expectEqualSlices(u8, known.buffered(), deferred.buffered());
+    }
+}
+
+test "a deferred RIFF header that would need RF64 at the end fails" {
+    const stereo = try audio.Format.init(44100, 2, .s16);
+    var buffer: [128]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&buffer);
+    var d = try Writer.beginDeferred(&out, .s16le, stereo, .{ .rf64 = .auto });
+    try d.finish();
+    // As if 4 GiB of frames had been written: RF64's header is longer.
+    d.frames_written = (1 << 30) + 1;
+    try std.testing.expectError(error.SizeOverflow, d.rewriteHeader(.fixed(&out)));
 }
 
 test "the writer rejects frame-count mismatches and incomplete frames" {

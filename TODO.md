@@ -318,7 +318,7 @@ Left open, each with the task it must land before:
 | A damaged Ogg FLAC frame shifts later timestamps; empty FLAC packets lose the start time | `demux.zig` | T65a |
 | Ogg's duration scan creates streams (notes.md "Length scan restore" says it does not) | `ogg.zig` | T65c |
 | A data offset of 0 is never replaced (`demux.c:350`) | `demux.zig` | T52b, T53c |
-| Decoded Ogg and MP3 inputs decode the stream twice from a file (a counting pass for the output header, raw, FLAC and Ogg outputs included): 45% of the conversion (zig-io analysis, "Findings for the codebase") | `oggdecode.zig`, `mp3decode.zig`, `convert.zig` | T57 |
+| Inputs without a count other than decoded Ogg and MP3 (raw PCM from a pipe, FLAC without a total, WAV of unknown length) are refused into WAV, AU and AIFF files (`UnsupportedStreamingSize`), where the deferred header the decoded inputs use (notes.md "Deferred header") would match FFmpeg's rewrite | `convert.zig` | any time |
 | CUESHEET chapter ends are not `compute_chapters_end`'s (library) | `flac.zig` | any time |
 | The allocation-free FLAC `readHeader` keeps its own channel-mask scanner | `flac.zig` | T65a |
 | `oggdecode` refuses a decoder that reconfigures its channel count (FFmpeg reallocates the frame) | `oggdecode.zig` | T33a, T35a |
@@ -3027,6 +3027,10 @@ names, not as an empty framework.
     Limitations: no Vorbis encoder; one decodable stream per input; a
       seekable input decodes twice (the count ahead); from a pipe only
       raw PCM, FLAC and Ogg outputs.
+    Amended (after T29b): the count ahead runs only for a WAV, AU or AIFF
+      header on an output that cannot seek back; into a regular file, from
+      a file or a pipe, the header is rewritten at the end (notes.md
+      "Deferred header"), which halves an Ogg conversion's time.
     ```
 
 - [x] **T28 — Opus decoder.** Checked when T28a–T28c are. Reference:
@@ -3131,6 +3135,8 @@ names, not as an empty framework.
       with SILK or hybrid frames skipped until T28b and T28c.
     Limitations: SILK and hybrid frames (T28b, T28c); mapping family 2;
       no Opus encoder; a seekable input decodes twice (the count ahead).
+    Amended (after T29b): only for a WAV, AU or AIFF header on an output
+      that cannot seek back (notes.md "Deferred header").
     ```
   - [x] **T28b — SILK.** Needs T28a.
     Done when the SILK-only test vectors decode as FFmpeg's decoder decodes

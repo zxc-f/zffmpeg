@@ -415,9 +415,9 @@ pub fn main(init: std.process.Init) !u8 {
     }
 
     // Ogg FLAC whose second frame changes the rate is refused, as native
-    // FLAC is, not converted with every sample at the first rate: from a
-    // file (the counting pass, before the output exists) and through a pipe
-    // (at the second frame).
+    // FLAC is, not converted with every sample at the first rate: into a
+    // file (at the second frame, the header rewritten at the end being
+    // never reached: the partial output removed) and through a pipe.
     {
         const case = "an Ogg FLAC rate change is refused";
         const native = try fixture_dir.readFileAlloc(io, "flac" ++ std.fs.path.sep_str ++ "flac_rate_change.flac", h.gpa, .limited(1 << 16));
@@ -429,6 +429,26 @@ pub fn main(init: std.process.Init) !u8 {
         h.expectAbsent(case, "rate.wav");
         const piped = "an Ogg FLAC rate change through a pipe is refused";
         h.expect(piped, try h.runPiped(&.{ "-i", "-", "-f", "s16le", "-" }, ogg), 3, "zffmpeg: -: UnsupportedFormat");
+    }
+
+    // A decoded input from a pipe into a WAV file: no count ahead, the
+    // header rewritten at the end, the same bytes as from the file (a stream
+    // without gapless trimming, which a pipe would lose).
+    {
+        const case = "an MP3 stream from a pipe into a WAV file";
+        const mp3 = try fixture_dir.readFileAlloc(io, "mp3" ++ std.fs.path.sep_str ++ "mp3_l3_long_stereo.mp3", h.gpa, .limited(1 << 16));
+        defer h.gpa.free(mp3);
+        try h.write("long.mp3", mp3);
+        h.expectSuccess(case, try h.run(&.{ "-y", "-i", "long.mp3", "file.wav" }, .ignore, null));
+        h.expectSuccess(case, try h.runPiped(&.{ "-y", "-i", "-", "pipe.wav" }, mp3));
+        const from_file = try dir.readFileAlloc(io, "file.wav", h.gpa, .limited(1 << 20));
+        defer h.gpa.free(from_file);
+        const from_pipe = try dir.readFileAlloc(io, "pipe.wav", h.gpa, .limited(1 << 20));
+        defer h.gpa.free(from_pipe);
+        // 27648 stereo s16 frames after the 44-byte header.
+        if (from_file.len != 44 + 27648 * 4 or !std.mem.eql(u8, from_file, from_pipe)) {
+            h.fail(case, "file.wav ({d} bytes) and pipe.wav ({d} bytes) differ", .{ from_file.len, from_pipe.len });
+        }
     }
 
     // Raw parameters refused after probing grew its buffer past the first

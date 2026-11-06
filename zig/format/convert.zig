@@ -126,6 +126,14 @@ pub const Request = struct {
     /// input `-ch_layout` names the layout, `6C` included; its `-ac` does
     /// not.
     guess_layout: bool = true,
+    /// The output will be a regular file `runTo` can seek back in. A decoded
+    /// Ogg or MP3 input's WAV, AU or AIFF header then says no frames until
+    /// the end and is rewritten there, as FFmpeg's muxers rewrite a seekable
+    /// output's header, so the stream is decoded once; otherwise such an
+    /// input is decoded ahead once to count its samples. `runTo` without a
+    /// seeker then refuses the request (`UnsupportedStreamingSize`) before
+    /// writing.
+    output_seekable: bool = false,
     /// Where FFmpeg's command line would log a warning (T17a): the guessed
     /// layout. The dither's own go to `dither.diagnostics`.
     diagnostics: ?diagnostics.Sink = null,
@@ -257,6 +265,9 @@ pub const Conversion = struct {
     /// An Ogg output's stream tags (T27b): the `encoder` tag the ffmpeg
     /// program sets under `-bitexact`; owned (`gpa`).
     stream_tags: metadata.Dictionary = .empty,
+    /// The WAV, AU or AIFF header says no frames and `runTo` rewrites it at
+    /// the end (`Request.output_seekable`).
+    deferred_header: bool = false,
 
     /// One parser per format family; the WAV parser also reads Wave64. A
     /// FLAC input reads as its decoded frames.
@@ -301,6 +312,18 @@ pub const Conversion = struct {
                 .init(request.gpa orelse return error.UnsupportedOperation, source.reader(), null, request.diagnostics) },
         };
         errdefer deinitParser(&input);
+        // A header written before the samples needs their count. A decoded
+        // Ogg or MP3 input counts them ahead (decoding the stream twice)
+        // only when that header cannot be rewritten at the end.
+        const header_first = switch (request.output.family()) {
+            .wav, .au, .aiff => true,
+            .raw, .flac, .ogg, .caf, .mp3 => false,
+        };
+        switch (input) {
+            .ogg => |*reader| reader.count_ahead = header_first and !request.output_seekable,
+            .mp3 => |*reader| reader.count_ahead = header_first and !request.output_seekable,
+            .wav, .au, .aiff, .caf, .flac, .raw => {},
+        }
         // The tags as the file stores them, renamed once the header is read.
         var stored: metadata.Dictionary = .empty;
         defer if (request.tags) |t| stored.deinit(t.gpa);
@@ -407,6 +430,9 @@ pub const Conversion = struct {
         if (!supported) return error.UnsupportedOperation;
         // A layout libswresample cannot mix fails before any output (T23c).
         if (request.mode == .transcode) _ = try rematrix.needed(summary.format.layout, summary.output_layout);
+        // Without a count, the decoded input's header is rewritten at the end.
+        const deferred_header = header_first and request.output_seekable and summary.frame_count == null and
+            (input == .ogg or input == .mp3);
         if (summary.output_rate == 0) return error.InvalidFormat;
         // The resampler's frame count, which the writers' headers need (T24).
         if (resampling) {
@@ -415,9 +441,9 @@ pub const Conversion = struct {
             }
         }
         switch (request.output.family()) {
-            .wav => try wav.Writer.check(summary.output_codec, summary.outputFormat(), try knownCount(summary), wavOptions(limits, request.output, tags)),
-            .au => try au.Writer.check(summary.output_codec, summary.outputFormat(), try knownCount(summary), limits.au),
-            .aiff => try aiff.Writer.check(summary.output_codec, summary.outputFormat(), try knownCount(summary), aiffOptions(limits)),
+            .wav => try wav.Writer.check(summary.output_codec, summary.outputFormat(), try headerCount(summary, deferred_header), wavOptions(limits, request.output, tags)),
+            .au => try au.Writer.check(summary.output_codec, summary.outputFormat(), try headerCount(summary, deferred_header), limits.au),
+            .aiff => try aiff.Writer.check(summary.output_codec, summary.outputFormat(), try headerCount(summary, deferred_header), aiffOptions(limits)),
             .raw => try raw.Writer.check(summary.output_codec, summary.outputFormat(), rawOptions(limits)),
             .flac => flacmux.Writer.check(request.gpa.?, summary.output_codec, summary.outputFormat(), sourceBits(summary, &input), .{ .encoder = request.flac, .tags = tags }) catch |err| return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
@@ -500,6 +526,7 @@ pub const Conversion = struct {
             .packet_frames = packet_frames,
             .flac_options = request.flac,
             .stream_tags = stream_tags,
+            .deferred_header = deferred_header,
         };
     }
 
@@ -542,6 +569,12 @@ pub const Conversion = struct {
     }
 
     /// The frame count a writer's header needs up front.
+    /// The count a header-first writer is checked with: the known one, or
+    /// none yet for a header rewritten at the end.
+    fn headerCount(summary: Summary, deferred: bool) error{UnsupportedStreamingSize}!u64 {
+        return if (deferred) 0 else knownCount(summary);
+    }
+
     fn knownCount(summary: Summary) error{UnsupportedStreamingSize}!u64 {
         return summary.output_frame_count orelse error.UnsupportedStreamingSize;
     }
@@ -558,19 +591,38 @@ pub const Conversion = struct {
     /// output's (T26c); `seeker` moves `out`.
     pub fn runTo(c: *Conversion, out: *std.Io.Writer, seeker: ?seek.OutputSeeker) RunError!void {
         const s = c.summary;
-        // `init` checked that every writer but raw PCM's has a known count.
+        // `init` checked that every writer but raw PCM's has a known count,
+        // or a header rewritten at the end, which needs the output to seek:
+        // without a seeker that is refused before any byte is written.
+        const rewrite: ?seek.OutputSeeker = if (c.deferred_header) seeker orelse return error.UnsupportedStreamingSize else null;
         switch (s.output.family()) {
             .wav => {
-                var writer = wav.Writer.begin(out, s.output_codec, s.outputFormat(), s.output_frame_count.?, wavOptions(c.limits, s.output, c.tags)) catch |err| return outputFailure(err);
+                const options = wavOptions(c.limits, s.output, c.tags);
+                const begun = if (rewrite != null)
+                    wav.Writer.beginDeferred(out, s.output_codec, s.outputFormat(), options)
+                else
+                    wav.Writer.begin(out, s.output_codec, s.outputFormat(), s.output_frame_count.?, options);
+                var writer = begun catch |err| return outputFailure(err);
                 try c.transfer(wav.Writer, &writer);
+                if (rewrite) |sk| writer.rewriteHeader(sk) catch |err| return outputFailure(err);
             },
             .au => {
-                var writer = au.Writer.begin(out, s.output_codec, s.outputFormat(), s.output_frame_count.?, c.limits.au) catch |err| return outputFailure(err);
+                const begun = if (rewrite != null)
+                    au.Writer.beginDeferred(out, s.output_codec, s.outputFormat(), c.limits.au)
+                else
+                    au.Writer.begin(out, s.output_codec, s.outputFormat(), s.output_frame_count.?, c.limits.au);
+                var writer = begun catch |err| return outputFailure(err);
                 try c.transfer(au.Writer, &writer);
+                if (rewrite) |sk| writer.rewriteHeader(sk) catch |err| return outputFailure(err);
             },
             .aiff => {
-                var writer = aiff.Writer.begin(out, s.output_codec, s.outputFormat(), s.output_frame_count.?, aiffOptions(c.limits)) catch |err| return outputFailure(err);
+                const begun = if (rewrite != null)
+                    aiff.Writer.beginDeferred(out, s.output_codec, s.outputFormat(), aiffOptions(c.limits))
+                else
+                    aiff.Writer.begin(out, s.output_codec, s.outputFormat(), s.output_frame_count.?, aiffOptions(c.limits));
+                var writer = begun catch |err| return outputFailure(err);
                 try c.transfer(aiff.Writer, &writer);
+                if (rewrite) |sk| writer.rewriteHeader(sk) catch |err| return outputFailure(err);
             },
             .raw => {
                 var writer = raw.Writer.begin(out, s.output_codec, s.outputFormat(), s.output_frame_count, rawOptions(c.limits)) catch |err| return outputFailure(err);
@@ -1125,7 +1177,7 @@ fn rawOptions(limits: Limits) raw.WriteOptions {
 
 /// Every error a writer's `begin`, `writeData` or `finish` returns. A new
 /// one fails to compile in `outputFailure`'s switch until it is classified.
-const WriterError = wav.WriteError || au.WriteError || aiff.WriteError || raw.WriteError || flacmux.WriteError;
+const WriterError = wav.RewriteError || au.RewriteError || aiff.RewriteError || raw.WriteError || flacmux.WriteError;
 
 /// A writer's failure once output started: the output's, or FLAC's that
 /// only its first frame reveals (T26c: the encoder refusing the block size
@@ -1143,11 +1195,16 @@ fn outputFailure(err: WriterError) RunError {
         // `init` ran the header checks `begin` repeats, with the same
         // arguments, and the FLAC encoder's option checks, which do not
         // depend on the block size.
-        error.InvalidFormat, error.LimitExceeded, error.SizeOverflow, error.InvalidOption => unreachable,
+        error.InvalidFormat, error.LimitExceeded, error.InvalidOption => unreachable,
+        // A deferred header (`Request.output_seekable`) learns the sizes at
+        // the end: more data than the container's sizes hold (AU's data
+        // limit, AIFF's 32-bit count, RIFF without RF64). A header written
+        // first was checked by `init`.
+        error.SizeOverflow, error.TooManyFrames => error.LimitExceeded,
         // The parser delivers whole frames of the same format, exactly the
         // count `init` declared (`resample.outputFrames` for a rate change),
-        // before `finish`.
-        error.IncompleteFrame, error.TooManyFrames, error.TooFewFrames => unreachable,
+        // before `finish`; a deferred header declares none.
+        error.IncompleteFrame, error.TooFewFrames => unreachable,
     };
 }
 
@@ -2324,6 +2381,59 @@ test "a decoded input resamples frame by frame: FFmpeg's FLAC block size and byt
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(out.written(), &digest, .{});
         try std.testing.expectEqualStrings(case.sha256, &std.fmt.bytesToHex(digest, .lower));
+    }
+}
+
+test "a decoded input's header is rewritten at the end on a seekable output: decoded once, the same bytes" {
+    const gpa = std.testing.allocator;
+    const out_buffer = try gpa.alloc(u8, 1 << 19);
+    defer gpa.free(out_buffer);
+    const inputs = [_][]const u8{ fixtures.mp3.bytes("mp3_l3_long_stereo"), fixtures.ogg.bytes("ogg_vorbis_ffmpeg_22k_short") };
+    for (inputs) |bytes| {
+        for ([_]Container{ .wav, .au, .aiff }) |output| {
+            // Counted ahead from a seekable input, the header written first.
+            var counted_reader: std.Io.Reader = .fixed(bytes);
+            var counted_source: detect.Input = undefined;
+            try counted_source.open(&counted_reader, .{ .seeker = .fixed(&counted_reader), .length = bytes.len, .gpa = gpa });
+            defer counted_source.deinit();
+            var counted = try Conversion.init(&counted_source, .{ .output = output, .mode = .transcode, .gpa = gpa }, .{});
+            defer counted.deinit();
+            try std.testing.expect(!counted.deferred_header);
+            var counted_out: std.Io.Writer.Allocating = .init(gpa);
+            defer counted_out.deinit();
+            try counted.run(&counted_out.writer);
+
+            // From a seekable input and from a pipe, decoded once, the
+            // header rewritten.
+            for ([_]bool{ true, false }) |seekable_input| {
+                var reader: std.Io.Reader = .fixed(bytes);
+                var source: detect.Input = undefined;
+                try source.open(&reader, .{ .seeker = if (seekable_input) .fixed(&reader) else null, .length = if (seekable_input) bytes.len else null, .gpa = gpa });
+                defer source.deinit();
+                var conversion = try Conversion.init(&source, .{ .output = output, .mode = .transcode, .gpa = gpa, .output_seekable = true }, .{});
+                defer conversion.deinit();
+                try std.testing.expect(conversion.deferred_header);
+                switch (conversion.input) {
+                    .ogg => |*r| try std.testing.expect(!r.count_ahead),
+                    .mp3 => |*r| try std.testing.expect(!r.count_ahead),
+                    else => return error.TestUnexpectedResult,
+                }
+                var out: std.Io.Writer = .fixed(out_buffer);
+                try conversion.runTo(&out, .fixed(&out));
+                try std.testing.expectEqualSlices(u8, counted_out.written(), out.buffered());
+            }
+
+            // Promised a seekable output, given none: refused before any byte.
+            var reader: std.Io.Reader = .fixed(bytes);
+            var source: detect.Input = undefined;
+            try source.open(&reader, .{ .gpa = gpa });
+            defer source.deinit();
+            var conversion = try Conversion.init(&source, .{ .output = output, .mode = .transcode, .gpa = gpa, .output_seekable = true }, .{});
+            defer conversion.deinit();
+            var out: std.Io.Writer = .fixed(out_buffer);
+            try std.testing.expectError(error.UnsupportedStreamingSize, conversion.runTo(&out, null));
+            try std.testing.expectEqual(0, out.buffered().len);
+        }
     }
 }
 

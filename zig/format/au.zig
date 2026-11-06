@@ -26,6 +26,7 @@ const audio = @import("../core/audio.zig");
 const samples_storage = @import("../core/samples.zig");
 const pcm = @import("../codec/pcm.zig");
 const skip = @import("../io/skip.zig");
+const seek = @import("seek.zig");
 
 /// Contract errors (see the AU fixture README), plus `IoFailure` for a failing
 /// reader.
@@ -342,6 +343,9 @@ pub const WriteError = std.Io.Writer.Error || HeaderError || error{
     TooFewFrames,
 };
 
+/// `Writer.rewriteHeader`'s failures: the header's, or moving the output.
+pub const RewriteError = WriteError || error{IoFailure};
+
 /// Writes one known-length AU stream to a borrowed writer: the canonical
 /// 32-byte header with the codec's encoding and the exact data size, then the
 /// samples. No seeking and no placeholder size.
@@ -351,6 +355,10 @@ pub const Writer = struct {
     format: audio.Format,
     frames_expected: u32,
     frames_written: u32 = 0,
+    /// Begun by `beginDeferred`: frames up to the data limit, the header
+    /// rewritten.
+    deferred: bool = false,
+    limits: Limits,
 
     /// Checks every size, then writes the header. Nothing is written when a
     /// check fails. `format.sample_format` must be `codec.storage()`.
@@ -359,7 +367,33 @@ pub const Writer = struct {
         try out.writeAll(&header);
         // encodeHeader checked the data size against max_data_bytes, so the
         // frame count fits in u32.
-        return .{ .out = out, .codec = codec, .format = format, .frames_expected = @intCast(frame_count) };
+        return .{ .out = out, .codec = codec, .format = format, .frames_expected = @intCast(frame_count), .limits = limits };
+    }
+
+    /// `begin` for a stream whose length is unknown until its end: the
+    /// header says no data until `rewriteHeader`, and the frames may fill
+    /// `max_data_bytes`.
+    pub fn beginDeferred(out: *std.Io.Writer, codec: pcm.Codec, format: audio.Format, limits: Limits) WriteError!Writer {
+        var w = try begin(out, codec, format, 0, limits);
+        // begin checked the channels: the frame is at least one byte.
+        const frame_bytes = codec.bytesPerSample() * format.channelCount();
+        w.frames_expected = max_data_bytes / frame_bytes;
+        w.deferred = true;
+        return w;
+    }
+
+    /// After `finish` (a no-op unless deferred): the header encoded for the
+    /// frames written, over the provisional one (`seeker` moves `out`), then
+    /// back to the end.
+    pub fn rewriteHeader(w: *Writer, seeker: seek.OutputSeeker) RewriteError!void {
+        // A known-length header is already right.
+        if (!w.deferred) return;
+        const header = try encodeHeader(w.codec, w.format, w.frames_written, w.limits);
+        const end = seeker.position();
+        try seeker.seekTo(0);
+        try w.out.writeAll(&header);
+        try seeker.seekTo(end);
+        try w.out.flush();
     }
 
     /// Runs `begin`'s checks without writing, so a caller can reject an
@@ -428,7 +462,7 @@ pub const Writer = struct {
 
     /// Verifies that every declared frame was written, then flushes `out`.
     pub fn finish(w: *Writer) WriteError!void {
-        if (w.frames_written != w.frames_expected) return error.TooFewFrames;
+        if (!w.deferred and w.frames_written != w.frames_expected) return error.TooFewFrames;
         try w.out.flush();
     }
 };
@@ -614,6 +648,29 @@ test "the largest data size is accepted from the header and its absence is trunc
     const info = try parser.readHeader();
     try std.testing.expectEqual(largest / 2, info.frame_count);
     try std.testing.expectError(error.Truncated, parser.finish());
+}
+
+test "a deferred AU header, rewritten at the end, equals the known-length header" {
+    const stereo = try audio.Format.init(8000, 2, .s16);
+    const data = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
+    var known_buffer: [64]u8 = undefined;
+    var known: std.Io.Writer = .fixed(&known_buffer);
+    var w = try Writer.begin(&known, .s16be, stereo, 3, .{});
+    try w.writeData(&data);
+    try w.finish();
+
+    var deferred_buffer: [64]u8 = undefined;
+    var deferred: std.Io.Writer = .fixed(&deferred_buffer);
+    var d = try Writer.beginDeferred(&deferred, .s16be, stereo, .{});
+    try d.writeData(data[0..4]);
+    try d.writeData(data[4..]);
+    try d.finish();
+    try d.rewriteHeader(.fixed(&deferred));
+    try std.testing.expectEqualSlices(u8, known.buffered(), deferred.buffered());
+    // Past max_data_bytes the frames are refused, as the header cannot say
+    // their size.
+    d.frames_written = d.frames_expected;
+    try std.testing.expectError(error.TooManyFrames, d.writeData(data[0..4]));
 }
 
 const synthetic = @import("../testing/synthetic.zig");

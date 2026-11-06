@@ -652,13 +652,16 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   MP3 and hash case fails.
 - **Ogg decoding through pipes.** Each Ogg fixture's raw PCM decode
   (`-f s16le`, `-f f32le`) also runs with the input on a pipe and the
-  output on stdout, and must equal the ffmpeg program's doing the same
-  (`-i pipe:`), or be the same refusal: from a pipe a junk prefix leaves
-  both probes no file name to fall back on.
+  output on stdout, and its WAV with the input on a pipe and the output in
+  a file (no count ahead: both rewrite the header at the end); each must
+  equal the ffmpeg program's doing the same (`-i pipe:`), or be the same
+  refusal: from a pipe a junk prefix leaves both probes no file name to
+  fall back on.
 - **MP3 decoding (T29b).** Every MP3 fixture converted by zffmpeg and by the
   ffmpeg program with `-bitexact` into the Ogg section's outputs (WAV, AU,
   AIFF, FLAC, Ogg, s16le, f32le, resampled, downmixed), byte for byte, and
-  its raw PCM decodes again through pipes; MP1 and MP2 streams, which the
+  its raw PCM decodes again through pipes and its WAV from a pipe into a
+  file (the header rewritten at the end); MP1 and MP2 streams, which the
   reference build has no decoder for, and streams past the decode error
   rate must be refused by both, zffmpeg before any output. The recorded
   differences are `KNOWN_MP3_DECODE_DIFFERENCES` (notes.md "MP3

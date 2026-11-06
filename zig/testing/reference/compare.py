@@ -2653,17 +2653,28 @@ def same_decode_refusal(ffmpeg_process, error):
     return b"Decode error rate " in ffmpeg_process.stderr and error == "DecodeErrorRate"
 
 
-def check_pipe_decode(args, path, opts, known):
+def check_pipe_decode(args, path, opts, known, work=None):
     """zffmpeg decoding an Ogg or MP3 fixture from standard input to raw PCM on
     standard output against the ffmpeg program doing the same (M17): equal
     bytes, or the same refusal (from a pipe, a junk prefix leaves FFmpeg's
-    probe nothing to detect, as it does zffmpeg's: no file name). A recorded
-    refusal must come with its status and error. Returns the problem, or None."""
+    probe nothing to detect, as it does zffmpeg's: no file name). With
+    `work`, the output is a file there instead, whose header both rewrite at
+    the end (no count ahead from a pipe). A recorded refusal must come with
+    its status and error. Returns the problem, or None."""
     data = path.read_bytes()
-    theirs = subprocess.run([str(part) for part in (args.ffmpeg, "-v", "error", "-i", "pipe:", "-bitexact", *opts,
-                                                    "-")], input=data, capture_output=True, timeout=120)
-    ours = subprocess.run([str(part) for part in (args.zffmpeg, "-i", "-", *opts, "-")], input=data,
+    theirs_file = ours_file = None
+    if work is not None:
+        theirs_file, ours_file = work / "theirs_pipe.out", work / "ours_pipe.out"
+        for f in (theirs_file, ours_file):
+            f.unlink(missing_ok=True)
+    theirs = subprocess.run([str(part) for part in (args.ffmpeg, "-v", "error", "-y", "-i", "pipe:", "-bitexact", *opts,
+                                                    theirs_file or "-")], input=data, capture_output=True, timeout=120)
+    ours = subprocess.run([str(part) for part in (args.zffmpeg, "-y", "-i", "-", *opts, ours_file or "-")], input=data,
                           capture_output=True, timeout=120)
+    if work is not None:
+        # Compared as the stdout of the other cells: the file's bytes.
+        theirs.stdout = theirs_file.read_bytes() if theirs_file.exists() else b""
+        ours.stdout = ours_file.read_bytes() if ours_file.exists() else b""
     error = tool_error(ours, "zffmpeg", "-")
     if known is not None and isinstance(known[0], tuple) and known[0][0] == "refused":
         _, code, name = known[0]
@@ -2747,6 +2758,15 @@ def decode_cells(args, paths, known_table, table_name, label_prefix, failures):
                         same += 1
                     else:
                         problems.append(f"{label} through pipes: {problem}")
+                if opts == ["-f", "wav"]:
+                    # From a pipe into a WAV file: no count ahead, the header
+                    # rewritten at the end, as the program's.
+                    total += 1
+                    problem = check_pipe_decode(args, path, opts, known, work)
+                    if problem is None:
+                        same += 1
+                    else:
+                        problems.append(f"{label} from a pipe into a file: {problem}")
             result = "pass" if not problems else "**FAIL**: " + "; ".join(problems)
             rows.append(f"| `{path.stem}` | {codec} | {result} |")
             failures.extend(f"{label_prefix} {path.stem}: {p}" for p in problems)
@@ -2801,7 +2821,7 @@ def compare_ogg_decode(args, lines, failures):
         "## Ogg decoding (T27d, T28a)",
         "",
         f"Ogg fixtures decoded by zffmpeg into WAV, AU, AIFF, FLAC, Ogg and raw PCM (and resampled, and downmixed), "
-        f"and into raw PCM from a pipe to stdout, equal to the ffmpeg program's with `-bitexact`: {same}/{total}, "
+        f"into raw PCM from a pipe to stdout, and from a pipe into a WAV file, equal to the ffmpeg program's with `-bitexact`: {same}/{total}, "
         f"{understood} of them as understood "
         f"differences:",
         "",
@@ -2861,7 +2881,7 @@ def compare_mp3_decode(args, lines, failures):
         "## MP3 decoding (T29b)",
         "",
         f"MP3 fixtures decoded by zffmpeg into WAV, AU, AIFF, FLAC, Ogg and raw PCM (and resampled, and "
-        f"downmixed), and into raw PCM from a pipe to stdout, equal to the ffmpeg program's with `-bitexact`, "
+        f"downmixed), into raw PCM from a pipe to stdout, and from a pipe into a WAV file, equal to the ffmpeg program's with `-bitexact`, "
         f"or refused by both: {same}/{total}, {understood} of them as understood differences:",
         "",
     ] + [f"- {note}" for note in sorted(understood_notes)] + [

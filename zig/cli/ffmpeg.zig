@@ -382,6 +382,13 @@ fn isStdio(path: []const u8) bool {
     return std.mem.eql(u8, path, "-");
 }
 
+/// Whether `path` names a regular file, or nothing yet (the output is then
+/// created as one); a FIFO or a device cannot seek back.
+fn namesRegularOutput(io: std.Io, path: []const u8) bool {
+    const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch |err| return err == error.FileNotFound;
+    return stat.kind == .file;
+}
+
 fn convert(io: std.Io, command: Command, request: av.convert.Request) ExitStatus {
     const cwd = std.Io.Dir.cwd();
     const input_file = if (isStdio(command.input))
@@ -414,7 +421,13 @@ fn convert(io: std.Io, command: Command, request: av.convert.Request) ExitStatus
     };
     defer source.deinit();
 
-    var conversion = av.convert.Conversion.init(&source, request, .{}) catch |err| {
+    // A regular output file gets a seeker below, so a header written before
+    // the samples can be rewritten at the end and a decoded input is
+    // decoded once; predicted from what the path names now, before the
+    // output exists. `runTo` refuses before writing if it is not one then.
+    var seekable_request = request;
+    seekable_request.output_seekable = !isStdio(command.output) and namesRegularOutput(io, command.output);
+    var conversion = av.convert.Conversion.init(&source, seekable_request, .{}) catch |err| {
         return fail(io, command.input, withReadCause(err, &reader));
     };
     defer conversion.deinit();

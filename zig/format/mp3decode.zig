@@ -11,10 +11,10 @@
 //! discarding of the samples the demuxer's gapless side data asks to skip,
 //! delivered as interleaved f32le.
 //!
-//! On a seekable input the stream is decoded once ahead to count its
-//! samples, the count FFmpeg's muxers write when they rewrite a header at
-//! the end, as `format/oggdecode.zig` does for Ogg. Without seeking there
-//! is no count. Reading checks the count unless the caller takes the
+//! On a seekable input, unless the caller clears `count_ahead`, the stream
+//! is decoded once ahead to count its samples, the count FFmpeg's muxers
+//! write when they rewrite a header at the end, as `format/oggdecode.zig`
+//! does for Ogg. Without seeking there is no count. Reading checks the count unless the caller takes the
 //! samples as they come (`expected` set to null).
 //!
 //! MP1 and MP2 streams are refused (`UnsupportedOperation`), as the
@@ -92,6 +92,10 @@ pub const DecodedReader = struct {
     ended: bool = false,
     /// This reader is the counting pass of another.
     counting: bool = false,
+    /// Count the samples ahead on a seekable input, for a header written
+    /// before the samples on an output that cannot be rewritten; a caller
+    /// that needs no count clears it before `readHeader` and decodes once.
+    count_ahead: bool = true,
     /// The ffmpeg program's decoder statistics.
     errors: decoded.ErrorRate = .{},
 
@@ -119,7 +123,7 @@ pub const DecodedReader = struct {
         std.debug.assert(r.demuxer == null);
         // The counting pass, from the start, before this one.
         var counted: ?u64 = null;
-        if (r.seeker != null and !r.counting) {
+        if (r.seeker != null and r.count_ahead and !r.counting) {
             var pass = init(r.gpa, r.reader, r.seeker, null);
             pass.counting = true;
             defer pass.deinit();

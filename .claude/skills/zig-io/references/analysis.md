@@ -117,12 +117,13 @@ Paths are relative to `lib/std/`.
 Checked on 2026-11-06 against a full clone of the Zig repository
 (`.references/zig`, then on `master`, `0.17.0-953-g155ec6090`):
 
-- **The installed `lib/std` is the 0.17.0 source.** Every file of the
-  release's `lib/std` equals the tag's, except the standard library's own
-  tests: the release ships each `test.zig` empty (`Io/test.zig`,
-  `fs/test.zig`, `Io/Threaded/test.zig` and 7 more) and leaves out their
-  test data (139 files). The API reading above, and every line cited in
-  this file, is the same in both.
+- **The installed `lib/std` is the 0.17.0 source.** With the clone checked
+  out at the tag (`7647adab80`), the toolchain's whole `lib/` differs in 88
+  files, every one a test file the release ships empty (`std/Io/test.zig`,
+  `std/fs/test.zig`, `std/json/*_test.zig`, `compiler_rt/*_test.zig`, ...),
+  and lacks 119 test data files and READMEs; all 563 `.zig` files of
+  `lib/std` that are not tests are byte for byte the tag's. The API
+  reading above, and every line cited in this file, is the same in both.
 - **`master` is not 0.17.0.** 953 commits later, 223 files of `lib/std`
   changed (23,788 lines added, 13,435 removed). Reading
   `.references/zig/lib` on `master` as if it were the pinned library gives
@@ -404,7 +405,7 @@ Each holds on both machines unless it says otherwise.
    count its samples (E2E-C, effect 1); write the header with a
    placeholder and rewrite it at the end on a seekable output, as FFmpeg's
    muxers do (`wavenc.c`, `au.c`, `aiffenc.c`), and skip any count for an
-   output that needs none.
+   output that needs none. Done for Ogg and MP3 inputs (40–43% less time).
 9. **Compare against the assembly build too.** The pinned build is the
    oracle for output; for speed, T57 needs both it (the same C algorithms)
    and an assembly build (what users run), since assembly removes 25–70%
@@ -437,14 +438,15 @@ Each holds on both machines unless it says otherwise.
 
 ## Findings for the codebase
 
-- **The decoded readers decode twice** (E2E-C, effect 1):
-  `format/oggdecode.zig` and `format/mp3decode.zig` run a counting pass
-  over the whole stream when the input can seek, for every output, raw,
-  FLAC and Ogg ones included, which then drop the count. It costs 45% of an
-  Ogg or MP3 conversion from a file. Conclusion 8 says how to remove it;
-  the count also checks that the stream decodes to what was announced
-  (`FrameCountMismatch`), which a header rewritten at the end makes
-  unnecessary.
+- **The decoded readers decoded twice** (E2E-C, effect 1), fixed after
+  this run: the counting pass of `format/oggdecode.zig` and
+  `format/mp3decode.zig` now runs only for a WAV, AU or AIFF header on an
+  output that cannot seek back; into a regular file the header is
+  rewritten at the end (`Request.output_seekable`, the writers'
+  `beginDeferred` and `rewriteHeader`; notes.md "Deferred header"). On B,
+  to WAV from a file: MP3 1.353 to 0.799 s (16.8 to 9.5 G instructions),
+  Vorbis 1.411 to 0.841 s (17.4 to 9.7 G), Opus 2.105 to 1.195 s (21.5 to
+  11.8 G), byte for byte the same output.
 - **FLAC decoding spends 53% in the parser and demuxer**
   (`flac_parser.Parser.scoreHeader` 40%, `Demuxer.parsePacketAt` 13%,
   perf on B): 1.5× the reference's instructions for the same algorithm.
