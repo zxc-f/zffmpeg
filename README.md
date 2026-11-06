@@ -68,7 +68,10 @@ decode as FFmpeg decodes them. MPEG audio demuxes since T29a as FFmpeg's
 mp3 demuxer and parser split it, its ID3v2 and ID3v1 tags, Xing, LAME,
 VBRI and iTunSMPB headers and gapless side data included, and detection
 follows FFmpeg's probe rounds and ID3v2 skip: `zffprobe` reports MP3 as
-ffprobe does without a decoder; decoding follows (T29b).
+ffprobe does. The Layer III decoder (T29b) is bit for bit FFmpeg's
+mp3float, gapless trimming included: `zffmpeg` converts MP3 into every PCM
+output and into FLAC as the ffmpeg program does; Layers I and II follow
+(T29c).
 [TODO.md](TODO.md) holds the completion
 evidence and the roadmap. Development is verified on Linux only. The compiler
 is **Zig 0.17.0**, enforced by the build.

@@ -642,7 +642,10 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   stream by the program's output with `-map 0:a:0`; a mid-stream FLAC
   change by libavcodec's decoded frames in `vectors/flac.txt`; an Ogg
   output whose granules differ by the same pages apart from granule
-  positions and CRCs, decoded by FFmpeg to the same samples; a FLAC
+  positions and CRCs, decoded by FFmpeg to the same samples, or whose
+  timestamps differ by the same packets (sizes, durations and data
+  hashes) and samples; two refusals for different reasons by the
+  program's last line of output with zffmpeg's status and error; a FLAC
   conversion to WAV that zffmpeg refuses by its status and error, with
   the same input's raw PCM equal to the program's. An entry whose outputs
   now agree fails as stale. Run with `--hasher /bin/false`, every Ogg,
@@ -652,6 +655,14 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   output on stdout, and must equal the ffmpeg program's doing the same
   (`-i pipe:`), or be the same refusal: from a pipe a junk prefix leaves
   both probes no file name to fall back on.
+- **MP3 decoding (T29b).** Every MP3 fixture converted by zffmpeg and by the
+  ffmpeg program with `-bitexact` into the Ogg section's outputs (WAV, AU,
+  AIFF, FLAC, Ogg, s16le, f32le, resampled, downmixed), byte for byte, and
+  its raw PCM decodes again through pipes; MP1 and MP2 streams, which the
+  reference build has no decoder for, and streams past the decode error
+  rate must be refused by both, zffmpeg before any output. The recorded
+  differences are `KNOWN_MP3_DECODE_DIFFERENCES` (notes.md "MP3
+  decoding").
 
 ## Results
 

@@ -58,9 +58,10 @@ CELT-only test vectors passing opus_compare; and T28b, SILK bit for bit
 FFmpeg's with its resampling, and T28c, hybrid frames and multistream
 packets, RFC 8251's twelve vectors decoded as FFmpeg decodes them, which
 completes T28; and T29a, FFmpeg's MP3 demuxer and mpegaudio parser with
-ID3 tags, the gapless headers and FFmpeg's probe rounds, without
-decoding. **Next: T29b (the Layer III decoder). See
-[Near-term order](#near-term-order).**
+ID3 tags, the gapless headers and FFmpeg's probe rounds; and T29b, the
+Layer III decoder bit for bit FFmpeg's mp3float, with MP3 decoded by
+zffmpeg as the ffmpeg program decodes it. **Next: T29c (Layers I and II).
+See [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
 [How tasks are completed](#how-tasks-are-completed) describes. Tasks and
@@ -310,7 +311,7 @@ Left open, each with the task it must land before:
 | Finding | Where | Before |
 | --- | --- | --- |
 | A leading ID3v2 tag opens only MP3 (WAV and FLAC refused; notes.md "A leading ID3v2 tag on other formats") | `detect.zig`, `convert.zig` | T30a (ADTS sets `FF_INFMT_FLAG_ID3V2_AUTO`) |
-| Codec parameters a mapping set during the read-ahead are kept (`parameters_from_context`; notes.md) | `demux.zig` | T29b |
+| Codec parameters a mapping set during the read-ahead are kept (`parameters_from_context`; notes.md); MP3 is not affected (T29b: mp3float decodes only the read-ahead's first packet, and mp3.txt's streams did not change when the reference build enabled it) | `demux.zig` | T30b |
 | Filter-graph timestamp arithmetic overflows on null or extreme pts (atrim, aresample, amix; library only) | `filters.zig`, `multi.zig` | T53b, with T65d |
 | An MP3 stream without parameters refused; negative durations reported as none (notes.md rows) | `detect.zig` | T51a |
 | A 3-byte `ID3` file scores 0 where FFmpeg's probe gives 12 (both refuse) | `mp3.zig` | any time |
@@ -3337,7 +3338,7 @@ names, not as an empty framework.
       APIC pictures and CHAP chapters not modeled; ID3v2 tags above
       64 MiB refused; MP3ADU, `usetoc` and fast seeking not ported.
     ```
-  - [ ] **T29b — Layer III decoder.** Needs T18c and T29a. Huffman decoding,
+  - [x] **T29b — Layer III decoder.** Needs T18c and T29a. Huffman decoding,
     requantization, stereo modes, IMDCT, alias reduction and polyphase
     synthesis.
     Done when decoding equals the reference's float decoder bit for bit, as
@@ -3347,7 +3348,7 @@ names, not as an empty framework.
 
     ```text
     ID / parent: T29b / T29
-    State: implementing (part 0)
+    State: verified (G5, local Linux x86-64 runs)
     Supported behavior and explicit exclusions: FFmpeg's mp3float decoder
       (mpegaudiodec_float.c over mpegaudiodec_template.c), the ffmpeg
       program's default for MP3: MPEG-1, 2 and 2.5 Layer III, mono, stereo,
@@ -3419,9 +3420,37 @@ names, not as an empty framework.
       integers the power tables take), checked by libm.txt's new D cbrt
       and I cbrt lines (7e3bb04); exp2 of the LSF intensity table's
       quarter exponents already equals glibc's.
-    Remaining work or blocker / next action: parts 1b and 2, the decoder
-      (tables, side information, scalefactors, Huffman decoding,
-      requantization, stereo, IMDCT and synthesis) against mp3_decode.txt.
+      Part 1b (adaf76a): mp3_tab.zig, the Huffman, scalefactor, band and
+      power tables (table_4_3 through glibc's cbrt, exp2 for the LSF
+      intensity tables), and vlc.lookup on the MSB-first reader. Part 2
+      (e61861d): mp3dec.zig and mpadsp.zig, mpegaudiodec_template.c's
+      Layer III path and mpegaudiodsp with the window the reference build
+      runs (x86's apply_window_mp3; notes.md "The synthesis window"),
+      dct32 and float_dsp's butterflies; demux.Packet.tail for the reads
+      past an uncopied frame. Every frame of the 62 fixtures equals
+      mp3_decode.txt (455 D lines, the damaged frames' errors, the gapless
+      trim of 576 and 1104 samples). Part 3 (231eeb9): mp3decode.zig, the
+      program's decoding (decode.c's frame loop, the side data, the
+      first frame's format with mp3float's carried rate, the counting pass,
+      the error rate) with decoded.zig shared with oggdecode; MP3 into
+      every zffmpeg output; seek_mp3.txt's 986 decoded frames compared;
+      the registry lists mp3float; compare.py's MP3 decoding section
+      682/682, 10 recorded differences (notes.md "MP3 decoding"); the
+      interim registry difference and seek-test exclusion removed.
+      G3: mp3dec's fuzz entry (parsed and raw packets, a flush) and
+      mutation smoke (the decoder does not allocate); mp3decode's
+      allocation sweep with remap failures, fuzz entry (seekable,
+      uncounted) and mutation smoke; crafted-frame tests for every refusal
+      and convert_cases from a file and a pipe. G5 at 231eeb9, locally on
+      Linux x86-64 (no CI run link): zig fmt, the fixture check, zig build
+      test 491/491 (264 steps) in Debug, ReleaseSafe and ReleaseFast, the
+      three cross builds, every vector generator reproducing its file,
+      compare.py 7107/0/0 required and 61/61 optional. FATE's
+      mp3-conformance samples are not in the synced optional corpus, so
+      FATE's tolerance was not run; bit-exactness against the reference's
+      decoder implies it.
+    Remaining work or blocker / next action: none; Layers I and II are
+      T29c.
     ```
   - [ ] **T29c — Layers I and II.** Needs T29b.
     Done when the required Layer I and II streams match within the same
