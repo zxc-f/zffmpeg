@@ -384,12 +384,19 @@ give and every frame the pinned decoder makes of it, then of a copy with
 bits flipped or cut short for a second decoder (concealment and errors);
 the Zig test renders the same lines from the port. `ac3_fixtures.sh`
 encodes the `ac3_ffmpeg_*` fixtures with the reference build's AC-3
-encoder from generate.py's inputs; their hashes are generate.py's:
+encoder from generate.py's inputs, and since T32b the `eac3_ffmpeg_*` ones
+with its E-AC-3 encoder; their hashes are generate.py's. The same program
+prints the E-AC-3 fixtures' vectors, decoded with the stream's codec, and
+`eac3_tab.c` prints the tables of `zig/codec/eac3_data.zig` (its body,
+between the header and the float table's conversion) from the pinned tree:
 
 ```bash
 clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/ac3_vectors.c .references/ffmpeg-install/lib/libavformat.a .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o ac3-vectors
 ./ac3-vectors $(sed -n 's/^ *\.name = "\(.*\)",$/zig\/testing\/fixtures\/ac3\/\1.ac3/p' zig/testing/fixtures/ac3/manifest.zon) | diff -u zig/testing/vectors/ac3_decode.txt -
+./ac3-vectors $(sed -n 's/^ *\.name = "\(.*\)",$/zig\/testing\/fixtures\/eac3\/\1.eac3/p' zig/testing/fixtures/eac3/manifest.zon) | diff -u zig/testing/vectors/eac3_decode.txt -
 bash zig/testing/reference/ac3_fixtures.sh .references/ffmpeg-install
+clang -I.references/ffmpeg -I.references/ffmpeg-build zig/testing/reference/eac3_tab.c -o eac3-tab
+./eac3-tab | diff -u <(sed -n '/^pub const bits_vs_hebap/,$p' zig/codec/eac3_data.zig | head -n "$(./eac3-tab | wc -l)") -
 ```
 
 `adpcm_wav_vectors.sh` (T31a) prints, for every ADPCM WAV fixture, the
@@ -920,6 +927,11 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   against the program's, through pipes too. Recorded
   (`KNOWN_AC3_DECODE_DIFFERENCES`): six fixtures' Ogg granules, which
   follow the program's timestamps in the raw demuxer's 1/90000 time base.
+  Since T32b every E-AC-3 fixture too, decoded with the `eac3` decoder
+  (four more Ogg granule cells recorded), and, when the optional corpus
+  is present, FATE's five E-AC-3 samples (`FATE_EAC3`: spectral
+  extension, AHT, 5.1 and 7.1 with dependent frames), probed and decoded
+  to s16le.
 - **MP2 output (T29d).** zffmpeg's MP2 (the `mp2` muxer, with `mp2` or
   `-c:a mp2fixed`) against the ffmpeg program's with `-bitexact`, for the
   FLAC output section's inputs and a decoded MP3, MP2 and Ogg Vorbis

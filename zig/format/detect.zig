@@ -717,10 +717,11 @@ fn probeAac(reader: *std.Io.Reader, input: *Input, options: Options) Error!Probe
 /// prints none.
 fn probeAc3(reader: *std.Io.Reader, input: *Input, options: Options) Error!Probed {
     const gpa = options.gpa orelse if (options.tags) |t| t.gpa else return error.UnsupportedFormat;
+    const codec: ac3.Codec = if (input.container == .eac3) .eac3 else .ac3;
     const d = if (options.source.seeker) |sk| blk: {
         sk.seekTo(0) catch return error.IoFailure;
-        break :blk try ac3.Demuxer.initSeekable(gpa, reader, sk);
-    } else try ac3.Demuxer.init(gpa, input.reader());
+        break :blk try ac3.Demuxer.initSeekable(gpa, reader, sk, codec);
+    } else try ac3.Demuxer.init(gpa, input.reader(), codec);
     defer d.deinit();
     var layer = demux.Layer(ac3.Demuxer).init(gpa, d);
     defer layer.deinit();
@@ -733,8 +734,9 @@ fn probeAc3(reader: *std.Io.Reader, input: *Input, options: Options) Error!Probe
         .{ .unspecified = std.math.cast(u8, params.channels) orelse return error.UnsupportedFormat };
     const duration = d.duration;
     return .{
-        .container = .ac3,
-        .codec = .ac3,
+        .container = input.container,
+        // The parser names E-AC-3 once it meets a frame of it.
+        .codec = if (codec == .eac3 or params.eac3) .eac3 else .ac3,
         .format = audio.Format.initLayout(params.sample_rate, layout, .fltp) catch return error.UnsupportedFormat,
         .frame_count = if (duration >= 0) @intCast(rational.rescale(duration, params.sample_rate, ac3.time_base.den)) else null,
         .time_base_duration = if (duration >= 0) .{ .ts = duration, .den = @intCast(ac3.time_base.den) } else null,

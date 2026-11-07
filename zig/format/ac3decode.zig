@@ -53,6 +53,8 @@ pub const DecodedReader = struct {
     seeker: ?seek.Seeker,
     sink: ?diagnostics.Sink,
     demuxer: ?*ac3.Demuxer = null,
+    /// The demuxer: ac3 or eac3.
+    codec: ac3.Codec,
     layer: ?Layer = null,
     decoder: ?*ac3dec.Decoder = null,
     /// The output's channels and rate: the first kept frame's, as the
@@ -78,7 +80,7 @@ pub const DecodedReader = struct {
     pending: [2]u32 = .{ 0, 0 },
     /// The current frame's planes (the decoder's, until its next frame);
     /// sliced when used, as the reader moves (no slice into itself).
-    planes: [ac3dec.max_channels][]const f32 = undefined,
+    planes: [ac3dec.max_out_channels][]const f32 = undefined,
     discard: decoded.Discard = .{},
     delivered: u64 = 0,
     expected: ?u64 = null,
@@ -99,8 +101,8 @@ pub const DecodedReader = struct {
 
     /// Reads `reader` from its start; `seeker`, when the input can seek,
     /// moves it there and lets the demuxer read its durations.
-    pub fn init(gpa: std.mem.Allocator, reader: *std.Io.Reader, seeker: ?seek.Seeker, sink: ?diagnostics.Sink) DecodedReader {
-        return .{ .gpa = gpa, .reader = reader, .seeker = seeker, .sink = sink };
+    pub fn init(gpa: std.mem.Allocator, reader: *std.Io.Reader, seeker: ?seek.Seeker, sink: ?diagnostics.Sink, codec: ac3.Codec) DecodedReader {
+        return .{ .gpa = gpa, .reader = reader, .seeker = seeker, .sink = sink, .codec = codec };
     }
 
     pub fn deinit(r: *DecodedReader) void {
@@ -120,7 +122,7 @@ pub const DecodedReader = struct {
         // The counting pass, from the start, before this one.
         var counted: ?u64 = null;
         if (r.seeker != null and r.count_ahead and !r.counting) {
-            var pass = init(r.gpa, r.reader, r.seeker, null);
+            var pass = init(r.gpa, r.reader, r.seeker, null, r.codec);
             pass.counting = true;
             defer pass.deinit();
             _ = try pass.readHeader();
@@ -132,8 +134,8 @@ pub const DecodedReader = struct {
         }
         if (r.seeker) |sk| {
             sk.seekTo(0) catch return error.IoFailure;
-            r.demuxer = try ac3.Demuxer.initSeekable(r.gpa, r.reader, sk);
-        } else r.demuxer = try ac3.Demuxer.init(r.gpa, r.reader);
+            r.demuxer = try ac3.Demuxer.initSeekable(r.gpa, r.reader, sk, r.codec);
+        } else r.demuxer = try ac3.Demuxer.init(r.gpa, r.reader, r.codec);
         r.layer = .init(r.gpa, r.demuxer.?);
         const layer = &r.layer.?;
         try layer.findStreamInfo();
@@ -158,7 +160,9 @@ pub const DecodedReader = struct {
         r.opened = true;
         const layout: audio.ChannelLayout = if (r.mask != 0) .{ .native = r.mask } else .{ .unspecified = std.math.cast(u8, r.channels) orelse return error.UnsupportedFormat };
         const format = audio.Format.initLayout(r.sample_rate, layout, .flt) catch return error.UnsupportedFormat;
-        return .{ .stream = .ac3, .codec = .f32le, .format = format, .frame_count = counted, .bits = 32 };
+        // The parser names E-AC-3 once it meets a frame of it.
+        const stream: @FieldType(Header, "stream") = if (r.codec == .eac3 or params.eac3) .eac3 else .ac3;
+        return .{ .stream = stream, .codec = .f32le, .format = format, .frame_count = counted, .bits = 32 };
     }
 
     /// The first decoded frame's sample count, after discarding (the
@@ -212,7 +216,7 @@ pub const DecodedReader = struct {
                 var text: [48]u8 = undefined;
                 const what = switch (err) {
                     error.InvalidData => "Invalid data found when processing input",
-                    error.Unsupported => "Function not implemented",
+                    error.PatchWelcome => "Not yet implemented in FFmpeg, patches welcome",
                     else => std.fmt.bufPrint(&text, "Error number {d} occurred", .{ac3dec.errorCode(err)}) catch unreachable,
                 };
                 // avcodec_send_packet fails while the packet has given no
@@ -272,7 +276,7 @@ fn decodeLines(w: *std.Io.Writer, d: *ac3dec.Decoder, packet: []const u8) !void 
         const got = d.decode(rest) catch |err| {
             switch (err) {
                 error.InvalidData => try w.writeAll("D INVALIDDATA\n"),
-                error.Unsupported => try w.writeAll("D ENOSYS\n"),
+                error.PatchWelcome => try w.writeAll("D PATCHWELCOME\n"),
                 else => try w.print("D {d}\n", .{ac3dec.errorCode(err)}),
             }
             return;
@@ -295,18 +299,18 @@ fn decodeLines(w: *std.Io.Writer, d: *ac3dec.Decoder, packet: []const u8) !void 
 /// vectors/ac3_decode.txt rendered from the port: detection, the demuxer
 /// and parser's packets, and two decoders, the second on the mutations
 /// the M lines name.
-fn renderVectors(gpa: std.mem.Allocator, w: *std.Io.Writer, expected: []const u8) !void {
-    inline for (fixtures.ac3.all) |fixture| {
-        const bytes = fixtures.ac3.bytes(fixture.name);
+fn renderVectors(comptime set: type, comptime ext: []const u8, gpa: std.mem.Allocator, w: *std.Io.Writer, expected: []const u8) !void {
+    inline for (set.all) |fixture| {
+        const bytes = set.bytes(fixture.name);
         try w.print("F {s}\n", .{fixture.name});
         var reader: std.Io.Reader = .fixed(bytes);
         var input: detect.Input = undefined;
-        const opened = if (input.open(&reader, .{ .file_name = fixture.name ++ ".ac3", .gpa = gpa })) |_| true else |_| false;
+        const opened = if (input.open(&reader, .{ .file_name = fixture.name ++ ext, .gpa = gpa })) |_| true else |_| false;
         defer if (opened) input.deinit();
-        if (!opened or input.container != .ac3) {
+        if (!opened or (input.container != .ac3 and input.container != .eac3)) {
             try w.writeAll("O error\n");
         } else {
-            const demuxer = try ac3.Demuxer.init(gpa, input.reader());
+            const demuxer = try ac3.Demuxer.init(gpa, input.reader(), if (input.container == .eac3) .eac3 else .ac3);
             defer demuxer.deinit();
             var layer = Layer.init(gpa, demuxer);
             defer layer.deinit();
@@ -350,13 +354,22 @@ test "every AC-3 fixture's packets and frames are FFmpeg's (vectors/ac3_decode.t
     const expected = @embedFile("../testing/vectors/ac3_decode.txt");
     var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
-    try renderVectors(gpa, &out.writer, expected);
+    try renderVectors(fixtures.ac3, ".ac3", gpa, &out.writer, expected);
+    try testing.expectEqualStrings(expected, out.written());
+}
+
+test "every E-AC-3 fixture's packets and frames are FFmpeg's (vectors/eac3_decode.txt)" {
+    const gpa = testing.allocator;
+    const expected = @embedFile("../testing/vectors/eac3_decode.txt");
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try renderVectors(fixtures.eac3, ".eac3", gpa, &out.writer, expected);
     try testing.expectEqualStrings(expected, out.written());
 }
 
 fn decodeAllBytes(gpa: std.mem.Allocator, bytes: []const u8, seekable: bool, out: *std.ArrayList(u8)) !DecodedReader.Header {
     var reader: std.Io.Reader = .fixed(bytes);
-    var r = DecodedReader.init(gpa, &reader, if (seekable) .fixed(&reader) else null, null);
+    var r = DecodedReader.init(gpa, &reader, if (seekable) .fixed(&reader) else null, null, .ac3);
     defer r.deinit();
     const header = try r.readHeader();
     var scratch: [8192]u8 = undefined;
@@ -414,6 +427,8 @@ const fuzz_corpus: []const []const u8 = &.{
     hostile.fuzzSeed(fixtures.ac3.bytes("ac3_byteswapped")[0..1536], &.{1}),
     hostile.fuzzSeed(fixtures.ac3.bytes("ac3_ffmpeg_short"), &.{1}),
     hostile.fuzzSeed(fixtures.ac3.bytes("ac3_half_rate")[0..1536], &.{0}),
+    hostile.fuzzSeed(fixtures.eac3.bytes("eac3_after_ac3")[0..2048], &.{1}),
+    hostile.fuzzSeed(fixtures.eac3.bytes("eac3_ffmpeg_short"), &.{0}),
 };
 
 test "fuzz: raw AC-3 decoded" {

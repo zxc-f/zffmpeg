@@ -7,7 +7,8 @@
 // the terms of the GNU Lesser General Public License as published by the
 // Free Software Foundation; either version 2.1 of the License, or (at your
 // option) any later version.
-//! FFmpeg's raw AC-3 demuxer (`ac3`, TODO.md T32a): its content probe, one
+//! FFmpeg's raw AC-3 and E-AC-3 demuxers (`ac3`, TODO.md T32a, and `eac3`,
+//! T32b, which differ in the codec their probe expects): the content probe, one
 //! stream in the 1/90000 time base starting at 0, and raw packets of up to
 //! 1024 bytes, which demux.zig's layer splits into frames with FFmpeg's
 //! AC-3 parser (codec/ac3.zig). The layer's read-ahead takes the stream's
@@ -43,6 +44,19 @@ pub const Packet = demux.SourcePacket;
 /// it), an AMR-like 16-byte `\x01\x10` header skipped before each; 0 when
 /// any frame found is E-AC-3.
 pub fn probeScore(buf: []const u8) u8 {
+    return probeFor(buf, .ac3);
+}
+
+/// The eac3 demuxer's probe: the same runs of frames, 0 unless one is
+/// E-AC-3.
+pub fn probeScoreEac3(buf: []const u8) u8 {
+    return probeFor(buf, .eac3);
+}
+
+/// The two raw demuxers, which differ only in the codec they expect.
+pub const Codec = enum { ac3, eac3 };
+
+fn probeFor(buf: []const u8, expected: Codec) u8 {
     var max_frames: u32 = 0;
     var first_frames: u32 = 0;
     var eac3 = false;
@@ -89,7 +103,7 @@ pub fn probeScore(buf: []const u8) u8 {
         max_frames = @max(max_frames, frames);
         if (start == 0) first_frames = frames;
     }
-    if (eac3) return 0;
+    if (eac3 != (expected == .eac3)) return 0;
     // AVPROBE_SCORE_EXTENSION is 50; kept in step with the MP3 probe.
     if (first_frames >= 7) return 50 + 2;
     if (max_frames > 200) return 50;
@@ -104,6 +118,8 @@ pub const Demuxer = struct {
 
     gpa: std.mem.Allocator,
     src: demux.Window,
+    /// `raw_codec_id`: the stream's codec until the parser finds E-AC-3.
+    codec: Codec = .ac3,
     /// The next read's position.
     pos: i64 = 0,
     /// ff_raw_audio_read_header's `start_time` 0.
@@ -112,19 +128,19 @@ pub const Demuxer = struct {
     /// The packet returned last.
     current: std.ArrayList(u8) = .empty,
 
-    /// The demuxer on a source that cannot seek (a pipe).
-    pub fn init(gpa: std.mem.Allocator, reader: *std.Io.Reader) Error!*Demuxer {
-        return initWith(gpa, reader, null);
+    /// The demuxer for `codec` on a source that cannot seek (a pipe).
+    pub fn init(gpa: std.mem.Allocator, reader: *std.Io.Reader, codec: Codec) Error!*Demuxer {
+        return initWith(gpa, reader, null, codec);
     }
 
     /// The demuxer on a seekable source read from its start (a file).
-    pub fn initSeekable(gpa: std.mem.Allocator, reader: *std.Io.Reader, seeker: seek.Seeker) Error!*Demuxer {
-        return initWith(gpa, reader, seeker);
+    pub fn initSeekable(gpa: std.mem.Allocator, reader: *std.Io.Reader, seeker: seek.Seeker, codec: Codec) Error!*Demuxer {
+        return initWith(gpa, reader, seeker, codec);
     }
 
-    fn initWith(gpa: std.mem.Allocator, reader: *std.Io.Reader, seeker: ?seek.Seeker) Error!*Demuxer {
+    fn initWith(gpa: std.mem.Allocator, reader: *std.Io.Reader, seeker: ?seek.Seeker, codec: Codec) Error!*Demuxer {
         const d = try gpa.create(Demuxer);
-        d.* = .{ .gpa = gpa, .src = .{ .reader = reader, .seeker = seeker } };
+        d.* = .{ .gpa = gpa, .src = .{ .reader = reader, .seeker = seeker }, .codec = codec };
         if (seeker) |sk| {
             d.src.window_start = @intCast(sk.position());
             d.pos = d.src.window_start;

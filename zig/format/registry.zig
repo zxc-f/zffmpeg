@@ -61,8 +61,10 @@ pub const Container = enum {
     /// FFmpeg's ADTS muxer (T30a): AAC packets, written only (the aac
     /// demuxer reads them); no encoder here gives it any yet.
     adts,
-    /// Raw AC-3 (T32a), read and decoded: FFmpeg's `ac3` demuxer.
+    /// Raw AC-3 (T32a) and E-AC-3 (T32b), read and decoded: FFmpeg's `ac3`
+    /// and `eac3` demuxers.
     ac3,
+    eac3,
     // Raw PCM (T22c), one format per codec FFmpeg has a raw format for, named
     // as the codec: every PCM codec but s64.
     u8,
@@ -95,7 +97,7 @@ pub const Container = enum {
             .mp2 => .mp2,
             .aac => .aac,
             .adts => .adts,
-            .ac3 => .ac3,
+            .ac3, .eac3 => .ac3,
             // Checked below: exactly the raw formats, each named as its codec.
             else => .raw,
         };
@@ -112,7 +114,7 @@ pub const Container = enum {
     /// The codec of a raw PCM format, which shares its name; null otherwise.
     pub fn rawCodec(container: Container) ?pcm.Codec {
         return switch (container) {
-            .wav, .w64, .au, .aiff, .caf, .flac, .ogg, .oga, .opus, .mp3, .mp2, .aac, .adts, .ac3 => null,
+            .wav, .w64, .au, .aiff, .caf, .flac, .ogg, .oga, .opus, .mp3, .mp2, .aac, .adts, .ac3, .eac3 => null,
             // Compiles only if every other tag names a codec.
             inline else => |tag| @field(pcm.Codec, @tagName(tag)),
         };
@@ -301,6 +303,15 @@ pub const formats = [_]Format{
         .demuxer = .{ .probe = ac3.probeScore, .extensions = &.{"ac3"} },
         .muxer = null,
     },
+    .{
+        .container = .eac3,
+        .name = "eac3",
+        .long_name = "raw E-AC-3",
+        // FFmpeg's eac3 demuxer (T32b); its eac3 muxer waits for an E-AC-3
+        // encoder.
+        .demuxer = .{ .probe = ac3.probeScoreEac3, .extensions = &.{ "eac3", "ec3" } },
+        .muxer = null,
+    },
     rawFormat(.u8, "PCM unsigned 8-bit", &.{"ub"}),
     rawFormat(.s8, "PCM signed 8-bit", &.{"sb"}),
     // FFmpeg gives `sw` to the native byte order's 16-bit format (`AV_NE`).
@@ -347,7 +358,7 @@ fn pcmOnly(comptime carries: fn (pcm.Codec) bool) *const fn (codecs.Codec) bool 
         fn f(codec: codecs.Codec) bool {
             return switch (codec) {
                 .pcm => |p| carries(p),
-                .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac, .adpcm_ima_wav, .adpcm_ms, .alac, .adpcm_g722, .adpcm_g726le, .ac3 => false,
+                .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac, .adpcm_ima_wav, .adpcm_ms, .alac, .adpcm_g722, .adpcm_g726le, .ac3, .eac3 => false,
             };
         }
     }.f;
@@ -359,7 +370,7 @@ fn wavCodecs(codec: codecs.Codec) bool {
     return switch (codec) {
         .pcm => |p| wav.carries(p),
         .adpcm_ima_wav, .adpcm_ms => true,
-        .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac, .alac, .adpcm_g722, .adpcm_g726le, .ac3 => false,
+        .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac, .alac, .adpcm_g722, .adpcm_g726le, .ac3, .eac3 => false,
     };
 }
 
@@ -370,7 +381,7 @@ fn cafCodecs(codec: codecs.Codec) bool {
     return switch (codec) {
         .pcm => |p| cafmux.carries(p),
         .alac => true,
-        .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac, .adpcm_ima_wav, .adpcm_ms, .adpcm_g722, .adpcm_g726le, .ac3 => false,
+        .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac, .adpcm_ima_wav, .adpcm_ms, .adpcm_g722, .adpcm_g726le, .ac3, .eac3 => false,
     };
 }
 
@@ -380,7 +391,7 @@ fn auCodecs(codec: codecs.Codec) bool {
     return switch (codec) {
         .pcm => |p| au.carries(p),
         .adpcm_g722, .adpcm_g726le => true,
-        .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac, .adpcm_ima_wav, .adpcm_ms, .alac, .ac3 => false,
+        .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac, .adpcm_ima_wav, .adpcm_ms, .alac, .ac3, .eac3 => false,
     };
 }
 
@@ -401,7 +412,7 @@ fn mp2Only(codec: codecs.Codec) bool {
 fn oggCodecs(codec: codecs.Codec) bool {
     return switch (codec) {
         .flac, .opus, .vorbis => true,
-        .pcm, .mp1, .mp2, .mp3, .aac, .adpcm_ima_wav, .adpcm_ms, .alac, .adpcm_g722, .adpcm_g726le, .ac3 => false,
+        .pcm, .mp1, .mp2, .mp3, .aac, .adpcm_ima_wav, .adpcm_ms, .alac, .adpcm_g722, .adpcm_g726le, .ac3, .eac3 => false,
     };
 }
 

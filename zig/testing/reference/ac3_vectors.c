@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Original file for this project: a vector generator, not part of the port.
 //
-// Prints the T32a AC-3 decoder oracle (zig/testing/vectors/ac3_decode.txt):
-// what the pinned FFmpeg's ac3 decoder makes of each packet the raw AC-3
-// demuxer and parser give for every file named on the command line, and of
+// Prints the T32a AC-3 and T32b E-AC-3 decoder oracles
+// (zig/testing/vectors/ac3_decode.txt, eac3_decode.txt):
+// what the pinned FFmpeg's decoder makes of each packet the raw AC-3 or
+// E-AC-3 demuxer and the parser give for every file named on the command line, and of
 // those packets with bits flipped or cut short, decoded in turn by one
 // decoder as decode.c feeds a packet until it is consumed. The lines:
 //
@@ -55,6 +56,8 @@ static void print_result(int ret)
         printf("EAGAIN");
     else if (ret == AVERROR(ENOSYS))
         printf("ENOSYS");
+    else if (ret == AVERROR_PATCHWELCOME)
+        printf("PATCHWELCOME");
     else
         printf("%d", ret);
 }
@@ -114,7 +117,8 @@ int main(int argc, char **argv)
             avformat_close_input(&fmt);
             continue;
         }
-        const AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_AC3);
+        // The stream's decoder: ac3, or eac3 once the parser named it.
+        const AVCodec *codec = avcodec_find_decoder(fmt->streams[0]->codecpar->codec_id);
         AVCodecContext *dec = avcodec_alloc_context3(codec);
         avcodec_parameters_to_context(dec, fmt->streams[0]->codecpar);
         avcodec_open2(dec, codec, NULL);

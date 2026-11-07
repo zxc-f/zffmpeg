@@ -3743,13 +3743,25 @@ def compare_alac(args, lines, failures):
 KNOWN_AC3_DECODE_DIFFERENCES = {
     (name, "-f ogg"): ("granules", "the same pages and samples but the granules: the program's timestamps, in the "
                                    "raw demuxer's 1/90000 time base, round a 44.1 kHz frame's 1536 samples")
-    for name in ("ac3_ffmpeg_30back", "ac3_ffmpeg_51side_44k", "ac3_ffmpeg_coupling", "ac3_ffmpeg_lowrate")
+    for name in ("ac3_ffmpeg_30back", "ac3_ffmpeg_51side_44k", "ac3_ffmpeg_coupling", "ac3_ffmpeg_lowrate",
+                 "eac3_ffmpeg_51side_44k", "eac3_ffmpeg_lowrate", "eac3_ffmpeg_quad")
 } | {
     (name, "-f ogg"): ("granules", "the same pages and samples but the granules: a packet the decoder refuses "
-                                   "(junk) leaves a gap in the program's timestamps")
-    for name in ("ac3_junk_prefix", "ac3_junk_between_long")
+                                   "(junk, another substream, a reduced rate, a lone dependent frame) leaves a "
+                                   "gap in the program's timestamps")
+    for name in ("ac3_junk_prefix", "ac3_junk_between_long", "eac3_junk_prefix", "eac3_substream",
+                 "eac3_reduced_rate", "eac3_dependent_alone")
 }
 
+
+# tests/fate/ac3.mak's E-AC-3 decode tests: (test, sample in eac3/).
+FATE_EAC3 = [
+    ("fate-eac3-1", "csi_miami_5.1_256_spx_small"),
+    ("fate-eac3-2", "csi_miami_stereo_128_spx_small"),
+    ("fate-eac3-3", "matrix2_commentary1_stereo_192_small"),
+    ("fate-eac3-4", "serenity_english_5.1_1536_small"),
+    ("fate-eac3-5", "the_great_wall_7.1"),
+]
 
 def rescaled_count(duration_ts, rate, den):
     """zffprobe's `nb_samples` for a duration in 1/den: av_rescale's
@@ -3766,7 +3778,7 @@ def compare_ac3(args, lines, failures):
     rows = []
     same = total = understood = 0
     notes = set()
-    paths = sorted((FIXTURES / "ac3").glob("*.ac3"))
+    paths = sorted((FIXTURES / "ac3").glob("*.ac3")) + sorted((FIXTURES / "eac3").glob("*.eac3"))
     decoded = []
     for path in paths:
         total += 1
@@ -3778,7 +3790,7 @@ def compare_ac3(args, lines, failures):
             if zcode != 3 or not zerr.endswith(": UnknownFormat"):
                 problems.append(f"ffprobe fails ({first_line(err)}), zffprobe exited {zcode} ({zerr})")
         else:
-            decoded.append((path, "ac3"))
+            decoded.append((path, fields.get("codec_name")))
             want = {"format": fields.get("format_name"), "codec": fields.get("codec_name"),
                     "sample_fmt": fields.get("sample_fmt"), "channels": fields.get("channels"),
                     "channel_layout": fields.get("channel_layout"), "sample_rate": fields.get("sample_rate"),
@@ -3796,13 +3808,47 @@ def compare_ac3(args, lines, failures):
     dtotal += unmatched_entries(KNOWN_AC3_DECODE_DIFFERENCES, compared, "KNOWN_AC3_DECODE_DIFFERENCES", failures)
     same, total, understood = same + dsame, total + dtotal, understood + dunderstood
     notes |= dnotes
-    rows += [row.replace("| ac3 |", "| decode |") for row in decode_rows]
-    record("AC-3 (T32a)", same, total, understood=understood)
+    rows += [row.replace("| ac3 |", "| decode |").replace("| eac3 |", "| decode |") for row in decode_rows]
+    record("AC-3 and E-AC-3 (T32a, T32b)", same, total, understood=understood)
+    # FATE's E-AC-3 decode tests (optional): spectral extension and 7.1
+    # dependent frames, which FFmpeg's encoder does not write.
+    suite = pathlib.Path(args.fate_suite)
+    fate_rows = []
+    fpassed = ffailed = fskipped = 0
+    for test, name in FATE_EAC3:
+        sample = suite / "eac3" / f"{name}.eac3"
+        if not sample.exists():
+            fskipped += 1
+            fate_rows.append(f"| {test} | skipped: `eac3/{name}.eac3` missing |")
+            continue
+        code, fields, err = ffprobe(args.ffprobe, sample)
+        zcode, zfields, zerr = zffprobe(args.zffprobe, sample)
+        want = {"format": fields.get("format_name"), "codec": fields.get("codec_name"),
+                "sample_fmt": fields.get("sample_fmt"), "channels": fields.get("channels"),
+                "channel_layout": fields.get("channel_layout"), "sample_rate": fields.get("sample_rate"),
+                "nb_samples": rescaled_count(fields.get("duration_ts"), fields.get("sample_rate"), 90000),
+                "duration_num": fields.get("duration_ts"), "duration_den": "90000"}
+        theirs = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", sample, "-f", "s16le", "-")
+        ours = run(args.zffmpeg, "-i", sample, "-f", "s16le", "-")
+        why = None
+        if zcode != 0 or zfields != want:
+            why = f"zffprobe exited {zcode} with {zfields or zerr}, ffprobe's {want}"
+        elif ours.returncode != 0 or ours.stdout != theirs.stdout:
+            why = "the samples differ" if ours.returncode == 0 else first_line(text(ours.stderr))
+        if why is None:
+            fpassed += 1
+            fate_rows.append(f"| {test} | pass |")
+        else:
+            ffailed += 1
+            fate_rows.append(f"| {test} | **FAIL**: {why} |")
+            failures.append(f"FATE eac3 {test}: {why}")
+    record("FATE E-AC-3 (T32b)", fpassed, len(FATE_EAC3), optional=True, skipped=fskipped,
+           reasons=["FATE samples missing"] if fskipped else ())
     lines += [
         "",
-        "## AC-3 (T32a)",
+        "## AC-3 and E-AC-3 (T32a, T32b)",
         "",
-        f"AC-3 fixtures probed by zffprobe as ffprobe probes them (or detected by neither), and decoded by zffmpeg "
+        f"AC-3 and E-AC-3 fixtures probed by zffprobe as ffprobe probes them (or detected by neither), and decoded by zffmpeg "
         f"into WAV, AU, AIFF, FLAC, Ogg and raw PCM (and resampled, and downmixed), into raw PCM from a pipe to "
         f"stdout, and from a pipe into a WAV file, equal to the ffmpeg program's with `-bitexact`: {same}/{total}, "
         f"{understood} of them as understood differences:",
@@ -3811,7 +3857,14 @@ def compare_ac3(args, lines, failures):
         "",
         "| Fixture | Cells | Result |",
         "| --- | --- | --- |",
-    ] + rows
+    ] + rows + [
+        "",
+        f"FATE's E-AC-3 decode tests (optional), zffprobe's report ffprobe's and zffmpeg's s16le the ffmpeg "
+        f"program's: {fpassed} passed, {ffailed} failed, {fskipped} skipped.",
+        "",
+        "| Test | Result |",
+        "| --- | --- |",
+    ] + fate_rows
 
 # The G.722 and G.726 fixtures zffprobe and zffmpeg refuse where FFmpeg
 # reads them (T31c, notes.md "G.722 and G.726"): status, error, reason.
@@ -4350,6 +4403,10 @@ KNOWN_REGISTRY_DIFFERENCES = {
                        "AC-3 encoder (T32c)"),
     ("format", "ac3"): (("D.", "DE"), "FFmpeg's raw AC-3 muxer writes the AC-3 fixtures (T32a); the port writes no "
                         "AC-3 before its encoder (T32c)"),
+    ("codec", "eac3"): (("D.AIL.", "DEAIL."), "FFmpeg's E-AC-3 encoder makes the E-AC-3 fixtures (T32b); the port "
+                        "has no E-AC-3 encoder"),
+    ("format", "eac3"): (("D.", "DE"), "FFmpeg's raw E-AC-3 muxer writes the E-AC-3 fixtures (T32b); the port "
+                         "writes no E-AC-3"),
 }
 
 

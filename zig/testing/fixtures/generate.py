@@ -5421,6 +5421,122 @@ def build_ac3_fixtures():
     return fx
 
 
+# --- E-AC-3 (T32b) --------------------------------------------------------------
+#
+# Raw E-AC-3 streams, FFmpeg's E-AC-3 encoder and raw muxer's output, made by
+# zig/testing/reference/ac3_fixtures.sh (`--eac3-input NAME`) and committed;
+# crafted ones built here from the first. The spectral extension, AHT and
+# dependent frames FFmpeg's encoder does not write come from the optional
+# FATE samples (compare.py). What FFmpeg makes of each is
+# vectors/eac3_decode.txt (ac3_vectors.c).
+
+EAC3_DIR = HERE / "eac3"
+EAC3_MANIFEST = EAC3_DIR / "manifest.zon"
+EAC3_README = EAC3_DIR / "README.md"
+
+# As AC3_FFMPEG's entries.
+EAC3_FFMPEG = {
+    "eac3_ffmpeg_stereo_48k": (2, "stereo", 48000, 9000, 151, "smooth", "-c:a eac3 -b:a 192k",
+        "408130aaddf67a9fb0114f7b24b0d2c8ba652444e3fa7e08c7604b29789b2656"),
+    "eac3_ffmpeg_mono_32k": (1, "mono", 32000, 6000, 152, "tones", "-c:a eac3 -b:a 32k",
+        "da53302c512e8b134a54c88cfc160b30df15ea9a652910d9bf42b12a7f77bab3"),
+    "eac3_ffmpeg_51side_44k": (6, "5.1(side)", 44100, 6000, 153, "smooth", "-c:a eac3 -b:a 256k",
+        "6ac59f8bf1f95148eef3a5db6905c7b954da14cd0233906660f57b45b7746696"),
+    "eac3_ffmpeg_51_coupling": (6, "5.1(side)", 48000, 5000, 154, "noise", "-c:a eac3 -b:a 96k -channel_coupling 1",
+        "b9cfd499ce77035687205c2a250759a5917e9b286cdf0a01dda4ab6ecfaaddf4"),
+    "eac3_ffmpeg_30": (3, "3.0", 48000, 5000, 155, "tones", "-c:a eac3",
+        "9cb67f1dad15a4552f94535bc5b459b3df18fbb14502cc85eb28970c6cca8a63"),
+    "eac3_ffmpeg_quad": (4, "quad", 44100, 7000, 156, "smooth", "-c:a eac3",
+        "af4c3ce2dde1089e66967106eb922cb007ec4aa94ed5149f671e522af16a70fd"),
+    "eac3_ffmpeg_lowrate": (2, "stereo", 44100, 9000, 157, "transients", "-c:a eac3 -b:a 32k",
+        "9d654afc0a49a114d155da36534df905492614008dfeabeadf0458355091191f"),
+    "eac3_ffmpeg_fclfe": (2, "FC+LFE", 48000, 4000, 158, "noise", "-c:a eac3",
+        "2eadcb83870084793305d57789a29172880f38aba3994f677981545af43a1fa9"),
+    "eac3_ffmpeg_ltrt": (6, "5.1(side)", 48000, 5000, 159, "tones", "-c:a eac3 -dmix_mode ltrt -ltrt_cmixlev 0.5 -ltrt_surmixlev 0.5",
+        "1ff11ac1183ab4b2afb52fdf9c82cc14b0d56d9a33d7b732b185449fbe088d94"),
+    "eac3_ffmpeg_short": (2, "stereo", 48000, 100, 160, "smooth", "-c:a eac3",
+        "19267431fcb434e90d010d36f31fc2bafccb349e726963a547505f6785ced755"),
+}
+
+
+def eac3_ffmpeg_input(name):
+    """The s16 samples, interleaved, that ac3_fixtures.sh encodes."""
+    channels, _, rate, count, seed, kind, _, _ = EAC3_FFMPEG[name]
+    return signal_input(channels, rate, count, seed, kind)
+
+
+def eac3_frames(data):
+    """The frames of a raw E-AC-3 stream (sizes from each header)."""
+    out = []
+    i = 0
+    while i + 4 <= len(data):
+        words = (((data[i + 2] & 7) << 8) | data[i + 3]) + 1
+        out.append(bytes(data[i:i + 2 * words]))
+        i += 2 * words
+    return out
+
+
+def build_eac3_fixtures():
+    fx = []
+
+    def ok(name, rule, data, group="accepted"):
+        fx.append(Mp3Fixture(name, group, rule, data))
+
+    base_path = EAC3_DIR / "eac3_ffmpeg_stereo_48k.eac3"
+    if base_path.exists():
+        base = base_path.read_bytes()
+        frames = eac3_frames(base)
+        rng = AdpcmLcg(41)
+        ok("eac3_junk_prefix", "29 bytes of junk before the first frame.", adpcm_bytes(rng, 29) + base)
+        ok("eac3_byteswapped", "The stream with every 16-bit word swapped.",
+           b"".join(bytes((base[i + 1], base[i])) for i in range(0, len(base), 2)))
+        damaged = list(frames)
+        for k, bit in ((1, 700), (4, 2000)):
+            f = bytearray(damaged[k])
+            f[bit // 8] ^= 0x80 >> (bit % 8)
+            damaged[k] = bytes(f)
+        ok("eac3_damaged", "Bits flipped in the second and fifth frames: decoded or concealed.", b"".join(damaged))
+        ok("eac3_truncated", "The last frame cut to half: concealed.",
+           b"".join(frames[:-1]) + frames[-1][:len(frames[-1]) // 2])
+        def recrc(frame):
+            # The frame's CRC (CRC-16 0x8005 over all but the sync word)
+            # rewritten, so the probe and the decoder see a valid frame.
+            f = bytearray(frame)
+            f[-2:] = flac_crc16(bytes(f[2:-2])).to_bytes(2, "big")
+            return bytes(f)
+
+        sub = list(frames)
+        f = bytearray(sub[1])
+        f[2] = (f[2] & 0xC7) | (1 << 3)
+        sub[1] = recrc(f)
+        ok("eac3_substream", "The second frame of substream 1: the parser keeps it in the first frame's packet "
+           "and the decoder's look for a dependent frame fails the packet (AC3_PARSE_ERROR_FRAME_TYPE).",
+           b"".join(sub))
+        reduced = list(frames)
+        f = bytearray(reduced[1])
+        f[4] = (f[4] & 0x0F) | 0xC0
+        reduced[1] = recrc(f)
+        ok("eac3_reduced_rate", "The second frame at a reduced sample rate (fscod 3): AVERROR_PATCHWELCOME, "
+           "its packet dropped.", b"".join(reduced))
+        dep = list(frames)
+        f = bytearray(dep[0])
+        f[2] = (f[2] & 0x3F) | 0x40
+        dep[0] = recrc(f)
+        ok("eac3_dependent_alone", "The first frame made a dependent frame: ignored without an independent frame.",
+           b"".join(dep))
+        mixed = list(frames)
+        ac3_path = AC3_DIR / "ac3_ffmpeg_stereo_48k.ac3"
+        if ac3_path.exists():
+            ok("eac3_after_ac3", "Three AC-3 frames, then the E-AC-3 stream: the parser renames the codec "
+               "E-AC-3 when it meets the first.", b"".join(ac3_frames(ac3_path.read_bytes())[:3]) + b"".join(mixed))
+    for name, (channels, layout, rate, count, _, kind, options, _) in EAC3_FFMPEG.items():
+        path = EAC3_DIR / f"{name}.eac3"
+        rule = (f"FFmpeg's encoder and raw muxer, {count} {kind} samples of {channels} channels ({layout}) at "
+                f"{rate} Hz, `{options}`.")
+        fx.append(Mp3Fixture(name, "ffmpeg", rule, path.read_bytes() if path.exists() else b"", made_by="ffmpeg"))
+    return fx
+
+
 def adts_probe_score(buf):
     """adts_aac_probe on a probe buffer (after any ID3v2 tags)."""
     end = len(buf) - 7
@@ -5470,7 +5586,7 @@ def render_mp3_manifest(fixtures):
 
 
 def outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures, flac_fixtures, ogg_fixtures,
-            mp3_fixtures, aac_fixtures, adpcm_fixtures, alac_fixtures, g72x_fixtures, ac3_fixtures):
+            mp3_fixtures, aac_fixtures, adpcm_fixtures, alac_fixtures, g72x_fixtures, ac3_fixtures, eac3_fixtures):
     files = {WAV_DIR / f"{f.name}.wav": f.data for f in fixtures}
     files[MANIFEST] = render_manifest(
         fixtures, "// Each entry names wav/<name>.wav; see README.md for the rules and decisions.")
@@ -5529,6 +5645,12 @@ def outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures, fl
         "Streams, tags and packets are", "Packets and decoded samples are").replace(
         "vectors/mp3.txt", "vectors/ac3_decode.txt").encode()
     files[AC3_README] = render_readme(AC3_README, render_ogg_table(ac3_fixtures))
+    files.update({EAC3_DIR / f"{f.name}.eac3": f.data for f in eac3_fixtures if f.made_by != "ffmpeg"})
+    files[EAC3_MANIFEST] = render_mp3_manifest(eac3_fixtures).replace(
+        "MP3 fixtures", "E-AC-3 fixtures").replace("mp3/<name>.mp3; see mp3/README.md", "eac3/<name>.eac3; see eac3/README.md").replace(
+        "Streams, tags and packets are", "Packets and decoded samples are").replace(
+        "vectors/mp3.txt", "vectors/eac3_decode.txt").encode()
+    files[EAC3_README] = render_readme(EAC3_README, render_ogg_table(eac3_fixtures))
     return files
 
 
@@ -5559,6 +5681,12 @@ def check_ffmpeg_made(flac_fixtures):
             problems.append(f"FFmpeg-made fixture differs from its recorded hash: {path.relative_to(HERE)}")
     for name, (*_, digest) in ALAC_FFMPEG.items():
         path = ALAC_DIR / f"{name}.caf"
+        if not path.exists():
+            problems.append(f"missing FFmpeg-made fixture: {path.relative_to(HERE)}")
+        elif digest is None or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            problems.append(f"FFmpeg-made fixture differs from its recorded hash: {path.relative_to(HERE)}")
+    for name, (*_, digest) in EAC3_FFMPEG.items():
+        path = EAC3_DIR / f"{name}.eac3"
         if not path.exists():
             problems.append(f"missing FFmpeg-made fixture: {path.relative_to(HERE)}")
         elif digest is None or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
@@ -5595,6 +5723,8 @@ def main():
                         help="write the s16le input of FFmpeg-made AAC fixture NAME to stdout and stop")
     parser.add_argument("--adpcm-input", metavar="NAME",
                         help="write the s16le input of FFmpeg-made ADPCM fixture NAME to stdout and stop")
+    parser.add_argument("--eac3-input", metavar="NAME",
+                        help="write the s16le input of FFmpeg-made E-AC-3 fixture NAME to stdout and stop")
     parser.add_argument("--ac3-input", metavar="NAME",
                         help="write the s16le input of FFmpeg-made AC-3 fixture NAME to stdout and stop")
     parser.add_argument("--g72x-input", metavar="NAME",
@@ -5613,6 +5743,9 @@ def main():
         return 0
     if args.adpcm_input:
         sys.stdout.buffer.write(b"".join(struct.pack("<h", v) for v in adpcm_ffmpeg_input(args.adpcm_input)))
+        return 0
+    if args.eac3_input:
+        sys.stdout.buffer.write(b"".join(struct.pack("<h", v) for v in eac3_ffmpeg_input(args.eac3_input)))
         return 0
     if args.ac3_input:
         sys.stdout.buffer.write(b"".join(struct.pack("<h", v) for v in ac3_ffmpeg_input(args.ac3_input)))
@@ -5639,8 +5772,10 @@ def main():
     alac_fixtures = build_alac_fixtures()
     g72x_fixtures = build_g72x_fixtures()
     ac3_fixtures = build_ac3_fixtures()
+    eac3_fixtures = build_eac3_fixtures()
     expected = outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures, flac_fixtures, ogg_fixtures,
-                       mp3_fixtures, aac_fixtures, adpcm_fixtures, alac_fixtures, g72x_fixtures, ac3_fixtures)
+                       mp3_fixtures, aac_fixtures, adpcm_fixtures, alac_fixtures, g72x_fixtures, ac3_fixtures,
+                       eac3_fixtures)
     stale = [path for path, content in expected.items() if not path.exists() or path.read_bytes() != content]
     ffmpeg_made = ({FLAC_DIR / f"{f.name}.flac" for f in flac_fixtures if f.made_by == "ffmpeg"}
                    | {OGG_DIR / f"{name}.ogg" for name in OGG_FFMPEG}
@@ -5648,18 +5783,19 @@ def main():
                    | {ADPCM_DIR / f"{name}.wav" for name in ADPCM_FFMPEG}
                    | {ALAC_DIR / f"{name}.caf" for name in ALAC_FFMPEG}
                    | {G72X_DIR / f"{name}.au" for name in G72X_FFMPEG}
-                   | {AC3_DIR / f"{name}.ac3" for name in AC3_FFMPEG})
+                   | {AC3_DIR / f"{name}.ac3" for name in AC3_FFMPEG}
+                   | {EAC3_DIR / f"{name}.eac3" for name in EAC3_FFMPEG})
     extra = sorted((set(WAV_DIR.glob("*.wav")) | set(AU_DIR.glob("*.au")) | set(AIFF_DIR.glob("*.aiff"))
              | set(RAW_DIR.glob("*.raw")) | set(CAF_DIR.glob("*.caf")) | set(FLAC_DIR.glob("*.flac"))
              | set(OGG_DIR.glob("*.ogg")) | set(MP3_DIR.glob("*.mp3")) | set(AAC_DIR.glob("*.aac"))
              | set(ADPCM_DIR.glob("*.wav")) | set(ALAC_DIR.glob("*.caf")) | set(G72X_DIR.glob("*.au"))
-             | set(AC3_DIR.glob("*.ac3")))
+             | set(AC3_DIR.glob("*.ac3")) | set(EAC3_DIR.glob("*.eac3")))
                    - set(expected) - ffmpeg_made)
     problems = check_ffmpeg_made(flac_fixtures)
     counts = (f"{len(fixtures)} WAV, {len(au_fixtures)} AU, {len(aiff_fixtures)} AIFF, {len(raw_fixtures)} raw PCM, "
               f"{len(caf_fixtures)} CAF, {len(flac_fixtures)} FLAC, {len(ogg_fixtures)} Ogg, {len(mp3_fixtures)} MP3"
               f", {len(aac_fixtures)} ADTS, {len(adpcm_fixtures)} ADPCM, {len(alac_fixtures)} ALAC, "
-              f"{len(g72x_fixtures)} G.72x and {len(ac3_fixtures)} AC-3 fixtures")
+              f"{len(g72x_fixtures)} G.72x, {len(ac3_fixtures)} AC-3 and {len(eac3_fixtures)} E-AC-3 fixtures")
 
     if args.check:
         for path in stale:
@@ -5680,6 +5816,7 @@ def main():
     WAV_DIR.mkdir(exist_ok=True)
     G72X_DIR.mkdir(exist_ok=True)
     AC3_DIR.mkdir(exist_ok=True)
+    EAC3_DIR.mkdir(exist_ok=True)
     AU_DIR.mkdir(exist_ok=True)
     AIFF_DIR.mkdir(exist_ok=True)
     RAW_DIR.mkdir(exist_ok=True)

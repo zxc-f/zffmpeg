@@ -418,6 +418,8 @@ pub const CodecParams = struct {
     mask: u64 = 0,
     /// The AAC parser's profile, when it set one.
     profile: ?u8 = null,
+    /// The AC-3 parser met an E-AC-3 frame: the codec is `eac3`.
+    eac3: bool = false,
     sample_rate: u32,
     channels: u8,
     bit_rate: i64,
@@ -480,7 +482,7 @@ pub fn Layer(comptime Source: type) type {
             if (s.codec) |codec| switch (codec) {
                 .mpa => |c| return .{ .mpa_codec = c.codec, .sample_rate = c.sample_rate, .channels = c.channels, .bit_rate = c.bit_rate },
                 .aac => |c| return .{ .mpa_codec = null, .profile = c.profile, .sample_rate = setup.sample_rate, .channels = setup.channels, .bit_rate = c.bit_rate },
-                .ac3 => |c| return .{ .mpa_codec = null, .sample_rate = c.sample_rate, .channels = c.channels, .mask = c.channel_layout, .bit_rate = c.bit_rate },
+                .ac3 => |c| return .{ .mpa_codec = null, .sample_rate = c.sample_rate, .channels = c.channels, .mask = c.channel_layout, .bit_rate = c.bit_rate, .eac3 = c.eac3 },
             };
             return .{ .mpa_codec = null, .sample_rate = setup.sample_rate, .channels = setup.channels, .bit_rate = setup.bit_rate };
         }
@@ -737,7 +739,15 @@ pub fn Layer(comptime Source: type) type {
             const d = s.ac3 orelse return;
             var data = data_in;
             while (data.len > 0 and (!hasCodecParameters(setup, s.*) or s.codec_info_nb_frames == 0)) {
-                const got = d.decode(data) catch return;
+                const got = d.decode(data) catch {
+                    // A packet that fails after a frame's channel
+                    // configuration leaves avctx's layout set.
+                    if (d.ch_layout != 0) {
+                        ctx.channels = @popCount(d.ch_layout);
+                        ctx.channel_layout = d.ch_layout;
+                    }
+                    return;
+                };
                 if (got.frame) |f| {
                     ctx.sample_rate = f.sample_rate;
                     ctx.channels = f.channels;

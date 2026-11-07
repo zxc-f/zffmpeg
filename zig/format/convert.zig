@@ -380,9 +380,9 @@ pub const Conversion = struct {
                 .init(request.gpa orelse return error.UnsupportedOperation, source.reader(), null, request.diagnostics) },
             // Decoded (T32a), read as the ADTS input is.
             .ac3 => .{ .ac3 = if (try rewound(source)) |sk|
-                .init(request.gpa orelse return error.UnsupportedOperation, source.replay.source, sk, request.diagnostics)
+                .init(request.gpa orelse return error.UnsupportedOperation, source.replay.source, sk, request.diagnostics, if (source.container == .eac3) .eac3 else .ac3)
             else
-                .init(request.gpa orelse return error.UnsupportedOperation, source.reader(), null, request.diagnostics) },
+                .init(request.gpa orelse return error.UnsupportedOperation, source.reader(), null, request.diagnostics, if (source.container == .eac3) .eac3 else .ac3) },
         };
         errdefer deinitParser(&input);
         // A header written before the samples needs their count. A decoded
@@ -525,7 +525,7 @@ pub const Conversion = struct {
             .mp2, .adpcm_ima_wav, .adpcm_ms, .adpcm_g722, .adpcm_g726le => .s16le,
             // ALAC's encoder takes s16p or s32p, picked as FLAC's (T31b).
             .alac => flacStorage(summary.format.sample_format),
-            .vorbis, .opus, .mp1, .mp3, .aac, .ac3 => return error.UnsupportedOperation,
+            .vorbis, .opus, .mp1, .mp3, .aac, .ac3, .eac3 => return error.UnsupportedOperation,
         };
         // FFmpeg's set_channel_layout: an unspecified request takes the
         // default for its count.
@@ -741,13 +741,28 @@ pub const Conversion = struct {
     /// STREAMINFO replaces the first, as FFmpeg's muxer rewrites a seekable
     /// output's (T26c); `seeker` moves `out`.
     /// libswresample's mix levels as the ffmpeg program's aresample sets
-    /// them: from an AC-3 decoder's downmix info (`clev`, `slev`, the LFE
-    /// level 0), else its defaults.
+    /// them from an (E-)AC-3 decoder's downmix info: the Lt/Rt levels and
+    /// the matrix encoding of a preferred Lt/Rt or Pro Logic II downmix
+    /// into stereo, else the Lo/Ro levels, and the LFE level; without the
+    /// info libswresample's defaults.
     fn mixLevels(c: *const Conversion) rematrix.Options {
-        return switch (c.input) {
-            .ac3 => |*reader| if (reader.downmix) |dm| .{ .center_mix_level = dm.center_mix_level, .surround_mix_level = dm.surround_mix_level, .lfe_mix_level = 0 } else .{},
-            else => .{},
+        const dm = switch (c.input) {
+            .ac3 => |*reader| reader.downmix orelse return .{},
+            else => return .{},
         };
+        var options: rematrix.Options = .{ .center_mix_level = dm.center_mix_level, .surround_mix_level = dm.surround_mix_level, .lfe_mix_level = dm.lfe_mix_level };
+        // "Don't use Dolby Surround compatible coeffs when not downmixing
+        // to stereo".
+        if (!c.summary.output_layout.eql(&audio.ChannelLayout.stereo)) return options;
+        switch (dm.preferred) {
+            1, 3 => {
+                options.matrix_encoding = if (dm.preferred == 1) .dolby else .dplii;
+                options.center_mix_level = dm.center_mix_level_ltrt;
+                options.surround_mix_level = dm.surround_mix_level_ltrt;
+            },
+            else => {},
+        }
+        return options;
     }
 
     /// The ffmpeg program's first frame for an encoder that takes its
@@ -1147,7 +1162,7 @@ fn carryStreamTags(gpa: std.mem.Allocator, out: *metadata.Dictionary, input: *co
 fn decoderSetsLayout(stream: codecs.Codec) bool {
     return switch (stream) {
         // The AAC decoder's layout is the stream's after the read-ahead.
-        .opus, .vorbis, .aac, .ac3 => true,
+        .opus, .vorbis, .aac, .ac3, .eac3 => true,
         else => false,
     };
 }

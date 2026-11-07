@@ -436,8 +436,8 @@ pub const ParserContext = struct {
     /// `avctx->codec_id` became AV_CODEC_ID_EAC3 (a bit stream id above 10).
     eac3: bool = false,
     /// `avctx->ch_layout`: the header's mask (never 0: every channel mode
-    /// names a layout), set on every checked frame, as the reference build
-    /// has no E-AC-3 decoder.
+    /// names a layout), set on every checked frame of an AC-3 stream; an
+    /// E-AC-3 stream's is the decoder's.
     channel_layout: u64 = 0,
     channels: u8 = 0,
     /// `avctx->audio_service_type`.
@@ -448,7 +448,7 @@ pub const ParserContext = struct {
 
 /// FFmpeg's AC-3 parser (`ff_aac_ac3_parse` with `ac3_sync`),
 /// `PARSER_FLAG_COMPLETE_FRAMES` off, as the reference build compiles it
-/// (`CONFIG_EAC3_DECODER` 0).
+/// (with its E-AC-3 decoder).
 pub const Parser = struct {
     splitter: aac_ac3_parser.Splitter(header_size, sync) = .{},
     /// The frames whose header and CRC checked out; an int.
@@ -498,14 +498,18 @@ pub const Parser = struct {
         // `rest` was not empty: `offset` is inside the frame.
         ctx.sample_rate = hdr.sample_rate;
         if (hdr.bitstream_id > 10) ctx.eac3 = true;
-        ctx.channel_layout = hdr.channel_layout;
-        ctx.channels = hdr.channels;
+        // With an E-AC-3 decoder compiled in (the reference build's), an
+        // E-AC-3 stream's layout and bit rate are the decoder's.
+        if (!ctx.eac3) {
+            ctx.channel_layout = hdr.channel_layout;
+            ctx.channels = hdr.channels;
+        }
         p.duration = @intCast(hdr.num_blocks * 256);
         ctx.audio_service_type = hdr.bitstream_mode;
         // AV_AUDIO_SERVICE_TYPE_KARAOKE.
         if (hdr.bitstream_mode == 0x7 and hdr.channels > 1) ctx.audio_service_type = 8;
         p.frame_number +%= 1;
-        if (p.frame_number != 0) ctx.bit_rate += @divTrunc(@as(i64, hdr.bit_rate) - ctx.bit_rate, p.frame_number);
+        if (!ctx.eac3 and p.frame_number != 0) ctx.bit_rate += @divTrunc(@as(i64, hdr.bit_rate) - ctx.bit_rate, p.frame_number);
     }
 };
 

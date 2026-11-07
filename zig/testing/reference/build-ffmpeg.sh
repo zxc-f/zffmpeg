@@ -52,10 +52,10 @@ configure_args=(
     --disable-ffplay
     --disable-avdevice
     --enable-protocol=file,pipe
-    --enable-demuxer=wav,w64,au,aiff,caf,flac,ogg,mp3,aac,ac3,"$pcm_formats"
-    --enable-decoder="$pcm_codecs",flac,vorbis,opus,mp3float,mp1float,mp2float,aac,adpcm_ima_wav,adpcm_ms,alac,adpcm_g722,adpcm_g726le,ac3
-    --enable-encoder="$pcm_codecs",flac,vorbis,opus,mp2,mp2fixed,aac,adpcm_ima_wav,adpcm_ms,alac,adpcm_g722,adpcm_g726le,ac3
-    --enable-muxer=wav,mp2,adts,w64,au,aiff,caf,flac,ogg,oga,opus,framecrc,framemd5,streamhash,ac3,"$pcm_formats"
+    --enable-demuxer=wav,w64,au,aiff,caf,flac,ogg,mp3,aac,ac3,eac3,"$pcm_formats"
+    --enable-decoder="$pcm_codecs",flac,vorbis,opus,mp3float,mp1float,mp2float,aac,adpcm_ima_wav,adpcm_ms,alac,adpcm_g722,adpcm_g726le,ac3,eac3
+    --enable-encoder="$pcm_codecs",flac,vorbis,opus,mp2,mp2fixed,aac,adpcm_ima_wav,adpcm_ms,alac,adpcm_g722,adpcm_g726le,ac3,eac3
+    --enable-muxer=wav,mp2,adts,w64,au,aiff,caf,flac,ogg,oga,opus,framecrc,framemd5,streamhash,ac3,eac3,"$pcm_formats"
     --enable-parser=flac,mpegaudio,aac,ac3
     --enable-filter=aresample,volume,asetpts,amix,pan,channelmap,channelsplit,asplit
 )

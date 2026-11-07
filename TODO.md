@@ -74,8 +74,9 @@ and encoded in WAV; and T31b, FFmpeg's ALAC codec read from CAF and written
 there with its CAF muxer, which also writes PCM; and T31c, FFmpeg's G.722
 and G.726 codecs packet for packet and sample for sample, read from AU and
 written there, which completes T31; and T32a, FFmpeg's raw AC-3 demuxer,
-parser and float decoder sample for sample. **Next: T32b (the E-AC-3
-decoder).
+parser and float decoder sample for sample, and T32b, its E-AC-3
+decoder sample for sample with the raw eac3 demuxer. **Next: T32c (the
+AC-3 encoder).
 See [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
@@ -3953,8 +3954,55 @@ names, not as an empty framework.
       pipe input equal; the native build at 0.81x to 0.83x.
     Remaining work or blocker / next action: none; T32b is next.
     ```
-  - [ ] **T32b — E-AC-3 decoder.** Needs T32a.
+  - [x] **T32b — E-AC-3 decoder.** Needs T32a.
     Done when the required streams match within tolerance.
+
+    ```text
+    ID / parent: T32b / T32
+    State: verified (G5, local Linux x86-64 runs)
+    Supported behavior and explicit exclusions: FFmpeg's raw eac3 demuxer
+      (the AC-3 probe expecting E-AC-3, extensions eac3 and ec3) and its
+      float decoder's E-AC-3 paths, bit-exact (no tolerance needed): the
+      frame syntax, spectral extension, AHT with GAQ, enhanced bit
+      allocation, reduced block counts, dependent frames and their
+      channel map (up to 16 channels); the parser's switch to eac3; the
+      read-ahead's layout from a failed packet; Lt/Rt and Pro Logic II
+      downmix info as aresample takes it. As FFmpeg (notes.md "E-AC-3"):
+      other substreams fail their packet, reduced sample rates and
+      enhanced coupling are PATCHWELCOME. Excluded: E-AC-3 output, stream
+      copy, the decoder's options.
+    Contract and source provenance: port.md "AC-3"; eac3dec.c and
+      eac3_data.c (derived; eac3_data.zig printed by eac3_tab.c from the
+      pinned tree), with ac3dec.c's E-AC-3 paths.
+    Required fixtures: zig/testing/fixtures/eac3/ (18: 10 from the
+      reference build's E-AC-3 encoder through ac3_fixtures.sh, 8 built
+      by generate.py: junk, byte-swapped, damage, truncation, AC-3 then
+      E-AC-3, substream 1, a reduced rate, a lone dependent frame).
+      Optional: FATE's five E-AC-3 samples (spectral extension, AHT, 5.1,
+      7.1 dependent frames; AHT checked to be used in two of them).
+    Comparison rule: eac3_decode.txt (every packet and frame of every
+      fixture, mutated copies included) equals the pinned build's;
+      zffprobe ffprobe's; zffmpeg's decodes the program's byte for byte;
+      the FATE samples' probe and s16le the program's.
+    Evidence: the commit that checks this card. G3: the decoder's and raw
+      AC-3 decoding's fuzz entries seeded with E-AC-3, 2000-round
+      mutation smokes in ReleaseSafe, allocation and remap sweeps,
+      crafted-frame tests (PATCHWELCOME, substream, lone dependent frame);
+      process cases (zffprobe on a file, a pipe, AC-3 then E-AC-3 forced
+      as ac3, the substream's missing duration; zffmpeg to raw PCM, the
+      three refusals' sample counts, an Lt/Rt downmix, no encoder). G5
+      locally on Linux x86-64 (no CI run link): zig fmt, the fixture
+      check, zig build test 617/617 (382 steps) in Debug, ReleaseSafe and
+      ReleaseFast, the cross builds, every vector generator (the E-AC-3
+      vectors diffed in the AC-3 step), compare.py 10686/0/0 required
+      (AC-3 and E-AC-3 522 cells, 13 recorded Ogg granule cells; the
+      registry with FFmpeg's E-AC-3 encoder and muxer recorded) and 66/66
+      optional (FATE E-AC-3 5/5). Speed check (10 minutes of the base
+      signal encoded by the reference build's E-AC-3 encoder, one core):
+      E-AC-3 to WAV 0.64x the reference build from a file and from a
+      pipe; the native build at 0.90x.
+    Remaining work or blocker / next action: none; T32c is next.
+    ```
   - [ ] **T32c — AC-3 encoder.** Needs T32a.
     Done when FFmpeg decodes our output, with bitrate and a declared quality
     metric recorded against FFmpeg's encoder.

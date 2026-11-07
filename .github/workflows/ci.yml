@@ -404,7 +404,7 @@ jobs:
 
       # The committed T32a oracle must be what this build's AC-3 demuxer,
       # parser and decoder make of every AC-3 fixture.
-      - name: Check the AC-3 vectors (T32a)
+      - name: Check the AC-3 and E-AC-3 vectors (T32a, T32b)
         run: |
           clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/ac3_vectors.c \
             .references/ffmpeg-install/lib/libavformat.a .references/ffmpeg-install/lib/libavcodec.a \
@@ -412,6 +412,8 @@ jobs:
             -lm -pthread -o ac3-vectors
           ./ac3-vectors $(sed -n 's/^ *\.name = "\(.*\)",$/zig\/testing\/fixtures\/ac3\/\1.ac3/p' zig/testing/fixtures/ac3/manifest.zon) |
             diff -u zig/testing/vectors/ac3_decode.txt -
+          ./ac3-vectors $(sed -n 's/^ *\.name = "\(.*\)",$/zig\/testing\/fixtures\/eac3\/\1.eac3/p' zig/testing/fixtures/eac3/manifest.zon) |
+            diff -u zig/testing/vectors/eac3_decode.txt -
 
       # The committed T28a oracle must be what this build's Opus decoder
       # makes of every Ogg fixture's first Opus stream.

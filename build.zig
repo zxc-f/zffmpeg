@@ -32,8 +32,8 @@ const examples = [_]Example{
 /// files' extension: wav (WAV and Wave64), au, aiff, raw (raw PCM), caf,
 /// flac, ogg, mp3 (MPEG audio, Layers I to III) and aac (ADTS); and adpcm,
 /// whose files are WAV (T31a), alac, whose files are CAF (T31b), and g72x,
-/// whose files are AU (T31c); and ac3 (T32a).
-const FixtureSet = enum { wav, au, aiff, raw, caf, flac, ogg, mp3, aac, adpcm, alac, g72x, ac3 };
+/// whose files are AU (T31c); and ac3 (T32a) and eac3 (T32b).
+const FixtureSet = enum { wav, au, aiff, raw, caf, flac, ogg, mp3, aac, adpcm, alac, g72x, ac3, eac3 };
 
 /// A zffprobe process run with its expected exit code and output.
 const ProbeCase = struct {
@@ -524,6 +524,13 @@ const probe_cases = [_]ProbeCase{
     .{ .name = "AC-3 of three frames is not detected", .set = .ac3, .fixture = "ac3_ffmpeg_quad", .exit_code = 3, .stderr_contains = ": UnknownFormat\n" },
     .{ .name = "AC-3 of three frames forced", .set = .ac3, .args = &.{ "-f", "ac3" }, .fixture = "ac3_ffmpeg_quad", .exit_code = 0, .stdout_contains = "channel_layout=quad(side)\n", .stderr = "" },
     .{ .name = "AC-3 forced on a WAV file", .args = &.{ "-f", "ac3" }, .fixture = "mono_8k", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
+    // T32b: raw E-AC-3, and an AC-3 stream the parser renames E-AC-3.
+    .{ .name = "E-AC-3", .set = .eac3, .fixture = "eac3_ffmpeg_stereo_48k", .exit_code = 0, .stdout = "format=eac3\ncodec=eac3\nsample_fmt=fltp\nchannels=2\nchannel_layout=stereo\nsample_rate=48000\nnb_samples=10752\nduration_num=20160\nduration_den=90000\n", .stderr = "" },
+    .{ .name = "E-AC-3 from a pipe", .set = .eac3, .args = &.{"-"}, .stdin_fixture = "eac3_ffmpeg_51side_44k", .exit_code = 0, .stdout_contains = "codec=eac3\nsample_fmt=fltp\nchannels=6\nchannel_layout=5.1(side)\nsample_rate=44100\nnb_samples=N/A\n", .stderr = "" },
+    // The first packet fails after setting the layout: the read-ahead
+    // stops with no bit rate, so no duration is estimated.
+    .{ .name = "E-AC-3 substream: no duration", .set = .eac3, .fixture = "eac3_substream", .exit_code = 0, .stdout_contains = "channels=2\nchannel_layout=stereo\nsample_rate=48000\nnb_samples=N/A\n", .stderr = "" },
+    .{ .name = "E-AC-3 after AC-3 read as AC-3", .set = .eac3, .args = &.{ "-f", "ac3" }, .fixture = "eac3_after_ac3", .exit_code = 0, .stdout_contains = "format=ac3\ncodec=eac3\n", .stderr = "" },
     .{ .name = "Ogg Vorbis", .set = .ogg, .fixture = "ogg_vorbis_ffmpeg_44k", .exit_code = 0, .stdout = "format=ogg\ncodec=vorbis\nsample_fmt=fltp\nchannels=2\nchannel_layout=stereo\nsample_rate=44100\nnb_samples=30000\nduration_num=30000\nduration_den=44100\n", .stderr = "" },
     .{ .name = "Ogg Vorbis whose setup header the decoder refuses", .set = .ogg, .fixture = "ogg_vorbis_stereo", .exit_code = 2, .stderr_contains = ": InvalidVorbis\n" },
     .{ .name = "Ogg FLAC", .set = .ogg, .fixture = "ogg_flac_stereo", .exit_code = 0, .stdout_contains = "codec=flac\nsample_fmt=s16\nchannels=2\nchannel_layout=stereo\n", .stderr = "" },
@@ -891,6 +898,12 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "AC-3 with junk after a frame", .set = .ac3, .args = &.{"-i"}, .input = "ac3_junk_between_long", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt ", .stderr = "" },
     .{ .name = "AC-3 copy is unsupported", .set = .ac3, .args = &.{"-i"}, .input = "ac3_ffmpeg_stereo_48k", .tail = &.{ "-c", "copy", "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
     .{ .name = "no AC-3 encoder", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-c:a", "ac3", "-f", "wav", "-" }, .exit_code = 1, .stdout = "", .stderr_contains = "unknown encoder: ac3" },
+    .{ .name = "E-AC-3 to raw PCM", .set = .eac3, .args = &.{"-i"}, .input = "eac3_ffmpeg_51side_44k", .tail = &.{ "-f", "f32le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stdout_raw = .{ .args = &.{ "-f", "f32le", "-ch_layout", "5.1(side)", "-sample_rate", "44100" }, .nb_samples = 7680 }, .stderr = "" },
+    .{ .name = "E-AC-3 at a reduced rate: the packet dropped", .set = .eac3, .args = &.{"-i"}, .input = "eac3_reduced_rate", .tail = &.{ "-f", "f32le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stdout_raw = .{ .args = &.{ "-f", "f32le", "-ch_layout", "stereo", "-sample_rate", "48000" }, .nb_samples = 9216 }, .stderr = "" },
+    .{ .name = "E-AC-3 substream 1: its packet dropped", .set = .eac3, .args = &.{"-i"}, .input = "eac3_substream", .tail = &.{ "-f", "f32le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stdout_raw = .{ .args = &.{ "-f", "f32le", "-ch_layout", "stereo", "-sample_rate", "48000" }, .nb_samples = 7680 }, .stderr = "" },
+    .{ .name = "E-AC-3 dependent frame alone: ignored", .set = .eac3, .args = &.{"-i"}, .input = "eac3_dependent_alone", .tail = &.{ "-f", "f32le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stdout_raw = .{ .args = &.{ "-f", "f32le", "-ch_layout", "stereo", "-sample_rate", "48000" }, .nb_samples = 9216 }, .stderr = "" },
+    .{ .name = "E-AC-3 downmixed to stereo", .set = .eac3, .args = &.{"-i"}, .input = "eac3_ffmpeg_ltrt", .tail = &.{ "-ac", "2", "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt ", .stderr = "" },
+    .{ .name = "no E-AC-3 encoder", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-c:a", "eac3", "-f", "wav", "-" }, .exit_code = 1, .stdout = "", .stderr_contains = "unknown encoder: eac3" },
     // A decoder that refuses the headers fails cleanly, before any output,
     // from a file (after the counting pass) and from a pipe.
     .{ .name = "Ogg Vorbis whose setup header the decoder refuses", .set = .ogg, .args = &.{"-i"}, .input = "ogg_vorbis_stereo", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stdout = "", .stderr_contains = ": InvalidVorbis\n" },
