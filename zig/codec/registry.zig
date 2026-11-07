@@ -206,7 +206,8 @@ pub const decoders = pcmImplementations() ++ [_]Implementation{
     .{ .name = "eac3", .codec = .eac3 },
 };
 /// The PCM encoders, then FLAC's (T26c), MP2's (T29d), ADPCM's (T31a),
-/// ALAC's (T31b), G.722's and G.726's (T31c) and AC-3's (T32c).
+/// ALAC's (T31b), G.722's and G.726's (T31c), AAC's (T32d) and AC-3's
+/// (T32c).
 pub const encoders = pcmImplementations() ++ [_]Implementation{
     .{ .name = "flac", .codec = .flac },
     // FFmpeg's MP2 encoders (T29d), in allcodecs.c's order.
@@ -218,7 +219,8 @@ pub const encoders = pcmImplementations() ++ [_]Implementation{
     .{ .name = "alac", .codec = .alac },
     .{ .name = "g722", .codec = .adpcm_g722 },
     .{ .name = "g726le", .codec = .adpcm_g726le },
-    // FFmpeg's float AC-3 encoder (T32c).
+    // FFmpeg's AAC encoder (T32d) and its float AC-3 encoder (T32c).
+    .{ .name = "aac", .codec = .aac },
     .{ .name = "ac3", .codec = .ac3 },
 };
 
@@ -300,5 +302,5 @@ test "every PCM codec has a decoder and an encoder" {
     try std.testing.expect(findDecoder("mp1float").?.codec.eql(.mp1));
     // AAC decodes (T30b); the port has no AAC encoder.
     try std.testing.expect(findDecoder("aac").?.codec.eql(.aac));
-    try std.testing.expectEqual(null, findEncoder("aac"));
+    try std.testing.expect(findEncoder("aac").?.codec.eql(.aac));
 }

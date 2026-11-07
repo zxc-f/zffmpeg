@@ -81,6 +81,8 @@ const mp2mux = @import("mp2mux.zig");
 const mp2enc = @import("../codec/mp2enc.zig");
 const ac3mux = @import("ac3mux.zig");
 const ac3enc = @import("../codec/ac3enc.zig");
+const aacadts = @import("aacadts.zig");
+const aacenc = @import("../codec/aacenc.zig");
 const flacenc = @import("../codec/flacenc.zig");
 const flac_codec = @import("../codec/flac.zig");
 const seek = @import("seek.zig");
@@ -128,6 +130,10 @@ pub const Request = struct {
     /// `-cutoff`, `-audio_service_type` and the encoder's own. Encoding
     /// AC-3 needs `gpa`.
     ac3: ac3enc.Options = .{},
+    /// The AAC encoder's options (T32d), for an ADTS output: `-b:a`,
+    /// `-cutoff`, `-q:a`, `-profile` and the encoder's own. Encoding AAC
+    /// needs `gpa`.
+    aac: aacenc.Options = .{},
     /// The ADPCM encoders' options (T31a), for `adpcm_ima_wav` or
     /// `adpcm_ms` into WAV: FFmpeg's `-block_size` and `-trellis`. Encoding
     /// ADPCM needs `gpa`.
@@ -214,6 +220,12 @@ pub const RunError = detect.Error || std.Io.Writer.Error || resample.Error || er
     /// rate (FFmpeg's "Bit allocation failed. Try increasing the bitrate.",
     /// EINVAL), which depends on the samples (T32c).
     InvalidOption,
+    /// The AAC encoder refuses NaN or infinite samples ("Input contains
+    /// (near) NaN/+-Inf", EINVAL; T32d).
+    InvalidSamples,
+    /// An AAC frame past the ADTS header's 13-bit length (the adts muxer's
+    /// "frame size too large", AVERROR_INVALIDDATA; T32d).
+    FrameTooLarge,
 };
 
 pub const Error = InitError || RunError;
@@ -303,6 +315,8 @@ pub const Conversion = struct {
     mp2_options: mp2enc.Options = .{},
     /// The AC-3 encoder's options, for an AC-3 output (T32c).
     ac3_options: ac3enc.Options = .{},
+    /// The AAC encoder's options, for an ADTS output (T32d).
+    aac_options: aacenc.Options = .{},
     /// The ADPCM encoders' options, for an ADPCM output (T31a).
     adpcm_options: wavadpcm.EncodeOptions = .{},
     /// The ALAC encoder's options, for an ALAC output (T31b).
@@ -541,7 +555,9 @@ pub const Conversion = struct {
             // The AC-3 encoder takes fltp, which the writer makes of
             // packed float (T32c).
             .ac3 => .f32le,
-            .vorbis, .opus, .mp1, .mp3, .aac, .eac3 => return error.UnsupportedOperation,
+            // The AAC encoder takes fltp too (T32d).
+            .aac => .f32le,
+            .vorbis, .opus, .mp1, .mp3, .eac3 => return error.UnsupportedOperation,
         };
         // FFmpeg's set_channel_layout: an unspecified request takes the
         // default for its count.
@@ -563,6 +579,7 @@ pub const Conversion = struct {
                 (g72xOutput(summary.output_stream) == null or request.gpa != null) and
                 (summary.output_stream != .alac or request.gpa != null) and
                 (summary.output_stream != .ac3 or request.gpa != null) and
+                (summary.output_stream != .aac or request.gpa != null) and
                 (summary.output_stream != .flac or request.gpa != null),
         };
         if (!supported) return error.UnsupportedOperation;
@@ -612,7 +629,12 @@ pub const Conversion = struct {
                 error.InvalidOption => error.InvalidOption,
             },
             .mp3, .aac => unreachable, // no muxer: refused above as UnsupportedOperation
-            .adts => unreachable, // no AAC encoder: refused above as UnsupportedOperation
+            // FFmpeg's AAC encoder before its adts muxer (T32d).
+            .adts => aacadts.Writer.check(request.gpa.?, summary.output_codec, summary.outputFormat(), request.aac) catch |err| return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                error.UnsupportedFormat => error.UnsupportedFormat,
+                error.InvalidOption => error.InvalidOption,
+            },
         }
         // For a decoded input, the largest frame its decoder gives: the
         // buffers of `transferResampled`, which takes each frame whole.
@@ -689,6 +711,7 @@ pub const Conversion = struct {
             .flac_options = request.flac,
             .mp2_options = request.mp2,
             .ac3_options = request.ac3,
+            .aac_options = request.aac,
             .adpcm_options = request.adpcm,
             .alac_options = request.alac,
             .g72x_options = request.g72x,
@@ -895,7 +918,12 @@ pub const Conversion = struct {
                 defer writer.deinit();
                 try c.transfer(ac3mux.Writer, &writer);
             },
-            .mp3, .aac, .adts => unreachable, // no muxer or encoder: `init` refused it
+            .adts => {
+                var writer = aacadts.Writer.begin(c.gpa.?, out, s.output_codec, s.outputFormat(), c.aac_options) catch |err| return outputFailure(err);
+                defer writer.deinit();
+                try c.transfer(aacadts.Writer, &writer);
+            },
+            .mp3, .aac => unreachable, // no muxer: `init` refused it
         }
         // Every frame was read: an unknown count is now known, and a FLAC
         // stream's decoded count replaces STREAMINFO's (equal unless raw
@@ -1423,7 +1451,7 @@ fn rawOptions(limits: Limits) raw.WriteOptions {
 
 /// Every error a writer's `begin`, `writeData` or `finish` returns. A new
 /// one fails to compile in `outputFailure`'s switch until it is classified.
-const WriterError = wav.RewriteError || au.RewriteError || aiff.RewriteError || raw.WriteError || flacmux.WriteError || mp2mux.WriteError || wavadpcm.RewriteError || cafmux.WriteError || aug72x.RewriteError || ac3mux.WriteError || ac3mux.HeaderError;
+const WriterError = wav.RewriteError || au.RewriteError || aiff.RewriteError || raw.WriteError || flacmux.WriteError || mp2mux.WriteError || wavadpcm.RewriteError || cafmux.WriteError || aug72x.RewriteError || ac3mux.WriteError || ac3mux.HeaderError || aacadts.WriteError;
 
 /// A writer's failure once output started: the output's, or FLAC's that
 /// only its first frame reveals (T26c: the encoder refusing the block size
@@ -1457,6 +1485,10 @@ fn outputFailure(err: WriterError) RunError {
         error.UnsupportedStreamingSize => error.UnsupportedStreamingSize,
         // The AC-3 encoder's search, which depends on the samples.
         error.BitAllocationFailed => error.InvalidOption,
+        // The AAC encoder's refusal of NaN or infinite samples, and an
+        // ADTS frame too large (T32d).
+        error.InvalidSamples => error.InvalidSamples,
+        error.FrameTooLarge => error.FrameTooLarge,
     };
 }
 

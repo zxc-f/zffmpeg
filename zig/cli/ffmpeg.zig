@@ -161,6 +161,10 @@ const Command = struct {
     g726: av.g726.EncodeOptions,
     /// The AC-3 encoder's options (T32c), its bit rate aside (`bit_rate`).
     ac3: av.ac3enc.Options,
+    /// The AAC encoder's options (T32d), its bit rate and cutoff aside.
+    aac: av.aacenc.Options,
+    /// `-q:a` (`-q`, `-aq`, `-qscale:a`): the encoder's fixed quality.
+    quality: ?[]const u8,
     dither: av.dither.Options,
     overwrite: bool,
 };
@@ -274,6 +278,18 @@ fn run(init: std.process.Init) ExitStatus {
     }
     var ac3 = command.ac3;
     ac3.bit_rate = mp2.bit_rate;
+    var aac = command.aac;
+    aac.bit_rate = mp2.bit_rate;
+    aac.cutoff = ac3.cutoff;
+    if (command.quality) |text| {
+        // The program's -q: a double; from 0 up, AV_CODEC_FLAG_QSCALE and
+        // global_quality = FF_QP2LAMBDA * q.
+        const q = av.number.parseNumber(text, .double, -std.math.inf(f64), std.math.inf(f64)) catch {
+            printError(io, "zffmpeg: {s}: invalid quality\n", .{text});
+            return .usage;
+        };
+        aac.setQuality(q);
+    }
     // The input's tags are carried, as FFmpeg's default -map_metadata does
     // (T21c, the project owner's choice).
     var tags: av.metadata.Dictionary = .empty;
@@ -285,6 +301,7 @@ fn run(init: std.process.Init) ExitStatus {
         .flac = command.flac.toOptions(),
         .mp2 = mp2,
         .ac3 = ac3,
+        .aac = aac,
         .adpcm = command.adpcm,
         .alac = alacOptions(command.flac),
         .g72x = .{ .trellis = command.adpcm.trellis, .code_size = command.g726.code_size, .bit_rate = mp2.bit_rate },
@@ -325,6 +342,8 @@ fn parse(args: []const [:0]const u8) Parsed {
     var adpcm: av.adpcm.EncodeOptions = .{};
     var g726: av.g726.EncodeOptions = .{};
     var ac3: av.ac3enc.Options = .{};
+    var aac: av.aacenc.Options = .{};
+    var quality: ?[]const u8 = null;
     var dither_method: ?[]const u8 = null;
     var dither_scale: ?[]const u8 = null;
     var yes = false;
@@ -367,6 +386,7 @@ fn parse(args: []const [:0]const u8) Parsed {
             if (std.mem.eql(u8, arg, "-f")) break :slot &format;
             if (std.mem.eql(u8, arg, "-c") or std.mem.eql(u8, arg, "-c:a")) break :slot &codec;
             if (isBitRateOption(arg)) break :slot &bit_rate;
+            if (isQualityOption(arg)) break :slot &quality;
             if (std.mem.eql(u8, arg, "-dither_method")) break :slot &dither_method;
             if (std.mem.eql(u8, arg, "-dither_scale")) break :slot &dither_scale;
             if (isFlacOption(arg)) {
@@ -393,6 +413,15 @@ fn parse(args: []const [:0]const u8) Parsed {
                 i += 1;
                 if (i == args.len) return .{ .usage = .{ .reason = "missing value for", .arg = arg } };
                 av.options.set(av.g726.EncodeOptions, &g726, arg[1..], args[i]) catch
+                    return .{ .usage = .{ .reason = "invalid value for", .arg = arg } };
+                continue;
+            }
+            if (isAacOption(arg)) {
+                // The AAC encoder's options and the codec context's
+                // -profile (T32d), likewise.
+                i += 1;
+                if (i == args.len) return .{ .usage = .{ .reason = "missing value for", .arg = arg } };
+                av.options.set(av.aacenc.Options, &aac, arg[1..], args[i]) catch
                     return .{ .usage = .{ .reason = "invalid value for", .arg = arg } };
                 continue;
             }
@@ -437,6 +466,8 @@ fn parse(args: []const [:0]const u8) Parsed {
         .adpcm = adpcm,
         .g726 = g726,
         .ac3 = ac3,
+        .aac = aac,
+        .quality = quality,
         .dither = dither,
         .overwrite = yes,
     } };
@@ -492,6 +523,25 @@ fn isG726Option(arg: []const u8) bool {
     if (arg.len < 2 or arg[0] != '-') return false;
     inline for (av.g726.EncodeOptions.option_specs) |spec| {
         if (std.mem.eql(u8, arg[1..], spec.name)) return true;
+    }
+    return false;
+}
+
+/// FFmpeg's `-q:a` and its spellings.
+fn isQualityOption(arg: []const u8) bool {
+    for ([_][]const u8{ "-q:a", "-q", "-aq", "-qscale:a" }) |name| {
+        if (std.mem.eql(u8, arg, name)) return true;
+    }
+    return false;
+}
+
+/// The AAC encoder's options but those `-b:a`, `-cutoff` and `-q:a` set.
+fn isAacOption(arg: []const u8) bool {
+    if (arg.len < 2 or arg[0] != '-') return false;
+    inline for (av.aacenc.Options.option_specs) |spec| {
+        const shared = comptime std.mem.eql(u8, spec.name, "b") or std.mem.eql(u8, spec.name, "cutoff") or
+            std.mem.eql(u8, spec.name, "global_quality") or std.mem.eql(u8, spec.name, "qscale");
+        if (!shared and std.mem.eql(u8, arg[1..], spec.name)) return true;
     }
     return false;
 }
@@ -651,9 +701,13 @@ fn runFailure(
         const cause: status.Error = if (writer.err) |e| e else if (writer.seek_err) |e| e else error.WriteFailed;
         return fail(io, command.output, cause);
     }
-    // The AC-3 encoder's bit allocation failing on the samples: the
-    // output's encoder (T32c).
-    if (err == error.InvalidOption) return fail(io, command.output, err);
+    // The output's encoder or muxer refusing what the samples became: the
+    // AC-3 encoder's bit allocation (T32c), the AAC encoder's NaN check and
+    // an ADTS frame too large (T32d).
+    switch (err) {
+        error.InvalidOption, error.InvalidSamples, error.FrameTooLarge => return fail(io, command.output, err),
+        else => {},
+    }
     return fail(io, command.input, withReadCause(err, reader));
 }
 

@@ -76,8 +76,9 @@ and G.726 codecs packet for packet and sample for sample, read from AU and
 written there, which completes T31; and T32a, FFmpeg's raw AC-3 demuxer,
 parser and float decoder sample for sample, and T32b, its E-AC-3
 decoder sample for sample with the raw eac3 demuxer, and T32c, its float
-AC-3 encoder packet for packet with the raw ac3 muxer. **Next: T32d (the
-AAC-LC encoder).
+AC-3 encoder packet for packet with the raw ac3 muxer, and T32d1, its AAC
+encoder's twoloop and fast coders packet for packet into ADTS. **Next:
+T32d2 (the AAC encoder's default nmr coder).
 See [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
@@ -4050,8 +4051,69 @@ names, not as an empty framework.
       native build at 0.84x.
     Remaining work or blocker / next action: none; T32d is next.
     ```
-  - [ ] **T32d — AAC-LC encoder.** Needs T30b.
+  - [ ] **T32d — AAC-LC encoder.** Needs T30b. Checked when T32d1 and
+    T32d2 are: the encoder's three coders are staged (the project owner's
+    choice, 2026-11-07; notes.md "AAC encoding").
     Done under the same rule as T32c.
+    - [x] **T32d1 — The framework, twoloop and fast.** Needs T30b.
+
+      ```text
+      ID / parent: T32d1 / T32d
+      State: verified (G5, local Linux x86-64 runs)
+      Supported behavior and explicit exclusions: FFmpeg's aac encoder with
+        the twoloop and fast coders, and its adts muxer, packet for packet
+        and byte for byte the program's -bitexact output: the 3GPP psy
+        model and window decisions, the windowed MDCT, clip avoidance, the
+        coders' scalefactor searches, TNS, PNS, mid/side and intensity
+        stereo, the codebook trellis, the rate loop (ABR and -q:a's
+        constant quality), channel configurations and FFmpeg's PCE
+        layouts with the height extension; every option of the encoder
+        but the nmr coder's, -b:a, -cutoff, -q:a, -profile. Excluded
+        (notes.md "AAC encoding"): the default nmr coder (T32d2, refused
+        with InvalidOption), input rates the encoder does not take
+        (refused where the program converts), AAC in another container,
+        stream copy into ADTS (T53), the non-bitexact identification.
+      Contract and source provenance: port.md "ADTS contract" (Encoding);
+        aacenc.c, aacenc.h, aacenctab.h, aaccoder.c, aaccoder_twoloop.h,
+        aaccoder_trellis.h, aacenc_utils.h, aacenc_quantization*.h,
+        aacenc_is.c, aacencdsp.c, aacenc_tns.c, aacpsy.c, psymodel.c,
+        lpc.c, lpc_functions.h, audio_frame_queue.c and glibc's expf and
+        logf (derived); adtsenc.c and the program's frame grouping
+        (restated); aacenc_tab.zig and aacenc_pce.zig generated.
+      Required fixtures: aacenc.txt (44 cases from aacenc_vectors.c),
+        aacpsy.txt (26 cases from aacpsy_vectors.c), libm.txt's expf and
+        logf lines; compare.py's AAC output inputs.
+      Comparison rule: every packet of aacenc.txt and every psy decision
+        of aacpsy.txt equals the pinned encoder's; zffmpeg's files and
+        pipes equal the program's, decoded back by FFmpeg and zffmpeg to
+        the same samples.
+      Evidence: the commit that checks this card. G3: the encoder's fuzz
+        entry over arbitrary float bits, every layout and every option, a
+        2000-round mutation smoke in ReleaseSafe, an allocation and remap
+        sweep (a channel configuration and a PCE layout), the psy model's
+        refusals and its allocation sweep, the writer's checks (ADTS's
+        refusal of channel configurations above 7, found by the
+        comparison: a `catch unreachable` before); process cases (WAV to
+        ADTS on stdout, the fast coder with options, -q:a with a PCE, 7.1
+        refused and with a PCE, the nmr default, a refused layout and
+        rate, AAC into WAV, an invalid coder, a NaN sample naming the
+        output, which is removed). G5 locally on Linux x86-64 (no CI run
+        link): zig fmt, the fixture check, zig build test 638/638 (399 steps) in
+        Debug, ReleaseSafe and ReleaseFast, the cross builds, every vector
+        generator (aacpsy, aacenc and the PCE table among them), compare.py
+        12228/0/0 required (AAC output 850 cells, 47 recorded refusals; the
+        registry with FFmpeg's AAC encoder no longer recorded) and 66/66
+        optional. Speed check (10 minutes of stereo 44.1 kHz, one core):
+        WAV to AAC 1.23x the reference build with twoloop and 1.25x with
+        fast, from a file and from a pipe; the native build at 0.94x and
+        0.91x. The profile's top entries are the coders' band costs and the
+        rate loop, FFmpeg's own hot spots.
+      Remaining work or blocker / next action: none; T32d2 is next.
+      ```
+    - [ ] **T32d2 — The nmr coder.** Needs T32d1. FFmpeg's default
+      `nmr` coder (`aaccoder_nmr.h`, with `aac_rc` and `aac_nmr_speed`),
+      replacing T32d1's refusal of it and its recorded cells.
+      Done under the same rule as T32c.
 
 ## Milestone 7: containers
 

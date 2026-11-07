@@ -2537,6 +2537,187 @@ def compare_ac3_output(args, lines, failures):
     ] + rows
 
 
+TWOLOOP, FAST = ["-aac_coder", "twoloop"], ["-aac_coder", "fast"]
+AAC_OUTPUT_OPTIONS = [TWOLOOP, FAST, TWOLOOP + ["-b:a", "64k"], TWOLOOP + ["-b:a", "256k"],
+                      FAST + ["-b:a", "96k", "-aac_tns", "0"], TWOLOOP + ["-aac_ms", "0", "-aac_is", "0"],
+                      TWOLOOP + ["-aac_pns", "0", "-aac_ms", "1"], TWOLOOP + ["-q:a", "2"], FAST + ["-q:a", "1.5"],
+                      TWOLOOP + ["-cutoff", "8000"], TWOLOOP + ["-aac_pce", "1"],
+                      FAST + ["-aac_allow_71wide", "1"], TWOLOOP + ["-ar", "22050"], TWOLOOP + ["-ac", "1"],
+                      FAST + ["-ac", "2", "-ar", "8000"], TWOLOOP + ["-ar", "44000"], [], ["-aac_coder", "nmr"]]
+# ff_mpeg4audio_sample_rates, the rates the encoder declares.
+AAC_RATES = (96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350)
+# The layouts the encoder codes with channel configurations 11, 12 and 14,
+# which FFmpeg's adts muxer refuses ("channelConfiguration > 7 is not
+# supported in ADTS") unless `aac_pce` puts them in a PCE.
+AAC_ADTS_REFUSED_LAYOUTS = {"6.1(back)", "7.1", "5.1.2(back)"}
+
+
+def aac_expected_refusal(rate, layout, opts, nan):
+    """The refusal zffmpeg makes before any output where the ffmpeg program
+    converts or fails, as (program fails, status, error), or None (notes.md
+    "AAC encoding"): a layout without a channel configuration or a PCE
+    fails both when the encoder opens, one ADTS cannot carry when the
+    muxer writes its header, a forced rate the encoder does not take when
+    it opens; an input rate it does not take is refused by zffmpeg
+    (UnsupportedFormat) where the program's filters pick one it takes; the
+    default coder, nmr, is T32d2's (InvalidOption). With a NaN sample in
+    the input, or a configuration ADTS cannot carry, the program fails
+    after the refusal's point."""
+    pairs = dict(zip(opts[0::2], opts[1::2]))
+    out_layout = {"1": "mono", "2": "stereo"}.get(pairs.get("-ac"), layout)
+    if "USR" in out_layout:
+        return (True, 3, "UnsupportedFormat")
+    if "-ar" in pairs and int(pairs["-ar"]) not in AAC_RATES:
+        return (True, 3, "UnsupportedFormat")
+    if "-ar" not in pairs and rate not in AAC_RATES:
+        return (nan, 3, "UnsupportedFormat")
+    adts_refused = out_layout in AAC_ADTS_REFUSED_LAYOUTS and pairs.get("-aac_pce") != "1"
+    if pairs.get("-aac_coder", "nmr") == "nmr":
+        # zffmpeg's encoder refuses the coder before its muxer sees the
+        # configuration.
+        return (nan or adts_refused, 1, "InvalidOption")
+    if adts_refused:
+        return (True, 3, "UnsupportedFormat")
+    return None
+
+
+def aac_output_inputs(work):
+    """The AAC output comparison's inputs: the FLAC output section's WAVs,
+    decoded ADTS, E-AC-3, AC-3, MP3 and Ogg Vorbis, 7.1 and stereo WAVs, a
+    layout no configuration has, and a float WAV holding a NaN sample in
+    its fifth frame, and a stereo WAV at a rate the encoder does not
+    take."""
+    import math
+    import random
+    inputs = dict(flac_output_inputs(work))
+    for fixture in ("aac/aac_ffmpeg_5point1.aac", "aac/aac_ffmpeg_7point1_wide.aac",
+                    "eac3/eac3_ffmpeg_51side_44k.eac3", "ac3/ac3_ffmpeg_51_48k.ac3", "mp3/mp3_l3_long_stereo.mp3",
+                    "ogg/ogg_vorbis_ffmpeg_44k.ogg", "wav/extensible_7point1_s24.wav", "wav/extensible_mask_high.wav",
+                    "wav/stereo_44k1.wav"):
+        inputs[pathlib.Path(fixture).stem] = FIXTURES / fixture
+    samples = [0.25 * ((i * 37) % 101 - 50) / 50 for i in range(9000)]
+    samples[5000] = float("nan")
+    data = struct.pack(f"<{len(samples)}f", *samples)
+    fmt = struct.pack("<HHIIHH", 3, 1, 44100, 4 * 44100, 4, 32)
+    nan = work / "f32_nan_mono.wav"
+    nan.write_bytes(b"RIFF" + struct.pack("<I", 4 + 8 + len(fmt) + 8 + len(data)) + b"WAVEfmt "
+                    + struct.pack("<I", len(fmt)) + fmt + b"data" + struct.pack("<I", len(data)) + data)
+    inputs["f32_nan_mono"] = nan
+    # A rate the encoder does not take: the program resamples to 32000 Hz.
+    odd = work / "s16_stereo_37800.wav"
+    rnd = random.Random("s16_stereo_37800")
+    data = b"".join(struct.pack("<hh", int(8000 * math.sin(i * 0.05)), rnd.randint(-3000, 3000)) for i in range(6000))
+    fmt = struct.pack("<HHIIHH", 1, 2, 37800, 4 * 37800, 4, 16)
+    odd.write_bytes(b"RIFF" + struct.pack("<I", 4 + 8 + len(fmt) + 8 + len(data)) + b"WAVEfmt "
+                    + struct.pack("<I", len(fmt)) + fmt + b"data" + struct.pack("<I", len(data)) + data)
+    inputs["s16_stereo_37800"] = odd
+    return inputs
+
+
+def compare_aac_output(args, lines, failures):
+    """zffmpeg's AAC output (T32d1) into ADTS against the ffmpeg program's
+    with `-bitexact`: the same bytes as a file and on a pipe, decoded back
+    by FFmpeg and by zffmpeg to the same samples, for `aac_output_inputs`
+    with the twoloop and fast coders and their options, resampled and
+    remixed; refusals as `aac_expected_refusal` records them, each with its
+    status and error and no output. Where the encoder refuses a NaN sample,
+    both fail and zffmpeg names its output and removes it."""
+    rows = []
+    same = total = understood = 0
+    with tempfile.TemporaryDirectory() as work:
+        work = pathlib.Path(work)
+        for name, source in aac_output_inputs(work).items():
+            probe = run(args.ffprobe, "-v", "error", "-select_streams", "a:0", "-show_entries",
+                        "stream=sample_rate,channel_layout,channels", "-of", "default=nw=1", source)
+            fields = dict(line.split("=", 1) for line in text(probe.stdout).splitlines() if "=" in line)
+            rate = int(fields["sample_rate"])
+            layout = fields.get("channel_layout", "unknown")
+            if layout == "unknown":
+                # The program's guess for an unspecified layout.
+                layout = {"1": "mono", "2": "stereo", "6": "5.1"}.get(fields["channels"], layout)
+            problems = []
+            for opts in AAC_OUTPUT_OPTIONS:
+                total += 1
+                theirs, ours = work / "theirs.aac", work / "ours.aac"
+                for path in (theirs, ours):
+                    path.unlink(missing_ok=True)
+                tp = run(args.ffmpeg, "-nostdin", "-v", "error", "-y", "-i", source, "-bitexact", "-c:a", "aac", *opts, theirs)
+                zp = run(args.zffmpeg, "-y", "-i", source, *opts, ours)
+                label = " ".join(opts) or "defaults"
+                refusal = aac_expected_refusal(rate, layout, opts, name == "f32_nan_mono")
+                if refusal is not None:
+                    fails, code, error = refusal
+                    program_ok = (tp.returncode != 0) if fails else tp.returncode == 0
+                    named = (text(zp.stderr) == f"zffmpeg: {source}: {error}" if code == 1
+                             else tool_error(zp, "zffmpeg", source) == error)
+                    if not program_ok or zp.returncode != code or not named or ours.exists():
+                        problems.append(f"{label}: FFmpeg exited {tp.returncode}, zffmpeg {zp.returncode} "
+                                        f"({first_line(text(zp.stderr)) or 'no error'}); recorded: zffmpeg refuses "
+                                        f"with {error} (status {code}) and writes nothing")
+                    else:
+                        same += 1
+                        understood += not fails
+                    continue
+                if tp.returncode != 0 and b"Input contains (near) NaN/+-Inf" in tp.stderr:
+                    # Both fail on the samples; zffmpeg names its output and
+                    # removes it.
+                    if zp.returncode != 2 or text(zp.stderr) != f"zffmpeg: {ours}: InvalidSamples" or ours.exists():
+                        problems.append(f"{label}: FFmpeg refused a NaN sample, zffmpeg exited {zp.returncode} "
+                                        f"({first_line(text(zp.stderr)) or 'no error'})")
+                    else:
+                        same += 1
+                    continue
+                if tp.returncode != 0 or zp.returncode != 0:
+                    problems.append(f"{label}: FFmpeg {tp.returncode}, zffmpeg {zp.returncode} "
+                                    f"({first_line(text(zp.stderr))})")
+                    continue
+                if theirs.read_bytes() != ours.read_bytes():
+                    problems.append(f"{label}: the files differ")
+                    continue
+                if not ours.read_bytes():
+                    # No samples after resampling a tiny input: no packets,
+                    # in both.
+                    same += 1
+                    continue
+                # FFmpeg's decoder and the port's read the output back to the
+                # same samples; a short stream is not detected, so the format
+                # is named.
+                total += 1
+                tdec = run(args.ffmpeg, "-nostdin", "-v", "error", "-f", "aac", "-i", ours, "-f", "f32le", "-")
+                zdec = run(args.zffmpeg, "-f", "aac", "-i", ours, "-f", "f32le", "-")
+                if tdec.returncode != 0 or tdec.stderr or zdec.returncode != 0 or not tdec.stdout \
+                        or tdec.stdout != zdec.stdout:
+                    problems.append(f"{label}: decoded, FFmpeg {tdec.returncode}, zffmpeg {zdec.returncode}, "
+                                    f"{len(tdec.stdout)} and {len(zdec.stdout)} bytes")
+                    continue
+                same += 1
+                total += 1
+                tpipe = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", source, "-bitexact", "-c:a", "aac", *opts,
+                            "-f", "adts", "-")
+                zpipe = run(args.zffmpeg, "-i", source, *opts, "-f", "adts", "-")
+                if tpipe.returncode != 0 or zpipe.returncode != 0 or not zpipe.stdout or tpipe.stdout != zpipe.stdout:
+                    problems.append(f"{label}: piped, FFmpeg {tpipe.returncode}, zffmpeg {zpipe.returncode}, "
+                                    f"{len(tpipe.stdout)} and {len(zpipe.stdout)} bytes")
+                    continue
+                same += 2
+            result = "pass" if not problems else "**FAIL**: " + "; ".join(problems)
+            rows.append(f"| `{name}` | {rate} Hz, {layout} | {result} |")
+            failures.extend(f"AAC output {name}: {p}" for p in problems)
+    record("AAC output (T32d1)", same, total, understood=understood)
+    lines += [
+        "",
+        "## AAC output (T32d1)",
+        "",
+        f"zffmpeg's AAC (the twoloop and fast coders) in ADTS equal to the ffmpeg program's with `-bitexact`, as a "
+        f"file and on a pipe, and decoded back by FFmpeg and zffmpeg to the same samples, or refused or failed as "
+        f"recorded: {same}/{total}, {understood} of them refusals where the program converts the rate or encodes "
+        f"with the nmr coder (T32d2).",
+        "",
+        "| Input | Format | Result |",
+        "| --- | --- | --- |",
+    ] + rows
+
+
 def compare_flac_output(args, lines, failures):
     """zffmpeg's FLAC output (T26c) against the ffmpeg program's with
     `-bitexact`: the same bytes, as a file (STREAMINFO rewritten at the
@@ -4541,8 +4722,6 @@ KNOWN_REGISTRY_DIFFERENCES = {
                           "the port has no Vorbis encoder"),
     ("codec", "opus"): (("D.AIL.", "DEAIL."), "FFmpeg's native Opus encoder makes the Opus fixtures (T28a); "
                         "the port has no Opus encoder"),
-    ("codec", "aac"): (("D.A.L.", "DEA.L."), "FFmpeg's native AAC encoder makes the AAC fixtures (T30b); "
-                       "the port has no AAC encoder (T32d)"),
     ("codec", "eac3"): (("D.AIL.", "DEAIL."), "FFmpeg's E-AC-3 encoder makes the E-AC-3 fixtures (T32b); the port "
                         "has no E-AC-3 encoder"),
     ("format", "eac3"): (("D.", "DE"), "FFmpeg's raw E-AC-3 muxer writes the E-AC-3 fixtures (T32b); the port "
@@ -4805,6 +4984,7 @@ def main():
     compare_g72x_output(args, lines, failures)
     compare_mp2_output(args, lines, failures)
     compare_ac3_output(args, lines, failures)
+    compare_aac_output(args, lines, failures)
     compare_opus_vectors(args, lines, failures)
     compare_hashes(args, lines, failures)
     compare_fate(args, lines, failures)

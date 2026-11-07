@@ -79,7 +79,11 @@ pub fn check(comptime T: type) void {
             }
             const F = @FieldType(T, spec.field);
             switch (spec.kind) {
-                .bool => if (F != bool) @compileError("a bool option needs a bool field: " ++ spec.field),
+                .bool => switch (@typeInfo(F)) {
+                    // An integer field keeps AV_OPT_TYPE_BOOL's -1 ("auto").
+                    .bool, .int => {},
+                    else => @compileError("a bool option needs a bool or integer field: " ++ spec.field),
+                },
                 .double => if (F != f64) @compileError("a double option needs an f64 field: " ++ spec.field),
                 .float => if (F != f32) @compileError("a float option needs an f32 field: " ++ spec.field),
                 .int => switch (@typeInfo(F)) {
@@ -122,7 +126,11 @@ fn setOne(comptime T: type, comptime spec: Spec, target: *T, text: []const u8) S
         const n = boolValue(text) orelse return error.InvalidValue;
         const n_f: f64 = @floatFromInt(n);
         if (n_f < spec.min or n_f > spec.max) return error.InvalidValue;
-        @field(target, spec.field) = n != 0;
+        @field(target, spec.field) = switch (@typeInfo(F)) {
+            .bool => n != 0,
+            // The range keeps it within the field's type.
+            else => @intCast(n),
+        };
         return;
     }
     if (spec.kind == .duration) {

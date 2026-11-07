@@ -3,7 +3,8 @@
 //! zffmpeg process cases that need files prepared on disk (TODO.md T13b): the
 //! overwrite policy, same-file refusal, what preflight leaves alone, removal of
 //! a partial output, read and write failures through redirected standard
-//! streams, raw PCM through a real pipe and by file name (T22c), and a long
+//! streams, raw PCM through a real pipe and by file name (T22c), an encoder
+//! refusing the samples (T32d), and a long
 //! stream. Cases that only check stdout, stderr and the
 //! status are `convert_cases` in build.zig.
 //!
@@ -472,6 +473,22 @@ pub fn main(init: std.process.Init) !u8 {
         const outcome = try h.run(&.{ "-ar", "8000", "-i", "tagged.mp3", "-f", "wav", "-" }, .ignore, null);
         h.expect(case, outcome, 1, "zffmpeg: tagged.mp3: -sample_rate and -ch_layout apply only to raw PCM input\n");
         h.expectLacking(case, outcome, "leaked");
+    }
+
+    // The AAC encoder refusing a NaN sample in its fifth frame, after it
+    // wrote packets (T32d): the output names the failure and the partial
+    // file is removed.
+    {
+        const case = "the AAC encoder refusing a NaN sample";
+        var samples: [2 * 5000 + 1][4]u8 = undefined;
+        for (&samples, 0..) |*sample, i| {
+            const value: f32 = if (i == 5000) std.math.nan(f32) else 0.1;
+            std.mem.writeInt(u32, sample, @bitCast(value), .little);
+        }
+        try h.write("nan.f32", std.mem.sliceAsBytes(&samples));
+        const outcome = try h.run(&.{ "-f", "f32le", "-ar", "44100", "-ch_layout", "mono", "-i", "nan.f32", "-aac_coder", "twoloop", "nan.aac" }, .ignore, null);
+        h.expect(case, outcome, 2, "zffmpeg: nan.aac: InvalidSamples\n");
+        h.expectAbsent(case, "nan.aac");
     }
 
     // A long stream converts through files with exact frame counts.

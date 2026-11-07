@@ -429,6 +429,29 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/aacpsy_vect
 ./aacpsy-vectors | diff -u zig/testing/vectors/aacpsy.txt -
 ```
 
+`aacenc_vectors.c` (T32d1) prints what the pinned AAC encoder makes of 44
+cases through the public API: the twoloop and fast coders over every
+channel configuration and PCE layouts (with and without the height
+extension, `aac_pce` forced, 7.1(wide) both ways), the stereo tools and
+TNS off and forced, cutoffs, MPEG-2 LC, constant quality, rates from 8 to
+96 kHz, bursts, silence, full-scale, hot and special-value samples, short
+and empty streams, and the refusals; each case's bit rate after opening,
+its frame size, delay and AudioSpecificConfig, and every packet's
+timestamp, duration, size and MD5. The Zig test renders the same lines
+from the port. `aacenc_tab.c` and `aacenc_pce.c` print the encoder's
+tables (`aacenc_tab.zig`, run through `zig fmt`; `aacenc_pce.zig` from
+`aac_pce_configs`, copied verbatim); the PCE one needs only the installed
+headers, so CI checks it:
+
+```bash
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/aacenc_vectors.c .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o aacenc-vectors
+./aacenc-vectors | diff -u zig/testing/vectors/aacenc.txt -
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/aacenc_pce.c -o aacenc-pce
+./aacenc-pce | diff -u zig/codec/aacenc_pce.zig -
+clang -O1 -I.references/ffmpeg-install/include -I.references/ffmpeg -I.references/ffmpeg-build zig/testing/reference/aacenc_tab.c .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o aacenc-tab
+./aacenc-tab | zig fmt --stdin | diff -u zig/codec/aacenc_tab.zig -
+```
+
 `adpcm_wav_vectors.sh` (T31a) prints, for every ADPCM WAV fixture, the
 stream the pinned ffprobe reports (codec, sample format, channels, rate,
 `duration_ts`) and the count and SHA-256 of the samples the pinned ffmpeg
@@ -972,6 +995,21 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   `UnsupportedFormat` (status 3) and no output (`ac3_expected_refusal`); a
   bit allocation that fails on the samples (5.1 at 32 kbit/s) fails both,
   zffmpeg with `InvalidOption` naming its output, which it removes.
+- **AAC output (T32d1).** zffmpeg's AAC (the `adts` muxer, with the
+  twoloop and fast coders and the encoder's options, `-q:a` included)
+  against the ffmpeg program's with `-bitexact`, for the FLAC output
+  section's inputs, decoded ADTS (5.1 and 7.1(wide)), E-AC-3 (5.1(side),
+  a PCE), AC-3, MP3 and Ogg Vorbis, 7.1 and stereo WAVs, a layout without
+  a configuration, a stereo WAV at 37800 Hz and a float WAV with a NaN
+  sample, resampled (`-ar`) and remixed (`-ac`): the same bytes as a file
+  and on a pipe, each decoded back by FFmpeg and zffmpeg to the same
+  samples. `aac_expected_refusal` records the refusals, each with its
+  status and error and no output: an input rate the encoder does not
+  take, which the program converts, and the default nmr coder (T32d2),
+  which it runs, are refused by zffmpeg; a forced rate it does not take,
+  a layout without a configuration and one ADTS cannot carry fail both.
+  A NaN sample fails both, zffmpeg with `InvalidSamples` naming its
+  output, which it removes.
 - **MP2 output (T29d).** zffmpeg's MP2 (the `mp2` muxer, with `mp2` or
   `-c:a mp2fixed`) against the ffmpeg program's with `-bitexact`, for the
   FLAC output section's inputs and a decoded MP3, MP2 and Ogg Vorbis

@@ -270,7 +270,7 @@ fn applyWelchWindow(data: []const i32, w_data: []f64) void {
 /// the zero after it) and the zeros before the block, and the lanes are
 /// added at the end. FFmpeg's C loop, one lane from 1.0, can differ in the
 /// last bits, which can change a quantized coefficient.
-fn computeAutocorr(data: []const f64, lag: usize, autoc: *[max_order + 1]f64) void {
+pub fn computeAutocorr(data: []const f64, lag: usize, autoc: *[max_order + 1]f64) void {
     const len = data.len;
     // The positions the pairs cover: `len` rounded up to even.
     const span = len + (len & 1);

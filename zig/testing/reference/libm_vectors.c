@@ -392,6 +392,20 @@ int main(void)
             print(head, md5);
         }
 
+    /* T32d: expf and logf, whose product is the AAC encoder's
+     * ff_fast_powf (its form factor). */
+    static float (*volatile const expf_logf[2])(float) = { expf, logf };
+    static const char *const expf_logf_names[2] = { "expf", "logf" };
+    for (int f = 0; f < 2; f++)
+        for (int d = 0; d < 8; d++) {
+            xs_state = 0x9E3779B97F4A7C15ull + 1000003ull * (6000 + 10 * f + d);
+            av_md5_init(md5);
+            for (int i = 0; i < 20000; i++)
+                put(md5, expf_logf[f](from_bits(sample_float(d))));
+            snprintf(head, sizeof(head), "X %s %d 20000", expf_logf_names[f], d);
+            print(head, md5);
+        }
+
     av_freep(&md5);
     return 0;
 }

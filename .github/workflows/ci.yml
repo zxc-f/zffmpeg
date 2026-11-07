@@ -433,6 +433,17 @@ jobs:
             .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o aacpsy-vectors
           ./aacpsy-vectors | diff -u zig/testing/vectors/aacpsy.txt -
 
+      # The committed T32d oracle must be what this build's AAC encoder
+      # makes of its cases, and the PCE table what its printer prints.
+      - name: Check the AAC encoder vectors and PCE table (T32d)
+        run: |
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/aacenc_vectors.c \
+            .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a \
+            .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o aacenc-vectors
+          ./aacenc-vectors | diff -u zig/testing/vectors/aacenc.txt -
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/aacenc_pce.c -o aacenc-pce
+          ./aacenc-pce | diff -u zig/codec/aacenc_pce.zig -
+
       # The committed T28a oracle must be what this build's Opus decoder
       # makes of every Ogg fixture's first Opus stream.
       - name: Check the Opus decoder vectors (T28a)

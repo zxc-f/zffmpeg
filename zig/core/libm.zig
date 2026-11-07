@@ -55,6 +55,9 @@ pub const powf = @import("libm/powf.zig").powf;
 pub const log2f = @import("libm/log2f.zig").log2f;
 pub const atanf = @import("libm/atanf.zig").atanf;
 pub const atan2f = @import("libm/atanf.zig").atan2f;
+/// glibc 2.44's expf and logf, FMA variants (T32d).
+pub const expf = @import("libm/expf.zig").expf;
+pub const logf = @import("libm/expf.zig").logf;
 /// Exact apart from one rounding (libm/ldexp.zig: std.math.ldexp
 /// mis-scales a zero); checked against glibc's in its tests.
 pub const ldexp = @import("libm/ldexp.zig").ldexp;
@@ -260,6 +263,7 @@ test {
     _ = @import("libm/powf.zig");
     _ = @import("libm/log2f.zig");
     _ = @import("libm/atanf.zig");
+    _ = @import("libm/expf.zig");
 }
 
 test "exp2f, sinf and cosf return glibc's results (vectors/libm.txt)" {
