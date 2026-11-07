@@ -2,8 +2,9 @@
 
 This is the canonical fixture contract for the
 [CAF contract](../../../../port.md#caf-contract) (TODO.md T22d): Apple Core
-Audio Format files holding linear PCM, A-law or µ-law, read only (FFmpeg's
-CAF muxer is not part of T22d). Every rule has at least one named fixture
+Audio Format files holding linear PCM, A-law or µ-law, read only here (FFmpeg's
+CAF muxer came with T31b: compare.py's CAF output section compares its
+output, and ALAC has [its own fixtures](../alac/README.md)). Every rule has at least one named fixture
 here with its expected result. `av.caf`, the content detection and the
 reference comparison test against these files. The WAV contract and its
 shared conventions are in [../README.md](../README.md).

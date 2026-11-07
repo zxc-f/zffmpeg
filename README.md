@@ -86,6 +86,8 @@ and Microsoft ADPCM codecs read and write WAV: `zffprobe` reports them as
 ffprobe does, and `zffmpeg` decodes them as the ffmpeg program does and
 encodes them (`-c:a adpcm_ima_wav`, `-c:a adpcm_ms`, with `-block_size`
 and `-trellis`) byte for byte as FFmpeg's encoders and muxer write them.
+Since T31b FFmpeg's ALAC decoder and encoder read and write CAF, with its
+CAF muxer, which also writes PCM, byte for byte the ffmpeg program's output.
 [TODO.md](TODO.md) holds the completion
 evidence and the roadmap. Development is verified on Linux only. The compiler
 is **Zig 0.17.0**, enforced by the build.

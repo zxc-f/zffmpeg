@@ -17,8 +17,9 @@
 //! size of -1 (unknown length) runs to the end of the input, behind the same
 //! `unknown_length` option as WAV and AU. Its accepted subset, error names
 //! and error precedence are the contract in zig/testing/fixtures/caf/README.md;
-//! every fixture there is tested below. Nothing is allocated. There is no
-//! writer: FFmpeg's CAF muxer is not part of T22d.
+//! every fixture there is tested below. PCM allocates nothing; ALAC (T31b,
+//! `enableAlac`) reads its magic cookie and packet table, the table into
+//! the caller's allocator. The writer is `format/cafmux.zig` (T31b).
 
 const std = @import("std");
 const audio = @import("../core/audio.zig");

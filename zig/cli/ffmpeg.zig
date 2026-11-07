@@ -61,17 +61,18 @@ const printError = status.printError;
 const usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout <layout>] -i <input | -> [-c copy|<encoder>] [-b:a <bit rate>] [-ar <rate>] [-ac <channels> | -ch_layout <layout>] [-dither_method <method>] [-dither_scale <scale>] [FLAC or ADPCM encoder options] [-f <format>] <output | ->\n";
 const help = usage ++
     \\
-    \\Converts one WAV, Wave64, AU, AIFF, CAF (input only), FLAC, Ogg (Vorbis,
-    \\Opus and FLAC input, FLAC output), MPEG audio (MP3, MP2 and MP1 input,
-    \\MP2 output) or raw PCM stream (standard input or output with -). The
+    \\Converts one WAV, Wave64, AU, AIFF, CAF (PCM, and ALAC), FLAC, Ogg
+    \\(Vorbis, Opus and FLAC input, FLAC output), MPEG audio (MP3, MP2 and MP1
+    \\input, MP2 output), ADTS AAC (input) or raw PCM stream (standard input
+    \\or output with -). The
     \\input container is
     \\detected from content, or for raw PCM from the name (.sb, .ub, .al, .ul,
     \\.sw), or forced with -f before -i.
     \\Before -i, -sample_rate (or -ar) and -ch_layout (or -ac) describe raw
     \\PCM input, 44100 Hz mono by default. The output container is the -f after
     \\-i, or the output name's extension (.wav, .w64, .au, .aif, .aiff, .afc,
-    \\.aifc, .flac, .ogg, .oga, .opus, .sb, .ub, .al, .ul, .sw). Formats: wav,
-    \\w64, au, aiff, flac, ogg, oga, opus and the raw formats u8, s8, s16le,
+    \\.aifc, .caf, .flac, .ogg, .oga, .opus, .sb, .ub, .al, .ul, .sw). Formats:
+    \\wav, w64, au, aiff, caf, flac, ogg, oga, opus and the raw formats u8, s8, s16le,
     \\s16be, s24le, s24be, s32le, s32be, f32le, f32be, f64le, f64be, alaw and
     \\mulaw.
     \\After -i, -ac <channels> or -ch_layout <layout> remixes into that layout
@@ -101,6 +102,10 @@ const help = usage ++
     \\WAV as FFmpeg's encoders do, from mono or stereo, with -block_size (32
     \\to 8192, a power of two, default 1024) and -trellis (0 to 16); WAV
     \\input in either is decoded as FFmpeg decodes it.
+    \\-c alac encodes ALAC into CAF (.caf, whose default is pcm_s16be) as
+    \\FFmpeg's encoder and muxer do, with -compression_level (0 to 2) and
+    \\-min_prediction_order and -max_prediction_order (1 to 30); a CAF output
+    \\of ALAC must be a file, which the muxer seeks back in.
     \\-y replaces an existing output; without it (or with -n) an existing output
     \\is an error.
     \\Exit codes: 0 success, 1 usage, 2 invalid or truncated media,
@@ -257,6 +262,7 @@ fn run(init: std.process.Init) ExitStatus {
         .flac = command.flac.toOptions(),
         .mp2 = mp2,
         .adpcm = command.adpcm,
+        .alac = alacOptions(command.flac),
         .dither = command.dither,
         .input = .{ .format = input_container, .raw = raw_params },
         // FFmpeg's input -ch_layout names the stream's layout, which its
@@ -415,6 +421,17 @@ fn parseBitRate(text: []const u8) ?i64 {
     const d = av.number.parseNumber(text, .int64, 0, max) catch return null;
     // 2^63 itself is the double nearest INT64_MAX.
     return if (d >= max) std.math.maxInt(i64) else @intFromFloat(d);
+}
+
+/// The ALAC encoder's options from the flags it shares with FLAC's
+/// (T31b): the codec context's `compression_level` and the private
+/// prediction orders, ALAC's defaults (4 and 6) where none was given.
+fn alacOptions(flac: av.flacenc.AvOptions) av.alac.EncodeOptions {
+    return .{
+        .compression_level = flac.compression_level,
+        .min_prediction_order = if (flac.min_prediction_order == -1) 4 else flac.min_prediction_order,
+        .max_prediction_order = if (flac.max_prediction_order == -1) 6 else flac.max_prediction_order,
+    };
 }
 
 fn isAdpcmOption(arg: []const u8) bool {

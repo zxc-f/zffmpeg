@@ -804,7 +804,10 @@ pub const Encoder = struct {
         i = order + 1;
         while (i < n) : (i += 1) {
             const samples = samples_all[base..];
-            var sum: i32 = @as(i32, 1) << @intCast(state.quant -% 1);
+            // `1 << (lpc_quant - 1)`: a shift of 0 (coefficients past 255,
+            // at high orders) shifts by -1, which x86 takes mod 32: 1 << 31
+            // (notes.md "Undefined C behavior").
+            var sum: i32 = @bitCast(@as(u32, 1) << @as(u5, @truncate(state.quant -% 1)));
             for (0..order) |j| sum +%= (samples[order - j] -% samples[0]) *% state.coeff[j];
             sum >>= @intCast(state.quant);
             sum +%= samples[0];

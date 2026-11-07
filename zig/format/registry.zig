@@ -28,6 +28,7 @@ const au = @import("au.zig");
 const aiff = @import("aiff.zig");
 const raw = @import("raw.zig");
 const caf = @import("caf.zig");
+const cafmux = @import("cafmux.zig");
 const flac = @import("flac.zig");
 const ogg = @import("ogg.zig");
 const mp3 = @import("mp3.zig");
@@ -218,8 +219,8 @@ pub const formats = [_]Format{
         .name = "caf",
         .long_name = "Apple CAF (Core Audio Format)",
         .demuxer = .{ .probe = caf.probeScore },
-        // FFmpeg's CAF muxer is not ported (T22d is demux only).
-        .muxer = null,
+        // FFmpeg's CAF muxer since T31b.
+        .muxer = .{ .extensions = &.{"caf"}, .mime_type = "audio/x-caf", .audio_codec = .{ .pcm = .s16be }, .carries = cafCodecs },
     },
     .{
         .container = .flac,
@@ -346,6 +347,17 @@ fn wavCodecs(codec: codecs.Codec) bool {
         .pcm => |p| wav.carries(p),
         .adpcm_ima_wav, .adpcm_ms => true,
         .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac, .alac => false,
+    };
+}
+
+/// The CAF muxer's codecs (ff_codec_caf_tags) the port writes: its PCM
+/// encodings and ALAC (T31b); not IMA WAV or Microsoft ADPCM (notes.md
+/// "CAF output").
+fn cafCodecs(codec: codecs.Codec) bool {
+    return switch (codec) {
+        .pcm => |p| cafmux.carries(p),
+        .alac => true,
+        .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac, .adpcm_ima_wav, .adpcm_ms => false,
     };
 }
 

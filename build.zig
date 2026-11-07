@@ -785,7 +785,6 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "FLAC copy has no output", .set = .flac, .args = &.{"-i"}, .input = "flac_constant_mono_8k", .tail = &.{ "-c", "copy", "-f", "wav", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedOperation\n" },
     .{ .name = "FLAC that decodes short of STREAMINFO", .set = .flac, .args = &.{"-i"}, .input = "flac_junk_between_frames", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stdout = "", .stderr_contains = ": FrameCountMismatch\n" },
     .{ .name = "FLAC that decodes short of STREAMINFO to raw PCM", .set = .flac, .args = &.{"-i"}, .input = "flac_junk_between_frames", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stdout_raw = .{ .args = &.{ "-f", "s16le", "-ch_layout", "mono", "-sample_rate", "44100" }, .nb_samples = 384 }, .stderr = "" },
-    .{ .name = "CAF output is unsupported", .args = &.{"-i"}, .input = "mono_8k", .tail = &.{ "-f", "caf", "-" }, .exit_code = 3, .stderr = "zffmpeg: caf: unsupported output format\n" },
     // T26c: FLAC output, the ffmpeg program's block size (the input's first
     // frame) and FFmpeg's header; standard output cannot seek back, so its
     // STREAMINFO stays as first written.
@@ -852,6 +851,11 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "ALAC from a pipe to raw PCM", .set = .alac, .args = &.{ "-i", "-" }, .stdin_input = "alac_pakt_before_data", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stdout_raw = .{ .args = &.{ "-f", "s16le", "-ch_layout", "stereo", "-sample_rate", "44100" }, .nb_samples = 9092 }, .stderr = "" },
     .{ .name = "ALAC with its table after the samples to WAV", .set = .alac, .args = &.{"-i"}, .input = "alac_ffmpeg_stereo24_96k", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt ", .stderr = "" },
     .{ .name = "ALAC every packet of which fails", .set = .alac, .args = &.{"-i"}, .input = "alac_all_damaged", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stdout = "", .stderr_contains = ": DecodeErrorRate\n" },
+    // T31b: FFmpeg's CAF muxer; compare.py checks the bytes against
+    // FFmpeg's. PCM to a pipe leaves the data's size -1; ALAC needs a file
+    // for its packet table, refused before any output.
+    .{ .name = "WAV to PCM CAF on standard output", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-f", "caf", "-" }, .exit_code = 0, .stdout_contains = "caff\x00\x01\x00\x00desc", .stderr = "" },
+    .{ .name = "WAV to ALAC on standard output is refused", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-c:a", "alac", "-f", "caf", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedStreamingSize\n" },
     .{ .name = "ALAC copy is unsupported", .set = .alac, .args = &.{"-i"}, .input = "alac_ffmpeg_mono_8k", .tail = &.{ "-c", "copy", "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
     .{ .name = "ADPCM into Wave64 is unsupported", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-c:a", "adpcm_ms", "-f", "w64", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
     // A decoder that refuses the headers fails cleanly, before any output,

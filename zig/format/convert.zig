@@ -69,6 +69,8 @@ const oggdecode = @import("oggdecode.zig");
 const decoded_input = @import("decoded.zig");
 const wavadpcm = @import("wavadpcm.zig");
 const cafalac = @import("cafalac.zig");
+const cafmux = @import("cafmux.zig");
+const alac = @import("../codec/alac.zig");
 const adpcm = @import("../codec/adpcm.zig");
 const mp3 = @import("mp3.zig");
 const mp3decode = @import("mp3decode.zig");
@@ -122,6 +124,11 @@ pub const Request = struct {
     /// `adpcm_ms` into WAV: FFmpeg's `-block_size` and `-trellis`. Encoding
     /// ADPCM needs `gpa`.
     adpcm: wavadpcm.EncodeOptions = .{},
+    /// The ALAC encoder's options (T31b), for ALAC into CAF:
+    /// `-compression_level`, `-min_prediction_order` and
+    /// `-max_prediction_order`. Encoding ALAC needs `gpa` and an output
+    /// that can seek back (`output_seekable`).
+    alac: alac.EncodeOptions = .{},
     /// libswresample's dither for `transcode` (FFmpeg's `-dither_method` and
     /// `-dither_scale`, T23a), applied where FFmpeg's would: when the sample
     /// storage changes to a narrower integer one (FFmpeg's filter graph
@@ -279,6 +286,8 @@ pub const Conversion = struct {
     mp2_options: mp2enc.Options = .{},
     /// The ADPCM encoders' options, for an ADPCM output (T31a).
     adpcm_options: wavadpcm.EncodeOptions = .{},
+    /// The ALAC encoder's options, for an ALAC output (T31b).
+    alac_options: alac.EncodeOptions = .{},
     /// An Ogg output's stream tags (T27b): the `encoder` tag the ffmpeg
     /// program sets under `-bitexact`; owned (`gpa`).
     stream_tags: metadata.Dictionary = .empty,
@@ -483,8 +492,9 @@ pub const Conversion = struct {
             // No encoder: refused by the operation check below.
             // The MP2 encoders take s16 (T29d), and the ADPCM ones (T31a).
             .mp2, .adpcm_ima_wav, .adpcm_ms => .s16le,
-            // No muxer carries ALAC yet (T31b).
-            .vorbis, .opus, .mp1, .mp3, .aac, .alac => return error.UnsupportedOperation,
+            // ALAC's encoder takes s16p or s32p, picked as FLAC's (T31b).
+            .alac => flacStorage(summary.format.sample_format),
+            .vorbis, .opus, .mp1, .mp3, .aac => return error.UnsupportedOperation,
         };
         // FFmpeg's set_channel_layout: an unspecified request takes the
         // default for its count.
@@ -503,6 +513,7 @@ pub const Conversion = struct {
             // The FLAC and ADPCM encoders allocate.
             .transcode => request.output.carriesCodec(summary.output_stream) and (!resampling or request.gpa != null) and
                 (adpcmOutput(summary.output_stream) == null or request.gpa != null) and
+                (summary.output_stream != .alac or request.gpa != null) and
                 (summary.output_stream != .flac or request.gpa != null),
         };
         if (!supported) return error.UnsupportedOperation;
@@ -541,7 +552,8 @@ pub const Conversion = struct {
             },
             // FFmpeg's MP2 encoder before its raw muxer (T29d).
             .mp2 => try mp2mux.Writer.check(summary.output_codec, summary.outputFormat(), request.mp2),
-            .caf, .mp3, .aac => unreachable, // no muxer: refused above as UnsupportedOperation
+            .caf => try cafmux.Writer.check(cafCoding(summary.output_stream, summary.output_codec, request.alac), summary.outputFormat(), request.output_seekable, tags),
+            .mp3, .aac => unreachable, // no muxer: refused above as UnsupportedOperation
             .adts => unreachable, // no AAC encoder: refused above as UnsupportedOperation
         }
         // For a decoded input, the largest frame its decoder gives: the
@@ -615,6 +627,7 @@ pub const Conversion = struct {
             .flac_options = request.flac,
             .mp2_options = request.mp2,
             .adpcm_options = request.adpcm,
+            .alac_options = request.alac,
             .stream_tags = stream_tags,
             .deferred_header = deferred_header,
         };
@@ -768,7 +781,13 @@ pub const Conversion = struct {
                 var writer = mp2mux.Writer.begin(out, s.output_codec, s.outputFormat(), c.mp2_options) catch |err| return outputFailure(err);
                 try c.transfer(mp2mux.Writer, &writer);
             },
-            .caf, .mp3, .aac, .adts => unreachable, // no muxer or encoder: `init` refused it
+            // FFmpeg's CAF muxer (T31b): the trailer seeks back when it can.
+            .caf => {
+                var writer = cafmux.Writer.begin(c.gpa, out, seeker, cafCoding(s.output_stream, s.output_codec, c.alac_options), s.outputFormat(), c.tags) catch |err| return outputFailure(err);
+                defer writer.deinit();
+                try c.transfer(cafmux.Writer, &writer);
+            },
+            .mp3, .aac, .adts => unreachable, // no muxer or encoder: `init` refused it
         }
         // Every frame was read: an unknown count is now known, and a FLAC
         // stream's decoded count replaces STREAMINFO's (equal unless raw
@@ -1295,7 +1314,7 @@ fn rawOptions(limits: Limits) raw.WriteOptions {
 
 /// Every error a writer's `begin`, `writeData` or `finish` returns. A new
 /// one fails to compile in `outputFailure`'s switch until it is classified.
-const WriterError = wav.RewriteError || au.RewriteError || aiff.RewriteError || raw.WriteError || flacmux.WriteError || mp2mux.WriteError || wavadpcm.RewriteError;
+const WriterError = wav.RewriteError || au.RewriteError || aiff.RewriteError || raw.WriteError || flacmux.WriteError || mp2mux.WriteError || wavadpcm.RewriteError || cafmux.WriteError;
 
 /// A writer's failure once output started: the output's, or FLAC's that
 /// only its first frame reveals (T26c: the encoder refusing the block size
@@ -1325,7 +1344,14 @@ fn outputFailure(err: WriterError) RunError {
         error.IncompleteFrame, error.TooFewFrames => unreachable,
         // FFmpeg's ADPCM encoder crashes there (notes.md "ADPCM").
         error.TrellisOverflow => error.UnsupportedFormat,
+        // ALAC into CAF run without the seeker `init` was promised.
+        error.UnsupportedStreamingSize => error.UnsupportedStreamingSize,
     };
+}
+
+/// What a CAF output's data holds (T31b): ALAC, or the PCM codec.
+fn cafCoding(stream: codecs.Codec, codec: pcm.Codec, options: alac.EncodeOptions) cafmux.Coding {
+    return if (stream == .alac) .{ .alac = options } else .{ .pcm = codec };
 }
 
 /// The ADPCM encoder a stream codec names (T31a), if any.

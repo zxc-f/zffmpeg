@@ -70,7 +70,9 @@ by zffprobe; and T30c, FFmpeg's SBR decoder bit for bit, with HE-AAC
 decoded, and T30d, its parametric stereo decoder bit for bit, with
 HE-AACv2 decoded, which completes T30; and T31a, FFmpeg's IMA WAV and
 Microsoft ADPCM codecs packet for packet and sample for sample, decoded
-and encoded in WAV. **Next: T31b (ALAC).
+and encoded in WAV; and T31b, FFmpeg's ALAC codec read from CAF and written
+there with its CAF muxer, which also writes PCM. **Next: T31c (G.722 and
+G.726 in AU).
 See [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
@@ -3803,8 +3805,54 @@ names, not as an empty framework.
       native build equals the reference (no assembly for these codecs).
     Remaining work or blocker / next action: none; T31b (ALAC) is next.
     ```
-  - [ ] **T31b — ALAC.** Needs T33a or T22d. Decoding and encoding.
+  - [x] **T31b — ALAC.** Needs T33a or T22d. Decoding and encoding.
     Done when both are bit-exact against the reference.
+
+    ```text
+    ID / parent: T31b / T31
+    State: verified (G5, local Linux x86-64 runs)
+    Supported behavior and explicit exclusions: FFmpeg's ALAC decoder (16
+      to 32 bits, 1 to 8 channels, extra_bits_bug, its error tolerance)
+      and encoder (levels 0 to 2, prediction orders 1 to 30, 16 and 24
+      bits); ALAC read from CAF (old and new cookies, the packet table
+      before or after the samples, priming and remainder as libavcodec
+      drops them, a counting pass for a header written first); FFmpeg's
+      CAF muxer for PCM and ALAC. Excluded (notes.md "ALAC in CAF", "CAF
+      output"): constant-size and variable-frame ALAC packets, unknown
+      length by default, packets past the data or the table, ADPCM in
+      CAF, compressed stream copy into CAF.
+    Contract and source provenance: port.md's CAF contract (ALAC and
+      Writing rows); alac.c, alacenc.c, alacdsp.c, alac_data.c (derived);
+      cafdec.c, cafenc.c, decode.c restated.
+    Required fixtures: zig/testing/fixtures/alac/ (33: 10 from the
+      reference build's encoder and CAF muxer through alac_fixtures.sh,
+      23 from generate.py with verbatim frames).
+    Comparison rule: alac.txt's 27 encoder and 242 decoder cases equal
+      the pinned codec's; each fixture's ffprobe stream and decoded
+      samples equal FFmpeg's (alac_caf.txt); FFmpeg's ALAC files written
+      again byte for byte; zffprobe ffprobe's; zffmpeg's decodes and CAF
+      outputs the program's byte for byte.
+    Evidence: b8763c2 (codec), 5051bed (CAF reading), and the commit
+      that checks this card (CAF muxer, ALAC encoding). G3: fuzz entries
+      for the codec (each decoded frame encoded back losslessly) and for
+      ALAC in CAF (seeking or not, unknown length, counted), 2000-round
+      mutation smokes in ReleaseSafe, allocation and remap sweeps through
+      decoding, CAF reading and the ALAC writer; process cases (zffprobe
+      on files and pipes, refusals; zffmpeg decoding from a file and a
+      pipe, the error rate, copy refused, PCM CAF to a pipe, ALAC to a
+      pipe refused). G5 locally on Linux x86-64 (no CI run link): zig
+      fmt, the fixture check, zig build test 585/585 (327 steps) in
+      Debug, ReleaseSafe and ReleaseFast, the cross builds, every vector
+      generator, compare.py 9726/0/0 required (ALAC in CAF 429 cells, 51
+      recorded; CAF output 358 cells, 3 recorded) and 61/61 optional.
+      Speed check (10 minutes of stereo 44.1 kHz, one core, against the
+      reference build): ALAC to WAV 0.77x at 16 and 24 bits, WAV to ALAC
+      1.10x (16 bits) and 1.17x (24), WAV to PCM CAF 0.41x; file and
+      pipe input equal; the native build equals the reference (no ALAC
+      assembly). The encoder's extra time is the LPC analysis it shares
+      with the FLAC encoder (T58).
+    Remaining work or blocker / next action: none; T31c is next.
+    ```
   - [ ] **T31c — G.722 and G.726 in AU.** Needs T22a. The AU codes 23, 25 and
     26 (G.726 little-endian at 4, 3 and 5 bits per sample) and 24 (G.722),
     decoding and encoding, each with its own vectors.

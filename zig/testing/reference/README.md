@@ -849,6 +849,14 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   where FFmpeg reads them (`KNOWN_ALAC_REFUSALS`: a zero-size packet, a
   packet past the data, data past the table, constant-size packets, unknown
   length) and `alac_damaged_packet`'s Ogg granules.
+- **CAF output (T31b).** zffmpeg's CAF against the ffmpeg program's with
+  `-bitexact`, for the FLAC output section's inputs and decoded MP3,
+  Vorbis and ALAC inputs: the default pcm_s16be, other PCM codecs, ALAC at
+  each compression level and with prediction orders 1 to 30, resampled,
+  downmixed and copied, the same bytes as a file and, for PCM, on a pipe
+  (the data's size left -1 by both); ALAC to a pipe refused by both,
+  zffmpeg with `UnsupportedStreamingSize` and no output. Recorded: stream
+  copy of MP3 and ALAC, which FFmpeg's muxer takes (`caf_expected_refusal`).
 - **MP2 output (T29d).** zffmpeg's MP2 (the `mp2` muxer, with `mp2` or
   `-c:a mp2fixed`) against the ffmpeg program's with `-bitexact`, for the
   FLAC output section's inputs and a decoded MP3, MP2 and Ogg Vorbis

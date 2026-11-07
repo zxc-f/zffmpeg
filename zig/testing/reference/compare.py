@@ -3736,6 +3736,110 @@ def compare_alac(args, lines, failures):
     ] + rows
 
 
+# The CAF output cells (T31b): FFmpeg's CAF muxer's default (pcm_s16be),
+# other PCM codecs, ALAC with its options, resampled and downmixed, and
+# stream copy.
+CAF_OUTPUT_OPTIONS = [[], ["-c:a", "pcm_s16le"], ["-c:a", "pcm_s24be"], ["-c:a", "pcm_f32le"], ["-c:a", "pcm_f64be"],
+                      ["-c:a", "pcm_alaw"], ["-c:a", "pcm_s8"], ["-c:a", "alac"],
+                      ["-c:a", "alac", "-compression_level", "0"], ["-c:a", "alac", "-compression_level", "1"],
+                      ["-c:a", "alac", "-min_prediction_order", "1", "-max_prediction_order", "30"],
+                      ["-c:a", "alac", "-ar", "22050"], ["-c:a", "alac", "-ac", "1"], ["-c", "copy"]]
+
+
+def caf_expected_refusal(codec, channels, opts):
+    """The cells zffmpeg refuses before any output: (whether FFmpeg fails
+    too, status, error). Stream copy of a codec CAF's muxer does not carry
+    (u8, s64, Vorbis) fails both; of MP3 and ALAC, which FFmpeg's muxer
+    copies, the port's copy is not ported (notes.md "CAF output")."""
+    if opts != ["-c", "copy"]:
+        return None
+    if codec in ("pcm_u8", "pcm_s64le", "vorbis"):
+        return True, 3, "UnsupportedOperation"
+    if codec in ("mp3", "alac"):
+        return False, 3, "UnsupportedOperation"
+    return None
+
+
+def compare_caf_output(args, lines, failures):
+    """zffmpeg's CAF output (T31b) against the ffmpeg program's with
+    `-bitexact`: the same bytes as a file, and to a pipe for PCM (where
+    neither muxer can seek back, so the data's size stays -1), for the FLAC
+    output section's inputs and decoded MP3, Vorbis and ALAC inputs; ALAC to
+    a pipe is refused by both, zffmpeg before any output."""
+    rows = []
+    same = total = understood = 0
+    with tempfile.TemporaryDirectory() as work:
+        work = pathlib.Path(work)
+        inputs = dict(flac_output_inputs(work))
+        for fixture in ("mp3/mp3_l3_long_stereo.mp3", "ogg/ogg_vorbis_ffmpeg_44k.ogg",
+                        "alac/alac_ffmpeg_stereo24_96k.caf", "alac/alac_pakt_before_data.caf"):
+            inputs[pathlib.Path(fixture).stem] = FIXTURES / fixture
+        for name, source in inputs.items():
+            probe = run(args.ffprobe, "-v", "error", "-select_streams", "a:0", "-show_entries",
+                        "stream=codec_name,channels", "-of", "default=nw=1:nk=1", source)
+            codec, channels = text(probe.stdout).split()[:2]
+            channels = int(channels)
+            problems = []
+            for opts in CAF_OUTPUT_OPTIONS:
+                total += 1
+                theirs, ours = work / "theirs.caf", work / "ours.caf"
+                for path in (theirs, ours):
+                    path.unlink(missing_ok=True)
+                tp = run(args.ffmpeg, "-nostdin", "-v", "error", "-y", "-i", source, "-bitexact", *opts, theirs)
+                zp = run(args.zffmpeg, "-y", "-i", source, *opts, ours)
+                label = " ".join(opts) or "defaults"
+                refusal = caf_expected_refusal(codec, channels, opts)
+                if refusal is not None:
+                    fails, code, error = refusal
+                    program_ok = tp.returncode != 0 if fails else tp.returncode == 0
+                    if not program_ok or zp.returncode != code or tool_error(zp, "zffmpeg", source) != error \
+                            or ours.exists():
+                        problems.append(f"{label}: FFmpeg exited {tp.returncode}, zffmpeg {zp.returncode} "
+                                        f"({first_line(text(zp.stderr)) or 'no error'}); recorded: zffmpeg refuses "
+                                        f"with {error} (status {code}) and writes nothing")
+                    else:
+                        same += 1
+                        understood += not fails
+                    continue
+                if tp.returncode != 0 or zp.returncode != 0:
+                    problems.append(f"{label}: FFmpeg {tp.returncode}, zffmpeg {zp.returncode} "
+                                    f"({first_line(text(zp.stderr))})")
+                    continue
+                if not ours.read_bytes() or theirs.read_bytes() != ours.read_bytes():
+                    problems.append(f"{label}: the files differ")
+                    continue
+                same += 1
+                # To a pipe: PCM, the same bytes (the size -1); ALAC refused.
+                total += 1
+                tpipe = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", source, "-bitexact", *opts, "-f", "caf", "-")
+                zpipe = run(args.zffmpeg, "-i", source, *opts, "-f", "caf", "-")
+                if "alac" in opts:
+                    ok = (tpipe.returncode != 0 and zpipe.returncode == 3 and not zpipe.stdout
+                          and tool_error(zpipe, "zffmpeg", source) == "UnsupportedStreamingSize")
+                else:
+                    ok = tpipe.returncode == 0 and zpipe.returncode == 0 and tpipe.stdout == zpipe.stdout
+                if ok:
+                    same += 1
+                else:
+                    problems.append(f"{label} to a pipe: FFmpeg {tpipe.returncode}, zffmpeg {zpipe.returncode} "
+                                    f"({first_line(text(zpipe.stderr))})")
+            failures.extend(f"CAF output {name}: {p}" for p in problems)
+            rows.append(f"| `{name}` | {'pass' if not problems else '**FAIL**: ' + '; '.join(problems)} |")
+    record("CAF output (T31b)", same, total, understood=understood)
+    lines += [
+        "",
+        "## CAF output (T31b)",
+        "",
+        f"zffmpeg's CAF (PCM codecs, ALAC with its options, resampled, downmixed, copied) equal to the ffmpeg "
+        f"program's with `-bitexact` as a file and, for PCM, on a pipe; ALAC on a pipe refused by both; refusals "
+        f"before any output: {same}/{total}, {understood} of them recorded refusals of MP3 and ALAC stream copy, "
+        f"which FFmpeg's muxer takes.",
+        "",
+        "| Input | Result |",
+        "| --- | --- |",
+    ] + rows
+
+
 def compare_ogg(args, lines, failures):
     """The Ogg fixtures (T27a): zffprobe against ffprobe's first audio
     stream (codec, sample format, channels, layout, rate, duration), and
@@ -3976,8 +4080,6 @@ KNOWN_REGISTRY_DIFFERENCES = {
                         "the port has no Opus encoder"),
     ("codec", "aac"): (("D.A.L.", "DEA.L."), "FFmpeg's native AAC encoder makes the AAC fixtures (T30b); "
                        "the port has no AAC encoder (T32d)"),
-    ("format", "caf"): (("D.", "DE"), "FFmpeg's CAF muxer makes the ALAC fixtures (T31b); the port's CAF writer "
-                        "comes with T31b's third part"),
 }
 
 
@@ -4230,6 +4332,7 @@ def main():
     compare_aac_decode(args, lines, failures)
     compare_adpcm(args, lines, failures)
     compare_alac(args, lines, failures)
+    compare_caf_output(args, lines, failures)
     compare_mp2_output(args, lines, failures)
     compare_opus_vectors(args, lines, failures)
     compare_hashes(args, lines, failures)
