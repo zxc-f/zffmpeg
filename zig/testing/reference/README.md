@@ -305,6 +305,18 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/aac_tab_vec
 bash zig/testing/reference/aac_fixtures.sh .references/ffmpeg-install
 ```
 
+`adpcm_vectors.c` (T31a) drives the pinned FFmpeg's adpcm_ima_wav and
+adpcm_ms encoders through the public API on deterministic signals (block
+sizes, trellis, mono and stereo, the last frame padded) and decodes each
+packet back, then decodes pseudo-random blocks of every IMA WAV bit depth
+and MS channel count, whole, short and refused. For MS mono with trellis
+only the bytes FFmpeg writes are hashed (notes.md "ADPCM"):
+
+```bash
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/adpcm_vectors.c .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o adpcm-vectors
+./adpcm-vectors | diff -u zig/testing/vectors/adpcm.txt -
+```
+
 `opus_vectors.c` is `vorbis_vectors.c` for Opus: the first Opus stream of
 every Ogg fixture opened as the ffmpeg program opens it, its packets sent
 to FFmpeg's Opus decoder, each frame's sample count and MD5 after

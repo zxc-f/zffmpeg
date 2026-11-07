@@ -35,7 +35,8 @@ build="$root/.references/ffmpeg-build"
 # Layers I and II (T29c), FFmpeg's MP2 encoders (mp2, mp2fixed) and its mp2
 # muxer (T29d), the aac (ADTS) demuxer, the aac parser and the adts muxer
 # (T30a), FFmpeg's float AAC decoder and its native AAC encoder, which makes
-# the AAC fixtures (T30b), and the audio filters T24-T25
+# the AAC fixtures (T30b), FFmpeg's IMA WAV and Microsoft ADPCM decoders and
+# encoders (T31a), and the audio filters T24-T25
 # compare. The ffmpeg program
 # selects the few filters it always needs. No GPL, nonfree, external or
 # hardware components.
@@ -52,8 +53,8 @@ configure_args=(
     --disable-avdevice
     --enable-protocol=file,pipe
     --enable-demuxer=wav,w64,au,aiff,caf,flac,ogg,mp3,aac,"$pcm_formats"
-    --enable-decoder="$pcm_codecs",flac,vorbis,opus,mp3float,mp1float,mp2float,aac
-    --enable-encoder="$pcm_codecs",flac,vorbis,opus,mp2,mp2fixed,aac
+    --enable-decoder="$pcm_codecs",flac,vorbis,opus,mp3float,mp1float,mp2float,aac,adpcm_ima_wav,adpcm_ms
+    --enable-encoder="$pcm_codecs",flac,vorbis,opus,mp2,mp2fixed,aac,adpcm_ima_wav,adpcm_ms
     --enable-muxer=wav,mp2,adts,w64,au,aiff,flac,ogg,oga,opus,framecrc,framemd5,streamhash,"$pcm_formats"
     --enable-parser=flac,mpegaudio,aac
     --enable-filter=aresample,volume,asetpts,amix,pan,channelmap,channelsplit,asplit

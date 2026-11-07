@@ -438,7 +438,7 @@ pub const Conversion = struct {
             // No encoder: refused by the operation check below.
             // The MP2 encoders take s16 (T29d).
             .mp2 => .s16le,
-            .vorbis, .opus, .mp1, .mp3, .aac => return error.UnsupportedOperation,
+            .vorbis, .opus, .mp1, .mp3, .aac, .adpcm_ima_wav, .adpcm_ms => return error.UnsupportedOperation,
         };
         // FFmpeg's set_channel_layout: an unspecified request takes the
         // default for its count.

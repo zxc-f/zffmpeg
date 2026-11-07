@@ -333,7 +333,8 @@ fn pcmOnly(comptime carries: fn (pcm.Codec) bool) *const fn (codecs.Codec) bool 
         fn f(codec: codecs.Codec) bool {
             return switch (codec) {
                 .pcm => |p| carries(p),
-                .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac => false,
+                // ADPCM goes in WAV once its writer path lands (T31a).
+                .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac, .adpcm_ima_wav, .adpcm_ms => false,
             };
         }
     }.f;
@@ -356,7 +357,7 @@ fn mp2Only(codec: codecs.Codec) bool {
 fn oggCodecs(codec: codecs.Codec) bool {
     return switch (codec) {
         .flac, .opus, .vorbis => true,
-        .pcm, .mp1, .mp2, .mp3, .aac => false,
+        .pcm, .mp1, .mp2, .mp3, .aac, .adpcm_ima_wav, .adpcm_ms => false,
     };
 }
 
