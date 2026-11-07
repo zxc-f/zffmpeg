@@ -36,7 +36,8 @@ zffmpeg, and FFmpeg's MP2 encoders with its mp2 muxer (T29d), and the
 ADTS demuxer and muxer and AudioSpecificConfig, with WAV
 and FLAC read after leading ID3v2 tags (T30a), and FFmpeg's float AAC
 decoder for AAC-LC, with ADTS decoded in zffmpeg (T30b), and its SBR
-decoder, with HE-AAC decoded (T30c). The `av`
+decoder, with HE-AAC decoded (T30c), and its parametric stereo, with
+HE-AACv2 decoded (T30d). The `av`
 module (rooted at `zig/root.zig`) exports `pcm` (the PCM encodings,
 kernels and decoder/encoder stages), `audio`, `channel_layout` (FFmpeg's
 channel layouts), `time`, `samples` (decoded sample storage
@@ -59,7 +60,7 @@ float MPEG audio decoders, Layers I to III), `mp2enc` and `mp2mux` (FFmpeg's
 MP2 encoders, mp2 and mp2fixed, and its mp2 muxer), `adts`, `aac`,
 `mpeg4audio` and `adtsmux` (ADTS headers and FFmpeg's AAC parser, its ADTS
 demuxer, the AudioSpecificConfig, its ADTS muxer), `aacdec` and
-`aacdecode` (FFmpeg's float AAC decoder with SBR, an ADTS stream
+`aacdecode` (FFmpeg's float AAC decoder with SBR and PS, an ADTS stream
 decoded), `mp3` (FFmpeg's MPEG
 audio demuxer), `mpegaudio` (frame headers and the mpegaudio parser), `id3v2` and
 `id3v1` (ID3 tags), `demux` (libavformat's generic layer:
@@ -102,8 +103,8 @@ Ogg Opus decoding), T28b (SILK) and T28c (hybrid frames and
 multistream), completing T28, and T29a (the MPEG audio demuxer and
 parser), T29b (the Layer III decoder), T29c (Layers I and II) and T29d
 (the MP2 encoder), completing T29, and T30a (ADTS and AudioSpecificConfig)
-and T30b (the AAC-LC decoder) and T30c (SBR); T30d (parametric stereo)
-is next,
+T30b (the AAC-LC decoder), T30c (SBR) and T30d (parametric stereo),
+completing T30; T31a (IMA and Microsoft ADPCM) is next,
 and TODO.md lays out the roadmap through T65.
  When the state changes, update the current-state statements in
 README.md, port.md ("Status and scope"), the TODO.md introduction and this file

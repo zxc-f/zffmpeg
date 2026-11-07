@@ -67,7 +67,9 @@ FFmpeg's ADTS demuxer and muxer and AudioSpecificConfig parsing, with
 WAV and FLAC read after leading ID3v2 tags; and T30b, FFmpeg's float AAC
 decoder for AAC-LC bit for bit, with ADTS decoded by zffmpeg and reported
 by zffprobe; and T30c, FFmpeg's SBR decoder bit for bit, with HE-AAC
-decoded. **Next: T30d (parametric stereo, HE-AAC v2).
+decoded, and T30d, its parametric stereo decoder bit for bit, with
+HE-AACv2 decoded, which completes T30. **Next: T31a (IMA and Microsoft
+ADPCM).
 See [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
@@ -3558,7 +3560,8 @@ names, not as an empty framework.
     Remaining work or blocker / next action: none.
     ```
 
-- [ ] **T30 — AAC.** Checked when T30a–T30d are. Reference:
+- [x] **T30 — AAC.** Checked when T30a–T30d are (verified at 0b6d8e4;
+  Main and LTP stay refused, notes.md "AAC decoder scope"). Reference:
   `libavcodec/aac/`, `aacsbr*.c`, `aacps*.c`, `mpeg4audio.c`,
   `libavformat/aacdec.c`, `adtsenc.c`; `tests/fate/aac.mak`.
   - [x] **T30a — ADTS and AudioSpecificConfig.** Needs T16. ADTS demux and
@@ -3709,8 +3712,43 @@ names, not as an empty framework.
       optional.
     Remaining work or blocker / next action: none; T30d adds PS.
     ```
-  - [ ] **T30d — PS (HE-AAC v2).** Needs T30c.
+  - [x] **T30d — PS (HE-AAC v2).** Needs T30c.
     Done when the required PS streams match within tolerance. LATM comes later.
+
+    ```text
+    ID / parent: T30d / T30
+    State: verified (G5, local Linux x86-64 runs)
+    Supported behavior and explicit exclusions: FFmpeg's float parametric
+      stereo decoder (aacps_common.c, aacps.c, aacps_tablegen.h,
+      aacpsdsp_template.c): IID, ICC, IPD and OPD data in 10, 20 or 34
+      bands, extensions, fake envelopes and FFmpeg's error handling; the
+      20- and 34-band hybrid filterbanks, decorrelation with transient
+      attenuation, the mixing matrices of both ICC modes interpolated with
+      phase; ps_tableinit's tables. glibc's sinf and cosf over every float
+      and CORE-MATH's atanf and atan2f ported. Excluded: LATM, USAC's
+      MPEG Surround.
+    Contract and source provenance: port.md's ADTS contract, "Decoding";
+      the files above and aacpsdata.c; glibc 2.44's s_sinf.c, s_cosf.c
+      (FMA variants), s_atanf.c and e_atan2f.c (CORE-MATH).
+    Required fixtures: aac_fdk_hev2_44k and aac_fdk_hev2_32k_noise
+      (libfdk-aac 3.0.0 through heaac_encode.c), and the HE-AAC mono
+      streams for the copy without PS data.
+    Comparison rule: every frame's samples bit for bit the pinned
+      decoder's (aac_decode.txt), packets and seeks (aac.txt,
+      seek_aac.txt), the VLC tables the size of FFmpeg's buffer, the libm
+      ports glibc's (libm.txt), zffprobe ffprobe's and zffmpeg's output
+      the program's byte for byte.
+    Evidence: 0b6d8e4. G3: HE-AACv2 seeds in the decoder's and aacdecode's
+      fuzz entries and mutation smokes (2000 and 300 rounds clean in
+      ReleaseSafe once), an allocation sweep through PS's allocation, a
+      unit test of PS data read and refused; process cases for HE-AACv2
+      reported as stereo and decoded to WAV. G5 at 0b6d8e4, locally on
+      Linux x86-64 (no CI run link): zig fmt, the fixture check, zig build
+      test 550/550 (294 steps) in Debug, ReleaseSafe and ReleaseFast, the
+      cross builds, every vector generator, compare.py 8274/0/0 required
+      (AAC decoding 552 cells, 3 recorded) and 61/61 optional.
+    Remaining work or blocker / next action: none.
+    ```
 
 - [ ] **T31 — ADPCM, G.72x and ALAC.** Checked when T31a–T31c are. Reference:
   `libavcodec/adpcm.c`, `adpcmenc.c`, `adpcm_data.c`, `g722.c`, `g722dec.c`,
