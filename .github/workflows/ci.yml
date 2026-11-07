@@ -380,6 +380,15 @@ jobs:
           bash zig/testing/reference/adpcm_wav_vectors.sh .references/ffmpeg-install |
             diff -u zig/testing/vectors/adpcm_wav.txt -
 
+      # The committed T31b oracle must be what this build's ALAC encoder
+      # and decoder make of its cases.
+      - name: Check the ALAC vectors (T31b)
+        run: |
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/alac_vectors.c \
+            .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a \
+            .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o alac-vectors
+          ./alac-vectors | diff -u zig/testing/vectors/alac.txt -
+
       # The committed T28a oracle must be what this build's Opus decoder
       # makes of every Ogg fixture's first Opus stream.
       - name: Check the Opus decoder vectors (T28a)

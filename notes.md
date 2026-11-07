@@ -234,6 +234,12 @@ FFmpeg has none of them. Each is `LimitExceeded`.
 | `kuki` | Skipped: PCM needs no magic cookie. FFmpeg keeps it as the stream's extradata, which its framecrc copy shows. | `KNOWN_HASH_DIFFERENCES`; a codec with a cookie (ALAC, T31b) reads it. |
 | Data not whole frames | `InvalidFormat`, as the WAV and raw contracts refuse a partial frame; FFmpeg decodes the whole frames. | `caf_data_not_whole_frames`. |
 
+## Speed check
+
+| Decision | Current choice and reason | To change it |
+| --- | --- | --- |
+| A speed check per feature (2026-11-07) | The project owner's rule: every feature that adds or changes a decode, encode, demux, mux or conversion path is timed against FFmpeg before G5 (`speed_check.py`, CLAUDE.md "Speed check"): zffmpeg in ReleaseFast from a file and from a pipe, the pinned reference build and the native build, on one core. It warns above 1.5 times the reference build's time, and when the file path takes more than 1.3 times the pipe path, the signature of the double decode the T53 I/O study found (45% of an Ogg or MP3 conversion), which no correctness check could see. A warning is fixed before G5 or recorded here. The native build's assembly (T58) is recorded, not chased. | `zig/testing/reference/speed_check.py`; the thresholds there; TODO.md's G5 row. |
+
 ## Undefined C behavior
 
 | Decision | Current choice and reason | To change it |
@@ -435,6 +441,15 @@ FFmpeg has none of them. Each is `LimitExceeded`.
 | MS ADPCM mono with trellis (T31a) | FFmpeg's adpcm_ms encoder with `-trellis` and one channel codes `block_size - 7` samples, half the block's nibbles, and writes `7 + (block_size - 7) / 2` bytes of the packet; the next byte takes its low nibble from the trellis buffer past the coded samples, and the rest is memory it never wrote (stale heap contents in the reference build, which differ by process). The port takes zeros for both ("Undefined memory" above). compare.py's ADPCM section compares the written bytes of such WAV outputs. vectors/adpcm.txt pins only the written bytes of such packets (its `H` lines) and does not decode them. | `adpcm.Encoder.encode`, `adpcm_vectors.c`. |
 | Decoded ADPCM into Ogg (T31a) | The program's decoded frames keep the WAV demuxer's packet timestamps, whose durations libavformat computes from the packet's size (`av_get_audio_frame_duration2`, 1 + (block_align - 4 × channels) / (bits × channels) × 8 samples an IMA WAV block, where the decoder's grouped 2-, 3- and 5-bit codes give fewer), and a frame the decoder refuses leaves a gap; the Ogg muxer's granules follow them, where zffmpeg's FLAC packets are numbered without gaps. Four fixtures' Ogg cells differ only so: the same pages apart from granules, and the same samples (`KNOWN_ADPCM_DECODE_DIFFERENCES`, "granules"). | The program's timestamps (T53). |
 | A trellis that loses every path (T31a) | In `adpcm_compress_trellis` a candidate whose 32-bit error sum wraps is skipped; when every candidate of a sample wraps (full-scale input against nodes whose sums are already near the reset at 2^28), no node is stored and FFmpeg reads the empty node and crashes. The port fails the frame with `TrellisOverflow` ("Refused instead" above), which zffmpeg reports as `UnsupportedFormat`. | `adpcm.Trellis.compress`; the encoder's fuzz entry. |
+
+## ALAC
+
+| Decision | Current choice and reason | To change it |
+| --- | --- | --- |
+| ALAC scope (T31b) | FFmpeg's ALAC decoder (16, 20, 24 and 32 bits, 1 to 8 channels, the `extra_bits_bug` option) and encoder (16 bits from s16p, 24 from s32p, `-compression_level` 0 to 2, `min_prediction_order` and `max_prediction_order`), sample for sample and packet for packet ([alac.txt](zig/testing/vectors/alac.txt)). Part 1 ports the codec only: no container carries it yet (CAF's packet table and cookie come with part 2, its muxer with part 3), so zffmpeg refuses `-c:a alac` (`UnsupportedOperation`). | `codec/alac.zig`; `registry.zig`. |
+| A frame's unwritten samples (T31b) | FFmpeg's decoder takes the frame's buffer uninitialized and fills it element by element; an element that fails exactly at the packet's end is ignored and its planes keep whatever the buffer held (stale pool memory). The port zeroes the frame's planes first ("Undefined memory" above). | `alac.Decoder.decodeElement`. |
+| Wrapping arithmetic (T31b) | The decoder's prediction runs in FFmpeg's unsigned arithmetic, and the encoder's in its `int` arithmetic, whose overflows (a 24-bit difference times a coefficient) wrap in the reference build; the port wraps them too ("Undefined C behavior" above). | `alac.lpcPrediction`, `alac.Encoder.linearPredictor`. |
+| Short frames in the LPC analysis (T31b) | ALAC's last frame can be shorter than the prediction order; `ff_lpc_calc_coefs` then reinitializes its zeroed buffers for the new block size, and the Levinson path reads zeros around the block, which `lpc.Context.calcCoefs` now accepts (the Cholesky path, FLAC's, still needs a block longer than the order). | `lpc.Context.calcCoefs`. |
 
 ## Floating-point library
 

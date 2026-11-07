@@ -3887,6 +3887,8 @@ KNOWN_REGISTRY_DIFFERENCES = {
                         "the port has no Opus encoder"),
     ("codec", "aac"): (("D.A.L.", "DEA.L."), "FFmpeg's native AAC encoder makes the AAC fixtures (T30b); "
                        "the port has no AAC encoder (T32d)"),
+    ("format", "caf"): (("D.", "DE"), "FFmpeg's CAF muxer makes the ALAC fixtures (T31b); the port's CAF writer "
+                        "comes with T31b's third part"),
 }
 
 

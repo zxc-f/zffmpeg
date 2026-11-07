@@ -160,7 +160,7 @@ IDs and commits; read them with this mapping:
 | G2 scalar implementation | Small concrete Zig types, local state, checked parsing, explicit allocator and I/O. | Unit vectors pass; new test files are reachable from `zig/root.zig`; new examples are registered in `build.zig`. |
 | G3 failure behavior | Truncation, malformed input, limit boundaries, one-byte input, output and flush failures, cancellation, allocation-failure injection, a bounded fuzz smoke run. | Each relevant case has an assertion and passes in ReleaseFast. Buffering stages also pass drain, reset and backpressure tests. |
 | G4 integration | Library path, CLI process cases where applicable, FFmpeg reading Zig-generated output, metadata and timestamp checks. | The supported operation or profile matrix passes; unsupported combinations fail as specified. |
-| G5 verified | Linux CI, the reference report, the port.md ledger and limitations. | All required checks pass for the implementation commit, and the evidence links the commit, the run and the coverage counts. Only now check the subtask. |
+| G5 verified | Linux CI, the reference report, the port.md ledger and limitations; for a decode, encode, demux, mux or conversion path, the speed check against FFmpeg (CLAUDE.md "Speed check"). | All required checks pass for the implementation commit, and the evidence links the commit, the run and the coverage counts, and the speed check's medians and ratios with any warning fixed or recorded in notes.md. Only now check the subtask. |
 
 Work at G2–G4 is **implemented** in the port.md ledger. It becomes **verified**
 only at G5, and **optimized** only with a retained scalar oracle and a measured
@@ -3795,7 +3795,12 @@ names, not as an empty framework.
       fixture check, zig build test 570/570 (313 steps) in Debug,
       ReleaseSafe and ReleaseFast, the cross builds, every vector
       generator, compare.py 8937/0/0 required (ADPCM in WAV 661 cells,
-      63 recorded) and 61/61 optional.
+      63 recorded) and 61/61 optional. Speed check (CLAUDE.md "Speed
+      check", added after G5; 10 minutes of stereo 44.1 kHz, one core,
+      medians against the reference build): IMA WAV and MS decoding to
+      WAV 0.35x and 0.43x, encoding 0.46x and 0.57x, MS with -trellis 4
+      1.08x (17.5 s against 16.2 s); file and pipe input equal; the
+      native build equals the reference (no assembly for these codecs).
     Remaining work or blocker / next action: none; T31b (ALAC) is next.
     ```
   - [ ] **T31b — ALAC.** Needs T33a or T22d. Decoding and encoding.

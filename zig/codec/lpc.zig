@@ -162,7 +162,10 @@ pub const Context = struct {
     ) usize {
         std.debug.assert(max >= min_order and max <= max_order and min >= min_order and min <= max);
         std.debug.assert(lpc_type == .levinson or lpc_type == .cholesky);
-        std.debug.assert(samples.len <= ctx.windowed.len and samples.len > max);
+        // A block no longer than the order (ALAC's last frame, T31b): the
+        // autocorrelation reads zeros around it, as FFmpeg's padded buffer.
+        std.debug.assert(samples.len <= ctx.windowed.len and samples.len >= 1);
+        std.debug.assert(lpc_type == .levinson or samples.len > max);
         const blocksize = samples.len;
         var autoc: [max_order + 1]f64 = undefined;
         var ref: [max_order]f64 = @splat(0);

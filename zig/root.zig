@@ -139,6 +139,7 @@ pub const caf = @import("format/caf.zig");
 pub const flac = @import("format/flac.zig");
 pub const flacenc = @import("codec/flacenc.zig");
 pub const adpcm = @import("codec/adpcm.zig");
+pub const alac = @import("codec/alac.zig");
 pub const flacmux = @import("format/flacmux.zig");
 pub const ogg = @import("format/ogg.zig");
 pub const demux = @import("format/demux.zig");
@@ -238,6 +239,7 @@ test {
     _ = @import("format/wavadpcm.zig");
     _ = @import("format/pcmdata.zig");
     _ = @import("codec/adpcm.zig");
+    _ = @import("codec/alac.zig");
     _ = @import("codec/tx.zig");
     _ = @import("codec/vlc.zig");
     _ = @import("codec/xiph.zig");

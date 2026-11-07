@@ -318,6 +318,29 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/adpcm_vecto
 ./adpcm-vectors | diff -u zig/testing/vectors/adpcm.txt -
 ```
 
+`speed_check.py` is CLAUDE.md's "Speed check": one conversion timed with
+hyperfine, pinned to one core, by zffmpeg in ReleaseFast (from a file and
+from a pipe), this reference build and the native build of the
+`zig-io` skill (`bench/build-ffmpeg-native.sh`), with each median's ratio
+to the reference and a warning above 1.5 times its time, or when the file
+path takes more than 1.3 times the pipe path:
+
+```bash
+ZIG=/path/to/zig-0.17.0/zig python3 zig/testing/reference/speed_check.py <scratch-dir> '@base:wav:-c:a adpcm_ms' wav -c:a pcm_s16le
+```
+
+`alac_vectors.c` (T31b) drives the pinned FFmpeg's ALAC encoder through
+the public API on deterministic signals (1 to 8 channels in ALAC's
+layouts, 16 and 24 bits, compression levels 0 to 2 and out of range,
+prediction orders, frames of one to 4096 samples) and decodes each packet
+back, then decodes those packets with bits flipped or cut short, under a
+cookie changed to 20, 32 or 8 bits and with `extra_bits_bug`:
+
+```bash
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/alac_vectors.c .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o alac-vectors
+./alac-vectors | diff -u zig/testing/vectors/alac.txt -
+```
+
 `adpcm_wav_vectors.sh` (T31a) prints, for every ADPCM WAV fixture, the
 stream the pinned ffprobe reports (codec, sample format, channels, rate,
 `duration_ts`) and the count and SHA-256 of the samples the pinned ffmpeg

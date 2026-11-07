@@ -423,6 +423,39 @@ changes: search the changed files for those phrases and the new `compare.py`
 entries, and confirm each has its row. Rows describe the current state, so
 fix a row a change makes stale in the same commit.
 
+### Speed check
+
+Every feature that adds or changes a decode, encode, demux, mux or
+conversion path gets a quick speed comparison with FFmpeg before it reaches
+G5: correctness checks cannot see a second pass over the input. The T53
+I/O study (the `zig-io` skill, E2E-C) found zffmpeg decoding Ogg and MP3
+twice from a file, 45% of the conversion, which every comparison had
+passed. Run [speed_check.py](zig/testing/reference/speed_check.py) on the
+feature's own paths: each new decoder into WAV, each new encoder from WAV,
+and a probe or stream copy when it reads the whole input; for example
+
+```bash
+ZIG=/home/julek/zig/zig-x86_64-linux-0.17.0/zig python3 zig/testing/reference/speed_check.py \
+    <scratch-dir> '@base:caf:-c:a alac' wav
+```
+
+It builds zffmpeg in ReleaseFast and times it from a file and from a pipe
+against the pinned reference build (the oracle, no assembly) and the
+native build (assembly and `-march=native`, built by the `zig-io` skill's
+`bench/build-ffmpeg-native.sh`; rebuild it when `build-ffmpeg.sh`'s
+components change), all pinned to one core. Run it on an idle machine,
+not beside the local CI.
+
+- A warning means zffmpeg takes more than 1.5 times the reference build's
+  time, or its file path more than 1.3 times its pipe path. Profile it
+  (`perf record`, `perf report`), find the cause and fix it before G5, or
+  record in notes.md why it stays (for example a counting pass that only
+  an output which cannot seek back needs).
+- Slower than the native build is expected where FFmpeg has assembly
+  (T58); record the ratio, do not chase it here.
+- The task's evidence note records each command's median and its ratio to
+  the reference build.
+
 ### Malformed input, cleanup and the CLI
 
 The review of 2026-11-04 found memory-safety defects, double frees and

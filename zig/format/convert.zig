@@ -461,7 +461,8 @@ pub const Conversion = struct {
             // No encoder: refused by the operation check below.
             // The MP2 encoders take s16 (T29d), and the ADPCM ones (T31a).
             .mp2, .adpcm_ima_wav, .adpcm_ms => .s16le,
-            .vorbis, .opus, .mp1, .mp3, .aac => return error.UnsupportedOperation,
+            // No muxer carries ALAC yet (T31b).
+            .vorbis, .opus, .mp1, .mp3, .aac, .alac => return error.UnsupportedOperation,
         };
         // FFmpeg's set_channel_layout: an unspecified request takes the
         // default for its count.
