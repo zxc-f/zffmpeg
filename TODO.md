@@ -315,7 +315,7 @@ Left open, each with the task it must land before:
 
 | Finding | Where | Before |
 | --- | --- | --- |
-| Codec parameters a mapping set during the read-ahead are kept (`parameters_from_context`; notes.md); MP3 is not affected (T29b: mp3float decodes only the read-ahead's first packet, and mp3.txt's streams did not change when the reference build enabled it) | `demux.zig` | T30b |
+| Codec parameters a mapping set during the read-ahead are kept (`parameters_from_context`; notes.md); MP3 is not affected (T29b: mp3float decodes only the read-ahead's first packet, and mp3.txt's streams did not change when the reference build enabled it); AAC's decoder parameters win since T30b, the Ogg mappings' remain | `demux.zig` | T65a |
 | Filter-graph timestamp arithmetic overflows on null or extreme pts (atrim, aresample, amix; library only) | `filters.zig`, `multi.zig` | T53b, with T65d |
 | An MP3 stream without parameters refused; negative durations reported as none (notes.md rows) | `detect.zig` | T51a |
 | A 3-byte `ID3` file scores 0 where FFmpeg's probe gives 12 (both refuse) | `mp3.zig` | any time |
@@ -3573,8 +3573,8 @@ names, not as an empty framework.
       the AudioSpecificConfig (avpriv_mpeg4audio_get_config2) and PCE
       copy; the adts muxer. Before it (b4fa6d5), avformat_open_input's
       leading ID3v2 tags for WAV and FLAC, the review row due before T30a.
-      Excluded: decoding (T30b), so zffprobe refuses ADTS and zffmpeg
-      reads and writes none (notes.md "ADTS without a decoder"); APE
+      Excluded: decoding (T30b), so zffprobe refused ADTS and zffmpeg
+      read and wrote none until T30b; APE
       attachment streams; the muxer's tag options; LATM.
     Contract and source provenance: port.md's ADTS contract; aacdec.c,
       apetag.c, adtsenc.c, adts_header.c, aac_parser.c, aac_ac3_parser.c,

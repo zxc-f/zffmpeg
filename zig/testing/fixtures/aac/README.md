@@ -44,4 +44,15 @@ port.md's "ADTS contract" says which behavior the port follows.
 | `aac_three_frames_late` | accepted | yes | Junk, then three frames at the end of the probe buffer: score 25. |
 | `aac_no_sync` | rejected | `EOF` | No sync word: the open's resync reaches the end (AVERROR_EOF). |
 | `aac_id3v2_only` | rejected | `EOF` | An ID3v2 tag and nothing after it. |
+| `aac_ffmpeg_lc_44k_stereo` | ffmpeg | yes | FFmpeg's AAC encoder, 30000 smooth samples of 2 channels at 44100 Hz, `-c:a aac`; decoded by the T30b oracle. |
+| `aac_ffmpeg_mono_8k` | ffmpeg | yes | FFmpeg's AAC encoder, 8000 smooth samples of 1 channels at 8000 Hz, `-c:a aac -b:a 24k`; decoded by the T30b oracle. |
+| `aac_ffmpeg_48k_64k` | ffmpeg | yes | FFmpeg's AAC encoder, 20000 tones samples of 2 channels at 48000 Hz, `-c:a aac -b:a 64k`; decoded by the T30b oracle. |
+| `aac_ffmpeg_96k_256k` | ffmpeg | yes | FFmpeg's AAC encoder, 20000 smooth samples of 2 channels at 96000 Hz, `-c:a aac -b:a 256k`; decoded by the T30b oracle. |
+| `aac_ffmpeg_transients` | ffmpeg | yes | FFmpeg's AAC encoder, 30000 transients samples of 2 channels at 44100 Hz, `-c:a aac`; decoded by the T30b oracle. |
+| `aac_ffmpeg_pns_22k` | ffmpeg | yes | FFmpeg's AAC encoder, 15000 noise samples of 1 channels at 22050 Hz, `-c:a aac -b:a 32k -aac_pns 1`; decoded by the T30b oracle. |
+| `aac_ffmpeg_is_ms` | ffmpeg | yes | FFmpeg's AAC encoder, 20000 tones samples of 2 channels at 44100 Hz, `-c:a aac -b:a 64k -aac_is 1 -aac_ms 1`; decoded by the T30b oracle. |
+| `aac_ffmpeg_fast_32k` | ffmpeg | yes | FFmpeg's AAC encoder, 15000 smooth samples of 2 channels at 32000 Hz, `-c:a aac -aac_coder fast`; decoded by the T30b oracle. |
+| `aac_ffmpeg_5point1` | ffmpeg | yes | FFmpeg's AAC encoder, 10000 smooth samples of 6 channels at 48000 Hz, `-c:a aac`; decoded by the T30b oracle. |
+| `aac_ffmpeg_7point1_wide` | ffmpeg | yes | FFmpeg's AAC encoder, 8000 tones samples of 8 channels at 48000 Hz, `-c:a aac -ch_layout 7.1(wide)`; decoded by the T30b oracle. |
+| `aac_ffmpeg_short` | ffmpeg | yes | FFmpeg's AAC encoder, 700 smooth samples of 2 channels at 44100 Hz, `-c:a aac`; decoded by the T30b oracle. |
 <!-- END GENERATED FIXTURE TABLE -->

@@ -10,12 +10,13 @@
 // its __exp2f_data and __sincosf_table.
 //! The reference platform's C library math where FFmpeg's C code calls it
 //! and Zig's own functions round differently (notes.md "Floating-point
-//! library"): single-precision `exp2f`, `sinf` and `cosf` here, and in
-//! libm/ the double functions FFmpeg's code paths here call: `sin`, `cos`,
-//! `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `exp2`, `log`, `pow`,
-//! `hypot`, `sinh`, `cosh`, `tanh`, `cbrt` and `ldexp`. Zig's `@exp2` and `@sin`
-//! follow musl's older code and differ from glibc in the last bit for about
-//! one float in 12,000 and for 1579 of CELT's rotation angles.
+//! library"): single-precision `exp2f`, `sinf` and `cosf` here, `powf` in
+//! libm/powf.zig, and in libm/ the double functions FFmpeg's code paths
+//! here call: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`,
+//! `exp2`, `log`, `pow`, `hypot`, `sinh`, `cosh`, `tanh`, `cbrt` and
+//! `ldexp`. Zig's `@exp2` and `@sin` follow musl's older code and differ
+//! from glibc in the last bit for about one float in 12,000 and for 1579 of
+//! CELT's rotation angles.
 //!
 //! glibc picks a variant by CPU at load time; on x86-64 with FMA and AVX2
 //! (every machine the project verifies on, AVX-512 ones included) it runs
@@ -45,6 +46,11 @@ pub const pow = @import("libm/pow.zig").pow;
 pub const hypot = @import("libm/hypot.zig").hypot;
 /// Not correctly rounded; musl's, `std.math.cbrt`, differs (T29b).
 pub const cbrt = @import("libm/cbrt.zig").cbrt;
+pub const cbrtf = @import("libm/cbrtf.zig").cbrtf;
+/// Checked against the installed glibc on 48 million random pairs, every
+/// float x for eight exponents and every integer exponent to 2^20 of the
+/// AAC decoder's four coupling bases, and by vectors/libm.txt (T30b).
+pub const powf = @import("libm/powf.zig").powf;
 /// Exact apart from one rounding (libm/ldexp.zig: std.math.ldexp
 /// mis-scales a zero); checked against glibc's in its tests.
 pub const ldexp = @import("libm/ldexp.zig").ldexp;
@@ -53,8 +59,9 @@ pub const sinh = @import("libm/hyperbolic.zig").sinh;
 pub const cosh = @import("libm/hyperbolic.zig").cosh;
 pub const tanh = @import("libm/hyperbolic.zig").tanh;
 
-/// __exp2f_data.tab: 2^(i/32) with i/32 taken out of the exponent.
-const exp2f_tab = [32]u64{
+/// __exp2f_data.tab: 2^(i/32) with i/32 taken out of the exponent (also
+/// powf's, libm/powf.zig).
+pub const exp2f_tab = [32]u64{
     0x3ff0000000000000, 0x3fefd9b0d3158574, 0x3fefb5586cf9890f, 0x3fef9301d0125b51,
     0x3fef72b83c7d517b, 0x3fef54873168b9aa, 0x3fef387a6e756238, 0x3fef1e9df51fdee1,
     0x3fef06fe0a31b715, 0x3feef1a7373aa9cb, 0x3feedea64c123422, 0x3feece086061892d,
@@ -105,16 +112,39 @@ const cos2 = f64Bits(0x3fa55553e1068f19);
 const cos3 = f64Bits(0xbf56c087e89a359d);
 const cos4 = f64Bits(0x3ef99343027bf8c3);
 
-/// The upper bound of `sinf` and `cosf`'s domain here.
+/// The upper bound of `cosf`'s domain here.
 pub const quarter_pi: f32 = std.math.pi / 4.0;
+/// The upper bound of `sinf`'s domain here.
+pub const half_pi: f32 = std.math.pi / 2.0;
 
-/// glibc's sinf for 0 <= x < pi/4, where it needs no argument reduction
-/// (from 0.75 its reduction gives n = 0 and the same polynomial).
+/// __sincosf_table[0]'s `hpi_inv` (2/pi scaled by 2^24, the build without
+/// TOINT_INTRINSICS) and `hpi`.
+const hpi_inv = f64Bits(0x41645f306dc9c883);
+const hpi = f64Bits(0x3ff921fb54442d18);
+
+/// glibc's sinf for 0 <= x < pi/2. Below pi/4 it needs no argument
+/// reduction (from 0.75 its reduction gives n = 0 and the same
+/// polynomial); above, reduce_fast gives quadrant 1 and sinf_poly
+/// evaluates the cosine polynomial of x - pi/2, computed in double (the
+/// sine windows of the AAC decoder, T30b).
 pub fn sinf(x: f32) f32 {
-    std.debug.assert(x >= 0 and x < quarter_pi);
+    std.debug.assert(x >= 0 and x < half_pi);
     const ux: u32 = @bitCast(x);
     if ((ux >> 20) & 0x7ff <= 0x397) return x; // below 2^-12
     const xd: f64 = x;
+    // reduce_fast's quadrant, in bits 24..31 of the scaled product, which
+    // lies below 2^24 on this domain.
+    const r_int: i32 = @trunc(xd * hpi_inv);
+    if ((r_int + 0x800000) >> 24 != 0) {
+        const y = xd - hpi;
+        const y2 = y * y;
+        const y4 = y2 * y2;
+        const c2 = @mulAdd(f64, y2, cos4, cos3);
+        const c1 = @mulAdd(f64, y2, cos1, 1.0);
+        const y6 = y4 * y2;
+        const c = @mulAdd(f64, y4, cos2, c1);
+        return @floatCast(@mulAdd(f64, y6, c2, c));
+    }
     const x2 = xd * xd;
     const s = @mulAdd(f64, x2, sin3, sin2);
     const x3 = xd * x2;
@@ -156,6 +186,8 @@ fn expectLine(line: []const u8, head: []const u8, md5: *Md5) !void {
 test {
     _ = @import("libm/ldexp.zig");
     _ = @import("libm/cbrt.zig");
+    _ = @import("libm/cbrtf.zig");
+    _ = @import("libm/powf.zig");
 }
 
 test "exp2f, sinf and cosf return glibc's results (vectors/libm.txt)" {

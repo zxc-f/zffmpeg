@@ -248,7 +248,10 @@ prints each frame's final range and the MD5 of its samples;
 superframes of every bandwidth, duration and channel count (T28b).
 `libm_vectors.c` needs only the C library: it prints digests of what
 glibc's `exp2f`, `sinf` and `cosf` return on sampled floats and on every
-angle CELT's spreading rotation can take, and of the fifteen double
+angle CELT's spreading rotation can take, what `powf` returns on the AAC
+decoder's coupling gains and sampled pairs and `cbrtf` on every integer
+below 65536 (its pulse amplitudes) and sampled floats (T30b), and of the
+fifteen double
 functions `core/libm.zig` ports over eight input distributions, inputs
 from 1e8 up on lines of their own (glibc 2.39 reduces sin, cos and tan's
 there differently) and sinh, cosh and tanh on `C` lines (correctly rounded
@@ -275,6 +278,24 @@ reference build has no MP3 or Layer I encoder):
 ```bash
 clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/mp3_decode_vectors.c .references/ffmpeg-install/lib/libavformat.a .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o mp3-decode-vectors
 LC_ALL=C ./mp3-decode-vectors zig/testing/fixtures/mp3/*.mp3 | diff -u zig/testing/vectors/mp3_decode.txt -
+```
+
+The same program prints the AAC decoding oracle (T30b) for the ADTS
+fixtures, through FFmpeg's float `aac` decoder; `aac_tab_vectors.c` prints
+the decoder's tables after their static initialization (the scalefactor
+band offsets, TNS tables, `ff_aac_pow2sf_tab`, the KBD and sine windows,
+`ff_cbrt_tab` and the spectral and scalefactor VLCs), which
+`codec/aac_tab.zig`'s test renders from its own. The fixtures that decode
+to audio are the `aac_ffmpeg_*` streams, which `aac_fixtures.sh` encodes
+with the reference build's native AAC encoder from generate.py's samples
+(their hashes are generate.py's `AAC_FFMPEG`); generate.py's own ADTS
+fixtures carry arbitrary payloads, which no packet of decodes:
+
+```bash
+LC_ALL=C ./mp3-decode-vectors zig/testing/fixtures/aac/*.aac | diff -u zig/testing/vectors/aac_decode.txt -
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/aac_tab_vectors.c .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o aac-tab-vectors
+./aac-tab-vectors | diff -u zig/testing/vectors/aac_tab.txt -
+bash zig/testing/reference/aac_fixtures.sh .references/ffmpeg-install
 ```
 
 `opus_vectors.c` is `vorbis_vectors.c` for Opus: the first Opus stream of
@@ -508,8 +529,9 @@ and Opus decoders with FFmpeg's native encoders, which make their fixtures
 (T27d, T28), the mp3 demuxer with the mpegaudio parser (T29a), mp3float,
 FFmpeg's float MP3 decoder and the ffmpeg program's default for MP3 (T29b),
 mp1float and mp2float (T29c), the mp2 and mp2fixed encoders with the
-mp2 muxer (T29d), and the aac demuxer with the aac parser and the adts muxer
-(T30a; no AAC decoder or encoder before T30b).
+mp2 muxer (T29d), the aac demuxer with the aac parser and the adts muxer
+(T30a), and FFmpeg's float AAC decoder with the native AAC encoder, which
+makes its fixtures (T30b).
 There are no GPL, nonfree, external-library or
 hardware components, and autodetection is off. `--disable-x86asm` keeps the C
 code paths as the reference and avoids a NASM dependency; inline assembly
@@ -720,12 +742,23 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   zffprobe refuses the stream the stopped tag's footer leaves before
   `fLaC` (`KNOWN_LEADING_ID3V2_REFUSALS`; notes.md "Headerless and rate-0
   parameters").
-- **ADTS fixtures (T30a).** Without an AAC decoder in the reference build,
-  ffprobe opens an ADTS fixture with no sample rate or channels, which the
-  section checks; zffprobe then refuses it with `UnsupportedFormat`, from a
-  file and a pipe, and a fixture ffprobe refuses, zffprobe refuses too;
-  every conversion is refused by both (notes.md "ADTS without a decoder").
-  Packets and seeks are the Zig tests' (vectors/aac.txt, seek_aac.txt).
+- **ADTS fixtures (T30a, T30b).** zffprobe against ffprobe's first audio
+  stream (codec, sample format, channels, layout, rate and the duration in
+  the stream's time base), from a file and a pipe, and the hash driver's
+  stream copy against `ffmpeg -c copy -f framecrc`; a fixture ffprobe
+  refuses, zffprobe refuses too. A stream no packet of which decodes in the
+  read-ahead (every generate.py fixture) has no rate: ffprobe reports 0 and
+  the program cannot copy it, and zffprobe and the hash driver refuse it
+  with `UnsupportedFormat` (notes.md "A stream none of whose packets
+  decodes"). Packets and seeks are the Zig tests' (vectors/aac.txt,
+  seek_aac.txt).
+- **AAC decoding (T30b).** Every ADTS fixture decoded by zffmpeg and by the
+  ffmpeg program with `-bitexact` into each output of the Ogg decoding
+  section, byte for byte, through pipes too; a stream without a rate is
+  refused by both, the program at the end ("Could not open encoder before
+  EOF"), zffmpeg before any output. `aac_ape_binary`'s AIFF, FLAC and Ogg
+  cells are recorded (`KNOWN_AAC_DECODE_DIFFERENCES`: the program maps the
+  APE cover art to a video stream and finds no encoder).
 - **MP2 output (T29d).** zffmpeg's MP2 (the `mp2` muxer, with `mp2` or
   `-c:a mp2fixed`) against the ffmpeg program's with `-bitexact`, for the
   FLAC output section's inputs and a decoded MP3, MP2 and Ogg Vorbis

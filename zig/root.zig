@@ -70,15 +70,19 @@
 //!   as the other containers' (`format/mp2mux.zig`).
 //! - `adts`: ADTS frame headers and FFmpeg's AAC parser (`codec/adts.zig`,
 //!   with `codec/parser.zig`'s `ff_combine_frame`).
-//! - `aac`: FFmpeg's raw ADTS demuxer, without decoding, with ID3v1 and
-//!   APEv2 tags (`format/aac.zig`, `format/apetag.zig`).
+//! - `aac`: FFmpeg's raw ADTS demuxer, with ID3v1 and APEv2 tags
+//!   (`format/aac.zig`, `format/apetag.zig`).
 //! - `mpeg4audio`: the AudioSpecificConfig as FFmpeg parses it, and its PCE
 //!   copy (`codec/mpeg4audio.zig`).
 //! - `adtsmux`: FFmpeg's ADTS muxer (`format/adtsmux.zig`).
+//! - `aacdec`: FFmpeg's float AAC decoder for AAC-LC (and SSR) streams,
+//!   bit for bit (`codec/aacdec.zig`, with `codec/aac_tab.zig`).
 //! - `oggdecode`: an Ogg stream decoded as the ffmpeg program decodes it
 //!   (`format/oggdecode.zig`, with `format/decoded.zig`).
 //! - `mp3decode`: an MP3 stream decoded as the ffmpeg program decodes it
 //!   (`format/mp3decode.zig`).
+//! - `aacdecode`: an ADTS stream decoded as the ffmpeg program decodes it
+//!   (`format/aacdecode.zig`).
 //! - `framehash`: FFmpeg's framecrc, framemd5 and streamhash muxers' text
 //!   for one audio stream (`format/framehash.zig`).
 //! - `seek`: the seek API, FFmpeg's `av_seek_frame` and
@@ -151,6 +155,8 @@ pub const adts = @import("codec/adts.zig");
 pub const aac = @import("format/aac.zig");
 pub const mpeg4audio = @import("codec/mpeg4audio.zig");
 pub const adtsmux = @import("format/adtsmux.zig");
+pub const aacdec = @import("codec/aacdec.zig");
+pub const aacdecode = @import("format/aacdecode.zig");
 pub const id3v2 = @import("format/id3v2.zig");
 pub const id3v1 = @import("format/id3v1.zig");
 pub const framehash = @import("format/framehash.zig");
@@ -206,8 +212,10 @@ test {
     _ = @import("format/apetag.zig");
     _ = @import("format/aac.zig");
     _ = @import("codec/mpeg4audio.zig");
+    _ = @import("codec/aacdec.zig");
     _ = @import("format/adtsmux.zig");
     _ = @import("codec/mp3_tab.zig");
+    _ = @import("codec/aac_tab.zig");
     _ = @import("codec/mpadsp.zig");
     _ = @import("codec/mp3dec.zig");
     _ = @import("codec/mp2enc.zig");
@@ -218,6 +226,7 @@ test {
     _ = @import("format/oggdecode.zig");
     _ = @import("format/decoded.zig");
     _ = @import("format/mp3decode.zig");
+    _ = @import("format/aacdecode.zig");
     _ = @import("codec/tx.zig");
     _ = @import("codec/vlc.zig");
     _ = @import("codec/xiph.zig");

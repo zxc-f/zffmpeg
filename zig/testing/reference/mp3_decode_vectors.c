@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Original file for this project: a vector generator, not part of the port.
 //
-// Prints the T29b MPEG audio decoding oracle (zig/testing/vectors/mp3_decode.txt):
+// Prints the T29b MPEG audio decoding oracle (zig/testing/vectors/mp3_decode.txt),
+// and given the ADTS fixtures the T30b AAC one (aac_decode.txt, FFmpeg's
+// float aac decoder):
 // what the pinned FFmpeg's float decoder for the stream's codec (mp3float,
 // or since T29c mp1float and mp2float, as the ffmpeg program picks it) makes
 // of the MPEG audio stream of each file named on the command line, opened
@@ -10,7 +12,7 @@
 // it, with libavcodec's discarding of skipped samples and padding (the
 // gapless trim the mp3 demuxer sets). The lines:
 //
-//   F <name>                 a file, by name without .mp3
+//   F <name>                 a file, by name without its extension
 //   O <result>               opening the input and the decoder: ok or the
 //                            error
 //   P <size> <result>        a packet sent: its size and the result

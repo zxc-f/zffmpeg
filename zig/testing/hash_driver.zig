@@ -67,6 +67,8 @@ fn run(init: std.process.Init) Status {
         if (mode == .copy) hashOgg(gpa, kind, bytes, out) else error.OggNotDecoded
     else if (head == .mp3)
         if (mode == .copy) hashMp3(gpa, kind, bytes, out) else error.Mp3NotDecoded
+    else if (head == .aac)
+        if (mode == .copy) hashAac(gpa, kind, bytes, out) else error.AacNotDecoded
     else if (kind != .streamhash)
         error.PcmNeedsStreamhash
     else
@@ -120,6 +122,42 @@ fn hashMp3(gpa: std.mem.Allocator, kind: av.framehash.Kind, bytes: []const u8, o
             .duration = p.duration,
             .flags = .{ .key = p.flags & 1 != 0 },
         }, side[0..n]);
+    }
+    try w.finish();
+}
+
+/// ADTS (T30a, T30b), `ffmpeg -i <input> -c copy -f <muxer>`: the frames
+/// the AAC parser splits, with the rate and layout the decoder gave the
+/// stream in the read-ahead.
+fn hashAac(gpa: std.mem.Allocator, kind: av.framehash.Kind, bytes: []const u8, out: *std.Io.Writer) !void {
+    var reader: std.Io.Reader = .fixed(bytes);
+    const d = try av.aac.Demuxer.initSeekable(gpa, &reader, .fixed(&reader), .{});
+    defer d.deinit();
+    var layer = av.demux.Layer(av.aac.Demuxer).init(gpa, d);
+    defer layer.deinit();
+    try layer.findStreamInfo();
+    const params = try layer.codecParams(0);
+    // No packet decoded in the read-ahead: the muxer's "sample rate not
+    // set", zffprobe's refusal.
+    if (params.sample_rate == 0 or params.channels == 0) return error.UnsupportedFormat;
+    const tb = av.aac.time_base;
+    var w: av.framehash.Writer = .init(kind, out, .{
+        .time_base = .{ .num = @intCast(tb.num), .den = @intCast(tb.den) },
+        .codec = "aac",
+        .sample_rate = params.sample_rate,
+        .layout = if (params.mask != 0) .{ .native = params.mask } else .{ .unspecified = std.math.cast(u8, params.channels) orelse return error.UnsupportedFormat },
+        .extradata = null,
+    });
+    try w.writeHeader();
+    while (layer.next() catch null) |p| {
+        try w.writePacketSide(.{
+            .data = p.data,
+            .time_base = .{ .num = @intCast(tb.num), .den = @intCast(tb.den) },
+            .pts = p.pts,
+            .dts = p.dts,
+            .duration = p.duration,
+            .flags = .{ .key = p.flags & 1 != 0 },
+        }, &.{});
     }
     try w.finish();
 }

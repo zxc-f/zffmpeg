@@ -352,6 +352,21 @@ jobs:
             -lm -pthread -o mp3-decode-vectors
           LC_ALL=C ./mp3-decode-vectors zig/testing/fixtures/mp3/*.mp3 | diff -u zig/testing/vectors/mp3_decode.txt -
 
+      # The committed T30b oracles must be what this build's aac decoder
+      # makes of every ADTS fixture, and its tables after their static
+      # initialization.
+      - name: Check the AAC decoder and table vectors (T30b)
+        run: |
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/mp3_decode_vectors.c \
+            .references/ffmpeg-install/lib/libavformat.a .references/ffmpeg-install/lib/libavcodec.a \
+            .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a \
+            -lm -pthread -o mp3-decode-vectors
+          LC_ALL=C ./mp3-decode-vectors zig/testing/fixtures/aac/*.aac | diff -u zig/testing/vectors/aac_decode.txt -
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/aac_tab_vectors.c \
+            .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a \
+            .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o aac-tab-vectors
+          ./aac-tab-vectors | diff -u zig/testing/vectors/aac_tab.txt -
+
       # The committed T28a oracle must be what this build's Opus decoder
       # makes of every Ogg fixture's first Opus stream.
       - name: Check the Opus decoder vectors (T28a)

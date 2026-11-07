@@ -632,11 +632,13 @@ fn probeMp3(reader: *std.Io.Reader, input: *Input, options: Options) Error!Probe
     };
 }
 
-/// ADTS (T30a): the demuxer and libavformat's read-ahead, as ffprobe
-/// opens the input, so that an input FFmpeg refuses is refused alike; then
-/// `UnsupportedFormat`, as without a decoder (T30b) the stream has no
-/// sample rate or channels to report (ffprobe prints 0 for both; notes.md
-/// "ADTS without a decoder").
+/// ADTS (T30a, T30b): the demuxer and libavformat's read-ahead, which
+/// decodes the first packets with FFmpeg's AAC decoder, as ffprobe opens the
+/// input: the decoder's rate, channels and layout, planar float, and the
+/// duration in the stream's 1/28224000 time base. A stream no packet of
+/// which decodes has no rate (ffprobe prints 0): `UnsupportedFormat`
+/// (notes.md "AAC decoder scope"). The format's tags (ID3v1, else APE, else
+/// ID3v2) are the input's.
 fn probeAac(reader: *std.Io.Reader, input: *Input, options: Options) Error!Probed {
     const gpa = options.gpa orelse if (options.tags) |t| t.gpa else return error.UnsupportedFormat;
     const d = if (options.source.seeker) |sk| blk: {
@@ -647,7 +649,24 @@ fn probeAac(reader: *std.Io.Reader, input: *Input, options: Options) Error!Probe
     var layer = demux.Layer(aac.Demuxer).init(gpa, d);
     defer layer.deinit();
     try layer.findStreamInfo();
-    return error.UnsupportedFormat;
+    const params = try layer.codecParams(0);
+    if (params.sample_rate == 0 or params.channels == 0) return error.UnsupportedFormat;
+    const layout: audio.ChannelLayout = if (params.mask != 0)
+        .{ .native = params.mask }
+    else
+        .{ .unspecified = std.math.cast(u8, params.channels) orelse return error.UnsupportedFormat };
+    if (options.tags) |t| {
+        std.debug.assert(t.dictionary.count() == 0);
+        std.mem.swap(metadata.Dictionary, t.dictionary, &d.tags);
+    }
+    const duration = d.duration;
+    return .{
+        .container = .aac,
+        .codec = .aac,
+        .format = audio.Format.initLayout(params.sample_rate, layout, .fltp) catch return error.UnsupportedFormat,
+        .frame_count = if (duration >= 0) @intCast(rational.rescale(duration, params.sample_rate, aac.time_base.den)) else null,
+        .time_base_duration = if (duration >= 0) .{ .ts = duration, .den = @intCast(aac.time_base.den) } else null,
+    };
 }
 
 /// The bits per sample of an Ogg FLAC stream's STREAMINFO.

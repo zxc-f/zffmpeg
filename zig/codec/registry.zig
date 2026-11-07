@@ -163,10 +163,10 @@ fn pcmImplementations() [pcm_count]Implementation {
     return list;
 }
 
-/// The PCM decoders, then FLAC's (T26a), Vorbis' (T27d), Opus' (T28) and
+/// The PCM decoders, then FLAC's (T26a), Vorbis' (T27d), Opus' (T28),
 /// MPEG audio's (the float decoders the reference build enables, one
 /// implementation for every layer: mp3float, T29b; mp1float and mp2float,
-/// T29c), which have their own APIs.
+/// T29c) and AAC's (the float `aac`, T30b), which have their own APIs.
 pub const decoders = pcmImplementations() ++ [_]Implementation{
     .{ .name = "flac", .codec = .flac },
     .{ .name = "vorbis", .codec = .vorbis },
@@ -174,6 +174,7 @@ pub const decoders = pcmImplementations() ++ [_]Implementation{
     .{ .name = "mp3float", .codec = .mp3 },
     .{ .name = "mp1float", .codec = .mp1 },
     .{ .name = "mp2float", .codec = .mp2 },
+    .{ .name = "aac", .codec = .aac },
 };
 /// The PCM encoders, then FLAC's (T26c) and MP2's (T29d).
 pub const encoders = pcmImplementations() ++ [_]Implementation{
@@ -246,4 +247,7 @@ test "every PCM codec has a decoder and an encoder" {
     try std.testing.expect(findDecoder("mp3float").?.codec.eql(.mp3));
     try std.testing.expect(findDecoder("mp2float").?.codec.eql(.mp2));
     try std.testing.expect(findDecoder("mp1float").?.codec.eql(.mp1));
+    // AAC decodes (T30b); the port has no AAC encoder.
+    try std.testing.expect(findDecoder("aac").?.codec.eql(.aac));
+    try std.testing.expectEqual(null, findEncoder("aac"));
 }

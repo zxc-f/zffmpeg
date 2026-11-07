@@ -38,6 +38,7 @@ Usage, from the repository root:
 import argparse
 import dataclasses
 import hashlib
+import math
 import pathlib
 import struct
 import sys
@@ -4247,6 +4248,8 @@ class Mp3Fixture:
     data: bytes
     # FFmpeg opens it ("accept") or fails with this error.
     reject: str = None
+    # "ffmpeg" for a committed file FFmpeg's encoder made, checked by hash.
+    made_by: str = "generate.py"
 
 
 def build_mp3_fixtures():
@@ -4561,9 +4564,63 @@ def ape_text_item(key, value):
     return struct.pack("<II", len(value), 0) + key + b"\0" + value
 
 
+# The FFmpeg-made AAC fixtures (T30b): FFmpeg's native AAC encoder on
+# generated inputs, written by zig/testing/reference/aac_fixtures.sh and
+# committed. Each entry: channels, rate, sample count, seed, signal kind,
+# the encoder options, and the file's SHA-256.
+AAC_FFMPEG = {
+    "aac_ffmpeg_lc_44k_stereo": (2, 44100, 30000, 31, "smooth", "-c:a aac",
+                           "f7f5363936d2fa9060b930418f1e9e16f1a07169b871d9d40f4113a2b0d01886"),
+    "aac_ffmpeg_mono_8k": (1, 8000, 8000, 33, "smooth", "-c:a aac -b:a 24k",
+                           "9ad938d4a238ef1279369819e193f33adea6650c8d1208cf1050ca8c44330f77"),
+    "aac_ffmpeg_48k_64k": (2, 48000, 20000, 35, "tones", "-c:a aac -b:a 64k",
+                           "005292cf7f2385cacd193aa1aa472f33798021c041b719e9916a3f42a8e15dc1"),
+    "aac_ffmpeg_96k_256k": (2, 96000, 20000, 37, "smooth", "-c:a aac -b:a 256k",
+                           "0969755772d0a6de2338ac6daa1bc20eba05fcf34d4b2911bb16b4c7356d0bd3"),
+    "aac_ffmpeg_transients": (2, 44100, 30000, 39, "transients", "-c:a aac",
+                           "8e3bfa9d383b78510fb88990a26fe01528c9120e9c8105b4d834d967f3cdb1c5"),
+    "aac_ffmpeg_pns_22k": (1, 22050, 15000, 41, "noise", "-c:a aac -b:a 32k -aac_pns 1",
+                           "a853ac653d9d2d8f8bec4a44dd7fa23fab291e9735ff123620da1fc0f2bbf8b9"),
+    "aac_ffmpeg_is_ms": (2, 44100, 20000, 43, "tones", "-c:a aac -b:a 64k -aac_is 1 -aac_ms 1",
+                           "407c3613927d61d1524fbe2bf666217b37ee987fb84d91452af4ae3a551d1263"),
+    "aac_ffmpeg_fast_32k": (2, 32000, 15000, 45, "smooth", "-c:a aac -aac_coder fast",
+                           "0aaf6eee55399e65e1c74e716b1dc9234b0eb22e05effd8e5907b95300796c98"),
+    "aac_ffmpeg_5point1": (6, 48000, 10000, 47, "smooth", "-c:a aac",
+                           "c18327ebb27c0cf0ce852c9e1be2371692c796923bd5ccf6787739031b17ea57"),
+    "aac_ffmpeg_7point1_wide": (8, 48000, 8000, 49, "tones", "-c:a aac -ch_layout 7.1(wide)",
+                           "ec84f1bcb729ae67b31a4db483ae4f32484ad4d29bb1dcd0454ac0a8266713ec"),
+    "aac_ffmpeg_short": (2, 44100, 700, 51, "smooth", "-c:a aac",
+                           "7d8bd3894c076e6ecd55945e4f37d9ee08a30ed5cdf18bc365d4a0c320c000b2"),
+}
+
+
+def aac_ffmpeg_input(name):
+    """The s16 samples, interleaved, that aac_fixtures.sh encodes."""
+    channels, rate, count, seed, kind, _, _ = AAC_FFMPEG[name]
+    if kind == "smooth":
+        return interleave(flac_signal(count, channels, seed=seed))
+    if kind == "noise":
+        return interleave(flac_signal(count, channels, seed=seed, amplitude=30000))
+    data = []
+    for c in range(channels):
+        out = []
+        for i in range(count):
+            t = i / rate
+            if kind == "tones":
+                v = 9000 * math.sin(2 * math.pi * (220 * (c + 1)) * t) + 4000 * math.sin(2 * math.pi * 3150 * t)
+            else:
+                # Clicks every 4000 samples over a quiet tone: short windows.
+                v = 2000 * math.sin(2 * math.pi * 440 * t)
+                if i % 4000 < 40:
+                    v += 24000 * (1 if (i // 7) % 2 else -1)
+            out.append(max(-32768, min(32767, round(v))))
+        data.append(out)
+    return interleave(data)
+
+
 def build_aac_fixtures():
-    """The T30a ADTS fixtures: frames with LCG payloads (no decoder reads
-    them before T30b), every header field and FFmpeg's demuxer paths:
+    """The T30a ADTS fixtures: frames with LCG payloads (which FFmpeg's
+    decoder refuses, so the streams have no rate), every header field and FFmpeg's demuxer paths:
     resync, ID3v2 tags before and between frames, ID3v1 and APE tags at
     the end, probing by content and by extension, and damaged frames."""
     fx = []
@@ -4635,6 +4692,11 @@ def build_aac_fixtures():
     bad("aac_no_sync", "No sync word: the open's resync reaches the end (AVERROR_EOF).", mpa_payload(78, 3000),
         "EOF")
     bad("aac_id3v2_only", "An ID3v2 tag and nothing after it.", id3v2_tag([title], padding=100), "EOF")
+    for name, (channels, rate, count, _, kind, options, _) in AAC_FFMPEG.items():
+        path = AAC_DIR / f"{name}.aac"
+        fx.append(Mp3Fixture(name, "ffmpeg", f"FFmpeg's AAC encoder, {count} {kind} samples of {channels} channels "
+                             f"at {rate} Hz, `{options}`; decoded by the T30b oracle.",
+                             path.read_bytes() if path.exists() else b"", made_by="ffmpeg"))
     return fx
 
 
@@ -4717,7 +4779,7 @@ def outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures, fl
     files.update({MP3_DIR / f"{f.name}.mp3": f.data for f in mp3_fixtures})
     files[MP3_MANIFEST] = render_mp3_manifest(mp3_fixtures).encode()
     files[MP3_README] = render_readme(MP3_README, render_ogg_table(mp3_fixtures))
-    files.update({AAC_DIR / f"{f.name}.aac": f.data for f in aac_fixtures})
+    files.update({AAC_DIR / f"{f.name}.aac": f.data for f in aac_fixtures if f.made_by != "ffmpeg"})
     files[AAC_MANIFEST] = render_mp3_manifest(aac_fixtures).replace(
         "MP3 fixtures", "ADTS fixtures").replace("mp3/<name>.mp3; see mp3/README.md", "aac/<name>.aac; see aac/README.md").replace(
         "vectors/mp3.txt", "vectors/aac.txt").encode()
@@ -4744,6 +4806,12 @@ def check_ffmpeg_made(flac_fixtures):
             problems.append(f"missing FFmpeg-made fixture: {path.relative_to(HERE)}")
         elif f.sha256 is None or hashlib.sha256(path.read_bytes()).hexdigest() != f.sha256:
             problems.append(f"FFmpeg-made fixture differs from its recorded hash: {path.relative_to(HERE)}")
+    for name, (*_, digest) in AAC_FFMPEG.items():
+        path = AAC_DIR / f"{name}.aac"
+        if not path.exists():
+            problems.append(f"missing FFmpeg-made fixture: {path.relative_to(HERE)}")
+        elif digest is None or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            problems.append(f"FFmpeg-made fixture differs from its recorded hash: {path.relative_to(HERE)}")
     return problems
 
 
@@ -4754,12 +4822,17 @@ def main():
                         help="write the s16le input of FFmpeg-made FLAC fixture NAME to stdout and stop")
     parser.add_argument("--ogg-input", metavar="NAME",
                         help="write the s16le input of FFmpeg-made Ogg fixture NAME to stdout and stop")
+    parser.add_argument("--aac-input", metavar="NAME",
+                        help="write the s16le input of FFmpeg-made AAC fixture NAME to stdout and stop")
     args = parser.parse_args()
     if args.flac_input:
         sys.stdout.buffer.write(b"".join(struct.pack("<h", v) for v in flac_ffmpeg_input(args.flac_input)))
         return 0
     if args.ogg_input:
         sys.stdout.buffer.write(b"".join(struct.pack("<h", v) for v in ogg_ffmpeg_input(args.ogg_input)))
+        return 0
+    if args.aac_input:
+        sys.stdout.buffer.write(b"".join(struct.pack("<h", v) for v in aac_ffmpeg_input(args.aac_input)))
         return 0
 
     fixtures = build_fixtures()
@@ -4775,7 +4848,8 @@ def main():
                        mp3_fixtures, aac_fixtures)
     stale = [path for path, content in expected.items() if not path.exists() or path.read_bytes() != content]
     ffmpeg_made = ({FLAC_DIR / f"{f.name}.flac" for f in flac_fixtures if f.made_by == "ffmpeg"}
-                   | {OGG_DIR / f"{name}.ogg" for name in OGG_FFMPEG})
+                   | {OGG_DIR / f"{name}.ogg" for name in OGG_FFMPEG}
+                   | {AAC_DIR / f"{name}.aac" for name in AAC_FFMPEG})
     extra = sorted((set(WAV_DIR.glob("*.wav")) | set(AU_DIR.glob("*.au")) | set(AIFF_DIR.glob("*.aiff"))
              | set(RAW_DIR.glob("*.raw")) | set(CAF_DIR.glob("*.caf")) | set(FLAC_DIR.glob("*.flac"))
              | set(OGG_DIR.glob("*.ogg")) | set(MP3_DIR.glob("*.mp3")) | set(AAC_DIR.glob("*.aac")))

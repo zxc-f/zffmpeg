@@ -475,10 +475,14 @@ const probe_cases = [_]ProbeCase{
     // Named .mp3, it is MP3 by the extension hint at the end of the input,
     // as to FFmpeg, whose demuxer then finds no frames.
     .{ .name = "MPEG audio with no frames", .set = .mp3, .fixture = "mp3_no_frames", .exit_code = 2, .stderr_contains = ": InvalidMp3\n" },
-    // T30a: ADTS opens as ffprobe opens it, then has no rate or channels
-    // to report without a decoder (T30b); what FFmpeg refuses is refused.
-    .{ .name = "ADTS without a decoder", .set = .aac, .fixture = "aac_lc_stereo_44k", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
-    .{ .name = "ADTS from a pipe without a decoder", .set = .aac, .args = &.{"-"}, .stdin_fixture = "aac_id3v2_between", .exit_code = 3, .stderr = "zffprobe: -: UnsupportedFormat\n" },
+    // T30a, T30b: ADTS opens as ffprobe opens it, the read-ahead decoding
+    // its first packets for the rate, channels and layout; a stream none of
+    // whose packets decodes has no rate to report (notes.md "AAC decoder
+    // scope"); what FFmpeg refuses is refused.
+    .{ .name = "ADTS", .set = .aac, .fixture = "aac_ffmpeg_5point1", .exit_code = 0, .stdout = "format=aac\ncodec=aac\nsample_fmt=fltp\nchannels=6\nchannel_layout=5.1\nsample_rate=48000\nnb_samples=11264\nduration_num=6623272\nduration_den=28224000\n", .stderr = "" },
+    .{ .name = "ADTS from a pipe has no duration", .set = .aac, .args = &.{"-"}, .stdin_fixture = "aac_ffmpeg_lc_44k_stereo", .exit_code = 0, .stdout_contains = "sample_rate=44100\nnb_samples=N/A\n", .stderr = "" },
+    .{ .name = "ADTS none of whose packets decodes", .set = .aac, .fixture = "aac_lc_stereo_44k", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
+    .{ .name = "ADTS from a pipe none of whose packets decodes", .set = .aac, .args = &.{"-"}, .stdin_fixture = "aac_id3v2_between", .exit_code = 3, .stderr = "zffprobe: -: UnsupportedFormat\n" },
     .{ .name = "ADTS without a sync word", .set = .aac, .fixture = "aac_no_sync", .exit_code = 2, .stderr_contains = ": Truncated\n" },
     // Forced, the resync finds a sync word in the samples, as FFmpeg's does.
     .{ .name = "ADTS forced on a WAV file", .args = &.{ "-f", "aac" }, .fixture = "mono_8k", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
@@ -786,9 +790,17 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "MP1 from a pipe to raw PCM", .set = .mp3, .args = &.{ "-i", "-" }, .stdin_input = "mp1_layer1_44k", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stdout_raw = .{ .args = &.{ "-f", "s16le", "-ch_layout", "stereo", "-sample_rate", "44100" }, .nb_samples = 11520 }, .stderr = "" },
     .{ .name = "MP2 to WAV", .set = .mp3, .args = &.{"-i"}, .input = "mp2_layer2_mpeg2_joint", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt ", .stderr = "" },
     .{ .name = "MP3 whose frames mostly fail to decode", .set = .mp3, .args = &.{"-i"}, .input = "mp3_rate_change", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stdout = "", .stderr_contains = ": DecodeErrorRate\n" },
-    // T30a: ADTS has no decoder before T30b.
+    // T30a: the port has no AAC encoder.
     .{ .name = "ADTS output has no AAC encoder", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-f", "adts", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
-    .{ .name = "ADTS input has no decoder", .set = .aac, .args = &.{"-i"}, .input = "aac_lc_stereo_44k", .tail = &.{ "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
+    // T30b: ADTS decoded; compare.py checks the bytes against FFmpeg's. A
+    // stream none of whose packets decodes has no rate and is refused
+    // before any output, where the program fails at the end; a Main
+    // profile stream is refused (notes.md "AAC decoder scope").
+    .{ .name = "ADTS to WAV", .set = .aac, .args = &.{"-i"}, .input = "aac_ffmpeg_lc_44k_stereo", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt ", .stderr = "" },
+    .{ .name = "ADTS from a pipe to raw PCM", .set = .aac, .args = &.{ "-i", "-" }, .stdin_input = "aac_ffmpeg_mono_8k", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stdout_raw = .{ .args = &.{ "-f", "s16le", "-ch_layout", "mono", "-sample_rate", "8000" }, .nb_samples = 9216 }, .stderr = "" },
+    .{ .name = "ADTS input none of whose packets decodes", .set = .aac, .args = &.{"-i"}, .input = "aac_lc_stereo_44k", .tail = &.{ "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedFormat\n" },
+    .{ .name = "ADTS Main profile is refused", .set = .aac, .args = &.{"-i"}, .input = "aac_main_96k", .tail = &.{ "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedFormat\n" },
+    .{ .name = "ADTS copy is unsupported", .set = .aac, .args = &.{"-i"}, .input = "aac_ffmpeg_lc_44k_stereo", .tail = &.{ "-c", "copy", "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
     // T29d: MP2 encoded; compare.py checks the bytes against FFmpeg's. The
     // default bit rate (384 kbit/s, an MPEG-1 header), and mp2fixed at an
     // LSF rate from a pipe; the encoder's refusals come before any output.

@@ -14,8 +14,8 @@
 //! bytes into ADTS frames for libavformat's AVSTREAM_PARSE_FULL_RAW. It
 //! sets the codec context's profile and average bit rate and marks each
 //! frame whose header parses as a keyframe; the sample rate, channels and
-//! frame durations are left to the decoder (T30b), as in FFmpeg, where
-//! HE-AAC makes the header's values unreliable.
+//! frame durations are left to the decoder (codec/aacdec.zig, T30b), as in
+//! FFmpeg, where HE-AAC makes the header's values unreliable.
 
 const std = @import("std");
 const parser = @import("parser.zig");

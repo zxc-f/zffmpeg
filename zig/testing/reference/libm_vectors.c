@@ -5,7 +5,7 @@
 // reference platform's exp2f, sinf and cosf (glibc, whose x86-64 variant
 // with FMA runs on every verified machine) return where FFmpeg's CELT
 // decoder calls them. The inputs come from integer arithmetic only, so the
-// Zig test (core/libm.zig) repeats them. The lines:
+// Zig tests (core/libm.zig, core/libm/powf.zig) repeat them. The lines:
 //
 //   E <stride> <count> <md5>   exp2f of the float with bit pattern
 //                              i * stride for i below count
@@ -28,8 +28,22 @@
 //   I cbrt <count> <md5>       cbrt of every integer below count, the
 //                              values FFmpeg's MP3 decoder tables take
 //                              (T29b)
+//   P powf <bits> <lo> <hi> <md5>
+//                              powf(scale, n) for every integer n from lo
+//                              to hi, scale the float with these bits:
+//                              the four coupling gain bases of FFmpeg's
+//                              float AAC decoder (cce_scale, T30b)
+//   F powf <dx> <dy> <count> <md5>
+//                              powf(x, y) of count pairs, x drawn from
+//                              float distribution dx and y from dy (see
+//                              sample_float)
+//   R cbrtf <count> <md5>      cbrtf of every integer below count, a range
+//                              holding the pulse amplitudes FFmpeg's float
+//                              AAC decoder takes it of (T30b)
+//   S cbrtf <d> <count> <md5>  cbrtf of count floats drawn from float
+//                              distribution d
 //
-// Each MD5 covers the results as float32 (or float64 for D lines)
+// Each MD5 covers the results as float32 (or float64 for D, C and I lines)
 // little-endian, in order (sinf before cosf). See zig/testing/reference/README.md for the build commands.
 
 #include <math.h>
@@ -101,6 +115,62 @@ static double sample(int dist)
         return ldexp(m, e) * ((xs_next() & 1) ? -1.0 : 1.0);
     }
     }
+}
+
+/* Float bit patterns for powf: zeros, infinities, quiet and signaling NaNs
+ * of both signs, small integers and halves, the smallest and largest
+ * normals and subnormals, odd and even integers near 2^24, the neighbors of
+ * one, and exponents at powf's overflow and underflow bounds. */
+static const uint32_t powf_special[] = {
+    0x00000000, 0x80000000, 0x7f800000, 0xff800000, 0x7fc00000, 0xffc00000,
+    0x7fa00001, 0xffa00001, 0x7fc12345, 0x3f800000, 0xbf800000, 0x3f000000,
+    0xbf000000, 0x40000000, 0xc0000000, 0x40400000, 0xc0400000, 0x00800000,
+    0x80800000, 0x00000001, 0x80000001, 0x007fffff, 0x7f7fffff, 0xff7fffff,
+    0x4b800000, 0x4b7fffff, 0xcb7fffff, 0x3f800001, 0x3f7fffff, 0x43000000,
+    0xc3160000, 0x42fc0000, 0xc3150000, 0x4effffff, 0xcf000000, 0x5f800000,
+};
+
+/* The float distributions, as bit patterns built from integers only: any
+ * pattern, 2^-8 <= |v| < 2^8, any positive finite (subnormals included),
+ * powf_special, an integer in [-300, 300], within 4096 ulps of one,
+ * 2^-30 <= |v| < 2^30, and integers and half-integers from 1 to 2^32 in
+ * magnitude; signs are random where the value has one. */
+static uint32_t sample_float(int dist)
+{
+    uint64_t u = xs_next();
+    uint32_t lo = (uint32_t)u, hi = (uint32_t)(u >> 32);
+    uint32_t sign = hi & 0x80000000u;
+    uint32_t pick = (hi >> 8) & 0xffff;
+    uint32_t mant = lo & 0x7fffff;
+    switch (dist) {
+    case 0: return lo;
+    case 1: return sign | ((127 - 8 + pick % 16) << 23) | mant;
+    case 2: return ((pick % 255) << 23) | mant;
+    case 3: return powf_special[pick % (sizeof(powf_special) / sizeof(powf_special[0]))];
+    case 4: {
+        float v = (float)((int32_t)(pick % 601) - 300);
+        uint32_t b;
+        memcpy(&b, &v, 4);
+        return b;
+    }
+    case 5: return (hi & 1) ? 0x3f800000u + lo % 4096 : 0x3f800000u - lo % 4096;
+    case 6: return sign | ((127 - 30 + pick % 60) << 23) | mant;
+    default: {
+        uint32_t e = pick % 32;
+        uint32_t frac = e < 23 ? 23 - e : 0;
+        uint32_t m = mant & ~((1u << frac) - 1);
+        if (frac > 0 && (hi & 1))
+            m |= 1u << (frac - 1);
+        return sign | ((127 + e) << 23) | m;
+    }
+    }
+}
+
+static float from_bits(uint32_t b)
+{
+    float v;
+    memcpy(&v, &b, 4);
+    return v;
 }
 
 static void print(const char *head, struct AVMD5 *md5)
@@ -219,6 +289,53 @@ int main(void)
     for (int v = 0; v < 8208; v++)
         put_double(md5, cbrt((double)v));
     print("I cbrt 8208", md5);
+
+    /* T30b: powf, called through a volatile pointer so that the compiler
+     * cannot fold or rewrite a call. FFmpeg's float AAC decoder takes
+     * powf(cce_scale[i], -gain) for its coupling gains. */
+    float (*volatile powf_fn)(float, float) = powf;
+    static const float cce_scale[] = {
+        1.09050773266525765921, // 2^(1/8)
+        1.18920711500272106672, // 2^(1/4)
+        M_SQRT2,
+        2,
+    };
+    for (int s = 0; s < 4; s++) {
+        uint32_t bits;
+        memcpy(&bits, &cce_scale[s], 4);
+        av_md5_init(md5);
+        for (int g = -300; g <= 300; g++)
+            put(md5, powf_fn(cce_scale[s], (float)g));
+        snprintf(head, sizeof(head), "P powf %08x -300 300", bits);
+        print(head, md5);
+    }
+    for (int dx = 0; dx < 8; dx++)
+        for (int dy = 0; dy < 8; dy++) {
+            xs_state = 0x9E3779B97F4A7C15ull + 1000003ull * (1000 + dx * 8 + dy);
+            av_md5_init(md5);
+            for (int i = 0; i < 5000; i++) {
+                float x = from_bits(sample_float(dx));
+                float y = from_bits(sample_float(dy));
+                put(md5, powf_fn(x, y));
+            }
+            snprintf(head, sizeof(head), "F powf %d %d 5000", dx, dy);
+            print(head, md5);
+        }
+
+    /* T30b: cbrtf, which the AAC decoder takes of its pulse amplitudes. */
+    float (*volatile cbrtf_fn)(float) = cbrtf;
+    av_md5_init(md5);
+    for (int v = 0; v < 65536; v++)
+        put(md5, cbrtf_fn((float)v));
+    print("R cbrtf 65536", md5);
+    for (int d = 0; d < 8; d++) {
+        xs_state = 0x9E3779B97F4A7C15ull + 1000003ull * (2000 + d);
+        av_md5_init(md5);
+        for (int i = 0; i < 20000; i++)
+            put(md5, cbrtf_fn(from_bits(sample_float(d))));
+        snprintf(head, sizeof(head), "S cbrtf %d 20000", d);
+        print(head, md5);
+    }
 
     av_freep(&md5);
     return 0;

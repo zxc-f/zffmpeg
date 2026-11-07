@@ -137,4 +137,59 @@
         .sha256 = "51002144c46b73379a91cef92d5dbf52e75aa8abec2f10e1d039a45fd422f811",
         .expected = .reject,
     },
+    .{
+        .name = "aac_ffmpeg_lc_44k_stereo",
+        .sha256 = "f7f5363936d2fa9060b930418f1e9e16f1a07169b871d9d40f4113a2b0d01886",
+        .expected = .accept,
+    },
+    .{
+        .name = "aac_ffmpeg_mono_8k",
+        .sha256 = "9ad938d4a238ef1279369819e193f33adea6650c8d1208cf1050ca8c44330f77",
+        .expected = .accept,
+    },
+    .{
+        .name = "aac_ffmpeg_48k_64k",
+        .sha256 = "005292cf7f2385cacd193aa1aa472f33798021c041b719e9916a3f42a8e15dc1",
+        .expected = .accept,
+    },
+    .{
+        .name = "aac_ffmpeg_96k_256k",
+        .sha256 = "0969755772d0a6de2338ac6daa1bc20eba05fcf34d4b2911bb16b4c7356d0bd3",
+        .expected = .accept,
+    },
+    .{
+        .name = "aac_ffmpeg_transients",
+        .sha256 = "8e3bfa9d383b78510fb88990a26fe01528c9120e9c8105b4d834d967f3cdb1c5",
+        .expected = .accept,
+    },
+    .{
+        .name = "aac_ffmpeg_pns_22k",
+        .sha256 = "a853ac653d9d2d8f8bec4a44dd7fa23fab291e9735ff123620da1fc0f2bbf8b9",
+        .expected = .accept,
+    },
+    .{
+        .name = "aac_ffmpeg_is_ms",
+        .sha256 = "407c3613927d61d1524fbe2bf666217b37ee987fb84d91452af4ae3a551d1263",
+        .expected = .accept,
+    },
+    .{
+        .name = "aac_ffmpeg_fast_32k",
+        .sha256 = "0aaf6eee55399e65e1c74e716b1dc9234b0eb22e05effd8e5907b95300796c98",
+        .expected = .accept,
+    },
+    .{
+        .name = "aac_ffmpeg_5point1",
+        .sha256 = "c18327ebb27c0cf0ce852c9e1be2371692c796923bd5ccf6787739031b17ea57",
+        .expected = .accept,
+    },
+    .{
+        .name = "aac_ffmpeg_7point1_wide",
+        .sha256 = "ec84f1bcb729ae67b31a4db483ae4f32484ad4d29bb1dcd0454ac0a8266713ec",
+        .expected = .accept,
+    },
+    .{
+        .name = "aac_ffmpeg_short",
+        .sha256 = "7d8bd3894c076e6ecd55945e4f37d9ee08a30ed5cdf18bc365d4a0c320c000b2",
+        .expected = .accept,
+    },
 }

@@ -9,13 +9,14 @@
 // the terms of the GNU Lesser General Public License as published by the
 // Free Software Foundation; either version 2.1 of the License, or (at your
 // option) any later version.
-//! FFmpeg's raw ADTS demuxer (`aac`, TODO.md T30a), without decoding: the
+//! FFmpeg's raw ADTS demuxer (`aac`, TODO.md T30a): the
 //! ID3v2 tags libavformat reads before it, ID3v1 and then APE tags at the
 //! end of a seekable input, the resync to the first sync word, then one
 //! packet per frame header (ID3v2 tags between frames read into the
 //! format's tags, junk resynced past), which demux.zig's layer splits again
-//! with FFmpeg's AAC parser (codec/adts.zig). Without a decoder the stream
-//! has no sample rate, channels or packet timestamps (T30b).
+//! with FFmpeg's AAC parser (codec/adts.zig). The layer's read-ahead runs
+//! the AAC decoder (T30b) for the stream's rate, channels and layout, and
+//! so its timestamps; a stream none of whose packets decodes has none.
 
 const std = @import("std");
 const metadata = @import("../core/metadata.zig");
@@ -246,6 +247,7 @@ pub const Demuxer = struct {
             .sample_rate = 0,
             .channels = 0,
             .parser = .aac,
+            .decoder = .aac,
         };
     }
 
@@ -502,8 +504,10 @@ fn seekBlock(name: []const u8) ?[]const u8 {
     return if (start) |s| seek_vectors[s..] else null;
 }
 
-/// The next packet's lines, as seek_vectors.c prints them: without a
-/// decoder, `D none`; a read that fails, its error.
+/// The next packet's lines, as seek_vectors.c prints them: the frame a
+/// fresh AAC decoder (opened with the stream's parameters) makes of it,
+/// its sample count and the first 16 sample frames' worth of bytes of its
+/// first plane, else `D none`; a read that fails, its error.
 fn nextAfterSeek(gpa: std.mem.Allocator, layer: anytype, out: *std.ArrayList(u8)) !void {
     const next_packet = layer.next() catch |err| switch (err) {
         error.InvalidAdts => return out.appendSlice(gpa, "P INVALIDDATA\n"),
@@ -514,8 +518,34 @@ fn nextAfterSeek(gpa: std.mem.Allocator, layer: anytype, out: *std.ArrayList(u8)
     try writeTs(out, gpa, p.pts);
     try out.print(gpa, " {d} {d}\n", .{ p.pos, p.data.len });
     if (p.skip) |skip| try out.print(gpa, "Z {d} {d}\n", .{ skip[0], skip[1] });
-    try out.appendSlice(gpa, "D none\n");
+    const params = try layer.codecParams(0);
+    var d = aacdec.Decoder.init(gpa, params.sample_rate, params.channels) catch return out.appendSlice(gpa, "D none\n");
+    defer d.deinit();
+    const got = d.decode(p.data) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return out.appendSlice(gpa, "D none\n"),
+    };
+    const frame = got.frame orelse return out.appendSlice(gpa, "D none\n");
+    // decode.c's discarding of the skip samples a seek asked for.
+    var discard: decoded.Discard = .{};
+    const kept = discard.apply(frame.samples, p.skip) orelse return out.appendSlice(gpa, "D none\n");
+    const count = kept[1] - kept[0];
+    try out.print(gpa, "D {d} ", .{count});
+    // frame->data[0]: the first plane, read for 16 frames of every channel;
+    // av_samples_copy moved the kept samples to its start.
+    const plane = frame.planes[0].ptr;
+    const floats = @min(count, 16) * frame.planes.len;
+    for (0..floats) |i| {
+        const v = if (i < count) plane[kept[0] + i] else plane[i];
+        var le: [4]u8 = undefined;
+        std.mem.writeInt(u32, &le, @bitCast(v), .little);
+        try out.print(gpa, "{x}", .{&le});
+    }
+    try out.append(gpa, '\n');
 }
+
+const aacdec = @import("../codec/aacdec.zig");
+const decoded = @import("decoded.zig");
 
 test "every ADTS fixture seeks as FFmpeg seeks it (vectors/seek_aac.txt)" {
     const gpa = testing.allocator;

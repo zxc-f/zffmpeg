@@ -69,6 +69,7 @@ const oggdecode = @import("oggdecode.zig");
 const decoded_input = @import("decoded.zig");
 const mp3 = @import("mp3.zig");
 const mp3decode = @import("mp3decode.zig");
+const aacdecode = @import("aacdecode.zig");
 const mp2mux = @import("mp2mux.zig");
 const mp2enc = @import("../codec/mp2enc.zig");
 const flacenc = @import("../codec/flacenc.zig");
@@ -288,6 +289,8 @@ pub const Conversion = struct {
         ogg: oggdecode.DecodedReader,
         /// MP3 decoded (T29b).
         mp3: mp3decode.DecodedReader,
+        /// ADTS decoded (T30b).
+        aac: aacdecode.DecodedReader,
         raw: raw.Parser,
     };
 
@@ -327,13 +330,15 @@ pub const Conversion = struct {
                 .init(request.gpa orelse return error.UnsupportedOperation, source.reader(), null, request.diagnostics) },
             // Output only: detection never names them.
             .mp2, .adts => return error.UnsupportedOperation,
-            // ADTS is read without a decoder until T30b, and no PCM or
-            // FLAC output carries AAC: nothing to convert it to.
-            .aac => return error.UnsupportedOperation,
+            // Decoded (T30b), read as the MP3 input is.
+            .aac => .{ .aac = if (try rewound(source)) |sk|
+                .init(request.gpa orelse return error.UnsupportedOperation, source.replay.source, sk, request.diagnostics)
+            else
+                .init(request.gpa orelse return error.UnsupportedOperation, source.reader(), null, request.diagnostics) },
         };
         errdefer deinitParser(&input);
         // A header written before the samples needs their count. A decoded
-        // Ogg or MP3 input counts them ahead (decoding the stream twice)
+        // Ogg, MP3 or ADTS input counts them ahead (decoding the stream twice)
         // only when that header cannot be rewritten at the end.
         const header_first = switch (request.output.family()) {
             .wav, .au, .aiff => true,
@@ -342,6 +347,7 @@ pub const Conversion = struct {
         switch (input) {
             .ogg => |*reader| reader.count_ahead = header_first and !request.output_seekable,
             .mp3 => |*reader| reader.count_ahead = header_first and !request.output_seekable,
+            .aac => |*reader| reader.count_ahead = header_first and !request.output_seekable,
             .wav, .au, .aiff, .caf, .flac, .raw => {},
         }
         // The tags as the file stores them, renamed once the header is read.
@@ -351,7 +357,7 @@ pub const Conversion = struct {
             std.debug.assert(t.dictionary.count() == 0);
             switch (input) {
                 .wav => |*parser| parser.collectTags(.{ .gpa = t.gpa, .dictionary = &stored }),
-                .au, .aiff, .caf, .flac, .ogg, .mp3, .raw => {},
+                .au, .aiff, .caf, .flac, .ogg, .mp3, .aac, .raw => {},
             }
         }
         var summary: Summary = switch (input) {
@@ -405,7 +411,7 @@ pub const Conversion = struct {
             // Later tags could not reach the output header; `stored` dies here.
             switch (input) {
                 .wav => |*parser| parser.tags = null,
-                .au, .aiff, .caf, .flac, .ogg, .mp3, .raw => {},
+                .au, .aiff, .caf, .flac, .ogg, .mp3, .aac, .raw => {},
             }
             // FLAC's tags are already under FFmpeg's names (T26b).
             var generic = switch (input) {
@@ -415,6 +421,8 @@ pub const Conversion = struct {
                 // MP3's ID3 and APE tags are the format's, under FFmpeg's
                 // names.
                 .mp3 => |*reader| try reader.tags().clone(t.gpa),
+                // ADTS's ID3 and APE tags, likewise.
+                .aac => |*reader| try reader.tags().clone(t.gpa),
                 else => try wav.genericTags(t.gpa, &stored),
             };
             defer generic.deinit(t.gpa);
@@ -455,7 +463,7 @@ pub const Conversion = struct {
         if (request.mode == .transcode) _ = try rematrix.needed(summary.format.layout, summary.output_layout);
         // Without a count, the decoded input's header is rewritten at the end.
         const deferred_header = header_first and request.output_seekable and summary.frame_count == null and
-            (input == .ogg or input == .mp3);
+            (input == .ogg or input == .mp3 or input == .aac);
         if (summary.output_rate == 0) return error.InvalidFormat;
         // The resampler's frame count, which the writers' headers need (T24).
         if (resampling) {
@@ -494,6 +502,7 @@ pub const Conversion = struct {
             // The decoder's frames: Vorbis' long block, FLAC's largest.
             .ogg => |*reader| reader.max_frame,
             .mp3 => mp3decode.DecodedReader.max_frame,
+            .aac => aacdecode.DecodedReader.max_frame,
             else => ffmpegPacketFrames(summary.input, summary.input_codec, summary.format),
         };
         if (resampling) try checkResampling(summary, packet_frames);
@@ -513,7 +522,7 @@ pub const Conversion = struct {
                 reader.expected = null;
                 summary.output_frame_count = null;
             },
-            .mp3 => |*reader| if (request.output.family() == .raw or request.output.family() == .flac or request.output.family() == .ogg) {
+            inline .mp3, .aac => |*reader| if (request.output.family() == .raw or request.output.family() == .flac or request.output.family() == .ogg) {
                 reader.expected = null;
                 summary.output_frame_count = null;
             },
@@ -533,7 +542,7 @@ pub const Conversion = struct {
             // program drops when it re-encodes.
             switch (input) {
                 .ogg => |*reader| try carryStreamTags(request.gpa.?, &stream_tags, reader.streamTags()),
-                .wav, .au, .aiff, .caf, .flac, .mp3, .raw => {},
+                .wav, .au, .aiff, .caf, .flac, .mp3, .aac, .raw => {},
             }
             // The comment header holds the stream tags too, so its bound
             // is checked again with them, before any output exists.
@@ -568,6 +577,7 @@ pub const Conversion = struct {
             .flac => |*reader| reader.deinit(),
             .ogg => |*reader| reader.deinit(),
             .mp3 => |*reader| reader.deinit(),
+            .aac => |*reader| reader.deinit(),
             .wav, .au, .aiff, .caf, .raw => {},
         }
     }
@@ -663,6 +673,7 @@ pub const Conversion = struct {
                     .flac => |*reader| try reader.firstFrameSamples(),
                     .ogg => |*reader| try reader.firstFrameSamples(),
                     .mp3 => |*reader| try reader.firstFrameSamples(),
+                    .aac => |*reader| try reader.firstFrameSamples(),
                     else => c.packet_frames,
                 };
                 var writer = flacmux.Writer.begin(c.gpa.?, out, seeker, s.output_codec, s.outputFormat(), sourceBits(s, &c.input), first, .{ .encoder = c.flac_options, .tags = c.tags }) catch |err| return outputFailure(err);
@@ -676,6 +687,7 @@ pub const Conversion = struct {
                     .flac => |*reader| try reader.firstFrameSamples(),
                     .ogg => |*reader| try reader.firstFrameSamples(),
                     .mp3 => |*reader| try reader.firstFrameSamples(),
+                    .aac => |*reader| try reader.firstFrameSamples(),
                     else => c.packet_frames,
                 };
                 var writer = flacmux.Writer.begin(c.gpa.?, out, null, s.output_codec, s.outputFormat(), sourceBits(s, &c.input), first, .{ .encoder = c.flac_options, .tags = c.tags, .container = .{ .ogg = .{ .stream_tags = &c.stream_tags } } }) catch |err| return outputFailure(err);
@@ -794,7 +806,7 @@ pub const Conversion = struct {
         defer gpa.free(encoded);
         var encoder: pcm.Encoder = .init(s.output_codec, out_format, encoded);
         switch (c.input) {
-            .flac, .ogg, .mp3 => try c.resampleFrames(W, writer, &converter, &encoder),
+            .flac, .ogg, .mp3, .aac => try c.resampleFrames(W, writer, &converter, &encoder),
             .wav, .au, .aiff, .caf, .raw => try c.resamplePackets(W, writer, &converter, &encoder),
         }
         encoder.finishInput();
@@ -980,7 +992,8 @@ fn carryStreamTags(gpa: std.mem.Allocator, out: *metadata.Dictionary, input: *co
 /// `vorbis_parse_id_hdr`).
 fn decoderSetsLayout(stream: codecs.Codec) bool {
     return switch (stream) {
-        .opus, .vorbis => true,
+        // The AAC decoder's layout is the stream's after the read-ahead.
+        .opus, .vorbis, .aac => true,
         else => false,
     };
 }
@@ -1009,7 +1022,7 @@ fn sourceBits(summary: Summary, input: *const Conversion.Parser) u8 {
     return switch (input.*) {
         .flac => |*reader| reader.bps,
         .ogg => |*reader| reader.bits,
-        .mp3 => 32,
+        .mp3, .aac => 32,
         else => @intCast(summary.input_codec.bytesPerSample() * 8),
     };
 }
@@ -1029,7 +1042,7 @@ fn ffmpegPacketFrames(container: Container, codec: pcm.Codec, format: audio.Form
         .ogg => unreachable, // Conversion.init takes the decoder's frames
         .mp3 => unreachable, // Conversion.init takes the decoder's frames
         .mp2, .adts => unreachable, // no demuxer
-        .aac => unreachable, // Conversion.init refuses it
+        .aac => unreachable, // Conversion.init takes the decoder's frames
     };
 }
 

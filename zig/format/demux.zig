@@ -46,6 +46,7 @@ const seek = @import("seek.zig");
 const mpegaudio = @import("../codec/mpegaudio.zig");
 const adts = @import("../codec/adts.zig");
 const id3v2 = @import("id3v2.zig");
+const aacdec = @import("../codec/aacdec.zig");
 
 pub const nopts: i64 = std.math.minInt(i64);
 /// libavformat's base for timestamps counted before the first is known.
@@ -116,6 +117,21 @@ pub const Decoder = enum {
     /// context without a channel count, so the parameters never complete
     /// and the read-ahead runs to its end.
     refuses,
+    /// FFmpeg's AAC decoder (T30b), run on the read-ahead's packets as
+    /// try_decode_frame runs it: the rate, channels and frame size are
+    /// what it decodes (the channels even from frames it then refuses).
+    aac,
+};
+
+/// What a decoder run in the read-ahead left in libavformat's codec
+/// context.
+pub const DecodedParams = struct {
+    sample_rate: u32 = 0,
+    channels: u32 = 0,
+    /// The channel mask, 0 for an unspecified order.
+    mask: u64 = 0,
+    frame_size: u32 = 0,
+    seek_preroll: u32 = 0,
 };
 
 pub const WindowError = error{ IoFailure, OutOfMemory };
@@ -338,6 +354,9 @@ const StreamState = struct {
     /// context it fills (`sti->avctx`), which stays.
     raw: ?RawParser = null,
     codec: ?ParserContext = null,
+    /// The AAC decoder try_decode_frame opened, and what it decoded.
+    aac: ?*aacdec.Decoder = null,
+    decoded_params: DecodedParams = .{},
     /// The samples the next packet's skip-samples side data discards,
     /// and the request a seek leaves for it (`seek_discard`,
     /// `seek_to_start`).
@@ -380,6 +399,8 @@ const ParserContext = union(enum) {
 pub const CodecParams = struct {
     /// The MPEG audio codec, when the parser chose one.
     mpa_codec: ?mpegaudio.Codec,
+    /// The channel mask a decoder set, 0 when none or unspecified.
+    mask: u64 = 0,
     /// The AAC parser's profile, when it set one.
     profile: ?u8 = null,
     sample_rate: u32,
@@ -422,6 +443,7 @@ pub fn Layer(comptime Source: type) type {
             for (l.states.items) |*s| {
                 s.index.deinit(l.gpa);
                 if (s.raw) |*p| p.deinit(l.gpa);
+                l.closeDecoder(s);
             }
             l.states.deinit(l.gpa);
         }
@@ -431,6 +453,15 @@ pub fn Layer(comptime Source: type) type {
         pub fn codecParams(l: *Self, i: usize) Error!CodecParams {
             const setup = l.src.setup(i);
             const s = try l.state(i);
+            if (setup.decoder == .aac and s.found_decoder > 0) {
+                const p = s.decoded_params;
+                const bit_rate = if (s.codec) |c| c.bitRate() else setup.bit_rate;
+                const profile: ?u8 = if (s.codec) |c| switch (c) {
+                    .aac => |a| a.profile,
+                    else => null,
+                } else null;
+                return .{ .mpa_codec = null, .profile = profile, .sample_rate = p.sample_rate, .channels = @intCast(@min(p.channels, 255)), .mask = p.mask, .bit_rate = bit_rate };
+            }
             if (s.codec) |codec| switch (codec) {
                 .mpa => |c| return .{ .mpa_codec = c.codec, .sample_rate = c.sample_rate, .channels = c.channels, .bit_rate = c.bit_rate },
                 .aac => |c| return .{ .mpa_codec = null, .profile = c.profile, .sample_rate = setup.sample_rate, .channels = setup.channels, .bit_rate = c.bit_rate },
@@ -530,11 +561,17 @@ pub fn Layer(comptime Source: type) type {
                             s.found_decoder = -1;
                             s.no_channels = true;
                         },
+                        // Opened by tryDecodeAac.
+                        .aac => {},
                     }
                 }
                 if (setup.decoder == .flac and !s.decoded and setup.parser == .flac_headers and validFlacFrame(pkt.data)) s.decoded = true;
+                if (setup.decoder == .aac) try l.tryDecodeAac(s, setup, pkt.data);
                 s.codec_info_nb_frames += 1;
             }
+            // The decoders opened for the read-ahead close; what they set
+            // stays.
+            for (l.states.items) |*s| l.closeDecoder(s);
             l.estimateTimings();
         }
 
@@ -628,9 +665,63 @@ pub fn Layer(comptime Source: type) type {
             }
         }
 
+        /// try_decode_frame with FFmpeg's AAC decoder: opened on the first
+        /// packet with the demuxer's rate and channels; each packet's
+        /// frames decoded in order while the parameters are incomplete (and
+        /// for the first packet, AV_CODEC_CAP_CHANNEL_CONF), up to a
+        /// refused frame.
+        fn tryDecodeAac(l: *Self, s: *StreamState, setup: Setup, data_in: []const u8) Error!void {
+            if (s.found_decoder == 0) {
+                const d = try l.gpa.create(aacdec.Decoder);
+                d.* = aacdec.Decoder.init(l.gpa, setup.sample_rate, setup.channels) catch |err| {
+                    l.gpa.destroy(d);
+                    if (err == error.OutOfMemory) return error.OutOfMemory;
+                    s.found_decoder = -1;
+                    return;
+                };
+                s.aac = d;
+                s.found_decoder = 1;
+                s.decoded_params = .{ .channels = d.channels, .mask = d.mask, .seek_preroll = d.seek_preroll };
+            }
+            const d = s.aac orelse return;
+            var data = data_in;
+            while (data.len > 0 and (!hasCodecParameters(setup, s.*) or s.codec_info_nb_frames == 0)) {
+                const got = d.decode(data) catch |err| {
+                    if (err == error.OutOfMemory) return error.OutOfMemory;
+                    s.decoded_params.channels = d.channels;
+                    s.decoded_params.mask = d.mask;
+                    return;
+                };
+                s.decoded_params = .{ .sample_rate = d.sample_rate, .channels = d.channels, .mask = d.mask, .frame_size = d.frame_size, .seek_preroll = d.seek_preroll };
+                if (got.consumed == 0) return;
+                data = data[@min(got.consumed, data.len)..];
+            }
+        }
+
+        fn closeDecoder(l: *Self, s: *StreamState) void {
+            if (s.aac) |d| {
+                d.deinit();
+                l.gpa.destroy(d);
+            }
+            s.aac = null;
+        }
+
+        /// `codecpar->seek_preroll`: the demuxer's, or the one a decoder
+        /// opened in the read-ahead set.
+        fn streamPreroll(setup: Setup, s: StreamState) u32 {
+            if (setup.decoder == .aac and s.found_decoder > 0) return @max(setup.seek_preroll, s.decoded_params.seek_preroll);
+            return setup.seek_preroll;
+        }
+
         /// has_codec_parameters for an audio stream.
         fn hasCodecParameters(setup: Setup, s: StreamState) bool {
             if (!setup.known) return false;
+            if (setup.decoder == .aac) {
+                // The sample format is unknown until the decoder opens.
+                if (s.found_decoder == 0) return false;
+                if (s.found_decoder < 0) return setup.sample_rate != 0 and setup.channels != 0;
+                return s.decoded_params.sample_rate != 0 and s.decoded_params.channels != 0;
+            }
             if (setup.frame_size_unknown) return false;
             if (setup.sample_rate == 0 and s.parser_rate == 0) return false;
             if (setup.channels == 0 or s.no_channels) return false;
@@ -732,6 +823,7 @@ pub fn Layer(comptime Source: type) type {
         /// The codec parameters' sample rate: the demuxer's, else the
         /// parser's.
         fn sampleRate(l: *Self, i: usize, s: *const StreamState) u32 {
+            if (l.src.setup(i).decoder == .aac and s.found_decoder > 0) return s.decoded_params.sample_rate;
             if (s.codec) |codec| switch (codec) {
                 .mpa => |c| return c.sample_rate,
                 .aac => {},
@@ -880,7 +972,7 @@ pub fn Layer(comptime Source: type) type {
                     if (first) {
                         if (setup.initial_padding > 0) skip = setup.initial_padding;
                     } else if (!(s.seek_to_start and h.pts != nopts and !in_priming)) {
-                        skip = @max(skip, setup.seek_preroll);
+                        skip = @max(skip, streamPreroll(setup, s.*));
                     }
                     s.skip_samples = @max(s.skip_samples, @min(skip, std.math.maxInt(i32)));
                 }
@@ -956,6 +1048,14 @@ pub fn Layer(comptime Source: type) type {
             // compute_frame_duration: av_get_audio_frame_duration's fixed
             // frame of an MPEG audio codec at the codec context's rate; for
             // the other supported codecs, whose frames vary in size, none.
+            // A decoder's frame size (av_get_audio_frame_duration's
+            // frame_size for a codec with no table of its own).
+            if (pkt.duration <= 0 and setup.decoder == .aac and s.decoded_params.frame_size > 0 and s.decoded_params.sample_rate > 0 and pkt.data.len > 0) {
+                const frame: i64 = s.decoded_params.frame_size;
+                const rate: i64 = s.decoded_params.sample_rate;
+                inc = .{ .num = @intCast(frame), .den = @intCast(rate) };
+                pkt.duration = rational.rescaleRnd(1, frame * setup.time_base.den, rate * setup.time_base.num, .down);
+            }
             if (pkt.duration <= 0) if (s.codec) |codec| if (codec == .mpa) {
                 const ctx = codec.mpa;
                 const frame: i64 = switch (ctx.codec) {
@@ -1239,8 +1339,9 @@ pub fn Layer(comptime Source: type) type {
             for (0..l.src.streamCount()) |i| {
                 const setup = l.src.setup(i);
                 const rate = l.sampleRate(i, &l.states.items[i]);
-                if (!setup.known or setup.seek_preroll == 0 or rate == 0) continue;
-                const v = rational.rescaleQRnd(setup.seek_preroll, .{ .num = 1, .den = @intCast(rate) }, unit, .{ .mode = .up });
+                const samples = streamPreroll(setup, l.states.items[i]);
+                if (!setup.known or samples == 0 or rate == 0) continue;
+                const v = rational.rescaleQRnd(samples, .{ .num = 1, .den = @intCast(rate) }, unit, .{ .mode = .up });
                 preroll = @max(preroll, v);
             }
             return preroll;
