@@ -27,6 +27,15 @@ libavformat; port.md's "MP3 contract" says which behavior the port follows.
 | `mp2_layer2_48k` | accepted | yes | MPEG-1 Layer II, 48000 Hz, 192 kbit/s stereo: codec mp2. |
 | `mp2_layer2_mpeg2_24k` | accepted | yes | MPEG-2 Layer II, 24000 Hz, 64 kbit/s mono. |
 | `mp1_layer1_44k` | accepted | yes | MPEG-1 Layer I, 44100 Hz, 384 kbit/s stereo, padded slots of 4 bytes: codec mp1. |
+| `mp1_layer1_mono_32k` | accepted | yes | MPEG-1 Layer I, 32000 Hz, 128 kbit/s mono. |
+| `mp1_layer1_joint_crc` | accepted | yes | MPEG-1 Layer I, 48000 Hz, 256 kbit/s joint stereo, the mode extension (the intensity bound) cycling through 0 to 3, frames protected by a CRC. |
+| `mp1_layer1_mpeg2_22k` | accepted | yes | MPEG-2 Layer I, 22050 Hz, 96 kbit/s stereo. |
+| `mp2_layer2_44k_dual` | accepted | yes | MPEG-1 Layer II, 44100 Hz, 192 kbit/s dual channel: allocation table 1 (96 kbit/s a channel, not 48 kHz). |
+| `mp2_layer2_44k_mono_48` | accepted | yes | MPEG-1 Layer II, 44100 Hz, 48 kbit/s mono: allocation table 2. |
+| `mp2_layer2_32k_mono` | accepted | yes | MPEG-1 Layer II, 32000 Hz, 32 kbit/s mono: allocation table 3. |
+| `mp2_layer2_joint_crc` | accepted | yes | MPEG-1 Layer II, 48000 Hz, 128 kbit/s joint stereo (allocation table 0), the mode extension cycling through 0 to 3, frames protected by a CRC. |
+| `mp2_layer2_mpeg2_joint` | accepted | yes | MPEG-2 Layer II, 22050 Hz, 64 kbit/s joint stereo (allocation table 4), the mode extension cycling. |
+| `mp2_layer2_mpeg25_8k` | accepted | yes | MPEG-2.5 Layer II, 8000 Hz, 32 kbit/s stereo. |
 | `mp3_xing_lame` | accepted | yes | A Xing tag (frame count, byte count, TOC, quality) with LAME's extension (delay 576, padding 1104, radio and audiophile gains, a peak) and its valid CRC, then 30 VBR frames: the gapless start and end, the encoder tag and ReplayGain. |
 | `mp3_info_lame` | accepted | yes | An Info tag (CBR) with LAME's extension and valid CRC, then 24 CBR frames. |
 | `mp3_xing_bad_crc` | accepted | yes | A Xing tag whose LAME CRC is wrong: the delays still apply, but not the encoder tag or ReplayGain. |

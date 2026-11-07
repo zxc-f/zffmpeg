@@ -860,8 +860,6 @@ fn nextAfterSeek(gpa: std.mem.Allocator, layer: anytype, out: *std.ArrayList(u8)
     try writeTs(out, gpa, p.pts);
     try out.print(gpa, " {d} {d}\n", .{ p.pos, p.data.len });
     if (p.skip) |skip| try out.print(gpa, "Z {d} {d}\n", .{ skip[0], skip[1] });
-    // MP1 and MP2 streams have no decoder in the reference build.
-    if ((try layer.codecParams(0)).mpa_codec orelse .mp3 != .mp3) return out.appendSlice(gpa, "D none\n");
     const d = try gpa.create(mp3dec.Decoder);
     defer gpa.destroy(d);
     d.* = .init;
@@ -954,7 +952,7 @@ test "every MP3 fixture seeks as FFmpeg seeks it (vectors/seek_mp3.txt)" {
         }
     }
     // Every seek of the fixtures FFmpeg opens, but the picture's.
-    try testing.expectEqual(3186, compared);
+    try testing.expectEqual(3672, compared);
 }
 
 test "iTunSMPB counts up to SMPB_MAX_SAMPLES (2^40) are kept, larger ones refuse the tag" {

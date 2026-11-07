@@ -769,14 +769,15 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "Ogg Opus to WAV", .set = .ogg, .args = &.{"-i"}, .input = "ogg_opus_ffmpeg_stereo", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt ", .stderr = "" },
     .{ .name = "Ogg Opus from a pipe to raw PCM", .set = .ogg, .args = &.{ "-i", "-" }, .stdin_input = "ogg_opus_ffmpeg_mono", .tail = &.{ "-f", "f32le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stdout_raw = .{ .args = &.{ "-f", "f32le", "-ch_layout", "mono", "-sample_rate", "48000" }, .nb_samples = 15000 }, .stderr = "" },
     .{ .name = "Ogg Opus with hybrid frames to WAV", .set = .ogg, .args = &.{"-i"}, .input = "ogg_opus_frame_counts", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt ", .stderr = "" },
-    // MP3 decoded (T29b): from a file and from a pipe, the same samples
-    // (no gapless trim in this stream); MP1 has no decoder in the reference
-    // build; a stream whose frames mostly fail stops at the ffmpeg
-    // program's error rate, before any output.
+    // MPEG audio decoded (T29b, T29c): from a file and from a pipe, the same
+    // samples (no gapless trim in these streams); a stream whose frames
+    // mostly fail stops at the ffmpeg program's error rate, before any
+    // output.
     .{ .name = "MP3 to WAV", .set = .mp3, .args = &.{"-i"}, .input = "mp3_l3_long_stereo", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt ", .stderr = "" },
     .{ .name = "MP3 from a pipe to raw PCM", .set = .mp3, .args = &.{ "-i", "-" }, .stdin_input = "mp3_l3_long_stereo", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stdout_raw = .{ .args = &.{ "-f", "s16le", "-ch_layout", "stereo", "-sample_rate", "44100" }, .nb_samples = 27648 }, .stderr = "" },
     .{ .name = "MP3 from a pipe has no count for WAV", .set = .mp3, .args = &.{ "-i", "-" }, .stdin_input = "mp3_l3_long_stereo", .tail = &.{ "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedStreamingSize\n" },
-    .{ .name = "MP1 has no decoder", .set = .mp3, .args = &.{"-i"}, .input = "mp1_layer1_44k", .tail = &.{ "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
+    .{ .name = "MP1 from a pipe to raw PCM", .set = .mp3, .args = &.{ "-i", "-" }, .stdin_input = "mp1_layer1_44k", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stdout_raw = .{ .args = &.{ "-f", "s16le", "-ch_layout", "stereo", "-sample_rate", "44100" }, .nb_samples = 11520 }, .stderr = "" },
+    .{ .name = "MP2 to WAV", .set = .mp3, .args = &.{"-i"}, .input = "mp2_layer2_mpeg2_joint", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt ", .stderr = "" },
     .{ .name = "MP3 whose frames mostly fail to decode", .set = .mp3, .args = &.{"-i"}, .input = "mp3_rate_change", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stdout = "", .stderr_contains = ": DecodeErrorRate\n" },
     // A decoder that refuses the headers fails cleanly, before any output,
     // from a file (after the counting pass) and from a pipe.

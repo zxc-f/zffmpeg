@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Original file for this project: a vector generator, not part of the port.
 //
-// Prints the T29b MP3 decoding oracle (zig/testing/vectors/mp3_decode.txt):
-// what the pinned FFmpeg's mp3float decoder makes of the MP3 stream of each
-// file named on the command line, opened as the ffmpeg program opens an
-// input, each packet av_read_frame returns sent to the decoder
-// (avcodec_send_packet) and every frame received after it, with
-// libavcodec's discarding of skipped samples and padding (the gapless trim
-// the mp3 demuxer sets). A stream the parser names MP1 or MP2 has no
-// decoder in the reference build. The lines:
+// Prints the T29b MPEG audio decoding oracle (zig/testing/vectors/mp3_decode.txt):
+// what the pinned FFmpeg's float decoder for the stream's codec (mp3float,
+// or since T29c mp1float and mp2float, as the ffmpeg program picks it) makes
+// of the MPEG audio stream of each file named on the command line, opened
+// as the ffmpeg program opens an input, each packet av_read_frame returns
+// sent to the decoder (avcodec_send_packet) and every frame received after
+// it, with libavcodec's discarding of skipped samples and padding (the
+// gapless trim the mp3 demuxer sets). The lines:
 //
 //   F <name>                 a file, by name without .mp3
 //   O <result>               opening the input and the decoder: ok or the
@@ -94,11 +94,11 @@ static void run(const char *path)
                 index = i;
                 break;
             }
-        if (index < 0 || fmt->streams[index]->codecpar->codec_id != AV_CODEC_ID_MP3)
+        if (index < 0 || !avcodec_find_decoder(fmt->streams[index]->codecpar->codec_id))
             ret = AVERROR_DECODER_NOT_FOUND;
     }
     if (ret >= 0) {
-        const AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_MP3);
+        const AVCodec *codec = avcodec_find_decoder(fmt->streams[index]->codecpar->codec_id);
         dec = avcodec_alloc_context3(codec);
         ret = avcodec_parameters_to_context(dec, fmt->streams[index]->codecpar);
         if (ret >= 0) {

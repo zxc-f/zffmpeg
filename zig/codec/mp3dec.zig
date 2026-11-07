@@ -13,14 +13,18 @@
 // the terms of the GNU Lesser General Public License as published by the
 // Free Software Foundation; either version 2.1 of the License, or (at your
 // option) any later version.
-//! FFmpeg's float MP3 decoder, `mp3float` (TODO.md T29b): MPEG-1, 2 and
+//! FFmpeg's float MPEG audio decoders, `mp3float` (TODO.md T29b) and
+//! `mp1float` and `mp2float` (T29c), which share one decoder: MPEG-1, 2 and
 //! 2.5 Layer III frames, mono, stereo, dual channel and joint stereo (M/S
 //! and intensity), long, short and mixed blocks, through the bit reservoir
-//! that carries main data across frames, into planar float samples. Every
-//! sample is FFmpeg's bit for bit (vectors/mp3_decode.txt): the same
-//! tables (codec/mp3_tab.zig), the same float operations in the same order
-//! (codec/mpadsp.zig for the IMDCT and the synthesis), the same reads past
-//! the end of a frame and of the reservoir.
+//! that carries main data across frames, and Layer I and II frames (their
+//! bit allocations, scale factors and grouped quantizers, with the joint
+//! stereo bound), into planar float samples. Every sample is FFmpeg's bit
+//! for bit (vectors/mp3_decode.txt): the same tables (codec/mp3_tab.zig),
+//! the same float operations in the same order (codec/mpadsp.zig for the
+//! IMDCT and the synthesis), the same reads past the end of a frame and of
+//! the reservoir. Any decoder decodes every layer, as FFmpeg's do: a stream
+//! whose frames change layer keeps decoding.
 //!
 //! `Decoder.decodeFrame` is `decode_frame`: it decodes the first frame of
 //! a packet (one parsed MPEG audio frame, as the mp3 demuxer gives them)
@@ -30,8 +34,7 @@
 //! `decodeFrame` or `flush`. libavcodec's skipping of the encoder delay and
 //! padding (side data from the demuxer) is the caller's, as decode.c's is.
 //!
-//! Layer I and II frames, which FFmpeg's mp3float decodes too, are refused
-//! until T29c (notes.md "MP3 decoding"). The decoder does not allocate.
+//! The decoder does not allocate.
 
 const std = @import("std");
 const bits = @import("bits.zig");
@@ -53,8 +56,11 @@ const extrabytes = 24;
 const last_buf_size = 2 * backstep_size + extrabytes;
 /// `HEADER_SIZE`.
 const header_size = 4;
-/// `MPA_MAX_CODED_FRAME_SIZE`: more than a Layer III frame's 1441 bytes.
-const max_coded_frame_size = 1792;
+/// The largest frame any header gives: MPEG-2.5 Layer II at 160 kbit/s
+/// and 8 kHz, padded (`144000 * 160 / 8000 + 1`). FFmpeg's decode_frame
+/// reads such a frame whole; its `MPA_MAX_CODED_FRAME_SIZE` (1792) bounds
+/// only the ADU and MP3-on-4 decoders. Layer III frames stay below 1442.
+const max_frame_size = 2881;
 /// The bytes past a frame its reader can see: the count stops 8 bits past
 /// the end, where a 32-bit read reaches 5 bytes on.
 const past_frame = 8;
@@ -71,18 +77,16 @@ pub const max_samples = 1152;
 pub const Error = error{
     /// FFmpeg's AVERROR_INVALIDDATA for the packet: fewer than 4 bytes
     /// after its leading zeros, no valid header ("Header missing"), a free
-    /// format frame, or a frame whose side information FFmpeg refuses (big
-    /// values past 288, block type 0) that is the whole packet.
+    /// format frame, or a Layer III frame whose side information FFmpeg
+    /// refuses (big values past 288, block type 0) that is the whole packet.
     InvalidData,
-    /// A Layer I or II frame, which FFmpeg's mp3float decoder decodes and
-    /// the port does not yet (TODO.md T29c).
-    UnsupportedFormat,
 };
 
 /// A decoded frame's parameters, which FFmpeg sets on the codec context
 /// for each frame.
 pub const Frame = struct {
-    /// Samples per channel: 1152, or 576 for MPEG-2 and 2.5.
+    /// Samples per channel: 1152 (Layer II, and Layer III's MPEG-1), 576
+    /// (Layer III's MPEG-2 and 2.5) or 384 (Layer I).
     samples: u32,
     /// 1 or 2.
     channels: u2,
@@ -209,14 +213,12 @@ pub const Decoder = struct {
         if (hdr.freeFormat()) return error.InvalidData;
         // "incorrect frame size - multiple frames in buffer?"
         const buf_size = @min(buf.len, hdr.frame_size);
-        if (hdr.layer != 3) return error.UnsupportedFormat;
-        // A Layer III frame is at most 1441 bytes (320 kbit/s at 32 kHz;
-        // the frame size test below checks every header).
-        std.debug.assert(hdr.frame_size <= max_coded_frame_size);
+        // The frame size test below checks every header against the bound.
+        std.debug.assert(hdr.frame_size <= max_frame_size);
 
         // The frame and the bytes a read past its end sees: the packet's,
         // then `tail`, then zeros.
-        var mem: [max_coded_frame_size + past_frame]u8 = undefined;
+        var mem: [max_frame_size + past_frame]u8 = undefined;
         const end = buf_size + past_frame;
         const in_packet = @min(buf.len, end);
         @memcpy(mem[0..in_packet], buf[0..in_packet]);
@@ -224,6 +226,7 @@ pub const Decoder = struct {
         @memcpy(mem[in_packet..][0..from_tail], tail[0..from_tail]);
         @memset(mem[in_packet + from_tail .. end], 0);
 
+        if (hdr.layer != 3) return .{ .consumed = buf_size + skipped, .frame = d.decodeLayer12Frame(hdr, mem[0..end], buf_size) };
         const frame = d.decodeLayer3Frame(hdr, mem[0..end], buf_size) catch |err| {
             // Only a frame that is the whole packet fails it; otherwise
             // its bytes are skipped.
@@ -271,20 +274,225 @@ pub const Decoder = struct {
         @memcpy(d.last_buf[d.reservoir_len..][0..n], buf[buf_size - n .. buf_size]);
         d.reservoir_len += @intCast(n);
 
-        const nb_frames = try result;
+        return d.synthesize(hdr, try result);
+    }
 
-        // The synthesis filter, planar.
+    /// `mp_decode_frame`'s synthesis: each of `nb_frames` rows of subband
+    /// samples through the polyphase filter, planar.
+    fn synthesize(d: *Decoder, hdr: mpegaudio.Header, nb_frames: u32) Frame {
         for (0..hdr.nb_channels) |ch| {
             for (0..nb_frames) |i| {
                 d.synth[ch].filter(d.output[ch][32 * i ..][0..32], d.sb_samples[ch][sblimit * i ..][0..sblimit]);
             }
         }
         return .{
-            .samples = @intCast(32 * nb_frames),
+            .samples = 32 * nb_frames,
             .channels = hdr.nb_channels,
             .sample_rate = hdr.sample_rate,
             .bit_rate = hdr.bit_rate,
         };
+    }
+
+    /// `mp_decode_frame` for Layers I and II: the frame `buf[0 .. buf_size]`
+    /// (`past_frame` bytes readable past it). Every payload is a frame: no
+    /// error, and the reservoir is left as it is.
+    fn decodeLayer12Frame(d: *Decoder, hdr: mpegaudio.Header, buf: []const u8, buf_size: usize) Frame {
+        // buf_size is at most a frame's size, far below the reader's limit.
+        var gb = BitReader.initIn(buf[header_size..], buf_size - header_size) catch unreachable;
+        // The CRC, which FFmpeg checks only with err_detect crccheck.
+        if (hdr.error_protection) _ = gb.bits(16);
+        const nb_frames: u32 = if (hdr.layer == 1) d.decodeLayer1(hdr, &gb) else d.decodeLayer2(hdr, &gb);
+        return d.synthesize(hdr, nb_frames);
+    }
+
+    /// `mp_decode_layer1`: 12 rows of subband samples, each subband's
+    /// allocated bits (4-bit fields, 0 for none) scaled by its 6-bit scale
+    /// factor; above the joint stereo bound one allocation and two scale
+    /// factors serve both channels.
+    fn decodeLayer1(d: *Decoder, hdr: mpegaudio.Header, gb: *BitReader) u32 {
+        const nb_channels: usize = hdr.nb_channels;
+        const bound: usize = if (hdr.mode == mode_joint_stereo) (@as(usize, hdr.mode_ext) + 1) * 4 else sblimit;
+        var allocation: [2][sblimit]u4 = @splat(@splat(0));
+        var scale_factors: [2][sblimit]u6 = @splat(@splat(0));
+        for (0..bound) |i| {
+            for (0..nb_channels) |ch| allocation[ch][i] = @intCast(gb.bits(4));
+        }
+        for (bound..sblimit) |i| allocation[0][i] = @intCast(gb.bits(4));
+        for (0..bound) |i| {
+            for (0..nb_channels) |ch| {
+                if (allocation[ch][i] != 0) scale_factors[ch][i] = @intCast(gb.bits(6));
+            }
+        }
+        for (bound..sblimit) |i| {
+            if (allocation[0][i] != 0) {
+                scale_factors[0][i] = @intCast(gb.bits(6));
+                scale_factors[1][i] = @intCast(gb.bits(6));
+            }
+        }
+        for (0..12) |j| {
+            const row = j * sblimit;
+            for (0..bound) |i| {
+                for (0..nb_channels) |ch| {
+                    const n = allocation[ch][i];
+                    d.sb_samples[ch][row + i] = if (n != 0) @floatFromInt(l1Unscale(n, gb.bits(@as(u6, n) + 1), scale_factors[ch][i])) else 0;
+                }
+            }
+            for (bound..sblimit) |i| {
+                const n = allocation[0][i];
+                if (n != 0) {
+                    const mant = gb.bits(@as(u6, n) + 1);
+                    d.sb_samples[0][row + i] = @floatFromInt(l1Unscale(n, mant, scale_factors[0][i]));
+                    d.sb_samples[1][row + i] = @floatFromInt(l1Unscale(n, mant, scale_factors[1][i]));
+                } else {
+                    d.sb_samples[0][row + i] = 0;
+                    d.sb_samples[1][row + i] = 0;
+                }
+            }
+        }
+        return 12;
+    }
+
+    /// `mp_decode_layer2`: 36 rows in three parts of 12, each subband's
+    /// quantizer chosen by its allocation through the frame's allocation
+    /// table, three samples a code (grouped) or one, scaled by the part's
+    /// scale factor; above the joint stereo bound the allocation and the
+    /// codes serve both channels; past the table's subbands, zeros.
+    fn decodeLayer2(d: *Decoder, hdr: mpegaudio.Header, gb: *BitReader) u32 {
+        const nb_channels: usize = hdr.nb_channels;
+        const table = tab.l2SelectTable(hdr.bit_rate / 1000, hdr.nb_channels, hdr.sample_rate, hdr.lsf);
+        const sb_limit: usize = tab.sblimit_table[table];
+        const alloc_table = tab.alloc_tables[table];
+        const joint_bound: usize = if (hdr.mode == mode_joint_stereo) (@as(usize, hdr.mode_ext) + 1) * 4 else sb_limit;
+        // "sanity check"
+        const bound = @min(joint_bound, sb_limit);
+
+        var bit_alloc: [2][sblimit]u8 = @splat(@splat(0));
+        var scale_code: [2][sblimit]u2 = @splat(@splat(0));
+        var scale_factors: [2][sblimit][3]u6 = @splat(@splat(@splat(0)));
+        var j: usize = 0;
+        for (0..bound) |i| {
+            const alloc_bits: u6 = @intCast(alloc_table[j]);
+            for (0..nb_channels) |ch| bit_alloc[ch][i] = @intCast(gb.bits(alloc_bits));
+            j += @as(usize, 1) << @intCast(alloc_bits);
+        }
+        for (bound..sb_limit) |i| {
+            const alloc_bits: u6 = @intCast(alloc_table[j]);
+            const v: u8 = @intCast(gb.bits(alloc_bits));
+            bit_alloc[0][i] = v;
+            bit_alloc[1][i] = v;
+            j += @as(usize, 1) << @intCast(alloc_bits);
+        }
+        for (0..sb_limit) |i| {
+            for (0..nb_channels) |ch| {
+                if (bit_alloc[ch][i] != 0) scale_code[ch][i] = @intCast(gb.bits(2));
+            }
+        }
+        // FFmpeg's handle_crc here is a no-op without err_detect crccheck.
+        for (0..sb_limit) |i| {
+            for (0..nb_channels) |ch| {
+                if (bit_alloc[ch][i] == 0) continue;
+                const sf = &scale_factors[ch][i];
+                switch (scale_code[ch][i]) {
+                    0 => {
+                        sf[0] = @intCast(gb.bits(6));
+                        sf[1] = @intCast(gb.bits(6));
+                        sf[2] = @intCast(gb.bits(6));
+                    },
+                    2 => {
+                        sf[0] = @intCast(gb.bits(6));
+                        sf[1] = sf[0];
+                        sf[2] = sf[0];
+                    },
+                    1 => {
+                        sf[0] = @intCast(gb.bits(6));
+                        sf[2] = @intCast(gb.bits(6));
+                        sf[1] = sf[0];
+                    },
+                    3 => {
+                        sf[0] = @intCast(gb.bits(6));
+                        sf[2] = @intCast(gb.bits(6));
+                        sf[1] = sf[2];
+                    },
+                }
+            }
+        }
+
+        for (0..3) |k| {
+            var l: usize = 0;
+            while (l < 12) : (l += 3) {
+                const rows = [3]usize{ (k * 12 + l) * sblimit, (k * 12 + l + 1) * sblimit, (k * 12 + l + 2) * sblimit };
+                j = 0;
+                for (0..bound) |i| {
+                    const alloc_bits: u6 = @intCast(alloc_table[j]);
+                    for (0..nb_channels) |ch| {
+                        const b = bit_alloc[ch][i];
+                        if (b == 0) {
+                            for (rows) |row| d.sb_samples[ch][row + i] = 0;
+                            continue;
+                        }
+                        const scale = scale_factors[ch][i][k];
+                        const qindex = alloc_table[j + b];
+                        const qbits = tab.quant_bits[qindex];
+                        if (qbits < 0) {
+                            // Three values at the same time.
+                            const v = gb.bits(@intCast(-qbits));
+                            const v2: i32 = tab.divisionTab(qindex)[v];
+                            const steps = tab.quant_steps[qindex];
+                            d.sb_samples[ch][rows[0] + i] = @floatFromInt(l2UnscaleGroup(steps, v2 & 15, scale));
+                            d.sb_samples[ch][rows[1] + i] = @floatFromInt(l2UnscaleGroup(steps, (v2 >> 4) & 15, scale));
+                            d.sb_samples[ch][rows[2] + i] = @floatFromInt(l2UnscaleGroup(steps, v2 >> 8, scale));
+                        } else {
+                            const nbits: u5 = @intCast(qbits);
+                            for (rows) |row| d.sb_samples[ch][row + i] = @floatFromInt(l1Unscale(nbits - 1, gb.bits(nbits), scale));
+                        }
+                    }
+                    // next subband in alloc table
+                    j += @as(usize, 1) << @intCast(alloc_bits);
+                }
+                for (bound..sb_limit) |i| {
+                    const alloc_bits: u6 = @intCast(alloc_table[j]);
+                    const b = bit_alloc[0][i];
+                    if (b == 0) {
+                        for (rows) |row| {
+                            d.sb_samples[0][row + i] = 0;
+                            d.sb_samples[1][row + i] = 0;
+                        }
+                    } else {
+                        const scale0 = scale_factors[0][i][k];
+                        const scale1 = scale_factors[1][i][k];
+                        const qindex = alloc_table[j + b];
+                        const qbits = tab.quant_bits[qindex];
+                        if (qbits < 0) {
+                            // Three values at the same time: two
+                            // remainders, then the quotient.
+                            var v = gb.bits(@intCast(-qbits));
+                            const steps = tab.quant_steps[qindex];
+                            for (rows, 0..) |row, m| {
+                                const mant: i32 = @intCast(if (m < 2) v % steps else v);
+                                if (m < 2) v /= steps;
+                                d.sb_samples[0][row + i] = @floatFromInt(l2UnscaleGroup(steps, mant, scale0));
+                                d.sb_samples[1][row + i] = @floatFromInt(l2UnscaleGroup(steps, mant, scale1));
+                            }
+                        } else {
+                            const nbits: u5 = @intCast(qbits);
+                            for (rows) |row| {
+                                const mant = gb.bits(nbits);
+                                d.sb_samples[0][row + i] = @floatFromInt(l1Unscale(nbits - 1, mant, scale0));
+                                d.sb_samples[1][row + i] = @floatFromInt(l1Unscale(nbits - 1, mant, scale1));
+                            }
+                        }
+                    }
+                    j += @as(usize, 1) << @intCast(alloc_bits);
+                }
+                // fill remaining samples to zero
+                for (sb_limit..sblimit) |i| {
+                    for (0..nb_channels) |ch| {
+                        for (rows) |row| d.sb_samples[ch][row + i] = 0;
+                    }
+                }
+            }
+        }
+        return 3 * 12;
     }
 
     /// `mp_decode_layer3`: the side information, then each granule's
@@ -619,6 +827,35 @@ fn exponentsFromScaleFactors(sr: u4, g: *const Granule, exponents: *[576]i16) vo
             }
         }
     }
+}
+
+/// `l1_unscale`: a Layer I or II sample of `n + 1` bits (n from 1 to 15),
+/// in two's complement offset by 2^n - 1, times its scale factor's
+/// multiplier, rounded to FRAC_BITS. The shift is 1 to 36 and the product
+/// below 2^42: the 64-bit arithmetic cannot overflow, and the result fits
+/// the C's `int`.
+fn l1Unscale(n: u5, mant: u32, scale_factor: u6) i32 {
+    const modshift = tab.scale_factor_modshift[scale_factor];
+    const mod = modshift & 3;
+    const shift: u6 = @intCast((modshift >> 2) + n);
+    // `(int)(mant + (-1U << n) + 1)`: unsigned arithmetic, then the bits as
+    // an int.
+    const offset: i32 = @bitCast(mant +% (@as(u32, std.math.maxInt(u32)) << n) +% 1);
+    const val = @as(i64, offset) * tab.scale_factor_mult[n - 1][mod];
+    return @intCast((val + (@as(i64, 1) << (shift - 1))) >> shift);
+}
+
+/// `l2_unscale_group`: a grouped Layer II sample (`mant` up to 25, from the
+/// division tables or a code's remainders) centred on `steps / 2` times its
+/// scale factor's group multiplier, rounded when the scale shifts; at most
+/// 25 * 11184811 before the shift, so the C's `int` cannot overflow.
+fn l2UnscaleGroup(steps: u16, mant: i32, scale_factor: u6) i32 {
+    const modshift = tab.scale_factor_modshift[scale_factor];
+    const mod = modshift & 3;
+    const shift: u5 = @intCast(modshift >> 2);
+    var val = (mant - (steps >> 1)) * tab.scale_factor_mult2[steps >> 2][mod];
+    if (shift > 0) val = (val + (@as(i32, 1) << (shift - 1))) >> shift;
+    return val;
 }
 
 /// `l3_unscale`: value^(4/3) * 2^(exponent / 4), normalized to FRAC_BITS,
@@ -1054,8 +1291,7 @@ fn decodeVectorLines(gpa: std.mem.Allocator, bytes: []const u8, out: *std.ArrayL
     var layer = demux.Layer(mp3.Demuxer).init(gpa, dm);
     defer layer.deinit();
     try layer.findStreamInfo();
-    const params = try layer.codecParams(0);
-    if (params.mpa_codec) |c| if (c != .mp3) return out.appendSlice(gpa, "O DECODER_NOT_FOUND\n");
+    _ = try layer.codecParams(0);
     try out.appendSlice(gpa, "O ok\n");
     const d = try gpa.create(Decoder);
     defer gpa.destroy(d);
@@ -1173,14 +1409,25 @@ test "packets without a frame header are invalid, an ID3v1 tag gives no frame" {
     try testing.expectEqual(131, (try d.decodeFrame(&zeros_tag, &.{})).consumed);
 }
 
-test "Layer I and II frames are refused until T29c" {
+test "Layer I and II frames decode without touching the reservoir" {
     var d: Decoder = .init;
-    var frame = monoFrame(0, .{ .{}, .{} }, 0);
-    // Layer II, then Layer I.
+    // The Layer III reservoir from a frame of the gapless stream.
+    const l3 = fixtures.mp3.bytes("mp3_l3_long_stereo");
+    const l3_size = mpegaudio.decodeHeader(std.mem.readInt(u32, l3[0..4], .big)).?.frame_size;
+    _ = try d.decodeFrame(l3[0..l3_size], &.{});
+    const reservoir = d.reservoir_len;
+    try testing.expect(reservoir > 0);
+    // Layer II (1152 samples), then Layer I (384): any payload decodes.
+    var frame = monoFrame(0, .{ .{}, .{} }, 0x5A);
     std.mem.writeInt(u32, frame[0..4], 0xFFFD90C4, .big);
-    try testing.expectError(error.UnsupportedFormat, d.decodeFrame(&frame, &.{}));
+    const l2 = (try d.decodeFrame(&frame, &.{})).frame.?;
+    try testing.expectEqual(1152, l2.samples);
     std.mem.writeInt(u32, frame[0..4], 0xFFFF90C4, .big);
-    try testing.expectError(error.UnsupportedFormat, d.decodeFrame(&frame, &.{}));
+    const l1_size = mpegaudio.decodeHeader(0xFFFF90C4).?.frame_size;
+    const l1 = (try d.decodeFrame(frame[0..l1_size], &.{})).frame.?;
+    try testing.expectEqual(384, l1.samples);
+    for (d.plane(l1, 0)) |v| try testing.expect(std.math.isFinite(v));
+    try testing.expectEqual(reservoir, d.reservoir_len);
 }
 
 test "a frame FFmpeg refuses fails a packet it fills, and is skipped in a longer one" {
@@ -1235,17 +1482,30 @@ test "main data before the stream's start decodes to silence; a cut frame reads 
     }
 }
 
-test "every Layer III header's frame fits the decoder's frame buffer" {
+test "every header's frame fits the decoder's frame buffer" {
     var largest: u32 = 0;
-    var header: u32 = 0xFFE20000; // Layer III, every version and field
+    var header: u32 = 0xFFE00000; // every version, layer and field
     while (true) : (header += 1 << 9) {
-        if (mpegaudio.decodeHeader(header)) |h| {
-            if (h.layer == 3) largest = @max(largest, h.frame_size);
-        }
+        if (mpegaudio.decodeHeader(header)) |h| largest = @max(largest, h.frame_size);
         if (header >> 9 == 0xFFFFFFFF >> 9) break;
     }
-    try testing.expectEqual(1441, largest);
-    try testing.expect(largest <= max_coded_frame_size);
+    // MPEG-2.5 Layer II at 160 kbit/s and 8 kHz, padded.
+    try testing.expectEqual(2881, largest);
+    try testing.expect(largest <= max_frame_size);
+}
+
+test "the largest frame, MPEG-2.5 Layer II at 160 kbit/s and 8 kHz, decodes whole" {
+    // 2881 bytes, past FFmpeg's MPA_MAX_CODED_FRAME_SIZE (1792), which an
+    // earlier frame buffer was sized by.
+    var frame: [2881]u8 = undefined;
+    for (&frame, 0..) |*b, i| b.* = @truncate(i * 37 + 11);
+    frame[0..4].* = .{ 0xFF, 0xE5, 0xEA, 0x04 };
+    try testing.expectEqual(frame.len, mpegaudio.decodeHeader(std.mem.readInt(u32, frame[0..4], .big)).?.frame_size);
+    var d: Decoder = .init;
+    const got = try d.decodeFrame(&frame, &.{});
+    try testing.expectEqual(frame.len, got.consumed);
+    try testing.expectEqual(1152, got.frame.?.samples);
+    for (0..2) |c| for (d.plane(got.frame.?, @intCast(c))) |v| try testing.expect(std.math.isFinite(v));
 }
 
 test "l3_unscale: shifts past 31 or below 0 give 0" {
@@ -1330,7 +1590,7 @@ fn fuzzRun(smith: *std.testing.Smith) !u32 {
             try testing.expect(got.consumed > 0 and got.consumed <= data.len);
             data = data[got.consumed..];
             const f = got.frame orelse continue;
-            try testing.expect(f.samples == 576 or f.samples == 1152);
+            try testing.expect(f.samples == 384 or f.samples == 576 or f.samples == 1152);
             for (0..f.channels) |c| for (d.plane(f, @intCast(c))) |v| std.mem.doNotOptimizeAway(v);
             frames += 1;
         }
@@ -1356,6 +1616,9 @@ const fuzz_corpus: []const []const u8 = &.{
     hostile.fuzzSeed(fixtures.mp3.bytes("mp3_l3_reservoir_missing"), &.{ 0, 4096, 1000 }),
     hostile.fuzzSeed(fixtures.mp3.bytes("mp3_l3_truncated"), &.{ 1, 100, 1000 }),
     hostile.fuzzSeed(fixtures.mp3.bytes("mp3_l3_short_part"), &.{ 0, 4096, 1000 }),
+    hostile.fuzzSeed(fixtures.mp3.bytes("mp1_layer1_joint_crc"), &.{ 0, 4096, 3 }),
+    hostile.fuzzSeed(fixtures.mp3.bytes("mp2_layer2_mpeg2_joint"), &.{ 1, 700, 1000 }),
+    hostile.fuzzSeed(fixtures.mp3.bytes("mp3_layer_change"), &.{ 0, 4096, 1000 }),
 };
 
 test "fuzz: the MP3 decoder on arbitrary streams, parsed or in raw pieces, with a flush" {

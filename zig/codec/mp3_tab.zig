@@ -3,8 +3,10 @@
 // tables and mpegaudiodec_common_init_static), mpegaudiodec_common_tablegen.h
 // (mpegaudiodec_common_tableinit), mpegaudio_tablegen.h
 // (mpegaudio_tableinit), mpegaudiodec_float.c (is_table, csa_table) and
-// mpegaudiodec_template.c (decode_init_static's is_table_lsf) at the pinned
-// reference revision: the constant tables transcribed value for value, the
+// mpegaudiodec_template.c (decode_init_static's is_table_lsf and
+// scale_factor_mult, scale_factor_mult2), mpegaudiodata.c (the Layer II
+// allocation and quantizer tables) and mpegaudio.c (ff_mpa_l2_select_table)
+// at the pinned reference revision: the constant tables transcribed value for value, the
 // computed ones computed as FFmpeg computes them, in its precision and with
 // the reference platform's cbrt and exp2 (core/libm.zig).
 // Copyright (c) 2001, 2002 Fabrice Bellard
@@ -13,11 +15,12 @@
 // the terms of the GNU Lesser General Public License as published by the
 // Free Software Foundation; either version 2.1 of the License, or (at your
 // option) any later version.
-//! The MPEG audio Layer III decoder's tables (TODO.md T29b), named as
-//! FFmpeg's without the `ff_` prefix: the band and scale factor layouts,
+//! The MPEG audio decoder's tables, named as FFmpeg's without the `ff_`
+//! prefix. Layer III (TODO.md T29b): the band and scale factor layouts,
 //! the Huffman tables as FFmpeg's VLC lookup tables, the n^(4/3) tables of
 //! the requantization and the stereo and antialiasing coefficients of the
-//! float decoder. Everything is built at compile time; FFmpeg builds the
+//! float decoder. Layers I and II (T29c): the scale factor multipliers,
+//! Layer II's bit allocation tables, quantizers and grouping tables. Everything is built at compile time; FFmpeg builds the
 //! same tables once at run time (CONFIG_HARDCODED_TABLES is off in the
 //! reference build).
 
@@ -504,6 +507,155 @@ pub const csa_table = [8][4]f32{
     .{ 9.999931454658508301e-01, -3.699974622577428818e-03, 9.962931871414184570e-01, -1.003693103790283203e+00 },
 };
 
+// --- Layers I and II (T29c) ---------------------------------------------
+
+/// `FRAC_ONE`: 1.0 in the fixed-point scale Layers I and II compute in;
+/// the float decoder keeps that scale and its synthesis window divides it
+/// out, as for Layer III's tables.
+const frac_one: i64 = 1 << frac_bits;
+
+/// `ff_scale_factor_modshift`: each 6-bit scale factor as its third's
+/// remainder (`& 3`) and quotient (`>> 2`).
+pub const scale_factor_modshift: [64]u16 = blk: {
+    var t: [64]u16 = undefined;
+    for (&t, 0..) |*v, i| v.* = @intCast((i % 3) | ((i / 3) << 2));
+    break :blk t;
+};
+
+/// `scale_factor_mult` (decode_init_static) as mpegaudiodec_float.c builds
+/// it: `MULLx(norm, FIXR(c), FRAC_BITS)` is the single-precision product of
+/// `(float)c` and the integer `norm`, stored into an `int32_t`, which
+/// truncates. `norm` is 2^n * FRAC_ONE / (2^n - 1) for n = i + 2; every
+/// product is positive and below 2^26, so the conversion is exact.
+pub const scale_factor_mult: [15][3]i32 = blk: {
+    @setEvalBranchQuota(10_000);
+    const factors = [3]f64{ 1.0 * 2.0, 0.7937005259 * 2.0, 0.6299605249 * 2.0 };
+    var t: [15][3]i32 = undefined;
+    for (&t, 0..) |*row, i| {
+        const n = i + 2;
+        const norm: i64 = @divTrunc((@as(i64, 1) << n) * frac_one, (@as(i64, 1) << n) - 1);
+        for (row, factors) |*v, c| {
+            const product = @as(f32, @floatCast(c)) * @as(f32, @floatFromInt(norm));
+            v.* = @intFromFloat(@trunc(product));
+        }
+    }
+    break :blk t;
+};
+
+/// `scale_factor_mult2`: Layer II's group multipliers, `SCALE_GEN` of 4/3,
+/// 4/5 and 4/9, each `FIXR_OLD`, `(int)(a * FRAC_ONE + 0.5)` in double.
+pub const scale_factor_mult2: [3][3]i32 = blk: {
+    const steps = [3]f64{ 4.0 / 3.0, 4.0 / 5.0, 4.0 / 9.0 };
+    const factors = [3]f64{ 1.0, 0.7937005259, 0.6299605249 };
+    var t: [3][3]i32 = undefined;
+    for (&t, steps) |*row, v| {
+        for (row, factors) |*out, f| out.* = @intFromFloat(@trunc(f * v * @as(f64, @floatFromInt(frac_one)) + 0.5));
+    }
+    break :blk t;
+};
+
+/// `ff_mpa_sblimit_table`: the subbands each allocation table codes.
+pub const sblimit_table = [5]u8{ 27, 30, 8, 12, 30 };
+
+/// `ff_mpa_quant_steps`.
+pub const quant_steps = [17]u16{ 3, 5, 7, 9, 15, 31, 63, 127, 255, 511, 1023, 2047, 4095, 8191, 16383, 32767, 65535 };
+
+/// `ff_mpa_quant_bits`: negative for three samples coded as one group.
+pub const quant_bits = [17]i8{ -5, -7, 3, -10, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
+
+/// `alloc_table_1`: per subband, the allocation's bit count, then the
+/// quantizer index of each allocation but the first.
+const alloc_table_1 = [_]u8{
+    4, 0, 2, 4,  5, 6, 7, 8,  9, 10, 11, 12, 13, 14, 15, 16,
+    4, 0, 2, 4,  5, 6, 7, 8,  9, 10, 11, 12, 13, 14, 15, 16,
+    4, 0, 2, 4,  5, 6, 7, 8,  9, 10, 11, 12, 13, 14, 15, 16,
+    4, 0, 1, 2,  3, 4, 5, 6,  7, 8,  9,  10, 11, 12, 13, 16,
+    4, 0, 1, 2,  3, 4, 5, 6,  7, 8,  9,  10, 11, 12, 13, 16,
+    4, 0, 1, 2,  3, 4, 5, 6,  7, 8,  9,  10, 11, 12, 13, 16,
+    4, 0, 1, 2,  3, 4, 5, 6,  7, 8,  9,  10, 11, 12, 13, 16,
+    4, 0, 1, 2,  3, 4, 5, 6,  7, 8,  9,  10, 11, 12, 13, 16,
+    4, 0, 1, 2,  3, 4, 5, 6,  7, 8,  9,  10, 11, 12, 13, 16,
+    4, 0, 1, 2,  3, 4, 5, 6,  7, 8,  9,  10, 11, 12, 13, 16,
+    4, 0, 1, 2,  3, 4, 5, 6,  7, 8,  9,  10, 11, 12, 13, 16,
+    3, 0, 1, 2,  3, 4, 5, 16, 3, 0,  1,  2,  3,  4,  5,  16,
+    3, 0, 1, 2,  3, 4, 5, 16, 3, 0,  1,  2,  3,  4,  5,  16,
+    3, 0, 1, 2,  3, 4, 5, 16, 3, 0,  1,  2,  3,  4,  5,  16,
+    3, 0, 1, 2,  3, 4, 5, 16, 3, 0,  1,  2,  3,  4,  5,  16,
+    3, 0, 1, 2,  3, 4, 5, 16, 3, 0,  1,  2,  3,  4,  5,  16,
+    3, 0, 1, 2,  3, 4, 5, 16, 3, 0,  1,  2,  3,  4,  5,  16,
+    2, 0, 1, 16, 2, 0, 1, 16, 2, 0,  1,  16, 2,  0,  1,  16,
+    2, 0, 1, 16, 2, 0, 1, 16, 2, 0,  1,  16,
+};
+
+const alloc_table_3 = [_]u8{
+    4, 0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+    4, 0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+    3, 0, 1, 3, 4, 5, 6, 7, 3, 0, 1,  3,  4,  5,  6,  7,
+    3, 0, 1, 3, 4, 5, 6, 7, 3, 0, 1,  3,  4,  5,  6,  7,
+    3, 0, 1, 3, 4, 5, 6, 7, 3, 0, 1,  3,  4,  5,  6,  7,
+    3, 0, 1, 3, 4, 5, 6, 7, 3, 0, 1,  3,  4,  5,  6,  7,
+    3, 0, 1, 3, 4, 5, 6, 7, 3, 0, 1,  3,  4,  5,  6,  7,
+};
+
+const alloc_table_4 = [_]u8{
+    4, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+    4, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+    4, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+    4, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+    3, 0, 1, 3, 4, 5, 6, 7, 3, 0, 1, 3,  4,  5,  6,  7,
+    3, 0, 1, 3, 4, 5, 6, 7, 3, 0, 1, 3,  4,  5,  6,  7,
+    3, 0, 1, 3, 4, 5, 6, 7, 3, 0, 1, 3,  4,  5,  6,  7,
+    3, 0, 1, 3, 4, 5, 6, 7, 2, 0, 1, 3,  2,  0,  1,  3,
+    2, 0, 1, 3, 2, 0, 1, 3, 2, 0, 1, 3,  2,  0,  1,  3,
+    2, 0, 1, 3, 2, 0, 1, 3, 2, 0, 1, 3,  2,  0,  1,  3,
+    2, 0, 1, 3, 2, 0, 1, 3, 2, 0, 1, 3,  2,  0,  1,  3,
+    2, 0, 1, 3, 2, 0, 1, 3, 2, 0, 1, 3,  2,  0,  1,  3,
+    2, 0, 1, 3,
+};
+
+/// `ff_mpa_alloc_tables`, by `l2SelectTable`.
+pub const alloc_tables = [5][]const u8{ &alloc_table_1, &alloc_table_1, &alloc_table_3, &alloc_table_3, &alloc_table_4 };
+
+/// `ff_mpa_l2_select_table`: the allocation table of a Layer II frame, from
+/// its bit rate in kbit/s, channels, sample rate and version.
+pub fn l2SelectTable(bitrate: u32, nb_channels: u32, freq: u32, lsf: bool) usize {
+    if (lsf) return 4;
+    const ch_bitrate = bitrate / nb_channels;
+    if ((freq == 48000 and ch_bitrate >= 56) or (ch_bitrate >= 56 and ch_bitrate <= 80)) return 0;
+    if (freq != 48000 and ch_bitrate >= 96) return 1;
+    if (freq != 32000 and ch_bitrate <= 48) return 2;
+    return 3;
+}
+
+/// `division_tab3`, `division_tab5`, `division_tab9`: a grouped code's three
+/// samples, `val1 + (val2 << 4) + (val3 << 8)`, for every code of twice the
+/// group's bits (FFmpeg's sizes; the reader gives fewer).
+fn divisionTable(comptime steps: u16, comptime len: usize) [len]i16 {
+    @setEvalBranchQuota(4 * len);
+    var t: [len]i16 = undefined;
+    for (&t, 0..) |*v, j| {
+        const val1 = j % steps;
+        const rest = j / steps;
+        v.* = @intCast(val1 + ((rest % steps) << 4) + ((rest / steps) << 8));
+    }
+    return t;
+}
+
+pub const division_tab3 = divisionTable(3, 1 << 6);
+pub const division_tab5 = divisionTable(5, 1 << 8);
+pub const division_tab9 = divisionTable(9, 1 << 11);
+
+/// `ff_division_tabs[qindex]` for the grouped quantizers (`quant_bits`
+/// negative: indexes 0, 1 and 3).
+pub fn divisionTab(qindex: usize) []const i16 {
+    return switch (qindex) {
+        0 => &division_tab3,
+        1 => &division_tab5,
+        3 => &division_tab9,
+        else => unreachable, // quant_bits is negative only for these
+    };
+}
+
 const testing = std.testing;
 const bits = @import("bits.zig");
 
@@ -561,4 +713,26 @@ test "the power tables' corners" {
     try testing.expectEqual(0, table_4_3.value[1]);
     try testing.expectEqual(103, table_4_3.exp[3]);
     try testing.expectEqual(0, table_4_3.exp[0]);
+}
+
+test "Layer I's multipliers equal the single-precision products computed at run time" {
+    // The table is built at compile time; the reference computes each
+    // product in an f32 multiply at run time, which this repeats.
+    var factors = [3]f64{ 1.0 * 2.0, 0.7937005259 * 2.0, 0.6299605249 * 2.0 };
+    std.mem.doNotOptimizeAway(&factors);
+    for (0..15) |i| {
+        const n: u6 = @intCast(i + 2);
+        var norm: i64 = @divTrunc((@as(i64, 1) << n) * frac_one, (@as(i64, 1) << n) - 1);
+        std.mem.doNotOptimizeAway(&norm);
+        for (0..3) |k| {
+            const product = @as(f32, @floatCast(factors[k])) * @as(f32, @floatFromInt(norm));
+            try testing.expectEqual(@as(i32, @intFromFloat(@trunc(product))), scale_factor_mult[i][k]);
+        }
+    }
+    // FIXR_OLD(4/3) is 2^23 * 4 / 3 rounded: 11184811.
+    try testing.expectEqual(11184811, scale_factor_mult2[0][0]);
+    // 26 = 2 + 3 * (2 + 3 * 2): three samples of 2; 27 overflows into a
+    // third sample of 3, as FFmpeg's table holds it.
+    try testing.expectEqual(2 + (2 << 4) + (2 << 8), division_tab3[26]);
+    try testing.expectEqual(3 << 8, division_tab3[27]);
 }

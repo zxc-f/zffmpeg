@@ -657,12 +657,11 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   equal the ffmpeg program's doing the same (`-i pipe:`), or be the same
   refusal: from a pipe a junk prefix leaves both probes no file name to
   fall back on.
-- **MP3 decoding (T29b).** Every MP3 fixture converted by zffmpeg and by the
+- **MPEG audio decoding (T29b, T29c).** Every MP3, MP2 and MP1 fixture converted by zffmpeg and by the
   ffmpeg program with `-bitexact` into the Ogg section's outputs (WAV, AU,
   AIFF, FLAC, Ogg, s16le, f32le, resampled, downmixed), byte for byte, and
   its raw PCM decodes again through pipes and its WAV from a pipe into a
-  file (the header rewritten at the end); MP1 and MP2 streams, which the
-  reference build has no decoder for, and streams past the decode error
+  file (the header rewritten at the end); streams past the decode error
   rate must be refused by both, zffmpeg before any output. The recorded
   differences are `KNOWN_MP3_DECODE_DIFFERENCES` (notes.md "MP3
   decoding").

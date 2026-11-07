@@ -4,9 +4,11 @@
 // fftools/ffmpeg_dec.c (packet_decode, the error rate) and the ffmpeg
 // program's input opening (avformat_find_stream_info, then the decoder) at
 // the pinned reference revision describe the behavior, restated here.
-//! An MP3 stream decoded as the ffmpeg program decodes it (TODO.md T29b):
-//! the mp3 demuxer through libavformat's generic layer, FFmpeg's mp3float
-//! decoder (`codec/mp3dec.zig`) over each packet as decode.c calls it,
+//! An MPEG audio stream decoded as the ffmpeg program decodes it (TODO.md
+//! T29b, T29c): the mp3 demuxer through libavformat's generic layer, FFmpeg's
+//! float decoder for the stream's codec (mp1float, mp2float or mp3float, one
+//! decoder for every layer: `codec/mp3dec.zig`) over each packet as
+//! decode.c calls it,
 //! frame after frame until the packet is used up, and libavcodec's
 //! discarding of the samples the demuxer's gapless side data asks to skip,
 //! delivered as interleaved f32le.
@@ -16,11 +18,6 @@
 //! write when they rewrite a header at the end, as `format/oggdecode.zig`
 //! does for Ogg. Without seeking there is no count. Reading checks the count unless the caller takes the
 //! samples as they come (`expected` set to null).
-//!
-//! MP1 and MP2 streams are refused (`UnsupportedOperation`), as the
-//! reference build, whose mp3float decoder is not registered for them,
-//! refuses them; a Layer I or II frame inside an MP3 stream is
-//! `UnsupportedFormat` until T29c (notes.md "MP3 decoding").
 
 const std = @import("std");
 const audio = @import("../core/audio.zig");
@@ -31,6 +28,7 @@ const mp3 = @import("mp3.zig");
 const demux = @import("demux.zig");
 const seek = @import("seek.zig");
 const decoded = @import("decoded.zig");
+const codecs = @import("../codec/registry.zig");
 
 /// What reading the samples can fail with.
 pub const ReadError = mp3.Error || error{
@@ -39,16 +37,13 @@ pub const ReadError = mp3.Error || error{
     /// More than two thirds of the decodes failed: the ffmpeg program's
     /// `-max_error_rate` (2/3), which fails the decoding.
     DecodeErrorRate,
-    /// A Layer I or II frame (T29c), or a frame whose channel count or
-    /// sample rate differs from the stream's (notes.md "MP3 decoding").
+    /// A frame whose channel count or sample rate differs from the
+    /// stream's (notes.md "MP3 decoding").
     UnsupportedFormat,
 };
 
 /// What opening can fail with, and reading.
-pub const Error = ReadError || error{
-    /// An MP1 or MP2 stream: the reference build has no decoder for it.
-    UnsupportedOperation,
-};
+pub const Error = ReadError;
 
 const Layer = demux.Layer(mp3.Demuxer);
 
@@ -142,10 +137,13 @@ pub const DecodedReader = struct {
         const layer = &r.layer.?;
         try layer.findStreamInfo();
         const params = try layer.codecParams(0);
-        // The parser names the layer; the reference build's mp3float
-        // decoder is registered for MP3 only ("Decoding requested, but no
-        // decoder found").
-        if ((params.mpa_codec orelse .mp3) != .mp3) return error.UnsupportedOperation;
+        // The parser names the layer, which picks FFmpeg's decoder; all
+        // three decode every layer.
+        const stream: codecs.Codec = switch (params.mpa_codec orelse .mp3) {
+            .mp1 => .mp1,
+            .mp2 => .mp2,
+            .mp3 => .mp3,
+        };
         const channels = std.math.cast(u2, params.channels) orelse return error.UnsupportedFormat;
         if (channels == 0 or params.sample_rate == 0) return error.UnsupportedFormat;
         const decoder = try r.gpa.create(mp3dec.Decoder);
@@ -160,7 +158,7 @@ pub const DecodedReader = struct {
         _ = try r.nextFrame();
         r.opened = true;
         const format = audio.Format.initLayout(r.sample_rate, .default(r.channels), .flt) catch return error.UnsupportedFormat;
-        return .{ .stream = .mp3, .codec = .f32le, .format = format, .frame_count = counted, .bits = 32 };
+        return .{ .stream = stream, .codec = .f32le, .format = format, .frame_count = counted, .bits = 32 };
     }
 
     /// The input's tags (ID3v2, else ID3v1, and APE), under FFmpeg's
@@ -230,7 +228,6 @@ pub const DecodedReader = struct {
                     r.packet.data = &.{};
                     continue;
                 },
-                error.UnsupportedFormat => return error.UnsupportedFormat,
             };
             r.packet.data = r.packet.data[got.consumed..];
             const frame = got.frame orelse continue;
@@ -300,7 +297,7 @@ fn vectorSamples(name: []const u8) !u64 {
 
 test "a non-seekable input decodes to the seekable decoding's samples, FFmpeg's count" {
     const gpa = testing.allocator;
-    inline for (.{ "mp3_l3_long_stereo", "mp3_l3_reservoir_mono", "mp3_l3_mpeg2_24k_switch", "mp3_l3_bad_big_values" }) |name| {
+    inline for (.{ "mp3_l3_long_stereo", "mp3_l3_reservoir_mono", "mp3_l3_mpeg2_24k_switch", "mp3_l3_bad_big_values", "mp1_layer1_joint_crc", "mp2_layer2_44k_dual", "mp2_layer2_mpeg2_joint", "mp3_layer_change" }) |name| {
         const bytes = fixtures.mp3.bytes(name);
         var streamed: std.ArrayList(u8) = .empty;
         defer streamed.deinit(gpa);
@@ -343,12 +340,9 @@ test "a gapless stream keeps its end padding from a pipe, as FFmpeg's does" {
     }
 }
 
-test "MP1 and MP2 streams have no decoder; a damaged stream fails the error rate" {
+test "a damaged stream fails the error rate; free format does not open" {
     const gpa = testing.allocator;
     const cases = [_]struct { bytes: []const u8, err: Error }{
-        .{ .bytes = fixtures.mp3.bytes("mp1_layer1_44k"), .err = error.UnsupportedOperation },
-        .{ .bytes = fixtures.mp3.bytes("mp2_layer2_48k"), .err = error.UnsupportedOperation },
-        .{ .bytes = fixtures.mp3.bytes("mp3_layer_change"), .err = error.UnsupportedOperation },
         .{ .bytes = fixtures.mp3.bytes("mp3_free_format"), .err = error.InvalidMp3 },
         // 23 of its 24 frames fail (FFmpeg: "Decode error rate 0.958333").
         .{ .bytes = fixtures.mp3.bytes("mp3_rate_change"), .err = error.DecodeErrorRate },
@@ -443,6 +437,8 @@ const fuzz_corpus: []const []const u8 = &.{
     hostile.fuzzSeed(fixtures.mp3.bytes("mp3_l3_intensity_ms"), &.{ 1, 1 }),
     hostile.fuzzSeed(fixtures.mp3.bytes("mp3_l3_truncated"), &.{ 0, 1 }),
     hostile.fuzzSeed(fixtures.mp3.bytes("mp3_xing_lame"), &.{ 1, 0 }),
+    hostile.fuzzSeed(fixtures.mp3.bytes("mp2_layer2_joint_crc"), &.{ 1, 0 }),
+    hostile.fuzzSeed(fixtures.mp3.bytes("mp1_layer1_mono_32k"), &.{ 0, 1 }),
 };
 
 test "fuzz: an MP3 stream decoded from arbitrary input" {

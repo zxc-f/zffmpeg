@@ -773,7 +773,7 @@ test "every MP3 fixture's ID3v2 and ID3v1 tags are FFmpeg's (vectors/mp3.txt)" {
             checked += 1;
         }
     }
-    try testing.expectEqual(60, checked);
+    try testing.expectEqual(69, checked);
 }
 
 const hostile = @import("../testing/hostile.zig");

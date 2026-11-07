@@ -2855,6 +2855,7 @@ KNOWN_MP3_DECODE_DIFFERENCES = {
     ("mp3_mpeg2_l3_16k_mono", "-f ogg"): MP3_OGG_GRANULES,
     ("mp3_mpeg2_l3_22k", "-f ogg"): MP3_OGG_GRANULES,
     ("mp3_xing_mpeg2_mono", "-f ogg"): MP3_OGG_GRANULES,
+    ("mp3_layer_change", "-f ogg"): MP3_OGG_GRANULES,
     ("mp3_mpeg25_l3_12k", "-f ogg"): ("timestamps", "the same packets and samples; their timestamps differ, as for "
                                                     "the granules above, and so the pages they fill (T53)"),
     ("mp3_mpeg25_l3_8k", "-f ogg"): ("timestamps", "the same packets and samples; their timestamps differ, as for "
@@ -2866,21 +2867,21 @@ KNOWN_MP3_DECODE_DIFFERENCES = {
 
 
 def compare_mp3_decode(args, lines, failures):
-    """MP3 decoded (T29b): every MP3 fixture converted by zffmpeg and by the
-    ffmpeg program with `-bitexact` into each output, byte for byte, and each
-    raw PCM output again through pipes; MP1 and MP2 streams, which the
-    reference build has no decoder for, and damaged streams past the decode
-    error rate are refused by both."""
+    """MPEG audio decoded (T29b, T29c): every MP3, MP2 and MP1 fixture
+    converted by zffmpeg and by the ffmpeg program with `-bitexact` into each
+    output, byte for byte, each raw PCM output again through pipes and the
+    WAV from a pipe into a file; damaged streams past the decode error rate
+    are refused by both."""
     paths = [(path, "mp3") for path in sorted((FIXTURES / "mp3").glob("*.mp3"))]
     rows, same, total, understood, understood_notes, compared = decode_cells(
         args, paths, KNOWN_MP3_DECODE_DIFFERENCES, "KNOWN_MP3_DECODE_DIFFERENCES", "MP3 decode", failures)
     total += unmatched_entries(KNOWN_MP3_DECODE_DIFFERENCES, compared, "KNOWN_MP3_DECODE_DIFFERENCES", failures)
-    record("MP3 decoding (T29b)", same, total, understood=understood)
+    record("MPEG audio decoding (T29b, T29c)", same, total, understood=understood)
     lines += [
         "",
-        "## MP3 decoding (T29b)",
+        "## MPEG audio decoding (T29b, T29c)",
         "",
-        f"MP3 fixtures decoded by zffmpeg into WAV, AU, AIFF, FLAC, Ogg and raw PCM (and resampled, and "
+        f"MPEG audio fixtures (MP3, MP2, MP1) decoded by zffmpeg into WAV, AU, AIFF, FLAC, Ogg and raw PCM (and resampled, and "
         f"downmixed), into raw PCM from a pipe to stdout, and from a pipe into a WAV file, equal to the ffmpeg program's with `-bitexact`, "
         f"or refused by both: {same}/{total}, {understood} of them as understood differences:",
         "",

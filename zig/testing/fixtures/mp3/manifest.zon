@@ -58,6 +58,51 @@
         .expected = .accept,
     },
     .{
+        .name = "mp1_layer1_mono_32k",
+        .sha256 = "48f6fc652b6934e3090a094ef45d72d9840ae3c01d239207bfac738147cf918e",
+        .expected = .accept,
+    },
+    .{
+        .name = "mp1_layer1_joint_crc",
+        .sha256 = "788ad6127f0d1ba4d4081ca52c77f65ae14798e87cb8111c1be60f3edccbea43",
+        .expected = .accept,
+    },
+    .{
+        .name = "mp1_layer1_mpeg2_22k",
+        .sha256 = "72f19648a0b63e0cf3f93981fed647ffc79ea0491c9410e303f51fd9bbaecfab",
+        .expected = .accept,
+    },
+    .{
+        .name = "mp2_layer2_44k_dual",
+        .sha256 = "8390f4f85d640a55e212ab6eb4584ddf8807e07437e2ae400f6a9f650242608e",
+        .expected = .accept,
+    },
+    .{
+        .name = "mp2_layer2_44k_mono_48",
+        .sha256 = "e856ff3a15ef7191702d418dbf0c08cbfe8fefb1c46a364093c08fe113f8f021",
+        .expected = .accept,
+    },
+    .{
+        .name = "mp2_layer2_32k_mono",
+        .sha256 = "71395f0cba3d3ad398d204c708f734ab5eb89234542905a768b6d83a92590c00",
+        .expected = .accept,
+    },
+    .{
+        .name = "mp2_layer2_joint_crc",
+        .sha256 = "5c6b19e797d40f0a9acbcd1eb6e8a4894f522009f78a83ea5ae6a0ea7479f591",
+        .expected = .accept,
+    },
+    .{
+        .name = "mp2_layer2_mpeg2_joint",
+        .sha256 = "00a691aacc2cf79a2d4b99055cd2b4bc89c955e677e0aef4d884ce79e7e760fd",
+        .expected = .accept,
+    },
+    .{
+        .name = "mp2_layer2_mpeg25_8k",
+        .sha256 = "e49573b46b1be6cbfcf1fb49ff10dfe78d768ed1875dc531b6c7f5835d7901a2",
+        .expected = .accept,
+    },
+    .{
         .name = "mp3_xing_lame",
         .sha256 = "7be52b44cda0c3bd03b835a19cc0ec10f25e61a640ec1247630809fe35100ec6",
         .expected = .accept,

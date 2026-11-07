@@ -48,8 +48,7 @@ pub const Container = enum {
     /// FFmpeg's Ogg Audio and Ogg Opus muxers (T27b): Ogg, written only.
     oga,
     opus,
-    /// MPEG audio (T29a), read only; MP3 decoded (T29b), MP1 and MP2 not
-    /// yet (T29c).
+    /// MPEG audio (T29a), read only; decoded since T29b and T29c.
     mp3,
     // Raw PCM (T22c), one format per codec FFmpeg has a raw format for, named
     // as the codec: every PCM codec but s64.

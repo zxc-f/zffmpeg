@@ -4277,6 +4277,35 @@ def build_mp3_fixtures():
        j(mpa_frames(20, seed=9, version="2", layer=2, rate=1, bitrate=8, mode=3)))
     ok("mp1_layer1_44k", "MPEG-1 Layer I, 44100 Hz, 384 kbit/s stereo, padded slots of 4 bytes: codec mp1.",
        j(mpa_frames(30, seed=10, layer=1, bitrate=12)))
+    # Layers I and II have no Huffman coding: any payload is a frame the
+    # decoder reads (T29c), so these pseudo-random ones reach every bit
+    # allocation, scale factor code and grouped quantizer; the headers pick
+    # each Layer II allocation table (ff_mpa_l2_select_table), the joint
+    # stereo bounds (every mode extension) and the CRC field.
+    ok("mp1_layer1_mono_32k", "MPEG-1 Layer I, 32000 Hz, 128 kbit/s mono.",
+       j(mpa_frames(24, seed=41, layer=1, rate=2, bitrate=4, mode=3)))
+    ok("mp1_layer1_joint_crc", "MPEG-1 Layer I, 48000 Hz, 256 kbit/s joint stereo, the mode extension (the "
+       "intensity bound) cycling through 0 to 3, frames protected by a CRC.",
+       j(mpa_frame(42 * 1000 + i, layer=1, rate=1, bitrate=8, mode=1, mode_ext=i % 4, crc=True,
+                   padding=1 if i % 3 == 0 else 0) for i in range(24)))
+    ok("mp1_layer1_mpeg2_22k", "MPEG-2 Layer I, 22050 Hz, 96 kbit/s stereo.",
+       j(mpa_frames(24, seed=43, version="2", layer=1, bitrate=6)))
+    ok("mp2_layer2_44k_dual", "MPEG-1 Layer II, 44100 Hz, 192 kbit/s dual channel: allocation table 1 (96 "
+       "kbit/s a channel, not 48 kHz).", j(mpa_frames(20, seed=44, layer=2, bitrate=10, mode=2)))
+    ok("mp2_layer2_44k_mono_48", "MPEG-1 Layer II, 44100 Hz, 48 kbit/s mono: allocation table 2.",
+       j(mpa_frames(20, seed=45, layer=2, bitrate=3, mode=3)))
+    ok("mp2_layer2_32k_mono", "MPEG-1 Layer II, 32000 Hz, 32 kbit/s mono: allocation table 3.",
+       j(mpa_frames(20, seed=46, layer=2, rate=2, bitrate=1, mode=3)))
+    ok("mp2_layer2_joint_crc", "MPEG-1 Layer II, 48000 Hz, 128 kbit/s joint stereo (allocation table 0), the "
+       "mode extension cycling through 0 to 3, frames protected by a CRC.",
+       j(mpa_frame(47 * 1000 + i, layer=2, rate=1, bitrate=8, mode=1, mode_ext=i % 4, crc=True)
+         for i in range(20)))
+    ok("mp2_layer2_mpeg2_joint", "MPEG-2 Layer II, 22050 Hz, 64 kbit/s joint stereo (allocation table 4), the "
+       "mode extension cycling.",
+       j(mpa_frame(48 * 1000 + i, version="2", layer=2, bitrate=8, mode=1, mode_ext=i % 4,
+                   padding=1 if i % 3 == 0 else 0) for i in range(24)))
+    ok("mp2_layer2_mpeg25_8k", "MPEG-2.5 Layer II, 8000 Hz, 32 kbit/s stereo.",
+       j(mpa_frames(24, seed=49, version="2.5", layer=2, rate=2, bitrate=4)))
 
     vbr = [mpa_frame(900 + i, bitrate=(9, 11, 7, 13, 10)[i % 5], padding=i % 2) for i in range(30)]
     vbr_bytes = sum(len(f) for f in vbr)
