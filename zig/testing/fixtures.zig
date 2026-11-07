@@ -521,6 +521,18 @@ pub const alac = struct {
     }
 };
 
+pub const g72x = struct {
+    /// The G.722 and G.726 AU fixtures (T31c): whether the port opens and
+    /// decodes each (`.reject` for its errors, which its tests name); what
+    /// FFmpeg makes of each is vectors/g72x_au.txt.
+    pub const all: []const mp3.Fixture = @import("fixtures/g72x/manifest.zon");
+
+    /// The bytes of fixtures/g72x/<name>.au, embedded at compile time.
+    pub fn bytes(comptime name: []const u8) []const u8 {
+        return @embedFile("fixtures/g72x/" ++ name ++ ".au");
+    }
+};
+
 /// This file's own declarations: the WAV contract's `all` and `bytes`.
 const wav_contract = @This();
 
@@ -604,6 +616,7 @@ test "manifest names are unique and expectations are consistent" {
         expectConsistent(aac);
         expectConsistent(adpcm);
         expectConsistent(alac);
+        expectConsistent(g72x);
     }
 }
 
@@ -619,6 +632,7 @@ test "every fixture file is present and matches its recorded SHA-256" {
     try expectHashes(aac);
     try expectHashes(adpcm);
     try expectHashes(alac);
+    try expectHashes(g72x);
 }
 
 test "fixture names do not collide across contracts" {
@@ -679,6 +693,7 @@ test "fixture names do not collide across contracts" {
         expectDistinct(alac, mp3);
         expectDistinct(alac, aac);
         expectDistinct(alac, adpcm);
+        for (.{ wav_contract, au, aiff, raw, caf, flac, ogg, mp3, aac, adpcm, alac }) |other| expectDistinct(g72x, other);
     }
 }
 

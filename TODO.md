@@ -71,8 +71,9 @@ decoded, and T30d, its parametric stereo decoder bit for bit, with
 HE-AACv2 decoded, which completes T30; and T31a, FFmpeg's IMA WAV and
 Microsoft ADPCM codecs packet for packet and sample for sample, decoded
 and encoded in WAV; and T31b, FFmpeg's ALAC codec read from CAF and written
-there with its CAF muxer, which also writes PCM. **Next: T31c (G.722 and
-G.726 in AU).
+there with its CAF muxer, which also writes PCM; and T31c, FFmpeg's G.722
+and G.726 codecs packet for packet and sample for sample, read from AU and
+written there, which completes T31. **Next: T32a (the AC-3 decoder).
 See [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
@@ -1811,7 +1812,8 @@ names, not as an empty framework.
       table (1 µ-law, 2 s8, 3-5 s16/s24/s32be, 6-7 f32/f64be, 27 A-law)
       read and written, in zffprobe and zffmpeg (A-law and µ-law copy
       between WAV and AU); unknown-length AU behind au.Limits.unknown_length.
-      Excluded: G.722/G.726 (T31c, au_encoding_g726), annotation metadata,
+      Excluded: G.722/G.726 (T31c, au_encoding_g726; since T31c read as
+      g72x_au_encoding_23), annotation metadata,
       unknown-length output, the option in the CLIs.
     Needs (verified) / lands with / verified after: T12 and T20b (verified);
       alone.
@@ -3752,7 +3754,7 @@ names, not as an empty framework.
     Remaining work or blocker / next action: none.
     ```
 
-- [ ] **T31 — ADPCM, G.72x and ALAC.** Checked when T31a–T31c are. Reference:
+- [x] **T31 — ADPCM, G.72x and ALAC.** Checked when T31a–T31c are. Reference:
   `libavcodec/adpcm.c`, `adpcmenc.c`, `adpcm_data.c`, `g722.c`, `g722dec.c`,
   `g722enc.c`, `g726.c`, `alac.c`, `alacenc.c`; `tests/fate/adpcm.mak`,
   `alac.mak`.
@@ -3853,19 +3855,57 @@ names, not as an empty framework.
       with the FLAC encoder (T58).
     Remaining work or blocker / next action: none; T31c is next.
     ```
-  - [ ] **T31c — G.722 and G.726 in AU.** Needs T22a. The AU codes 23, 25 and
+  - [x] **T31c — G.722 and G.726 in AU.** Needs T22a. The AU codes 23, 25 and
     26 (G.726 little-endian at 4, 3 and 5 bits per sample) and 24 (G.722),
     decoding and encoding, each with its own vectors.
     Done when decoding and encoding are bit-exact against the reference for
     every code, and T22a's rejection fixtures become accepted.
-    Progress: part 1, the codecs: `codec/g722.zig` and `codec/g726.zig`
-    port FFmpeg's g722 (decoder at 6 to 8 bits a codeword; encoder plain
-    and with its trellis, its last-segment shift kept) and g726le (code
-    sizes 2 to 5) bit for bit against `g72x_vectors.c`'s 37 encoder cases
-    and 7 random-packet decoder cases (vectors/g72x.txt); `-c:a` now also
-    takes a codec's name, as fftools' find_codec does. Remaining: AU
-    demuxing and muxing of codes 23 to 26 and '7262', the fixtures,
-    compare.py, process cases and the speed check (part 2).
+
+    ```text
+    ID / parent: T31c / T31
+    State: verified (G5, local Linux x86-64 runs)
+    Supported behavior and explicit exclusions: FFmpeg's g722 decoder (8
+      bits a codeword from the tools; 6 and 7 in av.g722) and encoder
+      (-trellis, clipped to 0 to 16, the last segment's one-byte shift
+      kept, the frame size from the first frame as the program presets
+      it) and g726le decoder and encoder (code sizes 2 to 5 from
+      -code_size or -b:a, 8 kHz), mono; AU encodings 23 to 26 and '7262'
+      read and written, every byte decoded as one channel whatever the
+      header's count, as FFmpeg does; -c:a also takes a codec's name.
+      Excluded (notes.md "G.722 and G.726"): G.72x in WAV, Wave64 and
+      AIFF-C, stream copy, G.722 from more than one channel, the
+      big-endian g726, unknown length and truncated data as for PCM AU.
+    Contract and source provenance: port.md "G.722 and G.726 in AU" and
+      the AU contract's rows; g722.c, g722dsp.c, g722dec.c, g722enc.c,
+      g726.c (derived); au.c, pcm.c, ffmpeg_enc.c restated.
+    Required fixtures: zig/testing/fixtures/g72x/ (23: 8 from the
+      reference build's encoders and AU muxer through g72x_fixtures.sh,
+      15 from generate.py; T22a's au_encoding_g726 is g72x_au_encoding_23,
+      accepted).
+    Comparison rule: g72x.txt's 37 encoder and 7 decoder cases equal the
+      pinned codecs'; each fixture's ffprobe stream and decoded samples
+      equal FFmpeg's (g72x_au.txt); zffprobe ffprobe's; zffmpeg's decodes
+      and AU outputs the program's byte for byte.
+    Evidence: e10bb57 (codecs) and the commit that checks this card (AU
+      reading and writing). G3: fuzz entries for both codecs and for G.72x
+      in AU (unknown length on and off), 2000-round mutation smokes in
+      ReleaseSafe, allocation and remap sweeps through decoding and the
+      trellis writer, malformed-header tests; process cases (zffprobe on
+      files and pipes, unknown length, truncation; zffmpeg decoding from
+      files and pipes, encoding by name, -code_size, -b:a, refusals of
+      stereo, 16 kHz G.726, copy, G.722 into WAV, an out-of-range
+      -code_size). G5 locally on Linux x86-64 (no CI run link): zig fmt,
+      the fixture check, zig build test 602/602 (348 steps) in Debug,
+      ReleaseSafe and ReleaseFast, the cross builds, every vector
+      generator, compare.py 10158/0/0 required (G.722 and G.726 in AU 251
+      cells, 4 recorded; output 182 cells, 19 recorded) and 61/61
+      optional. Speed check (10 minutes of the base signal made mono, one
+      core, against the reference build): G.722 to WAV 0.36x, 3-bit G.726
+      to WAV 0.41x, WAV to G.722 0.45x, with -trellis 4 0.91x, WAV to
+      G.726 0.56x; file and pipe input equal; the native build equals the
+      reference (no G.72x assembly).
+    Remaining work or blocker / next action: none; T32a is next.
+    ```
 
 - [ ] **T32 — AC-3 and native lossy encoders.** Checked when T32a–T32d are.
   Reference: `libavcodec/ac3dec.c`, `eac3dec.c`, `ac3dsp.c`, `ac3enc*.c`,

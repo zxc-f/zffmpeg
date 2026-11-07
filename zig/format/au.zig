@@ -60,12 +60,115 @@ pub const Limits = struct {
 };
 
 pub const Info = struct {
+    /// The PCM encoding of the data; for G.722 and G.726 (`g72x`), s16le,
+    /// the decoded samples' encoding.
     codec: pcm.Codec,
-    /// The decoded stream: `sample_format` is `codec.storage()`.
+    /// The decoded stream: `sample_format` is `codec.storage()`. For G.722
+    /// and G.726, FFmpeg's decoders' mono s16, whatever the header's
+    /// channel count.
     format: audio.Format,
-    /// Sample frames in the data; null when its length is unknown.
+    /// Sample frames in the data; null when its length is unknown. For
+    /// G.722 and G.726, the duration FFmpeg's demuxer sets, from the
+    /// header's channel count (`G72x.duration`); the decoder gives
+    /// `G72x.samples`.
     frame_count: ?u64,
+    /// Set for G.722 and G.726 data (T31c): `readData` then gives its
+    /// bytes, and `readSamples` refuses.
+    g72x: ?G72x = null,
 };
+
+/// G.722 (encoding 24) or little-endian G.726 (23, 25, 26 and the private
+/// '7262') data, as au_read_header describes it (T31c).
+pub const G72x = struct {
+    codec: Codec,
+    /// Bits a sample: G.726's code size, 4 for G.722.
+    bits: u32,
+    /// The header's channels. FFmpeg's demuxer sizes its packets and the
+    /// duration by them; its decoders take every byte as one channel.
+    header_channels: u32,
+    /// The data's bytes; null when they run to the end of the input.
+    data_bytes: ?u32,
+    /// The bytes of each packet FFmpeg's demuxer reads
+    /// (ff_pcm_default_packet_size), the last one aside.
+    packet_len: u32,
+
+    pub const Codec = enum { g722, g726le };
+
+    /// The AU encoding numbers (`codec_au_tags`).
+    pub const encoding_g726_4 = 23;
+    pub const encoding_g722 = 24;
+    pub const encoding_g726_3 = 25;
+    pub const encoding_g726_5 = 26;
+    /// 2-bit G.726 has no Sun number; FFmpeg writes and reads this private
+    /// tag.
+    pub const encoding_g726_2 = 0x3732_3632; // '7262'
+
+    fn fromEncoding(encoding: u32) ?struct { Codec, u32 } {
+        return switch (encoding) {
+            encoding_g726_4 => .{ .g726le, 4 },
+            encoding_g722 => .{ .g722, 4 },
+            encoding_g726_3 => .{ .g726le, 3 },
+            encoding_g726_5 => .{ .g726le, 5 },
+            encoding_g726_2 => .{ .g726le, 2 },
+            else => null,
+        };
+    }
+
+    /// au_g726le_tag and `codec_au_tags`: the encoding a stream is written
+    /// with.
+    pub fn tagFor(codec: Codec, bits: u32) u32 {
+        return switch (codec) {
+            .g722 => encoding_g722,
+            .g726le => switch (bits) {
+                2 => encoding_g726_2,
+                3 => encoding_g726_3,
+                4 => encoding_g726_4,
+                5 => encoding_g726_5,
+                else => unreachable, // the encoder's code sizes are 2 to 5
+            },
+        };
+    }
+
+    /// The stream's duration as au_read_header sets it: the data's bits
+    /// over the header's channels times the bits a sample.
+    pub fn duration(g: G72x) ?u64 {
+        const bytes = g.data_bytes orelse return null;
+        return @as(u64, bytes) * 8 / (@as(u64, g.header_channels) * g.bits);
+    }
+
+    /// The samples the decoder gives for the whole data: two a byte for
+    /// G.722; for G.726 every whole code, as each of FFmpeg's packets but
+    /// the last holds a whole number of codes (`packet_len`).
+    pub fn samples(g: G72x) ?u64 {
+        const bytes = g.data_bytes orelse return null;
+        return samplesIn(g, bytes);
+    }
+
+    /// The samples `bytes` of data decode to.
+    pub fn samplesIn(g: G72x, bytes: u64) u64 {
+        return switch (g.codec) {
+            .g722 => 2 * bytes,
+            .g726le => bytes * 8 / g.bits,
+        };
+    }
+};
+
+/// ff_pcm_default_packet_size for the block alignment and bit rate
+/// au_read_header sets: `block_align` times the largest power of two of
+/// blocks at most a tenth of a second (PCM_DEMUX_TARGET_FPS).
+fn g72xPacketLen(codec: G72x.Codec, encoding: u32, bits: u32, rate: u32, channels: u32) u32 {
+    // G.726's block_align is its bits a sample (the Sun encodings) or, as
+    // for G.722, max(bits * channels / 8, 1).
+    const block_align: u32 = if (codec == .g726le and encoding != G72x.encoding_g726_2) bits else @max(bits * channels / 8, 1);
+    // The bit rate the demuxer sets, which av_get_bits_per_sample (4 for
+    // G.722) gives as well. At most 5 * 192000 * 65535: no overflow.
+    const bit_rate: u64 = @as(u64, channels) * rate * bits;
+    const max_blocks: u64 = std.math.maxInt(i32) / block_align;
+    const blocks = std.math.clamp(bit_rate / 8 / 10 / block_align, 1, max_blocks);
+    const pow2 = @as(u64, 1) << @intCast(63 - @clz(blocks));
+    // blocks * block_align is at most INT_MAX.
+    return @intCast(block_align * pow2);
+}
 
 /// Bytes of the fixed header: magic, data offset, data size, encoding, sample
 /// rate and channels, each a big-endian `u32`.
@@ -151,6 +254,8 @@ pub const Parser = struct {
     /// The sample data's reader (T65b), set by `readHeader`: the bytes not
     /// yet delivered, or none when the data runs to the end of the input.
     data: pcmdata.Data = .{},
+    /// G.722 or G.726 data, read as bytes (T31c).
+    g72x: bool = false,
     state: State = .header,
 
     const State = enum { header, data, done };
@@ -181,13 +286,35 @@ pub const Parser = struct {
         } else if (!p.limits.unknown_length) {
             return error.UnsupportedStreamingSize;
         }
-        const codec = codecFor(encoding) orelse return error.UnsupportedFormat;
+        const g72x = G72x.fromEncoding(encoding);
+        const codec: pcm.Codec = if (g72x != null) .s16le else codecFor(encoding) orelse return error.UnsupportedFormat;
         if (rate == 0) return error.InvalidFormat;
         if (rate > p.limits.max_sample_rate) return error.LimitExceeded;
         if (channels == 0) return error.InvalidFormat;
         if (channels > p.limits.max_channels) return error.LimitExceeded;
         // max_channels is a u16.
         const channel_count: u16 = @intCast(channels);
+        if (g72x) |g| {
+            // FFmpeg's decoders open mono, and take every byte as that
+            // channel (G.726's refuses more channels in
+            // avformat_find_stream_info, which leaves the stream mono;
+            // notes.md "G.722 and G.726").
+            const stream: G72x = .{
+                .codec = g[0],
+                .bits = g[1],
+                .header_channels = channels,
+                .data_bytes = known_size,
+                .packet_len = g72xPacketLen(g[0], encoding, g[1], rate, channels),
+            };
+            skip.discardAll(p.reader, annotation_len) catch |err| return mapRead(err);
+            p.codec = codec;
+            p.frame_bytes = 1;
+            p.g72x = true;
+            p.data = .init(p.reader, 1, if (known_size) |size| size else null);
+            p.state = .data;
+            const mono: audio.Format = .{ .sample_rate = rate, .layout = audio.ChannelLayout.mono, .sample_format = .s16 };
+            return .{ .codec = codec, .format = mono, .frame_count = stream.duration(), .g72x = stream };
+        }
         // An AU header has no layout: FFmpeg leaves it unspecified.
         const format: audio.Format = .{ .sample_rate = rate, .layout = .{ .unspecified = channel_count }, .sample_format = codec.storage() };
         // At most 8 bytes times 65535 channels: no overflow.
@@ -210,8 +337,10 @@ pub const Parser = struct {
     /// and returns the decoded prefix, empty at the end of the data; an
     /// output that cannot hold one frame while data remains is
     /// `OutputTooSmall`, and before `readHeader` the end. Only for encodings stored as s16 (others are `UnsupportedFormat`) (s16be, µ-law,
-    /// A-law); use `readData` and `pcm.decode` for the others.
+    /// A-law); use `readData` and `pcm.decode` for the others, and
+    /// `aug72x.DecodedReader` for G.722 and G.726.
     pub fn readSamples(p: *Parser, output: []i16) Error![]i16 {
+        if (p.g72x) return error.UnsupportedFormat;
         return p.data.readSamples(p.codec, output);
     }
 
@@ -257,6 +386,8 @@ pub const DecodeError = Error || std.Io.Writer.Error;
 pub fn decodeToRaw(reader: *std.Io.Reader, out: *std.Io.Writer, limits: Limits) DecodeError!Info {
     var parser: Parser = .init(reader, limits);
     const info = try parser.readHeader();
+    // G.722 and G.726 need their decoders (`aug72x`).
+    if (info.g72x != null) return error.UnsupportedFormat;
     // readData delivers nothing when a frame does not fit, which would end
     // the loop below early; only a channel limit above the default allows it.
     if (parser.frame_bytes > pcmdata.scratch_len) return error.LimitExceeded;
@@ -351,22 +482,11 @@ pub const Writer = struct {
         if (format.sample_format != codec.storage()) return error.UnsupportedFormat;
         // avcodec_open2 refuses an encoder without channels; frame sizes divide by the count.
         if (format.sample_rate == 0 or format.channelCount() == 0) return error.InvalidFormat;
-        if (format.sample_rate > limits.max_sample_rate) return error.LimitExceeded;
-        if (format.channelCount() > limits.max_channels) return error.LimitExceeded;
         const sample_bytes: u32 = codec.bytesPerSample();
         const frame_bytes = sample_bytes * format.channelCount();
-        const data_bytes = std.math.mul(u64, frame_count, frame_bytes) catch return error.SizeOverflow;
-        if (data_bytes > max_data_bytes) return error.SizeOverflow;
-
-        // header[24..32] stays zero: the 8-byte annotation.
-        var header: [canonical_header_len]u8 = @splat(0);
-        @memcpy(header[0..4], ".snd");
-        std.mem.writeInt(u32, header[4..8], canonical_header_len, .big);
-        std.mem.writeInt(u32, header[8..12], @intCast(data_bytes), .big);
-        std.mem.writeInt(u32, header[12..16], encoding, .big);
-        std.mem.writeInt(u32, header[16..20], format.sample_rate, .big);
-        std.mem.writeInt(u32, header[20..24], format.channelCount(), .big);
-        return header;
+        // An overflow saturates, so that the limits are checked first.
+        const data_bytes = std.math.mul(u64, frame_count, frame_bytes) catch std.math.maxInt(u64);
+        return codedHeader(encoding, format, data_bytes, limits);
     }
 
     /// Writes whole interleaved frames of samples stored as s16, encoded as
@@ -401,6 +521,26 @@ pub const Writer = struct {
         try w.out.flush();
     }
 };
+
+/// The canonical header for `data_bytes` of data in `encoding`, after the
+/// writer's checks of the format and size: the PCM writer's, and the G.722
+/// and G.726 writer's (`aug72x.Writer`, T31c).
+pub fn codedHeader(encoding: u32, format: audio.Format, data_bytes: u64, limits: Limits) HeaderError![canonical_header_len]u8 {
+    if (format.sample_rate == 0 or format.channelCount() == 0) return error.InvalidFormat;
+    if (format.sample_rate > limits.max_sample_rate) return error.LimitExceeded;
+    if (format.channelCount() > limits.max_channels) return error.LimitExceeded;
+    if (data_bytes > max_data_bytes) return error.SizeOverflow;
+
+    // header[24..32] stays zero: the 8-byte annotation.
+    var header: [canonical_header_len]u8 = @splat(0);
+    @memcpy(header[0..4], ".snd");
+    std.mem.writeInt(u32, header[4..8], canonical_header_len, .big);
+    std.mem.writeInt(u32, header[8..12], @intCast(data_bytes), .big);
+    std.mem.writeInt(u32, header[12..16], encoding, .big);
+    std.mem.writeInt(u32, header[16..20], format.sample_rate, .big);
+    std.mem.writeInt(u32, header[20..24], format.channelCount(), .big);
+    return header;
+}
 
 const fixtures = @import("../testing/fixtures.zig");
 

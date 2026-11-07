@@ -3736,6 +3736,196 @@ def compare_alac(args, lines, failures):
     ] + rows
 
 
+
+# The G.722 and G.726 fixtures zffprobe and zffmpeg refuse where FFmpeg
+# reads them (T31c, notes.md "G.722 and G.726"): status, error, reason.
+KNOWN_G72X_REFUSALS = {
+    "g72x_unknown_size": (3, "UnsupportedStreamingSize", "data of unknown length, refused without "
+                                                         "`unknown_length`, as for PCM AU"),
+    "g72x_truncated": (2, "Truncated", "data shorter than its size: the AU contract's `Truncated`, where FFmpeg "
+                                       "decodes what is there"),
+    "g72x_rate_over_limit": (5, "LimitExceeded", "a rate above the parser's limit, as for PCM AU"),
+    "g72x_channels65": (5, "LimitExceeded", "channels above the parser's limit, as for PCM AU"),
+}
+
+# The cells the decoded G.722 and G.726 inputs differ in (none yet).
+KNOWN_G72X_DECODE_DIFFERENCES = {}
+
+
+def compare_g72x(args, lines, failures):
+    """G.722 and G.726 in AU (T31c): every fixture's zffprobe report against
+    ffprobe's, its refusal where `KNOWN_G72X_REFUSALS` records one (by
+    zffmpeg too, before any output), and its decoding by zffmpeg into each
+    output against the program's (`decode_cells`)."""
+    rows = []
+    same = total = understood = 0
+    notes = set()
+    paths = sorted((FIXTURES / "g72x").glob("*.au"))
+    decoded = []
+    with tempfile.TemporaryDirectory() as work:
+        work = pathlib.Path(work)
+        for path in paths:
+            total += 1
+            problems = []
+            code, fields, err = ffprobe(args.ffprobe, path)
+            zcode, zfields, zerr = zffprobe(args.zffprobe, path)
+            known = KNOWN_G72X_REFUSALS.get(path.stem)
+            if known:
+                status, error, reason = known
+                out = work / "out.wav"
+                out.unlink(missing_ok=True)
+                tp = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", path, "-f", "s16le", "-")
+                zp = run(args.zffmpeg, "-i", path, out)
+                if code != 0 or zcode != status or not zerr.endswith(f": {error}") or tp.returncode != 0 \
+                        or zp.returncode != status or tool_error(zp, "zffmpeg", path) != error or out.exists():
+                    problems.append(f"ffprobe exited {code}, zffprobe {zcode} ({zerr}), ffmpeg {tp.returncode}, "
+                                    f"zffmpeg {zp.returncode}; recorded: both tools refuse with {error}")
+                else:
+                    understood += 1
+                    notes.add(f"`{path.stem}`: {reason}")
+            elif code != 0:
+                problems.append(f"ffprobe fails ({first_line(err)}), zffprobe exited {zcode} ({zerr})")
+            else:
+                decoded.append((path, fields.get("codec_name")))
+                want = {"format": fields.get("format_name"), "codec": fields.get("codec_name"),
+                        "sample_fmt": fields.get("sample_fmt"), "channels": fields.get("channels"),
+                        "channel_layout": fields.get("channel_layout"), "sample_rate": fields.get("sample_rate"),
+                        "nb_samples": fields.get("duration_ts"), "duration_num": fields.get("duration_ts"),
+                        "duration_den": fields.get("sample_rate")}
+                if zcode != 0 or zfields != want:
+                    problems.append(f"zffprobe exited {zcode} with {zfields or zerr}, ffprobe's {want}")
+            if not problems:
+                same += 1
+            failures.extend(f"G.72x probe {path.stem}: {p}" for p in problems)
+            rows.append(f"| `{path.stem}` | probe | {'pass' if not problems else '**FAIL**: ' + '; '.join(problems)} |")
+    decode_rows, dsame, dtotal, dunderstood, dnotes, compared = decode_cells(
+        args, decoded, KNOWN_G72X_DECODE_DIFFERENCES, "KNOWN_G72X_DECODE_DIFFERENCES", "G.72x decode", failures)
+    dtotal += unmatched_entries(KNOWN_G72X_DECODE_DIFFERENCES, compared, "KNOWN_G72X_DECODE_DIFFERENCES", failures)
+    same, total, understood = same + dsame, total + dtotal, understood + dunderstood
+    notes |= dnotes
+    rows += [row.replace("| adpcm_g722 |", "| decode |").replace("| adpcm_g726le |", "| decode |")
+             for row in decode_rows]
+    record("G.722 and G.726 in AU (T31c)", same, total, understood=understood)
+    lines += [
+        "",
+        "## G.722 and G.726 in AU (T31c)",
+        "",
+        f"G.722 and G.726 fixtures probed by zffprobe as ffprobe probes them, and decoded by zffmpeg into WAV, AU, "
+        f"AIFF, FLAC, Ogg and raw PCM (and resampled, and downmixed), into raw PCM from a pipe to stdout, and from "
+        f"a pipe into a WAV file, equal to the ffmpeg program's with `-bitexact`, or refused by the port as "
+        f"recorded: {same}/{total}, {understood} of them as understood differences:",
+        "",
+    ] + [f"- {note}" for note in sorted(notes)] + [
+        "",
+        "| Fixture | Cells | Result |",
+        "| --- | --- | --- |",
+    ] + rows
+
+
+# The G.722 and G.726 output cells (T31c): each encoder into AU, with its
+# options, downmixed and resampled to what the encoders take, and stream
+# copy.
+G72X_OUTPUT_OPTIONS = [["-c:a", "g722"], ["-c:a", "g722", "-trellis", "3"], ["-c:a", "g722", "-ac", "1"],
+                       ["-c:a", "g722", "-ac", "1", "-trellis", "5"], ["-c:a", "g722", "-ac", "1", "-ar", "16000"],
+                       ["-c:a", "adpcm_g722", "-ac", "1", "-ar", "11025", "-trellis", "2"],
+                       ["-c:a", "g726le"],
+                       ["-c:a", "g726le", "-ac", "1", "-ar", "8000"],
+                       ["-c:a", "g726le", "-ac", "1", "-ar", "8000", "-code_size", "2"],
+                       ["-c:a", "adpcm_g726le", "-ac", "1", "-ar", "8000", "-code_size", "3"],
+                       ["-c:a", "g726le", "-ac", "1", "-ar", "8000", "-code_size", "5"],
+                       ["-c:a", "g726le", "-ac", "1", "-ar", "8000", "-b:a", "24k"], ["-c", "copy"]]
+
+
+def g72x_expected_refusal(codec, channels, rate, opts):
+    """The cells zffmpeg refuses before any output: (whether FFmpeg fails
+    too, status, error). G.722 from more than one channel, which the
+    program's filters downmix (notes.md "G.722 and G.726"); G.726 from more
+    than one channel or away from 8 kHz, which FFmpeg's encoder refuses
+    too; stream copy of G.722 and G.726, which FFmpeg's muxer copies, not
+    ported; copy of what AU does not carry fails both."""
+    if opts == ["-c", "copy"]:
+        if codec in ("adpcm_g722", "adpcm_g726le"):
+            return False, 3, "UnsupportedOperation"
+        return True, 3, "UnsupportedOperation"
+    mono = channels == 1 or "-ac" in opts
+    out_rate = int(opts[opts.index("-ar") + 1]) if "-ar" in opts else rate
+    if "g722" in opts[1] and not mono:
+        return False, 3, "UnsupportedFormat"
+    if "g726le" in opts[1] and (not mono or out_rate != 8000):
+        return True, 3, "UnsupportedFormat"
+    return None
+
+
+def compare_g72x_output(args, lines, failures):
+    """zffmpeg's G.722 and G.726 AU output (T31c) against the ffmpeg
+    program's with `-bitexact`: the same bytes as a file, from the FLAC
+    output section's inputs and decoded MP3, Vorbis, G.722 and G.726
+    inputs, or refused by zffmpeg before any output."""
+    rows = []
+    same = total = understood = 0
+    notes = set()
+    with tempfile.TemporaryDirectory() as work:
+        work = pathlib.Path(work)
+        inputs = dict(flac_output_inputs(work))
+        for fixture in ("mp3/mp3_l3_long_stereo.mp3", "ogg/ogg_vorbis_ffmpeg_44k.ogg",
+                        "g72x/g72x_ffmpeg_g722_16k.au", "g72x/g72x_ffmpeg_g726_3.au", "g72x/g72x_g722_44k.au"):
+            inputs[pathlib.Path(fixture).stem] = FIXTURES / fixture
+        for name, source in inputs.items():
+            probe = run(args.ffprobe, "-v", "error", "-select_streams", "a:0", "-show_entries",
+                        "stream=codec_name,channels,sample_rate", "-of", "default=nw=1:nk=1", source)
+            codec, rate, channels = text(probe.stdout).split()[:3]
+            channels, rate = int(channels), int(rate)
+            problems = []
+            for opts in G72X_OUTPUT_OPTIONS:
+                total += 1
+                theirs, ours = work / "theirs.au", work / "ours.au"
+                for path in (theirs, ours):
+                    path.unlink(missing_ok=True)
+                tp = run(args.ffmpeg, "-nostdin", "-v", "error", "-y", "-i", source, "-bitexact", *opts, theirs)
+                zp = run(args.zffmpeg, "-y", "-i", source, *opts, ours)
+                label = " ".join(opts)
+                refusal = g72x_expected_refusal(codec, channels, rate, opts)
+                if refusal is not None:
+                    fails, code, error = refusal
+                    program_ok = tp.returncode != 0 if fails else tp.returncode == 0
+                    if not program_ok or zp.returncode != code or tool_error(zp, "zffmpeg", source) != error \
+                            or ours.exists():
+                        problems.append(f"{label}: FFmpeg exited {tp.returncode}, zffmpeg {zp.returncode} "
+                                        f"({first_line(text(zp.stderr)) or 'no error'}); recorded: zffmpeg refuses "
+                                        f"with {error} (status {code}) and writes nothing")
+                    else:
+                        same += 1
+                        if not fails:
+                            understood += 1
+                            notes.add("G.722 from more than one channel, which the program downmixes: refused "
+                                      "(`UnsupportedFormat`)" if error == "UnsupportedFormat" else
+                                      "stream copy of G.722 and G.726, which FFmpeg's AU muxer copies: not ported "
+                                      "(`UnsupportedOperation`)")
+                    continue
+                if tp.returncode != 0 or zp.returncode != 0:
+                    problems.append(f"{label}: FFmpeg {tp.returncode}, zffmpeg {zp.returncode} "
+                                    f"({first_line(text(zp.stderr))})")
+                elif not ours.read_bytes() or theirs.read_bytes() != ours.read_bytes():
+                    problems.append(f"{label}: the files differ")
+                else:
+                    same += 1
+            failures.extend(f"G.72x output {name}: {p}" for p in problems)
+            rows.append(f"| `{name}` | {codec} | {'pass' if not problems else '**FAIL**: ' + '; '.join(problems)} |")
+    record("G.722 and G.726 output (T31c)", same, total, understood=understood)
+    lines += [
+        "",
+        "## G.722 and G.726 output (T31c)",
+        "",
+        f"zffmpeg's G.722 and G.726 AU outputs equal to the ffmpeg program's with `-bitexact`, byte for byte, "
+        f"from WAV and decoded inputs, with the encoders' options, downmixed and resampled, or refused before any "
+        f"output: {same}/{total}, {understood} of them as understood differences:",
+        "",
+    ] + [f"- {note}" for note in sorted(notes)] + [
+        "",
+        "| Input | Codec | Result |",
+        "| --- | --- | --- |",
+    ] + rows
+
 # The CAF output cells (T31b): FFmpeg's CAF muxer's default (pcm_s16be),
 # other PCM codecs, ALAC with its options, resampled and downmixed, and
 # stream copy.
@@ -4333,6 +4523,8 @@ def main():
     compare_adpcm(args, lines, failures)
     compare_alac(args, lines, failures)
     compare_caf_output(args, lines, failures)
+    compare_g72x(args, lines, failures)
+    compare_g72x_output(args, lines, failures)
     compare_mp2_output(args, lines, failures)
     compare_opus_vectors(args, lines, failures)
     compare_hashes(args, lines, failures)

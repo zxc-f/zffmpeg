@@ -200,7 +200,7 @@ pub const formats = [_]Format{
         .name = "au",
         .long_name = "Sun AU",
         .demuxer = .{ .probe = au.probeScore },
-        .muxer = .{ .extensions = &.{"au"}, .mime_type = "audio/basic", .audio_codec = .{ .pcm = .s16be }, .carries = pcmOnly(au.carries) },
+        .muxer = .{ .extensions = &.{"au"}, .mime_type = "audio/basic", .audio_codec = .{ .pcm = .s16be }, .carries = auCodecs },
     },
     .{
         .container = .aiff,
@@ -358,6 +358,16 @@ fn cafCodecs(codec: codecs.Codec) bool {
         .pcm => |p| cafmux.carries(p),
         .alac => true,
         .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac, .adpcm_ima_wav, .adpcm_ms, .adpcm_g722, .adpcm_g726le => false,
+    };
+}
+
+/// The AU muxer's codecs (codec_au_tags): its PCM encodings, G.722 and
+/// little-endian G.726 (T31c).
+fn auCodecs(codec: codecs.Codec) bool {
+    return switch (codec) {
+        .pcm => |p| au.carries(p),
+        .adpcm_g722, .adpcm_g726le => true,
+        .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac, .adpcm_ima_wav, .adpcm_ms, .alac => false,
     };
 }
 

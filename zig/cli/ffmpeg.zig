@@ -102,6 +102,10 @@ const help = usage ++
     \\WAV as FFmpeg's encoders do, from mono or stereo, with -block_size (32
     \\to 8192, a power of two, default 1024) and -trellis (0 to 16); WAV
     \\input in either is decoded as FFmpeg decodes it.
+    \\-c g722 (adpcm_g722) and -c g726le (adpcm_g726le) encode G.722 and
+    \\G.726 into AU as FFmpeg's encoders and muxer do, from mono: G.722 with
+    \\-trellis (0 to 16), G.726 at 8 kHz with -code_size (2 to 5, default 4)
+    \\or -b:a; AU input in either is decoded as FFmpeg decodes it.
     \\-c alac encodes ALAC into CAF (.caf, whose default is pcm_s16be) as
     \\FFmpeg's encoder and muxer do, with -compression_level (0 to 2) and
     \\-min_prediction_order and -max_prediction_order (1 to 30); a CAF output
@@ -139,8 +143,11 @@ const Command = struct {
     bit_rate: ?[]const u8,
     /// The FLAC encoder's options after `-i` (T26c).
     flac: av.flacenc.AvOptions,
-    /// The ADPCM encoders' options (T31a).
+    /// The ADPCM encoders' options (T31a); G.722's encoder takes its
+    /// `-trellis` (T31c).
     adpcm: av.adpcm.EncodeOptions,
+    /// The G.726 encoder's `-code_size` (T31c).
+    g726: av.g726.EncodeOptions,
     dither: av.dither.Options,
     overwrite: bool,
 };
@@ -264,6 +271,7 @@ fn run(init: std.process.Init) ExitStatus {
         .mp2 = mp2,
         .adpcm = command.adpcm,
         .alac = alacOptions(command.flac),
+        .g72x = .{ .trellis = command.adpcm.trellis, .code_size = command.g726.code_size, .bit_rate = mp2.bit_rate },
         .dither = command.dither,
         .input = .{ .format = input_container, .raw = raw_params },
         // FFmpeg's input -ch_layout names the stream's layout, which its
@@ -299,6 +307,7 @@ fn parse(args: []const [:0]const u8) Parsed {
     var bit_rate: ?[]const u8 = null;
     var flac: av.flacenc.AvOptions = .{};
     var adpcm: av.adpcm.EncodeOptions = .{};
+    var g726: av.g726.EncodeOptions = .{};
     var dither_method: ?[]const u8 = null;
     var dither_scale: ?[]const u8 = null;
     var yes = false;
@@ -362,6 +371,14 @@ fn parse(args: []const [:0]const u8) Parsed {
                     return .{ .usage = .{ .reason = "invalid value for", .arg = arg } };
                 continue;
             }
+            if (isG726Option(arg)) {
+                // The G.726 encoder's option (T31c), likewise.
+                i += 1;
+                if (i == args.len) return .{ .usage = .{ .reason = "missing value for", .arg = arg } };
+                av.options.set(av.g726.EncodeOptions, &g726, arg[1..], args[i]) catch
+                    return .{ .usage = .{ .reason = "invalid value for", .arg = arg } };
+                continue;
+            }
             if (arg.len > 1 and arg[0] == '-') return .{ .usage = .{ .reason = "unknown option", .arg = arg } };
             output = arg;
             continue;
@@ -392,6 +409,7 @@ fn parse(args: []const [:0]const u8) Parsed {
         .bit_rate = bit_rate,
         .flac = flac,
         .adpcm = adpcm,
+        .g726 = g726,
         .dither = dither,
         .overwrite = yes,
     } };
@@ -438,6 +456,14 @@ fn alacOptions(flac: av.flacenc.AvOptions) av.alac.EncodeOptions {
 fn isAdpcmOption(arg: []const u8) bool {
     if (arg.len < 2 or arg[0] != '-') return false;
     inline for (av.adpcm.EncodeOptions.option_specs) |spec| {
+        if (std.mem.eql(u8, arg[1..], spec.name)) return true;
+    }
+    return false;
+}
+
+fn isG726Option(arg: []const u8) bool {
+    if (arg.len < 2 or arg[0] != '-') return false;
+    inline for (av.g726.EncodeOptions.option_specs) |spec| {
         if (std.mem.eql(u8, arg[1..], spec.name)) return true;
     }
     return false;

@@ -17,6 +17,7 @@
 //! build's do.
 
 const std = @import("std");
+const options_zig = @import("../core/options.zig");
 
 /// Float11: a sign, a 4-bit exponent and a 6-bit mantissa.
 const Float11 = struct { sign: u8 = 0, exp: u8 = 0, mant: u8 = 0 };
@@ -255,11 +256,24 @@ pub fn encodePacket(c: *Codec, samples: []const i16, out: []u8) []u8 {
 /// clipped to 2 to 5.
 pub fn encoderCodeSize(option: i64, bit_rate: i64, sample_rate: u32) u32 {
     var cs = option;
-    if (bit_rate != 0) cs = @divTrunc(bit_rate + sample_rate / 2, sample_rate);
+    // `(bit_rate + sample_rate / 2) / sample_rate` in int64_t, which wraps
+    // in the reference build for a bit rate near INT64_MAX (notes.md "G.726's
+    // code size from a bit rate").
+    if (bit_rate != 0) cs = @divTrunc(bit_rate +% (sample_rate / 2), sample_rate);
     return @intCast(std.math.clamp(cs, 2, 5));
 }
 
 pub const default_code_size = 4;
+
+/// The encoder's private option, `code_size` (2 to 5, 4 by default); a bit
+/// rate, when set, overrides it (`encoderCodeSize`).
+pub const EncodeOptions = struct {
+    code_size: i32 = default_code_size,
+
+    pub const option_specs = [_]options_zig.Spec{
+        .{ .name = "code_size", .field = "code_size", .kind = .int, .help = "Bits per code", .min = 2, .max = 5 },
+    };
+};
 
 const testing = std.testing;
 const signals = @import("../testing/signals.zig");
@@ -427,6 +441,7 @@ test "code sizes from the option and the bit rate" {
     try testing.expectEqual(3, encoderCodeSize(4, 24000, 8000));
     try testing.expectEqual(2, encoderCodeSize(4, 1000, 8000));
     try testing.expectEqual(5, encoderCodeSize(4, 900000, 8000));
+    try testing.expectEqual(2, encoderCodeSize(4, std.math.maxInt(i64), 8000));
 }
 
 const hostile = @import("../testing/hostile.zig");

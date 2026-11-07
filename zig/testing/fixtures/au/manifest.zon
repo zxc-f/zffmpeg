@@ -196,12 +196,6 @@
         .detected = .au,
     },
     .{
-        .name = "au_encoding_g726",
-        .sha256 = "5150af0881e4c158eee09d3159a24253b5973fa802088160c398d8a8364ee1a6",
-        .expected = .{ .reject = .UnsupportedFormat },
-        .detected = .au,
-    },
-    .{
         .name = "au_encoding_unknown",
         .sha256 = "c22a72e95b2dbda4e144be6a35e85072332302ea04cdc7878df8c0aabd4e4531",
         .expected = .{ .reject = .UnsupportedFormat },
@@ -258,7 +252,7 @@
     },
     .{
         .name = "au_unsupported_before_invalid",
-        .sha256 = "4d9bf4b697802293982178987c44517b4b87cc67789892ab0672f8d54ccf96b2",
+        .sha256 = "cc18b5d834cf71e26bd3bbead1d9acb231e6b37438e94c70cfbd7a2225415b1e",
         .expected = .{ .reject = .UnsupportedFormat },
         .detected = null,
     },

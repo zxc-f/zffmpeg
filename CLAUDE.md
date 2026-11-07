@@ -39,7 +39,8 @@ decoder for AAC-LC, with ADTS decoded in zffmpeg (T30b), and its SBR
 decoder, with HE-AAC decoded (T30c), and its parametric stereo, with
 HE-AACv2 decoded (T30d), and FFmpeg's IMA WAV and Microsoft ADPCM codecs,
 decoded and encoded in WAV (T31a), and its ALAC codec, read from CAF and
-written there with its CAF muxer, which also writes PCM (T31b). The `av`
+written there with its CAF muxer, which also writes PCM (T31b), and its
+G.722 and G.726 codecs, read from AU and written there (T31c). The `av`
 module (rooted at `zig/root.zig`) exports `pcm` (the PCM encodings,
 kernels and decoder/encoder stages), `audio`, `channel_layout` (FFmpeg's
 channel layouts), `time`, `samples` (decoded sample storage
@@ -66,7 +67,8 @@ demuxer, the AudioSpecificConfig, its ADTS muxer), `aacdec` and
 decoded), `adpcm` and `wavadpcm` (FFmpeg's IMA WAV and Microsoft ADPCM
 codecs, and ADPCM in WAV decoded and encoded, T31a), `alac`, `cafalac` and
 `cafmux` (FFmpeg's ALAC codec, ALAC in CAF decoded, and its CAF muxer,
-T31b), `mp3` (FFmpeg's MPEG
+T31b), `g722`, `g726` and `aug72x` (FFmpeg's G.722 and G.726 codecs, and
+G.722 and G.726 in AU decoded and encoded, T31c), `mp3` (FFmpeg's MPEG
 audio demuxer), `mpegaudio` (frame headers and the mpegaudio parser), `id3v2` and
 `id3v1` (ID3 tags), `demux` (libavformat's generic layer:
 timestamps, the stream-info read-ahead, timings and seeking),
@@ -81,9 +83,9 @@ stream-copy pipeline) and `file` (file and pipe adapters). Two tools sit on it:
 `zffprobe` probes WAV, Wave64, AU, AIFF, CAF, FLAC, Ogg, MP3, ADTS and raw PCM, tags included, and `zffmpeg` (T13b)
 converts and stream-copies between them (CAF as input only; Ogg Vorbis, Opus
 and FLAC, MPEG audio and ADTS AAC, decoded as input; FLAC and MP2 written as output; IMA WAV and
-Microsoft ADPCM in WAV and ALAC in CAF both ways, PCM CAF written), carrying tags,
-with `-c:a`, `-b:a`, FFmpeg's dither options and its FLAC and ADPCM encoder options. Tests cover 129 WAV,
-41 AU, 57 AIFF, 25 raw PCM, 58 CAF, 57 FLAC, 37 Ogg, 71 MP3, 46 ADTS, 41 ADPCM and 33 ALAC fixtures, process runs of both tools, and a CI comparison against a
+Microsoft ADPCM in WAV, ALAC in CAF and G.722 and G.726 in AU both ways, PCM CAF written), carrying tags,
+with `-c:a`, `-b:a`, FFmpeg's dither options and its FLAC, ADPCM and G.726 encoder options. Tests cover 129 WAV,
+40 AU, 57 AIFF, 25 raw PCM, 58 CAF, 57 FLAC, 37 Ogg, 71 MP3, 46 ADTS, 41 ADPCM, 33 ALAC and 23 G.72x fixtures, process runs of both tools, and a CI comparison against a
 pinned FFmpeg build that also reads every `zffmpeg` output. Verification is
 Linux-only during development; Windows and ARM wait for T62–T63. T13, T14a
 (packets, frames and stages), T17b (the metadata dictionary), T20a (decoded
@@ -111,8 +113,8 @@ parser), T29b (the Layer III decoder), T29c (Layers I and II) and T29d
 (the MP2 encoder), completing T29, and T30a (ADTS and AudioSpecificConfig)
 T30b (the AAC-LC decoder), T30c (SBR) and T30d (parametric stereo),
 completing T30, and T31a (IMA WAV and Microsoft ADPCM, decoded and
-encoded in WAV) and T31b (ALAC in CAF and the CAF muxer); T31c (G.722 and
-G.726 in AU) is next,
+encoded in WAV), T31b (ALAC in CAF and the CAF muxer) and T31c (G.722
+and G.726 in AU), completing T31; T32a (the AC-3 decoder) is next,
 and TODO.md lays out the roadmap through T65.
  When the state changes, update the current-state statements in
 README.md, port.md ("Status and scope"), the TODO.md introduction and this file

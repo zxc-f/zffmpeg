@@ -88,6 +88,8 @@
 //! - `cafalac`: ALAC in CAF decoded as the ffmpeg program decodes it
 //!   (`format/cafalac.zig`, T31b).
 //! - `cafmux`: FFmpeg's CAF muxer, PCM and ALAC (`format/cafmux.zig`, T31b).
+//! - `aug72x`: G.722 and G.726 in AU, decoded and encoded as the ffmpeg
+//!   program does (`format/aug72x.zig`, T31c).
 //! - `framehash`: FFmpeg's framecrc, framemd5 and streamhash muxers' text
 //!   for one audio stream (`format/framehash.zig`).
 //! - `seek`: the seek API, FFmpeg's `av_seek_frame` and
@@ -168,6 +170,7 @@ pub const aacdec = @import("codec/aacdec.zig");
 pub const aacdecode = @import("format/aacdecode.zig");
 pub const wavadpcm = @import("format/wavadpcm.zig");
 pub const cafalac = @import("format/cafalac.zig");
+pub const aug72x = @import("format/aug72x.zig");
 pub const cafmux = @import("format/cafmux.zig");
 pub const id3v2 = @import("format/id3v2.zig");
 pub const id3v1 = @import("format/id3v1.zig");
@@ -245,6 +248,7 @@ test {
     _ = @import("format/aacdecode.zig");
     _ = @import("format/wavadpcm.zig");
     _ = @import("format/cafalac.zig");
+    _ = @import("format/aug72x.zig");
     _ = @import("format/cafmux.zig");
     _ = @import("format/pcmdata.zig");
     _ = @import("codec/adpcm.zig");

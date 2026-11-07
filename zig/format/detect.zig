@@ -495,7 +495,13 @@ pub fn probeWith(reader: *std.Io.Reader, limits: Limits, options: Options) Error
             var parser: au.Parser = .init(input.reader(), limits.au);
             const info = try parser.readHeader();
             try parser.finish();
-            return .{ .container = .au, .codec = .{ .pcm = info.codec }, .format = info.format, .frame_count = info.frame_count };
+            // G.722 and G.726 (T31c): the decoders' mono s16, the
+            // demuxer's duration.
+            const codec: codecs.Codec = if (info.g72x) |g| switch (g.codec) {
+                .g722 => .adpcm_g722,
+                .g726le => .adpcm_g726le,
+            } else .{ .pcm = info.codec };
+            return .{ .container = .au, .codec = codec, .format = info.format, .frame_count = info.frame_count };
         },
         .aiff => {
             var parser: aiff.Parser = .init(input.reader(), limits.aiff);

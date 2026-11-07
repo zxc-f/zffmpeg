@@ -1260,8 +1260,6 @@ def build_au_fixtures():
         au(pcm_be(MONO[:4])[:5], size=8), "Truncated")
 
     # Encoding, rate and channels.
-    bad("au_encoding_g726", "format", "Encoding 23 (4-bit G.726) waits for T31c.",
-        au(bytes(4), encoding=23), "UnsupportedFormat")
     bad("au_encoding_unknown", "format", "Encoding 99 is not an AU encoding.",
         au(bytes(4), encoding=99), "UnsupportedFormat")
     bad("au_rate_zero", "format", "Sample rate 0.", au(pcm_be(MONO[:4]), rate=0), "InvalidFormat")
@@ -1289,9 +1287,9 @@ def build_au_fixtures():
         "Data size over the limit and encoding 99: the data size field comes first.",
         au(bytes(4), encoding=99, size=AU_MAX_DATA + 1), "LimitExceeded")
     bad("au_unsupported_before_invalid", "precedence",
-        "Encoding 24 (G.722) and sample rate 0: the encoding field comes first. (Before T22a it used "
-        "encoding 6, now supported.)",
-        au(bytes(4), encoding=24, rate=0), "UnsupportedFormat")
+        "Encoding 99 and sample rate 0: the encoding field comes first. (It used encoding 6 before T22a "
+        "and 24, G.722, before T31c, both now supported.)",
+        au(bytes(4), encoding=99, rate=0), "UnsupportedFormat")
 
     names = [f.name for f in fx]
     assert len(names) == len(set(names)), "duplicate AU fixture names"
@@ -5181,6 +5179,100 @@ def build_alac_fixtures():
     return fx
 
 
+# --- G.722 and G.726 in AU (T31c) ---------------------------------------------
+#
+# AU files of G.722 (encoding 24) and little-endian G.726 (23, 25, 26 and
+# the private '7262'). The g72x_ffmpeg_* files are FFmpeg's encoders and AU
+# muxer's output, made by zig/testing/reference/g72x_fixtures.sh from inputs
+# this script writes (`--g72x-input NAME`) and committed; the others are
+# built here, pseudo-random codes under headers that reach every encoding,
+# channel count, packet size and size rule of FFmpeg's demuxer. What
+# FFmpeg makes of each is vectors/g72x_au.txt (g72x_au_vectors.sh).
+
+G72X_DIR = HERE / "g72x"
+G72X_MANIFEST = G72X_DIR / "manifest.zon"
+G72X_README = G72X_DIR / "README.md"
+
+# Each entry: rate, sample count, seed, signal kind (as AAC_FFMPEG's), the
+# encoder options, and the file's SHA-256. Mono throughout: both encoders
+# take one channel.
+G72X_FFMPEG = {
+    "g72x_ffmpeg_g722_16k": (16000, 12000, 121, "tones", "-c:a g722",
+                             "c594092cfa89144fa24cad4e3fb9fdbbb0d8687b5a45addb4488f689d6b5d484"),
+    "g72x_ffmpeg_g722_trellis": (16000, 9001, 122, "smooth", "-c:a g722 -trellis 5",
+                             "a3c692e060298c41b2c79e2dff81713d82b7b163ff86a8e74a7446d6f3a2d453"),
+    "g72x_ffmpeg_g722_8k": (8000, 5000, 123, "noise", "-c:a g722",
+                             "29d626feef419be7983b618d088078317e93b34b256837fa87cbac745a158647"),
+    "g72x_ffmpeg_g726_2": (8000, 9000, 124, "tones", "-c:a g726le -code_size 2",
+                             "dd2e068b0bc3da8919b5ed655d7d1da67b0eb269f4b12dcfb3f51b419a8c6ba4"),
+    "g72x_ffmpeg_g726_3": (8000, 9001, 125, "smooth", "-c:a g726le -code_size 3",
+                             "4790fe91b31ba53a2282dfdeca4155248b66da4dc31bd41740b328b2d538f0b0"),
+    "g72x_ffmpeg_g726_4": (8000, 8000, 126, "transients", "-c:a g726le",
+                             "424b88b06f602980a98fc45a1fe6201c4b0e3bd1029377162df5b16bf977ddbe"),
+    "g72x_ffmpeg_g726_5": (8000, 7003, 127, "noise", "-c:a g726le -code_size 5",
+                             "2851863d8c2f39675504a752435b4c9676f321088588ab0d6b5e74d7a365f55c"),
+    "g72x_ffmpeg_one_sample": (8000, 1, 128, "tones", "-c:a g726le -code_size 3",
+                             "7e6fa21c844e893c9b024072e6cf7620e7737e8f964f2d8a0d4e9691fe4d92f0"),
+}
+
+G72X_ENCODINGS = {"g722": 24, "g726_2": 0x37323632, "g726_3": 25, "g726_4": 23, "g726_5": 26}
+
+
+def g72x_ffmpeg_input(name):
+    """The s16 samples that g72x_fixtures.sh encodes."""
+    rate, count, seed, kind, _, _ = G72X_FFMPEG[name]
+    return signal_input(1, rate, count, seed, kind)
+
+
+def build_g72x_fixtures():
+    fx = []
+
+    def ok(name, rule, data, group="accepted"):
+        fx.append(Mp3Fixture(name, group, rule, data))
+
+    def bad(name, rule, data, error, group="rejected"):
+        fx.append(Mp3Fixture(name, group, rule, data, reject=error))
+
+    def codes(seed, n):
+        return adpcm_bytes(AdpcmLcg(seed), n)
+
+    e = G72X_ENCODINGS
+    ok("g72x_au_encoding_23", "T22a's `au_encoding_g726`: four zero bytes of 4-bit G.726 (encoding 23), "
+       "rejected until T31c.", au(bytes(4), encoding=23))
+    ok("g72x_g722_stereo_header", "G.722 under a header of two channels: FFmpeg's decoder takes every byte as "
+       "one channel, the duration counts two.", au(codes(1, 3000), channels=2, rate=16000, encoding=e["g722"]))
+    ok("g72x_g722_3ch_header", "G.722 under three channels: a packet of one byte a block.",
+       au(codes(2, 2001), channels=3, rate=16000, encoding=e["g722"]))
+    ok("g72x_g726_3_ch2", "3-bit G.726 under two channels: the decoder refuses them in "
+       "avformat_find_stream_info, then decodes the data as one.", au(codes(3, 3001), channels=2, encoding=e["g726_3"]))
+    ok("g72x_7262_8ch", "2-bit G.726 ('7262') under eight channels: `block_align` 2.",
+       au(codes(4, 2000), channels=8, encoding=e["g726_2"]))
+    ok("g72x_g726_5_partial", "5-bit G.726 whose last packet ends inside a code: its bits dropped.",
+       au(codes(5, 1003), encoding=e["g726_5"]))
+    ok("g72x_g726_4_16k", "4-bit G.726 at 16 kHz, which its decoder takes.", au(codes(6, 1500), rate=16000,
+                                                                               encoding=e["g726_4"]))
+    ok("g72x_g722_44k", "G.722 at 44100 Hz: packets of a power of two of bytes.",
+       au(codes(7, 7000), rate=44100, encoding=e["g722"]))
+    ok("g72x_g726_2_one_byte", "One byte of 2-bit G.726: four samples.", au(codes(8, 1), encoding=e["g726_2"]))
+    ok("g72x_g726_3_two_bytes", "Two bytes of 3-bit G.726: five codes, one bit dropped.",
+       au(codes(9, 2), encoding=e["g726_3"]))
+    ok("g72x_annotation", "G.722 after a 16-byte annotation of zeros.",
+       au(codes(10, 500), rate=16000, encoding=e["g722"], annotation=bytes(16)))
+    bad("g72x_unknown_size", "G.722 of unknown length (data size 0xFFFFFFFF): refused by default, as for PCM AU.",
+        au(codes(11, 600), rate=16000, encoding=e["g722"], size=0xFFFFFFFF), "UnsupportedStreamingSize")
+    bad("g72x_truncated", "3-bit G.726 whose data ends 1000 bytes before its size: `Truncated`, where FFmpeg "
+        "decodes what is there.", au(codes(12, 2000), encoding=e["g726_3"], size=3000), "Truncated")
+    bad("g72x_rate_over_limit", "G.722 at 200000 Hz, above the parser's limit.",
+        au(codes(13, 100), rate=200000, encoding=e["g722"]), "LimitExceeded")
+    bad("g72x_channels65", "4-bit G.726 under 65 channels, above the parser's limit.",
+        au(codes(14, 100), channels=65, encoding=e["g726_4"]), "LimitExceeded")
+    for name, (rate, count, _, kind, options, _) in G72X_FFMPEG.items():
+        path = G72X_DIR / f"{name}.au"
+        rule = f"FFmpeg's encoder and AU muxer, {count} {kind} samples at {rate} Hz, `{options}`."
+        fx.append(Mp3Fixture(name, "ffmpeg", rule, path.read_bytes() if path.exists() else b"", made_by="ffmpeg"))
+    return fx
+
+
 def adts_probe_score(buf):
     """adts_aac_probe on a probe buffer (after any ID3v2 tags)."""
     end = len(buf) - 7
@@ -5230,7 +5322,7 @@ def render_mp3_manifest(fixtures):
 
 
 def outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures, flac_fixtures, ogg_fixtures,
-            mp3_fixtures, aac_fixtures, adpcm_fixtures, alac_fixtures):
+            mp3_fixtures, aac_fixtures, adpcm_fixtures, alac_fixtures, g72x_fixtures):
     files = {WAV_DIR / f"{f.name}.wav": f.data for f in fixtures}
     files[MANIFEST] = render_manifest(
         fixtures, "// Each entry names wav/<name>.wav; see README.md for the rules and decisions.")
@@ -5277,6 +5369,12 @@ def outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures, fl
         "Streams, tags and packets are", "Streams and decoded samples are").replace(
         "vectors/mp3.txt", "vectors/alac_caf.txt").encode()
     files[ALAC_README] = render_readme(ALAC_README, render_ogg_table(alac_fixtures))
+    files.update({G72X_DIR / f"{f.name}.au": f.data for f in g72x_fixtures if f.made_by != "ffmpeg"})
+    files[G72X_MANIFEST] = render_mp3_manifest(g72x_fixtures).replace(
+        "MP3 fixtures", "G.722 and G.726 fixtures").replace("mp3/<name>.mp3; see mp3/README.md", "g72x/<name>.au; see g72x/README.md").replace(
+        "Streams, tags and packets are", "Streams and decoded samples are").replace(
+        "vectors/mp3.txt", "vectors/g72x_au.txt").encode()
+    files[G72X_README] = render_readme(G72X_README, render_ogg_table(g72x_fixtures))
     return files
 
 
@@ -5311,6 +5409,12 @@ def check_ffmpeg_made(flac_fixtures):
             problems.append(f"missing FFmpeg-made fixture: {path.relative_to(HERE)}")
         elif digest is None or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
             problems.append(f"FFmpeg-made fixture differs from its recorded hash: {path.relative_to(HERE)}")
+    for name, (*_, digest) in G72X_FFMPEG.items():
+        path = G72X_DIR / f"{name}.au"
+        if not path.exists():
+            problems.append(f"missing FFmpeg-made fixture: {path.relative_to(HERE)}")
+        elif digest is None or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            problems.append(f"FFmpeg-made fixture differs from its recorded hash: {path.relative_to(HERE)}")
     for name, (*_, digest) in ADPCM_FFMPEG.items():
         path = ADPCM_DIR / f"{name}.wav"
         if not path.exists():
@@ -5331,6 +5435,8 @@ def main():
                         help="write the s16le input of FFmpeg-made AAC fixture NAME to stdout and stop")
     parser.add_argument("--adpcm-input", metavar="NAME",
                         help="write the s16le input of FFmpeg-made ADPCM fixture NAME to stdout and stop")
+    parser.add_argument("--g72x-input", metavar="NAME",
+                        help="write the s16le input of FFmpeg-made G.722 or G.726 fixture NAME to stdout and stop")
     parser.add_argument("--alac-input", metavar="NAME",
                         help="write the s16le or s32le input of FFmpeg-made ALAC fixture NAME to stdout and stop")
     args = parser.parse_args()
@@ -5345,6 +5451,9 @@ def main():
         return 0
     if args.adpcm_input:
         sys.stdout.buffer.write(b"".join(struct.pack("<h", v) for v in adpcm_ffmpeg_input(args.adpcm_input)))
+        return 0
+    if args.g72x_input:
+        sys.stdout.buffer.write(b"".join(struct.pack("<h", v) for v in g72x_ffmpeg_input(args.g72x_input)))
         return 0
     if args.alac_input:
         bits = ALAC_FFMPEG[args.alac_input][5]
@@ -5363,23 +5472,26 @@ def main():
     aac_fixtures = build_aac_fixtures()
     adpcm_fixtures = build_adpcm_fixtures()
     alac_fixtures = build_alac_fixtures()
+    g72x_fixtures = build_g72x_fixtures()
     expected = outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures, flac_fixtures, ogg_fixtures,
-                       mp3_fixtures, aac_fixtures, adpcm_fixtures, alac_fixtures)
+                       mp3_fixtures, aac_fixtures, adpcm_fixtures, alac_fixtures, g72x_fixtures)
     stale = [path for path, content in expected.items() if not path.exists() or path.read_bytes() != content]
     ffmpeg_made = ({FLAC_DIR / f"{f.name}.flac" for f in flac_fixtures if f.made_by == "ffmpeg"}
                    | {OGG_DIR / f"{name}.ogg" for name in OGG_FFMPEG}
                    | {AAC_DIR / f"{name}.aac" for name in AAC_FFMPEG}
                    | {ADPCM_DIR / f"{name}.wav" for name in ADPCM_FFMPEG}
-                   | {ALAC_DIR / f"{name}.caf" for name in ALAC_FFMPEG})
+                   | {ALAC_DIR / f"{name}.caf" for name in ALAC_FFMPEG}
+                   | {G72X_DIR / f"{name}.au" for name in G72X_FFMPEG})
     extra = sorted((set(WAV_DIR.glob("*.wav")) | set(AU_DIR.glob("*.au")) | set(AIFF_DIR.glob("*.aiff"))
              | set(RAW_DIR.glob("*.raw")) | set(CAF_DIR.glob("*.caf")) | set(FLAC_DIR.glob("*.flac"))
              | set(OGG_DIR.glob("*.ogg")) | set(MP3_DIR.glob("*.mp3")) | set(AAC_DIR.glob("*.aac"))
-             | set(ADPCM_DIR.glob("*.wav")) | set(ALAC_DIR.glob("*.caf")))
+             | set(ADPCM_DIR.glob("*.wav")) | set(ALAC_DIR.glob("*.caf")) | set(G72X_DIR.glob("*.au")))
                    - set(expected) - ffmpeg_made)
     problems = check_ffmpeg_made(flac_fixtures)
     counts = (f"{len(fixtures)} WAV, {len(au_fixtures)} AU, {len(aiff_fixtures)} AIFF, {len(raw_fixtures)} raw PCM, "
               f"{len(caf_fixtures)} CAF, {len(flac_fixtures)} FLAC, {len(ogg_fixtures)} Ogg, {len(mp3_fixtures)} MP3"
-              f", {len(aac_fixtures)} ADTS, {len(adpcm_fixtures)} ADPCM and {len(alac_fixtures)} ALAC fixtures")
+              f", {len(aac_fixtures)} ADTS, {len(adpcm_fixtures)} ADPCM, {len(alac_fixtures)} ALAC and "
+              f"{len(g72x_fixtures)} G.72x fixtures")
 
     if args.check:
         for path in stale:
@@ -5398,6 +5510,7 @@ def main():
         return 0
 
     WAV_DIR.mkdir(exist_ok=True)
+    G72X_DIR.mkdir(exist_ok=True)
     AU_DIR.mkdir(exist_ok=True)
     AIFF_DIR.mkdir(exist_ok=True)
     RAW_DIR.mkdir(exist_ok=True)

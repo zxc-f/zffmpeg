@@ -31,7 +31,7 @@ All header fields are big-endian `u32` values.
 | 0 | magic | `.snd`; anything else is `InvalidAu`. |
 | 4 | data offset | At least 24, else `InvalidAu`. The `offset − 24` annotation bytes may be at most 1 MiB (1,048,576), else `LimitExceeded`; the limit is configurable. |
 | 8 | data size | `0xffffffff` (unknown length) is `UnsupportedStreamingSize`, unless the parser's `unknown_length` option (T22a) reads the data to the end of the input, which must end on a whole frame (`Truncated` otherwise). Above `0x7fffffff` is `LimitExceeded`, the range FFmpeg's signed read also accepts. 0 is an empty stream. It must hold whole frames (the encoding's sample width × channels bytes), else `InvalidFormat`. |
-| 12 | encoding | Since T22a, the PCM encodings of `au.c`'s table (see below); any other value is `UnsupportedFormat`, G.722 and G.726 (23 to 26) until T31c. |
+| 12 | encoding | Since T22a, the PCM encodings of `au.c`'s table (see below), and since T31c G.722 (24) and G.726 (23, 25, 26, '7262'), whose data may have any size and decodes as one channel ([g72x/](../g72x/README.md)); any other value is `UnsupportedFormat`. |
 | 16 | sample rate | 0 is `InvalidFormat`; above 192,000 Hz is `LimitExceeded` (configurable). |
 | 20 | channels | 0 is `InvalidFormat`; more than 64 (the configurable `Limits.max_channels`, libswresample's limit, as for WAV) is `LimitExceeded`. Since T23b any count up to it is read, in an unspecified layout: the header holds only the count, so zffprobe prints `channel_layout=unknown`, as ffprobe does. |
 | 24 | annotation | `offset − 24` bytes, skipped and ignored. Input ending inside them is `Truncated`. |
@@ -124,7 +124,7 @@ size says, so several rules here are deliberately stricter.
 | Data size not a whole number of frames | `InvalidFormat` (`au_data_not_block_aligned`). | Reads it; the duration rounds down. |
 | Sample rate above 192 kHz | `LimitExceeded` (`au_rate_over_limit`). | Accepts any rate up to `INT_MAX`. |
 | Channels | Since T23b 1 to 64, unspecified (`au_channels3`, `au_channels6`, `au_channels64`); more is `LimitExceeded` (`au_channels65`). | Accepts up to `INT_MAX / (1024 × bytes per sample)`, also unspecified. Its command line then guesses the default layout for the count (5.1 for six), as zffmpeg does. |
-| Encodings | Since T22a every PCM encoding of `au.c`'s table, read and written (`au_mulaw_mono_8k`, `au_s8_mono_8k`, `au_s24_stereo`, `au_s32_mono`, `au_f32_mono`, `au_f64_stereo_96k`, `au_alaw_mono_8k`); whole frames follow the encoding's width (`au_s24_data_not_block_aligned`). G.722 and G.726 (`au_encoding_g726`) and unknown numbers (`au_encoding_unknown`) are `UnsupportedFormat`. µ-law's negative zero is left out of writer output, as for WAV. | The same PCM encodings; G.72x needs decoders this reference build lacks. |
+| Encodings | Since T22a every PCM encoding of `au.c`'s table, read and written (`au_mulaw_mono_8k`, `au_s8_mono_8k`, `au_s24_stereo`, `au_s32_mono`, `au_f32_mono`, `au_f64_stereo_96k`, `au_alaw_mono_8k`); whole frames follow the encoding's width (`au_s24_data_not_block_aligned`). Unknown numbers (`au_encoding_unknown`) are `UnsupportedFormat`. Since T31c G.722 and G.726 (23 to 26 and '7262') are read and decoded, with their own fixtures in [g72x/](../g72x/README.md), where T22a's `au_encoding_g726` is now `g72x_au_encoding_23`. µ-law's negative zero is left out of writer output, as for WAV. | The same PCM encodings; G.72x has its own fixture set and comparison (T31c). |
 | Writer header | 32 bytes with the known data size and the codec's encoding. | The same 32 bytes for every encoding (its `-bitexact` copy of each writer-output fixture is identical); it writes `0xffffffff` and patches the size when the output is seekable, and puts title, artist, album, track and genre tags in the annotation. |
 
 ## Provenance
@@ -170,7 +170,6 @@ differences above.
 | `au_s24_data_not_block_aligned` | size | 36 | reject: `InvalidFormat` | 24-bit mono data size 4: frames follow the encoding's width. | `9a9187a98f5ca69433217d2d52a16f75fd658faf47c58a53b248f9229e75fcf2` |
 | `au_truncated_data` | size | 42 | reject: `Truncated` | Data size 16, but input ends after 10 data bytes. | `c9b4a2c5c68eb42d5e295dd8a916f7736273c4b2f1b9f5b0564c824ce72c7632` |
 | `au_truncated_mid_sample` | size | 37 | reject: `Truncated` | Data size 8, but input ends inside the third sample. | `bc91cb8379d7a65bb05ee136e9378d85e76c0de31b0d74d7d1ce96b905de84ae` |
-| `au_encoding_g726` | format | 36 | reject: `UnsupportedFormat` | Encoding 23 (4-bit G.726) waits for T31c. | `5150af0881e4c158eee09d3159a24253b5973fa802088160c398d8a8364ee1a6` |
 | `au_encoding_unknown` | format | 36 | reject: `UnsupportedFormat` | Encoding 99 is not an AU encoding. | `c22a72e95b2dbda4e144be6a35e85072332302ea04cdc7878df8c0aabd4e4531` |
 | `au_rate_zero` | format | 40 | reject: `InvalidFormat`; not detected (probing picks no format) | Sample rate 0. | `7bccf402af28a56ddde19e3ddc1c16d9c16042eb2b80edc4f2cad20bbc45d5a0` |
 | `au_rate_over_limit` | limits | 40 | reject: `LimitExceeded` | Sample rate 192001, one above the limit. | `a95f07d4fd74824917682ec3928a27bee43f5100e020cde8cf01718dc0624ce5` |
@@ -180,5 +179,5 @@ differences above.
 | `au_channels64` | channels | 160 | accept: 64 channels, 8000 Hz, 1 frame | 64 channels, the default limit: one frame. | `fcb0bd682fe86e6402848ad045f29b23337e54ea05f6139e64085738991d1fe7` |
 | `au_channels65` | channels | 162 | reject: `LimitExceeded` | 65 channels, above the default limit (FFmpeg reads them). | `e2070dde2741310d56bd93677f7d24a02773a927c08f74c8c8b5ed93d8e190d8` |
 | `au_limit_before_unsupported` | precedence | 36 | reject: `LimitExceeded` | Data size over the limit and encoding 99: the data size field comes first. | `572bd49c00e6a74b04615d07f4f48b42cc7faa5644791c91f8407b1d4cf9b364` |
-| `au_unsupported_before_invalid` | precedence | 36 | reject: `UnsupportedFormat`; not detected (probing picks no format) | Encoding 24 (G.722) and sample rate 0: the encoding field comes first. (Before T22a it used encoding 6, now supported.) | `4d9bf4b697802293982178987c44517b4b87cc67789892ab0672f8d54ccf96b2` |
+| `au_unsupported_before_invalid` | precedence | 36 | reject: `UnsupportedFormat`; not detected (probing picks no format) | Encoding 99 and sample rate 0: the encoding field comes first. (It used encoding 6 before T22a and 24, G.722, before T31c, both now supported.) | `cc18b5d834cf71e26bd3bbead1d9acb231e6b37438e94c70cfbd7a2225415b1e` |
 <!-- END GENERATED FIXTURE TABLE -->

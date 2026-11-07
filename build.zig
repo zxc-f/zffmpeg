@@ -31,8 +31,9 @@ const examples = [_]Example{
 /// The fixture directories, zig/testing/fixtures/<set>/, each named after its
 /// files' extension: wav (WAV and Wave64), au, aiff, raw (raw PCM), caf,
 /// flac, ogg, mp3 (MPEG audio, Layers I to III) and aac (ADTS); and adpcm,
-/// whose files are WAV (T31a), and alac, whose files are CAF (T31b).
-const FixtureSet = enum { wav, au, aiff, raw, caf, flac, ogg, mp3, aac, adpcm, alac };
+/// whose files are WAV (T31a), alac, whose files are CAF (T31b), and g72x,
+/// whose files are AU (T31c).
+const FixtureSet = enum { wav, au, aiff, raw, caf, flac, ogg, mp3, aac, adpcm, alac, g72x };
 
 /// A zffprobe process run with its expected exit code and output.
 const ProbeCase = struct {
@@ -393,7 +394,7 @@ const probe_cases = [_]ProbeCase{
     .{ .name = "a wrong AU magic is not detected", .set = .au, .fixture = "au_bad_magic", .exit_code = 3, .stderr_contains = ": UnknownFormat\n" },
     .{ .name = "a wrong AU magic, forced", .set = .au, .args = &.{ "-f", "au" }, .fixture = "au_bad_magic", .exit_code = 2, .stderr_contains = ": InvalidAu\n" },
     .{ .name = "an unknown -f", .args = &.{ "-f", "ac3" }, .fixture = "mono_8k", .exit_code = 3, .stderr = "zffprobe: ac3: unsupported input format\n" },
-    .{ .name = "unsupported AU encoding", .set = .au, .fixture = "au_encoding_g726", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
+    .{ .name = "unsupported AU encoding", .set = .au, .fixture = "au_encoding_unknown", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
     .{ .name = "unknown AU size", .set = .au, .fixture = "au_unknown_size", .exit_code = 3, .stderr_contains = ": UnsupportedStreamingSize\n" },
     .{ .name = "AU rate limit", .set = .au, .fixture = "au_rate_over_limit", .exit_code = 5, .stderr_contains = ": LimitExceeded\n" },
     .{ .name = "truncated AU pipe", .set = .au, .args = &.{"-"}, .stdin_fixture = "au_truncated_data", .exit_code = 2, .stderr = "zffprobe: -: Truncated\n" },
@@ -498,6 +499,11 @@ const probe_cases = [_]ProbeCase{
     .{ .name = "ADPCM with channels FFmpeg's decoder refuses", .set = .adpcm, .fixture = "adpcm_ms_7ch", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
     .{ .name = "ADPCM with a short fact chunk", .set = .adpcm, .fixture = "adpcm_fact_short", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
     .{ .name = "ADPCM in Wave64", .set = .adpcm, .fixture = "adpcm_w64", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
+    .{ .name = "G.722 in AU", .set = .g72x, .fixture = "g72x_ffmpeg_g722_16k", .exit_code = 0, .stdout = "format=au\ncodec=adpcm_g722\nsample_fmt=s16\nchannels=1\nchannel_layout=mono\nsample_rate=16000\nnb_samples=12000\nduration_num=12000\nduration_den=16000\n", .stderr = "" },
+    .{ .name = "G.726 under a header of two channels", .set = .g72x, .fixture = "g72x_g726_3_ch2", .exit_code = 0, .stdout = "format=au\ncodec=adpcm_g726le\nsample_fmt=s16\nchannels=1\nchannel_layout=mono\nsample_rate=8000\nnb_samples=4001\nduration_num=4001\nduration_den=8000\n", .stderr = "" },
+    .{ .name = "2-bit G.726 from a pipe", .set = .g72x, .args = &.{"-"}, .stdin_fixture = "g72x_ffmpeg_g726_2", .exit_code = 0, .stdout_contains = "codec=adpcm_g726le\n", .stderr = "" },
+    .{ .name = "G.722 of unknown length", .set = .g72x, .fixture = "g72x_unknown_size", .exit_code = 3, .stderr_contains = ": UnsupportedStreamingSize\n" },
+    .{ .name = "truncated G.726 from a pipe", .set = .g72x, .args = &.{"-"}, .stdin_fixture = "g72x_truncated", .exit_code = 2, .stderr = "zffprobe: -: Truncated\n" },
     // T31b: ALAC in CAF, with the decoder's layout and the packet table's
     // duration; a table after the samples needs a seekable input, as
     // FFmpeg's demuxer does; a stream without a cookie FFmpeg's decoder
@@ -858,6 +864,18 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "WAV to ALAC on standard output is refused", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-c:a", "alac", "-f", "caf", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedStreamingSize\n" },
     .{ .name = "ALAC copy is unsupported", .set = .alac, .args = &.{"-i"}, .input = "alac_ffmpeg_mono_8k", .tail = &.{ "-c", "copy", "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
     .{ .name = "ADPCM into Wave64 is unsupported", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-c:a", "adpcm_ms", "-f", "w64", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
+    .{ .name = "G.722 to raw PCM", .set = .g72x, .args = &.{"-i"}, .input = "g72x_ffmpeg_g722_16k", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stdout_raw = .{ .args = &.{ "-f", "s16le", "-ch_layout", "mono", "-sample_rate", "16000" }, .nb_samples = 12000 }, .stderr = "" },
+    .{ .name = "G.726 from a pipe to raw PCM", .set = .g72x, .args = &.{ "-i", "-" }, .stdin_input = "g72x_g726_5_partial", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stdout_raw = .{ .args = &.{ "-f", "s16le", "-ch_layout", "mono", "-sample_rate", "8000" }, .nb_samples = 1604 }, .stderr = "" },
+    .{ .name = "G.726 to WAV", .set = .g72x, .args = &.{"-i"}, .input = "g72x_ffmpeg_g726_3", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt ", .stderr = "" },
+    .{ .name = "truncated G.726 from a pipe to WAV", .set = .g72x, .args = &.{ "-i", "-" }, .stdin_input = "g72x_truncated", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stderr = "zffmpeg: -: Truncated\n" },
+    .{ .name = "G.722 copy is unsupported", .set = .g72x, .args = &.{"-i"}, .input = "g72x_ffmpeg_g722_8k", .tail = &.{ "-c", "copy", "-f", "au", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
+    .{ .name = "WAV to G.722", .args = &.{"-i"}, .input = "mono_8k", .tail = &.{ "-c:a", "g722", "-trellis", "2", "-f", "au", "-" }, .exit_code = 0, .stdout_contains = ".snd\x00\x00\x00\x20\x00\x00\x00\x04\x00\x00\x00\x18\x00\x00\x1f\x40\x00\x00\x00\x01", .stderr = "" },
+    .{ .name = "WAV to G.726 by its codec's name, 2 bits a code", .args = &.{"-i"}, .input = "mono_8k", .tail = &.{ "-c:a", "adpcm_g726le", "-code_size", "2", "-f", "au", "-" }, .exit_code = 0, .stdout_contains = ".snd\x00\x00\x00\x20\x00\x00\x00\x02" ++ "7262", .stderr = "" },
+    .{ .name = "WAV to G.726 at a bit rate", .args = &.{"-i"}, .input = "mono_8k", .tail = &.{ "-c:a", "g726le", "-b:a", "40k", "-f", "au", "-" }, .exit_code = 0, .stdout_contains = ".snd\x00\x00\x00\x20\x00\x00\x00\x05\x00\x00\x00\x1a", .stderr = "" },
+    .{ .name = "stereo the G.722 encoder refuses", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-c:a", "g722", "-f", "au", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedFormat\n" },
+    .{ .name = "G.726 away from 8 kHz", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-c:a", "g726le", "-ac", "1", "-f", "au", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedFormat\n" },
+    .{ .name = "a code size outside the option's range", .args = &.{ "-i", "a.wav", "-c:a", "g726le", "-code_size", "6", "b.au" }, .exit_code = 1, .stderr_contains = "invalid value for: -code_size" },
+    .{ .name = "G.722 into WAV is unsupported", .args = &.{"-i"}, .input = "mono_8k", .tail = &.{ "-c:a", "g722", "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
     // A decoder that refuses the headers fails cleanly, before any output,
     // from a file (after the counting pass) and from a pipe.
     .{ .name = "Ogg Vorbis whose setup header the decoder refuses", .set = .ogg, .args = &.{"-i"}, .input = "ogg_vorbis_stereo", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stdout = "", .stderr_contains = ": InvalidVorbis\n" },
@@ -1157,6 +1175,7 @@ fn fixturePath(b: *std.Build, set: FixtureSet, name: []const u8) std.Build.LazyP
     const extension = switch (set) {
         .adpcm => "wav",
         .alac => "caf",
+        .g72x => "au",
         else => @tagName(set),
     };
     return b.path(b.fmt("zig/testing/fixtures/{t}/{s}.{s}", .{ set, name, extension }));

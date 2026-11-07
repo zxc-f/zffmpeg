@@ -364,6 +364,20 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/g72x_vector
 ./g72x-vectors | diff -u zig/testing/vectors/g72x.txt -
 ```
 
+`g72x_au_vectors.sh` (T31c) prints, for every G.722 and G.726 AU fixture,
+the stream the pinned ffprobe reports (codec, sample format, channels,
+layout, rate, `duration_ts`) and the count and SHA-256 of the samples the
+pinned ffmpeg decodes, or that either fails; the Zig tests compare
+zffprobe's report and the decoded reader's samples with it.
+`g72x_fixtures.sh` encodes the `g72x_ffmpeg_*` fixtures with the reference
+build's encoders and AU muxer from generate.py's inputs; their hashes are
+generate.py's:
+
+```bash
+bash zig/testing/reference/g72x_au_vectors.sh .references/ffmpeg-install | diff -u zig/testing/vectors/g72x_au.txt -
+bash zig/testing/reference/g72x_fixtures.sh .references/ffmpeg-install
+```
+
 `adpcm_wav_vectors.sh` (T31a) prints, for every ADPCM WAV fixture, the
 stream the pinned ffprobe reports (codec, sample format, channels, rate,
 `duration_ts`) and the count and SHA-256 of the samples the pinned ffmpeg
@@ -870,6 +884,22 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   (the data's size left -1 by both); ALAC to a pipe refused by both,
   zffmpeg with `UnsupportedStreamingSize` and no output. Recorded: stream
   copy of MP3 and ALAC, which FFmpeg's muxer takes (`caf_expected_refusal`).
+- **G.722 and G.726 in AU (T31c).** Every G.72x fixture's zffprobe report
+  against ffprobe's and its decoding by zffmpeg into each output of the Ogg
+  decoding section against the program's, through pipes too. Recorded: the
+  four inputs the port refuses where FFmpeg reads them
+  (`KNOWN_G72X_REFUSALS`: unknown length, data shorter than its size, a
+  rate and a channel count above the parser's limits), each refused by
+  zffprobe and by zffmpeg before any output.
+- **G.722 and G.726 output (T31c).** zffmpeg's AU of `-c:a g722` (with
+  `-trellis`) and `-c:a g726le` (with `-code_size` and `-b:a`) against the
+  ffmpeg program's with `-bitexact`, from the FLAC output section's inputs
+  and decoded MP3, Vorbis, G.722 and G.726 inputs, downmixed and resampled
+  to what the encoders take, the same bytes as a file; G.726 from more than
+  one channel or away from 8 kHz fails both, zffmpeg with
+  `UnsupportedFormat` and no output. Recorded (`g72x_expected_refusal`):
+  G.722 from more than one channel, which the program downmixes, and stream
+  copy of G.722 and G.726, which FFmpeg's AU muxer copies.
 - **MP2 output (T29d).** zffmpeg's MP2 (the `mp2` muxer, with `mp2` or
   `-c:a mp2fixed`) against the ffmpeg program's with `-bitexact`, for the
   FLAC output section's inputs and a decoded MP3, MP2 and Ogg Vorbis
