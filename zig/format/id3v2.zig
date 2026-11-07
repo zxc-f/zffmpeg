@@ -64,6 +64,38 @@ pub fn bodyLen(buf: *const [header_size]u8) u32 {
     return declaredLen(buf) + if (buf[3] == 4 and buf[5] & 0x10 != 0) @as(u32, header_size) else 0;
 }
 
+/// Where `Reader.parseTag` resumes, in bytes after the header, from the
+/// header and the body's first 4 bytes alone (fewer at the end of the
+/// input read as zeros): the declared length, less a v2.4 footer that a
+/// malformed extended header stops `id3v2_parse` before counting. A caller
+/// that only skips the tag needs no allocation.
+pub fn resumeLen(header: *const [header_size]u8, body: []const u8) u64 {
+    const len: i64 = declaredLen(header);
+    const version = header[3];
+    const flags = header[5];
+    if (version != 3 and version != 4) return @intCast(len);
+    if (flags & 0x40 != 0) {
+        var c: Cursor = .{ .bytes = body[0..@min(body.len, 4)] };
+        var extlen: i64 = getSize(&c, 4);
+        if (version == 4) extlen -= 4;
+        if (extlen < 0 or len - (extlen + 4) < 0) return @intCast(len);
+    }
+    return @as(u64, @intCast(len)) + if (version == 4 and flags & 0x10 != 0) @as(u64, header_size) else 0;
+}
+
+/// The bytes `ff_id3v2_read_dict` takes from the start of `bytes`: each
+/// ID3v2 tag that follows the one before, resumed as `resumeLen` says
+/// (past the end of `bytes` when a tag claims more).
+pub fn leadingLen(bytes: []const u8) u64 {
+    var pos: u64 = 0;
+    while (pos + header_size <= bytes.len) {
+        const at: usize = @intCast(pos);
+        if (!match(bytes[at..])) break;
+        pos += header_size + resumeLen(bytes[at..][0..header_size], bytes[at + header_size ..]);
+    }
+    return pos;
+}
+
 /// An `AVIOContext` over a tag's bytes: a read past them gives zeros (a
 /// short read) and stops the position at their end; a seek may go past.
 const Cursor = struct {
@@ -656,6 +688,16 @@ test "header matching and lengths" {
     try testing.expectEqual(130 + 10, bodyLen(&header));
     try testing.expect(!match(&[_]u8{ 'I', 'D', '3', 0xff, 0, 0, 0, 0, 0, 0 }));
     try testing.expect(!match(&[_]u8{ 'I', 'D', '3', 3, 0, 0, 0x80, 0, 0, 0 }));
+    // A v2.4 footer counts, unless an extended header longer than the tag
+    // stops the parse first.
+    try testing.expectEqual(130 + 10, resumeLen(&header, &.{}));
+    const extended = [_]u8{ 'I', 'D', '3', 4, 0, 0x50, 0, 0, 0, 20 };
+    try testing.expectEqual(20 + 10, resumeLen(&extended, &.{ 0, 0, 0, 10 }));
+    try testing.expectEqual(20, resumeLen(&extended, &.{ 0, 0, 0, 30 }));
+    try testing.expectEqual(20, resumeLen(&extended, &.{ 0, 0, 0, 2 }));
+    var r: Reader = .init(testing.allocator);
+    defer r.deinit();
+    try testing.expectEqual(20, try r.parseTag(&extended, &([_]u8{ 0, 0, 0, 30 } ++ @as([26]u8, @splat(0)))));
 }
 
 test "UTF-16 strings: either BOM, surrogate pairs, and the NUL that ends them" {
@@ -750,7 +792,9 @@ fn formatTags(gpa: std.mem.Allocator, bytes: []const u8, out: *std.ArrayList(u8)
         const at: usize = @intCast(pos);
         const header = bytes[at..][0..header_size];
         const rest = bytes[at + header_size ..];
-        pos += header_size + try r.parseTag(header, rest[0..@min(bodyLen(header), rest.len)]);
+        const resume_at = try r.parseTag(header, rest[0..@min(bodyLen(header), rest.len)]);
+        try testing.expectEqual(resume_at, resumeLen(header, rest));
+        pos += header_size + resume_at;
     }
     try r.finish();
     if (r.tags.count() == 0 and bytes.len > id3v1.tag_size) try id3v1.parse(gpa, bytes[bytes.len - id3v1.tag_size ..][0..id3v1.tag_size], &r.tags);

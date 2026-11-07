@@ -21,9 +21,12 @@
 //! buffer (`av_probe_input_buffer2`); this file does the same since T29a,
 //! because MP3's probe looks as far as the buffer goes. Before scoring, a
 //! leading ID3v2 tag is skipped for every probe, as
-//! `av_probe_input_format3` skips it; only the mp3 demuxer then reads the tag
-//! (notes.md "A leading ID3v2 tag on other formats"). A demuxer without a
-//! probe (a format without a content signature) is never chosen by content.
+//! `av_probe_input_format3` skips it; then the formats with
+//! `FF_INFMT_FLAG_ID3V2_AUTO` read the tags before their header, as
+//! avformat_open_input does (`Input.readLeadingTags`: WAV and FLAC here,
+//! the MP3 demuxer itself), and the others start at the tag (T30a). A
+//! demuxer without a probe (a format without a content signature) is never
+//! chosen by content.
 //!
 //! A file name, when the caller has one, adds FFmpeg's extension hints
 //! (`av_match_ext`): a demuxer without a probe whose extension matches scores
@@ -51,6 +54,7 @@ const codecs = @import("../codec/registry.zig");
 const registry = @import("registry.zig");
 const Replay = @import("replay.zig").Replay;
 const id3v2 = @import("id3v2.zig");
+const skip = @import("../io/skip.zig");
 
 pub const Container = registry.Container;
 
@@ -75,6 +79,10 @@ pub const Error = wav.Error || au.Error || aiff.Error || raw.Error || caf.Error 
 };
 
 pub const Limits = struct {
+    /// The largest leading ID3v2 tag read for its tags before a WAV or
+    /// FLAC demuxer (`Input.readLeadingTags`), as MP3's limit
+    /// (`mp3.Limits.max_id3v2_bytes`); a tag only skipped has none.
+    max_id3v2_bytes: u32 = 64 << 20,
     wav: wav.Limits = .{},
     au: au.Limits = .{},
     aiff: aiff.Limits = .{},
@@ -206,6 +214,10 @@ fn probeRound(formats: []const registry.Format, buf_in: []const u8, file_name: ?
 /// bytes probing read before the rest of the source.
 pub const Input = struct {
     head_buffer: [probe_len]u8,
+    /// Bytes read past the probe buffer that `readLeadingTags` gives back:
+    /// a header that was not a tag's, or the end of a tag's body that
+    /// `id3v2_parse` stopped before.
+    pending: [id3v2.header_size]u8 = undefined,
     /// The probe buffer once probing read more than `probe_len` bytes.
     extra: ?[]u8 = null,
     gpa: ?std.mem.Allocator = null,
@@ -288,6 +300,74 @@ pub const Input = struct {
         return &input.replay.interface;
     }
 
+    /// avformat_open_input's `ff_id3v2_read_dict` before a demuxer with
+    /// `FF_INFMT_FLAG_ID3V2_AUTO` (WAV and FLAC here; the MP3 demuxer reads
+    /// its own): every ID3v2 tag that follows the one before, from the
+    /// stream's start, each resumed after where `id3v2_parse` stops. With
+    /// `gpa` the tags are parsed (one larger than `max_bytes` is
+    /// `LimitExceeded`); without, only skipped. The reader then serves the
+    /// bytes after them.
+    pub fn readLeadingTags(input: *Input, gpa: ?std.mem.Allocator, max_bytes: u32) LeadingTags.Error!LeadingTags {
+        var result: LeadingTags = .{ .id3 = if (gpa) |g| .init(g) else null };
+        errdefer result.deinit();
+        while (true) {
+            var header: [id3v2.header_size]u8 = undefined;
+            const r = &input.replay;
+            const in_head = r.head.len - r.pos;
+            if (in_head >= header.len) {
+                header = r.head[r.pos..][0..header.len].*;
+                if (!id3v2.match(&header)) break;
+                r.pos += header.len;
+            } else {
+                // The probe buffer ends inside the header: its rest and the
+                // source's next bytes, served again unless they are a tag's.
+                @memcpy(input.pending[0..in_head], r.head[r.pos..]);
+                const got = in_head + (r.source.readSliceShort(input.pending[in_head..]) catch return error.IoFailure);
+                input.replay = .init(input.pending[0..got], r.source);
+                if (got < header.len or !id3v2.match(&input.pending)) break;
+                header = input.pending;
+                input.replay.pos = header.len;
+            }
+            result.len += header.len;
+            const body_len = id3v2.bodyLen(&header);
+            // Read the body (only its first bytes when skipping), noting
+            // whether all of it came from the replayed head, where a stop
+            // before its end rewinds.
+            const head_left = input.replay.head.len - input.replay.pos;
+            var prefix: [4]u8 = undefined;
+            var body: []u8 = &.{};
+            defer if (result.id3) |*id3| id3.gpa.free(body);
+            var read: []const u8 = undefined;
+            if (result.id3) |*id3| {
+                if (body_len > max_bytes) return error.LimitExceeded;
+                body = try id3.gpa.alloc(u8, body_len);
+                read = body[0 .. input.reader().readSliceShort(body) catch return error.IoFailure];
+            } else {
+                read = prefix[0 .. input.reader().readSliceShort(prefix[0..@min(prefix.len, body_len)]) catch return error.IoFailure];
+            }
+            const resume_at = if (result.id3) |*id3| try id3.parseTag(&header, read) else id3v2.resumeLen(&header, read);
+            result.len += resume_at;
+            if (resume_at >= read.len) {
+                skip.discardAll(input.reader(), resume_at - read.len) catch |err| switch (err) {
+                    error.EndOfStream => break,
+                    error.ReadFailed => return error.IoFailure,
+                };
+                continue;
+            }
+            // Stopped before the bytes read (at most a footer's 10): serve
+            // them again.
+            const back: usize = @intCast(read.len - resume_at);
+            if (read.len <= head_left) {
+                input.replay.pos -= back;
+            } else {
+                @memcpy(input.pending[0..back], read[@intCast(resume_at)..]);
+                input.replay = .init(input.pending[0..back], input.replay.source);
+            }
+        }
+        if (result.id3) |*id3| try id3.finish();
+        return result;
+    }
+
     /// A WAV parser for a `wav` or `w64` input, which accepts only that
     /// variant, as FFmpeg's demuxers do when forced.
     pub fn wavParser(input: *Input, limits: wav.Limits) wav.Parser {
@@ -304,6 +384,32 @@ pub const Input = struct {
     pub fn rawParser(input: *Input, limits: raw.Limits) raw.Parser {
         const codec = input.container.rawCodec() orelse unreachable; // the caller dispatches on the family
         return .init(input.reader(), codec, input.source.raw orelse .{}, input.source.length, limits);
+    }
+};
+
+/// The ID3v2 tags `Input.readLeadingTags` read.
+pub const LeadingTags = struct {
+    /// The bytes the tags took, as `id3v2_parse` resumed after each.
+    len: u64 = 0,
+    /// Their tags, when parsed.
+    id3: ?id3v2.Reader = null,
+
+    pub const Error = error{ IoFailure, LimitExceeded } || std.mem.Allocator.Error;
+
+    pub fn deinit(t: *LeadingTags) void {
+        if (t.id3) |*r| r.deinit();
+        t.id3 = null;
+    }
+
+    /// avformat_open_input after the demuxer's header: the ID3v2 tags
+    /// become the input's when the demuxer set none, else they are
+    /// discarded ("Discarding ID3 tags because more suitable tags were
+    /// found"); then the PRIV frames are added (`ff_id3v2_parse_priv`).
+    /// `tags` uses the allocator the tags were read with.
+    pub fn merge(t: *LeadingTags, tags: *metadata.Dictionary) std.mem.Allocator.Error!void {
+        const r = if (t.id3) |*r| r else return;
+        if (tags.count() == 0) std.mem.swap(metadata.Dictionary, tags, &r.tags);
+        try r.addPriv(tags);
     }
 };
 
@@ -351,6 +457,11 @@ pub fn probeWith(reader: *std.Io.Reader, limits: Limits, options: Options) Error
     defer input.deinit();
     switch (input.container.family()) {
         .wav => {
+            var leading: LeadingTags = if (input.container.readsLeadingId3v2())
+                try input.readLeadingTags(if (options.tags) |t| t.gpa else null, limits.max_id3v2_bytes)
+            else
+                .{};
+            defer leading.deinit();
             var parser = input.wavParser(limits.wav);
             var stored: metadata.Dictionary = .empty;
             defer if (options.tags) |t| stored.deinit(t.gpa);
@@ -364,6 +475,7 @@ pub fn probeWith(reader: *std.Io.Reader, limits: Limits, options: Options) Error
                 const generic = try wav.genericTags(t.gpa, &stored);
                 t.dictionary.deinit(t.gpa);
                 t.dictionary.* = generic;
+                try leading.merge(t.dictionary);
             }
             std.debug.assert(Container.ofWav(info.variant) == input.container);
             return .{ .container = input.container, .codec = .{ .pcm = info.codec }, .format = info.format, .frame_count = info.frame_count };
@@ -395,7 +507,10 @@ pub fn probeWith(reader: *std.Io.Reader, limits: Limits, options: Options) Error
         .flac => {
             // The frames are the decoder's to check; FFmpeg's probe reads
             // the header, and the duration comes from STREAMINFO. Tags come
-            // from VORBIS_COMMENT (T26b).
+            // from VORBIS_COMMENT (T26b), else a leading ID3v2 tag.
+            std.debug.assert(input.container.readsLeadingId3v2());
+            var leading = try input.readLeadingTags(if (options.tags) |t| t.gpa else null, limits.max_id3v2_bytes);
+            defer leading.deinit();
             var info = if (options.tags) |t| try flac.readHeaderAlloc(input.reader(), t.gpa) else try flac.readHeader(input.reader());
             const probed: Probed = .{
                 .container = .flac,
@@ -412,6 +527,7 @@ pub fn probeWith(reader: *std.Io.Reader, limits: Limits, options: Options) Error
                 t.dictionary.* = info.tags;
                 info.tags = .empty;
                 info.deinit(t.gpa);
+                try leading.merge(t.dictionary);
             }
             return probed;
         },
@@ -812,8 +928,15 @@ fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
         .au => try expectSameResult(au.probe(&direct, .{}), got, .au),
         .aiff => try expectSameResult(aiff.probe(&direct, .{}), got, .aiff),
         .caf => try expectSameResult(caf.probe(&direct, .{}), got, .caf),
-        .wav => try expectSameResult(wav.probe(&direct, .{}), got, container),
-        .flac => try expectSameResult(flacProbe(&direct), got, .flac),
+        // avformat_open_input's leading ID3v2 tags come first.
+        .wav, .flac => {
+            const lead = id3v2.leadingLen(bytes);
+            var after: std.Io.Reader = .fixed(bytes[@intCast(@min(lead, bytes.len))..]);
+            if (container.family() == .wav)
+                try expectSameResult(wav.probe(&after, .{}), got, container)
+            else
+                try expectSameResult(flacProbe(&after), got, .flac);
+        },
         // Ogg's and MP3's demuxers need an allocator, which this probe has
         // not.
         .ogg, .mp3 => try std.testing.expectError(error.UnsupportedFormat, got),
@@ -833,6 +956,74 @@ test "fuzz: detection agrees with the direct parser on arbitrary input" {
         hostile.fuzzSeed(fixtures.caf.bytes("caf_chunks_around_data"), &.{}),
         hostile.fuzzSeed(fixtures.flac.bytes("flac_constant_mono_8k"), &.{}),
     } });
+}
+
+/// An ID3v2.3 tag of TIT2 `title`, then `padding` zeros; a v2.4 tag with
+/// a footer when `footer` is set.
+fn testTag(comptime title: []const u8, comptime padding: usize, comptime footer: bool) []const u8 {
+    const text = "\x00" ++ title;
+    const frame_size: [4]u8 = if (footer) .{ 0, 0, 0, text.len } else std.mem.toBytes(std.mem.nativeToBig(u32, text.len));
+    const body = "TIT2" ++ frame_size ++ "\x00\x00" ++ text ++ @as([padding]u8, @splat(0));
+    const size = [4]u8{ @truncate(body.len >> 21 & 0x7f), @truncate(body.len >> 14 & 0x7f), @truncate(body.len >> 7 & 0x7f), @truncate(body.len & 0x7f) };
+    const flags: u8 = if (footer) 0x10 else 0;
+    const version: u8 = if (footer) 4 else 3;
+    const head = "ID3" ++ [_]u8{ version, 0, flags } ++ size;
+    return head ++ body ++ if (footer) "3DI" ++ [_]u8{ version, 0, flags } ++ size else "";
+}
+
+test "WAV and FLAC open after leading ID3v2 tags, whose tags they take only when they have none" {
+    const gpa = std.testing.allocator;
+    const tags = comptime testTag("First", 0, false) ++ testTag("Second", 6000, true);
+    const wav_mono = try std.mem.concat(gpa, u8, &.{ tags, fixtures.bytes("mono_8k") });
+    defer gpa.free(wav_mono);
+    const wav_info = try std.mem.concat(gpa, u8, &.{ tags, fixtures.bytes("info_tags") });
+    defer gpa.free(wav_info);
+    const flac_mono = try std.mem.concat(gpa, u8, &.{ tags, fixtures.flac.bytes("flac_constant_mono_8k") });
+    defer gpa.free(flac_mono);
+    const cases = .{
+        .{ wav_mono, Container.wav, @as(?u64, 8), "First" },
+        .{ wav_info, Container.wav, @as(?u64, 4), "Title" },
+        .{ flac_mono, Container.flac, @as(?u64, 256), "First" },
+    };
+    inline for (cases) |case| {
+        // The second tag runs past the probe buffer; a reader giving one
+        // byte at a time serves it as a pipe would.
+        var one_buffer: [16]u8 = undefined;
+        var one: std.testing.Reader = .init(&one_buffer, &.{.{ .buffer = case[0] }});
+        one.artificial_limit = .limited(1);
+        for ([_]bool{ false, true }) |collect| {
+            var reader: std.Io.Reader = .fixed(case[0]);
+            var dictionary: metadata.Dictionary = .empty;
+            defer dictionary.deinit(gpa);
+            // The tags past the probe buffer make FFmpeg probe again with a
+            // larger one, which takes the allocator.
+            const options: Options = if (collect) .{ .tags = .{ .gpa = gpa, .dictionary = &dictionary } } else .{ .gpa = gpa };
+            const probed = try probeWith(&reader, .{}, options);
+            try std.testing.expectEqual(case[1], probed.container);
+            try std.testing.expectEqual(case[2], probed.frame_count);
+            if (collect) try std.testing.expectEqualStrings(case[3], dictionary.get("title").?);
+        }
+        try std.testing.expectEqual(case[2], (try probeWith(&one.interface, .{}, .{ .gpa = gpa })).frame_count);
+    }
+    // FFmpeg resumes a tag whose extended header is longer than the tag
+    // before its footer, which is then neither a tag nor RIFF.
+    const broken = "ID3\x04\x00\x50\x00\x00\x00\x08" ++ "\x00\x00\x00\x20" ++ "\x00\x00\x00\x00" ++ "3DI\x04\x00\x50\x00\x00\x00\x08";
+    const stopped = try std.mem.concat(gpa, u8, &.{ broken, fixtures.bytes("mono_8k") });
+    defer gpa.free(stopped);
+    var stop: std.Io.Reader = .fixed(stopped);
+    try std.testing.expectError(error.InvalidRiff, probe(&stop, .{}));
+    // A tag read for its tags has a limit; one only skipped has none.
+    var big: std.Io.Reader = .fixed(wav_mono);
+    var dictionary: metadata.Dictionary = .empty;
+    defer dictionary.deinit(gpa);
+    try std.testing.expectError(error.LimitExceeded, probeWith(&big, .{ .max_id3v2_bytes = 100 }, .{ .tags = .{ .gpa = gpa, .dictionary = &dictionary } }));
+    var skipped: std.Io.Reader = .fixed(wav_mono);
+    try std.testing.expectEqual(8, (try probeWith(&skipped, .{ .max_id3v2_bytes = 100 }, .{ .gpa = gpa })).frame_count);
+    // A tag claiming more than the input holds leaves nothing to parse
+    // (probing gives such an input to MP3; `-f wav` forces it).
+    var past: std.Io.Reader = .fixed((comptime testTag("Cut", 100, false))[0..60]);
+    try std.testing.expectError(error.Truncated, probeWith(&past, .{}, .{ .source = .{ .format = .wav } }));
+    try std.testing.expectEqual(tags.len, id3v2.leadingLen(wav_mono));
 }
 
 test "a failing reader reports IoFailure" {

@@ -682,6 +682,16 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   rate must be refused by both, zffmpeg before any output. The recorded
   differences are `KNOWN_MP3_DECODE_DIFFERENCES` (notes.md "MP3
   decoding").
+- **Leading ID3v2 tags (T30a).** Four ID3v2 tags (text frames; two tags,
+  the second past the probe buffer with a v2.4 footer; a PRIV frame; an
+  extended header longer than its tag, where `id3v2_parse` stops before the
+  footer) before WAV, Wave64, FLAC and AU fixtures: zffprobe's stream and
+  format tags equal ffprobe's, from the file and a pipe, and zffmpeg's WAV
+  and s16le equal the program's `-bitexact` output, or both refuse
+  (Wave64 and AU start at the tag). Two FLAC cells are recorded:
+  zffprobe refuses the stream the stopped tag's footer leaves before
+  `fLaC` (`KNOWN_LEADING_ID3V2_REFUSALS`; notes.md "Headerless and rate-0
+  parameters").
 - **MP2 output (T29d).** zffmpeg's MP2 (the `mp2` muxer, with `mp2` or
   `-c:a mp2fixed`) against the ffmpeg program's with `-bitexact`, for the
   FLAC output section's inputs and a decoded MP3, MP2 and Ogg Vorbis

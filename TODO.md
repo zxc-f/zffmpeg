@@ -313,7 +313,6 @@ Left open, each with the task it must land before:
 
 | Finding | Where | Before |
 | --- | --- | --- |
-| A leading ID3v2 tag opens only MP3 (WAV and FLAC refused; notes.md "A leading ID3v2 tag on other formats") | `detect.zig`, `convert.zig` | T30a (ADTS sets `FF_INFMT_FLAG_ID3V2_AUTO`) |
 | Codec parameters a mapping set during the read-ahead are kept (`parameters_from_context`; notes.md); MP3 is not affected (T29b: mp3float decodes only the read-ahead's first packet, and mp3.txt's streams did not change when the reference build enabled it) | `demux.zig` | T30b |
 | Filter-graph timestamp arithmetic overflows on null or extreme pts (atrim, aresample, amix; library only) | `filters.zig`, `multi.zig` | T53b, with T65d |
 | An MP3 stream without parameters refused; negative durations reported as none (notes.md rows) | `detect.zig` | T51a |

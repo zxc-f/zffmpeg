@@ -88,6 +88,14 @@ pub const Container = enum {
         };
     }
 
+    /// A demuxer with `FF_INFMT_FLAG_ID3V2_AUTO` whose leading ID3v2 tags
+    /// detection reads before the parser (`detect.Input.readLeadingTags`),
+    /// as avformat_open_input reads them: WAV (not Wave64) and FLAC. The
+    /// MP3 demuxer, which has the flag too, reads its own.
+    pub fn readsLeadingId3v2(container: Container) bool {
+        return container == .wav or container == .flac;
+    }
+
     /// The codec of a raw PCM format, which shares its name; null otherwise.
     pub fn rawCodec(container: Container) ?pcm.Codec {
         return switch (container) {

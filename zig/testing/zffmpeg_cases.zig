@@ -247,6 +247,15 @@ pub fn main(init: std.process.Init) !u8 {
     // named only `.au` is AU output (av_match_ext's strrchr).
     h.expectSuccess("an output named only by its extension", try h.run(&.{ "-i", "in.wav", ".au" }, .ignore, null));
     try h.expectContent("an output named only by its extension", ".au", au_out);
+    // T30a: avformat_open_input reads a WAV input's leading ID3v2 tags
+    // before its header; the samples are the untagged file's.
+    const id3_tag = "ID3\x03\x00\x00\x00\x00\x00\x0f" ++ "TIT2\x00\x00\x00\x05\x00\x00\x00Tag!";
+    var tagged_buffer: [id3_tag.len + 256]u8 = undefined;
+    @memcpy(tagged_buffer[0..id3_tag.len], id3_tag);
+    @memcpy(tagged_buffer[id3_tag.len..][0..wav_in.len], wav_in);
+    try h.write("tagged.wav", tagged_buffer[0 .. id3_tag.len + wav_in.len]);
+    h.expectSuccess("a WAV input after a leading ID3v2 tag", try h.run(&.{ "-i", "tagged.wav", "tagged.au" }, .ignore, null));
+    try h.expectContent("a WAV input after a leading ID3v2 tag", "tagged.au", au_out);
     try h.write("out.au", previous);
     h.expect("-y with -n is refused", try h.run(&.{ "-y", "-n", "-i", "in.wav", "out.au" }, .ignore, null), 1, "contradict");
     try h.expectContent("-y with -n is refused", "out.au", previous);

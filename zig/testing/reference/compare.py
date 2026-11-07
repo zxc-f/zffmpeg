@@ -3080,6 +3080,125 @@ def check_framecrc_copy(args, path, known, probe, reference_options=()):
     return []
 
 
+def id3v2_test_tag(frames, version=3, padding=0, footer=False, extended=b""):
+    """An ID3v2 tag of `(id, data)` frames (sizes as the version writes
+    them), then `padding` zeros, with a v2.4 footer when asked."""
+    def size(n, safe):
+        return bytes([(n >> 21) & 0x7F, (n >> 14) & 0x7F, (n >> 7) & 0x7F, n & 0x7F]) if safe else n.to_bytes(4, "big")
+    body = extended + b"".join(fid + size(len(data), version == 4) + b"\0\0" + data for fid, data in frames)
+    body += bytes(padding)
+    flags = (0x10 if footer else 0) | (0x40 if extended else 0)
+    head = b"ID3" + bytes([version, 0, flags]) + size(len(body), True)
+    return head + body + (b"3DI" + head[3:] if footer else b"")
+
+
+# The ID3v2 tags put before the inputs of compare_leading_id3v2: text, two
+# tags (the second past the 2048-byte probe buffer, with a footer), a PRIV
+# frame (added even when the demuxer has tags), and an extended header
+# longer than its tag, which id3v2_parse stops at before the footer.
+LEADING_TAGS = {
+    "text": id3v2_test_tag([(b"TIT2", b"\0Leading title"), (b"TPE1", b"\0Someone")]),
+    "two": id3v2_test_tag([(b"TIT2", b"\0First")]) + id3v2_test_tag([(b"TALB", b"\0Second")], version=4,
+                                                                    padding=6000, footer=True),
+    "priv": id3v2_test_tag([(b"PRIV", b"owner\0\x01\x02\\x"), (b"TIT2", b"\0With PRIV")]),
+    "stopped": id3v2_test_tag([], version=4, footer=True, extended=b"\0\0\0\x40"),
+}
+# Cells zffprobe refuses where ffprobe opens: the stopped tag leaves its
+# footer before `fLaC`, so FFmpeg reads a headerless stream whose first
+# frame header is junk and its parser finds the frames after it, which the
+# port does not model (notes.md "Headerless and rate-0 parameters").
+KNOWN_LEADING_ID3V2_REFUSALS = {
+    ("stopped", "flac/flac_constant_mono_8k.flac"): "UnsupportedFormat",
+    ("stopped", "flac/flac_vorbis_comment.flac"): "UnsupportedFormat",
+}
+LEADING_TAG_INPUTS = ["wav/mono_8k.wav", "wav/info_tags.wav", "wav/s24_stereo_48k_extensible.wav",
+                      "wav/w64_mono_8k.wav", "flac/flac_constant_mono_8k.flac", "flac/flac_vorbis_comment.flac",
+                      "au/au_mono_8k.au"]
+
+
+def compare_leading_id3v2(args, lines, failures):
+    """Leading ID3v2 tags (T30a): each of LEADING_TAGS before WAV, Wave64,
+    FLAC and AU inputs. avformat_open_input reads the tags before the WAV
+    and FLAC demuxers (FF_INFMT_FLAG_ID3V2_AUTO) and keeps them when the
+    demuxer has none; Wave64 and AU start at the tag and fail. zffprobe's
+    stream and tags against ffprobe's, from the file and a pipe, and
+    zffmpeg's WAV (tags carried) and s16le against the program's
+    `-bitexact` output; or the same refusal."""
+    rows = []
+    passed = total = understood = 0
+    with tempfile.TemporaryDirectory() as work:
+        work = pathlib.Path(work)
+        for base in LEADING_TAG_INPUTS:
+            data = (FIXTURES / base).read_bytes()
+            for tag_name, tag in LEADING_TAGS.items():
+                path = work / f"{tag_name}_{pathlib.Path(base).name}"
+                path.write_bytes(tag + data)
+                label = f"{tag_name} + {base}"
+                problems = []
+                total += 1
+                theirs = run(args.ffprobe, "-v", "error", "-show_entries",
+                             "stream=codec_name,sample_fmt,channels,channel_layout,sample_rate,duration_ts,time_base",
+                             "-of", "default=nw=1", path)
+                ours = run(args.zffprobe, path)
+                piped = subprocess.run([args.zffprobe, "-"], input=path.read_bytes(), capture_output=True)
+                known = KNOWN_LEADING_ID3V2_REFUSALS.get((tag_name, base))
+                if known is not None:
+                    if theirs.returncode != 0 or tool_error(ours, "zffprobe", path) != known:
+                        problems.append(f"recorded: ffprobe opens it and zffprobe refuses with {known}; ffprobe "
+                                        f"exited {theirs.returncode}, zffprobe {first_line(text(ours.stderr))}")
+                    ok = f"recorded: zffprobe refuses with {known}"
+                elif theirs.returncode != 0 or not theirs.stdout.strip():
+                    for process, how in ((ours, "file"), (piped, "pipe")):
+                        if tool_error(process, "zffprobe", path if how == "file" else "-") is None:
+                            problems.append(f"zffprobe ({how}) exited {process.returncode} "
+                                            f"({first_line(text(process.stderr)) or 'no error'}) where ffprobe refuses")
+                    ok = "both refuse"
+                elif ours.returncode != 0:
+                    problems.append(f"zffprobe refuses: {first_line(text(ours.stderr))}")
+                else:
+                    f = dict(line.split("=", 1) for line in text(theirs.stdout).splitlines() if "=" in line)
+                    o = dict(line.split("=", 1) for line in text(ours.stdout).splitlines() if "=" in line)
+                    want = {"codec": f.get("codec_name"), "sample_fmt": f.get("sample_fmt"),
+                            "channels": f.get("channels"), "channel_layout": f.get("channel_layout"),
+                            "sample_rate": f.get("sample_rate"), "duration_num": f.get("duration_ts"),
+                            "duration_den": f.get("time_base", "1/0").split("/")[1]}
+                    problems += [f"{key}: zffprobe {o.get(key)}, ffprobe {value}" for key, value in want.items()
+                                 if o.get(key) != value]
+                    want_tags, got_tags = ffprobe_tags(args.ffprobe, path), zffprobe_tags(args.zffprobe, path)
+                    if want_tags != got_tags:
+                        problems.append(f"tags: zffprobe {tags_text(got_tags)}, ffprobe {tags_text(want_tags)}")
+                    if piped.returncode != 0 or piped.stdout != ours.stdout:
+                        problems.append("zffprobe from a pipe differs from the file")
+                    for output, fmt in (("out.wav", "wav"), ("out.raw", "s16le")):
+                        tp = run(args.ffmpeg, "-nostdin", "-v", "error", "-y", "-i", path, "-bitexact", "-f", fmt,
+                                 work / f"t_{output}")
+                        zp = run(args.zffmpeg, "-y", "-i", path, "-f", fmt, work / f"z_{output}")
+                        if tp.returncode != 0 or zp.returncode != 0:
+                            problems.append(f"{fmt}: FFmpeg {tp.returncode}, zffmpeg {zp.returncode} "
+                                            f"({first_line(text(zp.stderr))})")
+                        elif (work / f"t_{output}").read_bytes() != (work / f"z_{output}").read_bytes():
+                            problems.append(f"{fmt}: the outputs differ")
+                    ok = f"{len(want_tags)} tags"
+                if problems:
+                    failures.extend(f"leading ID3v2 {label}: {p}" for p in problems)
+                    rows.append(f"| `{label}` | **FAIL**: {'; '.join(problems)} |")
+                else:
+                    passed += 1
+                    understood += known is not None
+                    rows.append(f"| `{label}` | pass ({ok}) |")
+    lines += [
+        "",
+        "## Leading ID3v2 tags (T30a)",
+        "",
+        f"Inputs behind leading ID3v2 tags whose zffprobe report and tags equal ffprobe's, from a file and a "
+        f"pipe, and whose WAV and s16le conversions equal the program's (or both refuse): {passed}/{total}.",
+        "",
+        "| Input | Result |",
+        "| --- | --- |",
+    ] + rows
+    record("Leading ID3v2 tags (T30a)", passed, total, understood=understood)
+
+
 def compare_mp3(args, lines, failures):
     """The MP3 fixtures (T29a): zffprobe against ffprobe's first audio
     stream (codec, sample format, channels, layout, rate, and the duration
@@ -3621,6 +3740,7 @@ def main():
     compare_mp3(args, lines, failures)
     compare_ogg_decode(args, lines, failures)
     compare_mp3_decode(args, lines, failures)
+    compare_leading_id3v2(args, lines, failures)
     compare_mp2_output(args, lines, failures)
     compare_opus_vectors(args, lines, failures)
     compare_hashes(args, lines, failures)

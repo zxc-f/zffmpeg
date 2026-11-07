@@ -296,6 +296,14 @@ pub const Conversion = struct {
     /// output header. Reads at most up to the first sample and writes
     /// nothing.
     pub fn init(source: *detect.Input, request: Request, limits: Limits) InitError!Conversion {
+        // avformat_open_input's leading ID3v2 tags, before the demuxers
+        // with FF_INFMT_FLAG_ID3V2_AUTO that do not read their own.
+        // Not Wave64's: its demuxer lacks the flag.
+        var leading: detect.LeadingTags = if (source.container.readsLeadingId3v2())
+            try source.readLeadingTags(if (request.tags) |t| t.gpa else null, limits.max_id3v2_bytes)
+        else
+            .{};
+        defer leading.deinit();
         var input: Parser = switch (source.container.family()) {
             .wav => .{ .wav = source.wavParser(limits.wav) },
             .au => .{ .au = .init(source.reader(), limits.au) },
@@ -407,6 +415,7 @@ pub const Conversion = struct {
                 else => try wav.genericTags(t.gpa, &stored),
             };
             defer generic.deinit(t.gpa);
+            try leading.merge(&generic);
             const carried = try carriedTags(t.gpa, &generic, request.mode);
             t.dictionary.deinit(t.gpa);
             t.dictionary.* = carried;
