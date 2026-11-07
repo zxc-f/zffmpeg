@@ -3754,9 +3754,50 @@ names, not as an empty framework.
   `libavcodec/adpcm.c`, `adpcmenc.c`, `adpcm_data.c`, `g722.c`, `g722dec.c`,
   `g722enc.c`, `g726.c`, `alac.c`, `alacenc.c`; `tests/fate/adpcm.mak`,
   `alac.mak`.
-  - [ ] **T31a — IMA and Microsoft ADPCM.** Needs T21a. Decoding and encoding
+  - [x] **T31a — IMA and Microsoft ADPCM.** Needs T21a. Decoding and encoding
     in WAV.
     Done when both are bit-exact against the reference.
+
+    ```text
+    ID / parent: T31a / T31
+    State: verified (G5, local Linux x86-64 runs)
+    Supported behavior and explicit exclusions: FFmpeg's adpcm_ima_wav
+      (2 to 5 bits) and adpcm_ms (1 to 6 channels) decoders and encoders
+      (block_size, trellis), in RIFF and RF64 WAV, plain or extensible:
+      the demuxer's duration, packets and seeks, decode.c's frame loop
+      with the error rate, the encoders' frames padded at the end and the
+      muxer's fmt and fact; zffprobe, zffmpeg decoding into every output
+      and encoding into WAV. Excluded (notes.md "ADPCM"): Wave64, stream
+      copy (T53), block_align 0, a short fact, adpcm_zork, more than two
+      channels into the encoders, seeking the decoded reader.
+    Contract and source provenance: port.md "ADPCM in WAV"; adpcm.c,
+      adpcmenc.c, adpcm_data.c (codec/adpcm.zig, derived); wavdec.c,
+      riffdec.c, riffenc.c, wavenc.c, pcm.c, decode.c, encode.c restated
+      in wav.zig and format/wavadpcm.zig.
+    Required fixtures: zig/testing/fixtures/adpcm/ (41: 9 encoded by the
+      reference build through adpcm_fixtures.sh, 32 from generate.py);
+      the WAV contract's fmt_gsm, extensible_subformat_gsm and
+      fmt_unsupported_before_invalid, moved from tag 2 to tag 0x0031.
+    Comparison rule: packets and samples of adpcm.txt's cases equal the
+      pinned encoders' and decoders'; each fixture's ffprobe stream and
+      decoded samples (adpcm_wav.txt) and seeks (seek_adpcm.txt) equal
+      FFmpeg's; zffprobe ffprobe's; zffmpeg's decodes and encodes the
+      program's byte for byte (MS mono trellis: the bytes FFmpeg writes).
+    Evidence: 3a5464d (codecs), 48b4935 (WAV, tools, fixtures). G3: the
+      WAV ADPCM fuzz entry (unknown length, counted or not) with eight
+      seeds, a 2000-round mutation smoke in ReleaseSafe, an allocation and
+      remap sweep through decoding and trellis encoding, the codecs' own
+      fuzz entries; process cases for zffprobe (reports, a decoder
+      refusal, a short fact, Wave64) and zffmpeg (decoding from a file and
+      a pipe, the error rate, copy refused, encoding with options,
+      refused block size, range, channels and Wave64 output). G5 at
+      48b4935, locally on Linux x86-64 (no CI run link): zig fmt, the
+      fixture check, zig build test 570/570 (313 steps) in Debug,
+      ReleaseSafe and ReleaseFast, the cross builds, every vector
+      generator, compare.py 8937/0/0 required (ADPCM in WAV 661 cells,
+      63 recorded) and 61/61 optional.
+    Remaining work or blocker / next action: none; T31b (ALAC) is next.
+    ```
   - [ ] **T31b — ALAC.** Needs T33a or T22d. Decoding and encoding.
     Done when both are bit-exact against the reference.
   - [ ] **T31c — G.722 and G.726 in AU.** Needs T22a. The AU codes 23, 25 and
