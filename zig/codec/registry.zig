@@ -54,12 +54,15 @@ pub const Codec = union(enum) {
     adpcm_ms,
     /// ALAC (T31b).
     alac,
+    /// G.722 and little-endian G.726 (T31c), in AU.
+    adpcm_g722,
+    adpcm_g726le,
 
     /// FFmpeg's codec name, such as `pcm_s16le` or `flac`.
     pub fn name(c: Codec) []const u8 {
         return switch (c) {
             .pcm => |p| p.name(),
-            .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac, .adpcm_ima_wav, .adpcm_ms, .alac => @tagName(c),
+            .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac, .adpcm_ima_wav, .adpcm_ms, .alac, .adpcm_g722, .adpcm_g726le => @tagName(c),
         };
     }
 
@@ -67,14 +70,14 @@ pub const Codec = union(enum) {
     pub fn pcmCodec(c: Codec) ?pcm.Codec {
         return switch (c) {
             .pcm => |p| p,
-            .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac, .adpcm_ima_wav, .adpcm_ms, .alac => null,
+            .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac, .adpcm_ima_wav, .adpcm_ms, .alac, .adpcm_g722, .adpcm_g726le => null,
         };
     }
 
     pub fn eql(a: Codec, b: Codec) bool {
         return switch (a) {
             .pcm => |p| b == .pcm and b.pcm == p,
-            .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac, .adpcm_ima_wav, .adpcm_ms, .alac => std.meta.activeTag(a) == std.meta.activeTag(b),
+            .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac, .adpcm_ima_wav, .adpcm_ms, .alac, .adpcm_g722, .adpcm_g726le => std.meta.activeTag(a) == std.meta.activeTag(b),
         };
     }
 };
@@ -131,10 +134,14 @@ pub const descriptors = [_]Descriptor{
     .{ .codec = .adpcm_ms, .media_type = .audio, .long_name = "ADPCM Microsoft", .props = .{ .intra_only = true, .lossy = true } },
     // Every frame decodes alone.
     .{ .codec = .alac, .media_type = .audio, .long_name = "ALAC (Apple Lossless Audio Codec)", .props = .{ .intra_only = true, .lossless = true } },
+    // Intra-only in FFmpeg's descriptors, though each packet's state
+    // carries into the next.
+    .{ .codec = .adpcm_g722, .media_type = .audio, .long_name = "G.722 ADPCM", .props = .{ .intra_only = true, .lossy = true } },
+    .{ .codec = .adpcm_g726le, .media_type = .audio, .long_name = "G.726 ADPCM little-endian", .props = .{ .intra_only = true, .lossy = true } },
 };
 
 /// The descriptors after the PCM ones, in their order.
-const compressed = [_]std.meta.Tag(Codec){ .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac, .adpcm_ima_wav, .adpcm_ms, .alac };
+const compressed = [_]std.meta.Tag(Codec){ .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac, .adpcm_ima_wav, .adpcm_ms, .alac, .adpcm_g722, .adpcm_g726le };
 
 fn pcmDescriptor(codec: pcm.Codec, long_name: []const u8, props: Props) Descriptor {
     return .{ .codec = .{ .pcm = codec }, .media_type = .audio, .long_name = long_name, .props = props };
@@ -143,7 +150,7 @@ fn pcmDescriptor(codec: pcm.Codec, long_name: []const u8, props: Props) Descript
 pub fn descriptor(codec: Codec) *const Descriptor {
     return switch (codec) {
         .pcm => |p| &descriptors[@backingInt(p)],
-        .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac, .adpcm_ima_wav, .adpcm_ms, .alac => &descriptors[pcm_count + std.mem.findScalar(std.meta.Tag(Codec), &compressed, std.meta.activeTag(codec)).?],
+        .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac, .adpcm_ima_wav, .adpcm_ms, .alac, .adpcm_g722, .adpcm_g726le => &descriptors[pcm_count + std.mem.findScalar(std.meta.Tag(Codec), &compressed, std.meta.activeTag(codec)).?],
     };
 }
 
@@ -188,6 +195,8 @@ pub const decoders = pcmImplementations() ++ [_]Implementation{
     .{ .name = "adpcm_ima_wav", .codec = .adpcm_ima_wav },
     .{ .name = "adpcm_ms", .codec = .adpcm_ms },
     .{ .name = "alac", .codec = .alac },
+    .{ .name = "g722", .codec = .adpcm_g722 },
+    .{ .name = "g726le", .codec = .adpcm_g726le },
 };
 /// The PCM encoders, then FLAC's (T26c) and MP2's (T29d).
 pub const encoders = pcmImplementations() ++ [_]Implementation{
@@ -199,6 +208,8 @@ pub const encoders = pcmImplementations() ++ [_]Implementation{
     .{ .name = "adpcm_ima_wav", .codec = .adpcm_ima_wav },
     .{ .name = "adpcm_ms", .codec = .adpcm_ms },
     .{ .name = "alac", .codec = .alac },
+    .{ .name = "g722", .codec = .adpcm_g722 },
+    .{ .name = "g726le", .codec = .adpcm_g726le },
 };
 
 /// The decoder FFmpeg names `name`, if registered.
@@ -209,6 +220,19 @@ pub fn findDecoder(name: []const u8) ?*const Implementation {
 /// The encoder FFmpeg names `name`, if registered.
 pub fn findEncoder(name: []const u8) ?*const Implementation {
     return findIn(&encoders, name);
+}
+
+/// fftools' find_codec for an encoder: the encoder named `name`, else the
+/// first one registered for the codec named `name` (`-c:a adpcm_g722`
+/// finds `g722`).
+pub fn findEncoderOrCodec(name: []const u8) ?*const Implementation {
+    if (findEncoder(name)) |found| return found;
+    for (&descriptors) |*d| {
+        if (!std.mem.eql(u8, d.name(), name)) continue;
+        for (&encoders) |*entry| if (entry.codec.eql(d.codec)) return entry;
+        return null;
+    }
+    return null;
 }
 
 fn findIn(list: []const Implementation, name: []const u8) ?*const Implementation {
@@ -224,7 +248,7 @@ comptime {
     for (descriptors, 0..) |d, i| {
         switch (d.codec) {
             .pcm => |p| if (@backingInt(p) != i) @compileError("descriptors must follow pcm.Codec's order: " ++ d.name()),
-            .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac, .adpcm_ima_wav, .adpcm_ms, .alac => if (i < pcm_count or compressed[i - pcm_count] != std.meta.activeTag(d.codec)) @compileError("the compressed codecs' descriptors follow the PCM ones in order"),
+            .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac, .adpcm_ima_wav, .adpcm_ms, .alac, .adpcm_g722, .adpcm_g726le => if (i < pcm_count or compressed[i - pcm_count] != std.meta.activeTag(d.codec)) @compileError("the compressed codecs' descriptors follow the PCM ones in order"),
         }
         if (d.props.lossy and d.props.lossless) @compileError("a codec is lossy or lossless, not both: " ++ d.name());
     }

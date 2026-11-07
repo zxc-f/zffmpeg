@@ -351,6 +351,19 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/alac_vector
 ./alac-vectors | diff -u zig/testing/vectors/alac.txt -
 ```
 
+`g72x_vectors.c` (T31c) drives the pinned FFmpeg's `g722` and `g726le`
+encoders through the public API on deterministic mono signals (G.722
+with no trellis and trellis 1 to 8, clipped from 99 and -2, frame sizes
+of one, odd and above the maximum; G.726 at code sizes 2 to 5 from the
+`code_size` option and from bit rates, frames of one sample to
+FFmpeg's ~1024 bytes) and decodes each packet back, then decodes
+pseudo-random packets at every G.722 codeword size and G.726 code size:
+
+```bash
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/g72x_vectors.c .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o g72x-vectors
+./g72x-vectors | diff -u zig/testing/vectors/g72x.txt -
+```
+
 `adpcm_wav_vectors.sh` (T31a) prints, for every ADPCM WAV fixture, the
 stream the pinned ffprobe reports (codec, sample format, channels, rate,
 `duration_ts`) and the count and SHA-256 of the samples the pinned ffmpeg

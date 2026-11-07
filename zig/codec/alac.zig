@@ -894,44 +894,8 @@ fn maxFrameSize(n: u32, channels: u32, bps: u32) u32 {
 
 const testing = std.testing;
 
-/// The vector generator's xorshift (alac_vectors.c).
-const Rng = struct {
-    state: u32,
-
-    fn next(r: *Rng) u32 {
-        var x = r.state;
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
-        r.state = x;
-        return x;
-    }
-};
-
-/// alac_vectors.c's `sample`.
-fn testSample(rng: *Rng, signal: []const u8, c: usize, i: usize, state: *[8]i32, bps: u32) i32 {
-    const noise: i32 = @as(i32, @intCast(rng.next() & 0xffff)) - 0x8000;
-    var v: i32 = undefined;
-    if (std.mem.eql(u8, signal, "tone")) {
-        const period: i32 = 64 + 24 * @as(i32, @intCast(c));
-        const phase: i32 = @intCast(@rem(@as(i64, @intCast(i)), period));
-        const tri = if (phase < @divTrunc(period, 2)) phase else period - phase;
-        v = @divTrunc((tri * 2 - @divTrunc(period, 2)) * 16384, @divTrunc(period, 2)) + @divTrunc(noise, 8);
-    } else if (std.mem.eql(u8, signal, "smooth")) {
-        state[c] += @divTrunc(noise - state[c], 8);
-        v = state[c] * 2;
-    } else if (std.mem.eql(u8, signal, "noise")) {
-        v = noise;
-    } else if (std.mem.eql(u8, signal, "silence")) {
-        v = 0;
-    } else {
-        v = if ((i + c) & 1 != 0) 32767 else -32768;
-        if (rng.next() & 1 != 0) v = -32768;
-    }
-    v = std.math.clamp(v, -32768, 32767);
-    if (bps == 24 and !std.mem.eql(u8, signal, "silence")) v = v * 256 + @as(i32, @intCast(rng.next() & 0xff));
-    return v;
-}
+const signals = @import("../testing/signals.zig");
+const Rng = signals.Rng;
 
 fn decodeLine(w: *std.Io.Writer, d: *Decoder, packet: []const u8) !void {
     const frame = d.decode(packet) catch |err| {
@@ -1024,7 +988,7 @@ fn renderVectors(gpa: std.mem.Allocator, w: *std.Io.Writer, expected: []const u8
             const n = @min(t.samples - at, frame_size);
             for (0..n) |i| {
                 for (0..t.channels) |c| {
-                    const v = testSample(&rng, t.signal, c, at + i, &state, t.bps);
+                    const v = signals.sample(&rng, t.signal, c, at + i, &state, t.bps);
                     plane_storage[c][i] = if (t.bps == 16) v else @bitCast(@as(u32, @bitCast(v)) << 8);
                 }
             }

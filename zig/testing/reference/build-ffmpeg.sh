@@ -53,8 +53,8 @@ configure_args=(
     --disable-avdevice
     --enable-protocol=file,pipe
     --enable-demuxer=wav,w64,au,aiff,caf,flac,ogg,mp3,aac,"$pcm_formats"
-    --enable-decoder="$pcm_codecs",flac,vorbis,opus,mp3float,mp1float,mp2float,aac,adpcm_ima_wav,adpcm_ms,alac
-    --enable-encoder="$pcm_codecs",flac,vorbis,opus,mp2,mp2fixed,aac,adpcm_ima_wav,adpcm_ms,alac
+    --enable-decoder="$pcm_codecs",flac,vorbis,opus,mp3float,mp1float,mp2float,aac,adpcm_ima_wav,adpcm_ms,alac,adpcm_g722,adpcm_g726le
+    --enable-encoder="$pcm_codecs",flac,vorbis,opus,mp2,mp2fixed,aac,adpcm_ima_wav,adpcm_ms,alac,adpcm_g722,adpcm_g726le
     --enable-muxer=wav,mp2,adts,w64,au,aiff,caf,flac,ogg,oga,opus,framecrc,framemd5,streamhash,"$pcm_formats"
     --enable-parser=flac,mpegaudio,aac
     --enable-filter=aresample,volume,asetpts,amix,pan,channelmap,channelsplit,asplit

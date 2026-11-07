@@ -3858,6 +3858,14 @@ names, not as an empty framework.
     decoding and encoding, each with its own vectors.
     Done when decoding and encoding are bit-exact against the reference for
     every code, and T22a's rejection fixtures become accepted.
+    Progress: part 1, the codecs: `codec/g722.zig` and `codec/g726.zig`
+    port FFmpeg's g722 (decoder at 6 to 8 bits a codeword; encoder plain
+    and with its trellis, its last-segment shift kept) and g726le (code
+    sizes 2 to 5) bit for bit against `g72x_vectors.c`'s 37 encoder cases
+    and 7 random-packet decoder cases (vectors/g72x.txt); `-c:a` now also
+    takes a codec's name, as fftools' find_codec does. Remaining: AU
+    demuxing and muxing of codes 23 to 26 and '7262', the fixtures,
+    compare.py, process cases and the speed check (part 2).
 
 - [ ] **T32 — AC-3 and native lossy encoders.** Checked when T32a–T32d are.
   Reference: `libavcodec/ac3dec.c`, `eac3dec.c`, `ac3dsp.c`, `ac3enc*.c`,

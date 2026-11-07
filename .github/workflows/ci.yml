@@ -391,6 +391,15 @@ jobs:
           bash zig/testing/reference/alac_caf_vectors.sh .references/ffmpeg-install |
             diff -u zig/testing/vectors/alac_caf.txt -
 
+      # The committed T31c oracle must be what this build's G.722 and G.726
+      # encoders and decoders make of its cases.
+      - name: Check the G.722 and G.726 vectors (T31c)
+        run: |
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/g72x_vectors.c \
+            .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a \
+            .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o g72x-vectors
+          ./g72x-vectors | diff -u zig/testing/vectors/g72x.txt -
+
       # The committed T28a oracle must be what this build's Opus decoder
       # makes of every Ogg fixture's first Opus stream.
       - name: Check the Opus decoder vectors (T28a)

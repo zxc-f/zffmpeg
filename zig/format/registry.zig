@@ -334,7 +334,7 @@ fn pcmOnly(comptime carries: fn (pcm.Codec) bool) *const fn (codecs.Codec) bool 
         fn f(codec: codecs.Codec) bool {
             return switch (codec) {
                 .pcm => |p| carries(p),
-                .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac, .adpcm_ima_wav, .adpcm_ms, .alac => false,
+                .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac, .adpcm_ima_wav, .adpcm_ms, .alac, .adpcm_g722, .adpcm_g726le => false,
             };
         }
     }.f;
@@ -346,7 +346,7 @@ fn wavCodecs(codec: codecs.Codec) bool {
     return switch (codec) {
         .pcm => |p| wav.carries(p),
         .adpcm_ima_wav, .adpcm_ms => true,
-        .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac, .alac => false,
+        .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac, .alac, .adpcm_g722, .adpcm_g726le => false,
     };
 }
 
@@ -357,7 +357,7 @@ fn cafCodecs(codec: codecs.Codec) bool {
     return switch (codec) {
         .pcm => |p| cafmux.carries(p),
         .alac => true,
-        .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac, .adpcm_ima_wav, .adpcm_ms => false,
+        .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac, .adpcm_ima_wav, .adpcm_ms, .adpcm_g722, .adpcm_g726le => false,
     };
 }
 
@@ -378,7 +378,7 @@ fn mp2Only(codec: codecs.Codec) bool {
 fn oggCodecs(codec: codecs.Codec) bool {
     return switch (codec) {
         .flac, .opus, .vorbis => true,
-        .pcm, .mp1, .mp2, .mp3, .aac, .adpcm_ima_wav, .adpcm_ms, .alac => false,
+        .pcm, .mp1, .mp2, .mp3, .aac, .adpcm_ima_wav, .adpcm_ms, .alac, .adpcm_g722, .adpcm_g726le => false,
     };
 }
 

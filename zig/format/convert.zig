@@ -494,7 +494,8 @@ pub const Conversion = struct {
             .mp2, .adpcm_ima_wav, .adpcm_ms => .s16le,
             // ALAC's encoder takes s16p or s32p, picked as FLAC's (T31b).
             .alac => flacStorage(summary.format.sample_format),
-            .vorbis, .opus, .mp1, .mp3, .aac => return error.UnsupportedOperation,
+            // No muxer carries G.722 or G.726 yet (T31c).
+            .vorbis, .opus, .mp1, .mp3, .aac, .adpcm_g722, .adpcm_g726le => return error.UnsupportedOperation,
         };
         // FFmpeg's set_channel_layout: an unspecified request takes the
         // default for its count.

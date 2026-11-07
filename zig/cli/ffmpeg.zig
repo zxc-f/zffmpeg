@@ -235,8 +235,9 @@ fn run(init: std.process.Init) ExitStatus {
         if (std.mem.eql(u8, name, "copy")) {
             mode = .copy;
         } else {
-            // An encoder, as FFmpeg names it (T23a, T26c).
-            const found = av.codecs.findEncoder(name) orelse {
+            // An encoder, or a codec's first encoder, as FFmpeg finds
+            // them (T23a, T26c, T31c).
+            const found = av.codecs.findEncoderOrCodec(name) orelse {
                 printError(io, "zffmpeg: unknown encoder: {s}\n" ++ usage, .{name});
                 return .usage;
             };
