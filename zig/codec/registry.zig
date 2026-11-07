@@ -46,12 +46,15 @@ pub const Codec = union(enum) {
     mp1,
     mp2,
     mp3,
+    /// AAC (T30a): named by the ADTS demuxer and muxer; decoded since
+    /// T30b.
+    aac,
 
     /// FFmpeg's codec name, such as `pcm_s16le` or `flac`.
     pub fn name(c: Codec) []const u8 {
         return switch (c) {
             .pcm => |p| p.name(),
-            .flac, .vorbis, .opus, .mp1, .mp2, .mp3 => @tagName(c),
+            .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac => @tagName(c),
         };
     }
 
@@ -59,14 +62,14 @@ pub const Codec = union(enum) {
     pub fn pcmCodec(c: Codec) ?pcm.Codec {
         return switch (c) {
             .pcm => |p| p,
-            .flac, .vorbis, .opus, .mp1, .mp2, .mp3 => null,
+            .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac => null,
         };
     }
 
     pub fn eql(a: Codec, b: Codec) bool {
         return switch (a) {
             .pcm => |p| b == .pcm and b.pcm == p,
-            .flac, .vorbis, .opus, .mp1, .mp2, .mp3 => std.meta.activeTag(a) == std.meta.activeTag(b),
+            .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac => std.meta.activeTag(a) == std.meta.activeTag(b),
         };
     }
 };
@@ -115,10 +118,13 @@ pub const descriptors = [_]Descriptor{
     .{ .codec = .mp1, .media_type = .audio, .long_name = "MP1 (MPEG audio layer 1)", .props = .{ .intra_only = true, .lossy = true } },
     .{ .codec = .mp2, .media_type = .audio, .long_name = "MP2 (MPEG audio layer 2)", .props = .{ .intra_only = true, .lossy = true } },
     .{ .codec = .mp3, .media_type = .audio, .long_name = "MP3 (MPEG audio layer 3)", .props = .{ .intra_only = true, .lossy = true } },
+    // Not intra-only in FFmpeg's descriptor: AAC frames depend on the one
+    // before (the MDCT's overlap and LTP).
+    .{ .codec = .aac, .media_type = .audio, .long_name = "AAC (Advanced Audio Coding)", .props = .{ .lossy = true } },
 };
 
 /// The descriptors after the PCM ones, in their order.
-const compressed = [_]std.meta.Tag(Codec){ .flac, .vorbis, .opus, .mp1, .mp2, .mp3 };
+const compressed = [_]std.meta.Tag(Codec){ .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac };
 
 fn pcmDescriptor(codec: pcm.Codec, long_name: []const u8, props: Props) Descriptor {
     return .{ .codec = .{ .pcm = codec }, .media_type = .audio, .long_name = long_name, .props = props };
@@ -127,7 +133,7 @@ fn pcmDescriptor(codec: pcm.Codec, long_name: []const u8, props: Props) Descript
 pub fn descriptor(codec: Codec) *const Descriptor {
     return switch (codec) {
         .pcm => |p| &descriptors[@backingInt(p)],
-        .flac, .vorbis, .opus, .mp1, .mp2, .mp3 => &descriptors[pcm_count + std.mem.findScalar(std.meta.Tag(Codec), &compressed, std.meta.activeTag(codec)).?],
+        .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac => &descriptors[pcm_count + std.mem.findScalar(std.meta.Tag(Codec), &compressed, std.meta.activeTag(codec)).?],
     };
 }
 
@@ -200,7 +206,7 @@ comptime {
     for (descriptors, 0..) |d, i| {
         switch (d.codec) {
             .pcm => |p| if (@backingInt(p) != i) @compileError("descriptors must follow pcm.Codec's order: " ++ d.name()),
-            .flac, .vorbis, .opus, .mp1, .mp2, .mp3 => if (i < pcm_count or compressed[i - pcm_count] != std.meta.activeTag(d.codec)) @compileError("the compressed codecs' descriptors follow the PCM ones in order"),
+            .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac => if (i < pcm_count or compressed[i - pcm_count] != std.meta.activeTag(d.codec)) @compileError("the compressed codecs' descriptors follow the PCM ones in order"),
         }
         if (d.props.lossy and d.props.lossless) @compileError("a codec is lossy or lossless, not both: " ++ d.name());
     }

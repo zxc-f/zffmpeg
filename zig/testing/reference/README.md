@@ -201,6 +201,15 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/mp3_vectors
 LC_ALL=C ./mp3-vectors zig/testing/fixtures/mp3/*.mp3 | diff -u zig/testing/vectors/mp3.txt -
 ```
 
+The T30a ADTS vectors are the same program's lines for each ADTS fixture
+(the reference build has the aac demuxer and parser, and no AAC decoder),
+and `seek_vectors.c`'s for their seeks:
+
+```bash
+LC_ALL=C ./mp3-vectors zig/testing/fixtures/aac/*.aac | diff -u zig/testing/vectors/aac.txt -
+LC_ALL=C ./seek-vectors zig/testing/fixtures/aac/*.aac | diff -u zig/testing/vectors/seek_aac.txt -
+```
+
 The T27d Vorbis vectors come from the reference's `libavformat` and
 `libavcodec`: `vorbis_vectors.c` opens each Ogg Vorbis fixture as the
 ffmpeg program opens an input, sends every packet of its Vorbis stream to
@@ -356,6 +365,24 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/mp2enc_vect
 ./mp2enc-vectors | diff -u zig/testing/vectors/mp2enc.txt -
 ```
 
+The T30a AudioSpecificConfig vectors call the reference's
+`avpriv_mpeg4audio_get_config2` (exported by the static `libavcodec`) on
+crafted configurations (LC, SBR and PS signalled every way, the escapes,
+channel configurations, ALS, USAC, ELD, LD, BSAC) and 600 pseudo-random
+ones, each with zeroed padding as extradata has, with and without the sync
+extension search, and print the result and the configuration;
+`adtsmux_vectors.c` runs FFmpeg's adts muxer on crafted extradata (PCEs,
+`write_mpeg2`, the configurations it refuses), packets of every size up to
+its 16383-byte limit, empty ones, and new extradata as side data, and prints
+each result and the MD5 of the bytes written:
+
+```bash
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/mpeg4audio_vectors.c .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o mpeg4audio-vectors
+./mpeg4audio-vectors | diff -u zig/testing/vectors/mpeg4audio.txt -
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/adtsmux_vectors.c .references/ffmpeg-install/lib/libavformat.a .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o adtsmux-vectors
+./adtsmux-vectors | diff -u zig/testing/vectors/adtsmux.txt -
+```
+
 The FFmpeg-made FLAC fixtures (`flac_ffmpeg_*`) come from the reference's
 FLAC encoder; `flac_fixtures.sh` remakes them and prints their hashes, which
 `generate.py` records:
@@ -480,8 +507,9 @@ the Ogg demuxer and the ogg, oga and opus muxers (T27a, T27b), the Vorbis
 and Opus decoders with FFmpeg's native encoders, which make their fixtures
 (T27d, T28), the mp3 demuxer with the mpegaudio parser (T29a), mp3float,
 FFmpeg's float MP3 decoder and the ffmpeg program's default for MP3 (T29b),
-mp1float and mp2float (T29c), and the mp2 and mp2fixed encoders with the
-mp2 muxer (T29d).
+mp1float and mp2float (T29c), the mp2 and mp2fixed encoders with the
+mp2 muxer (T29d), and the aac demuxer with the aac parser and the adts muxer
+(T30a; no AAC decoder or encoder before T30b).
 There are no GPL, nonfree, external-library or
 hardware components, and autodetection is off. `--disable-x86asm` keeps the C
 code paths as the reference and avoids a NASM dependency; inline assembly
@@ -692,6 +720,12 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   zffprobe refuses the stream the stopped tag's footer leaves before
   `fLaC` (`KNOWN_LEADING_ID3V2_REFUSALS`; notes.md "Headerless and rate-0
   parameters").
+- **ADTS fixtures (T30a).** Without an AAC decoder in the reference build,
+  ffprobe opens an ADTS fixture with no sample rate or channels, which the
+  section checks; zffprobe then refuses it with `UnsupportedFormat`, from a
+  file and a pipe, and a fixture ffprobe refuses, zffprobe refuses too;
+  every conversion is refused by both (notes.md "ADTS without a decoder").
+  Packets and seeks are the Zig tests' (vectors/aac.txt, seek_aac.txt).
 - **MP2 output (T29d).** zffmpeg's MP2 (the `mp2` muxer, with `mp2` or
   `-c:a mp2fixed`) against the ffmpeg program's with `-bitexact`, for the
   FLAC output section's inputs and a decoded MP3, MP2 and Ogg Vorbis

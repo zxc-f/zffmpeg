@@ -215,6 +215,7 @@ jobs:
           LC_ALL=C ./seek-vectors zig/testing/fixtures/flac/*.flac | diff -u zig/testing/vectors/seek_flac.txt -
           LC_ALL=C ./seek-vectors zig/testing/fixtures/ogg/*.ogg | diff -u zig/testing/vectors/seek_ogg.txt -
           LC_ALL=C ./seek-vectors zig/testing/fixtures/mp3/*.mp3 | diff -u zig/testing/vectors/seek_mp3.txt -
+          LC_ALL=C ./seek-vectors zig/testing/fixtures/aac/*.aac | diff -u zig/testing/vectors/seek_aac.txt -
 
       # The committed T15 oracle must be what this build's libavutil gives.
       - name: Check the rational vectors (T15)
@@ -243,15 +244,16 @@ jobs:
             -lm -pthread -o ogg-vectors
           LC_ALL=C ./ogg-vectors zig/testing/fixtures/ogg/*.ogg | diff -u zig/testing/vectors/ogg.txt -
 
-      # The committed T29a oracle must be what this build's libavformat makes
-      # of every MP3 fixture.
-      - name: Check the MP3 vectors (T29a)
+      # The committed T29a and T30a oracles must be what this build's
+      # libavformat makes of every MP3 and ADTS fixture.
+      - name: Check the MP3 and ADTS vectors (T29a, T30a)
         run: |
           clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/mp3_vectors.c \
             .references/ffmpeg-install/lib/libavformat.a .references/ffmpeg-install/lib/libavcodec.a \
             .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a \
             -lm -pthread -o mp3-vectors
           LC_ALL=C ./mp3-vectors zig/testing/fixtures/mp3/*.mp3 | diff -u zig/testing/vectors/mp3.txt -
+          LC_ALL=C ./mp3-vectors zig/testing/fixtures/aac/*.aac | diff -u zig/testing/vectors/aac.txt -
 
       # The committed T26c oracle must be what this build's FLAC encoder makes
       # of the generated signals.
@@ -272,6 +274,21 @@ jobs:
             .references/ffmpeg-install/lib/libavutil.a \
             -lm -pthread -o mp2enc-vectors
           ./mp2enc-vectors | diff -u zig/testing/vectors/mp2enc.txt -
+
+      # The committed T30a oracles must be what this build's
+      # AudioSpecificConfig parser and ADTS muxer make of their cases.
+      - name: Check the AudioSpecificConfig and ADTS muxer vectors (T30a)
+        run: |
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/mpeg4audio_vectors.c \
+            .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a \
+            .references/ffmpeg-install/lib/libavutil.a \
+            -lm -pthread -o mpeg4audio-vectors
+          ./mpeg4audio-vectors | diff -u zig/testing/vectors/mpeg4audio.txt -
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/adtsmux_vectors.c \
+            .references/ffmpeg-install/lib/libavformat.a .references/ffmpeg-install/lib/libavcodec.a \
+            .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a \
+            -lm -pthread -o adtsmux-vectors
+          ./adtsmux-vectors | diff -u zig/testing/vectors/adtsmux.txt -
 
       # The committed T28a oracles must be what this build's Opus range
       # decoder and packet parser give.

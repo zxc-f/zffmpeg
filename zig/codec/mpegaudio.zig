@@ -2,7 +2,7 @@
 // Derived from FFmpeg's libavcodec/mpegaudiodecheader.c and .h
 // (ff_mpa_check_header, ff_mpegaudio_decode_header, ff_mpa_decode_header),
 // mpegaudiotabs.h (ff_mpa_bitrate_tab, ff_mpa_freq_tab), mpegaudio_parser.c
-// (mpegaudio_parse) and parser.c (ff_combine_frame) at the pinned reference
+// (mpegaudio_parse, with parser.zig's ff_combine_frame) at the pinned reference
 // revision.
 // Copyright (c) 2003 Fabrice Bellard
 // FFmpeg is free software; you can redistribute it and/or modify it under
@@ -17,6 +17,7 @@
 //! duration) once a header repeats.
 
 const std = @import("std");
+const parser = @import("parser.zig");
 
 /// `MP3_MASK`: the header bits that stay the same in a stream.
 pub const mp3_mask: u32 = 0xFFFE0CCF;
@@ -172,40 +173,10 @@ pub const Context = struct {
     bit_rate: i64 = 0,
 };
 
-/// `ParseContext` with `ff_combine_frame`, for a parser that never
-/// overreads (`next` is a frame end at or after the bytes it was given, or
-/// none).
-const ParseContext = struct {
-    buffer: std.ArrayList(u8) = .empty,
-    /// `index`: the bytes held of a frame not yet complete.
-    held: usize = 0,
-    state: u32 = 0,
-
-    /// `ff_combine_frame`: with `next` null (END_NOT_FOUND) the bytes are
-    /// held and null returned; otherwise the frame, the held bytes and
-    /// `buf[0..next]`.
-    fn combine(pc: *ParseContext, gpa: std.mem.Allocator, next_in: ?usize, buf: []const u8) std.mem.Allocator.Error!?[]const u8 {
-        var next = next_in;
-        // At the end, flush what is held.
-        if (buf.len == 0 and next == null) next = 0;
-        const n = next orelse {
-            try pc.buffer.resize(gpa, pc.held);
-            try pc.buffer.appendSlice(gpa, buf);
-            pc.held += buf.len;
-            return null;
-        };
-        if (pc.held == 0) return buf[0..n];
-        try pc.buffer.resize(gpa, pc.held);
-        try pc.buffer.appendSlice(gpa, buf[0..n]);
-        pc.held = 0;
-        return pc.buffer.items;
-    }
-};
-
 /// The MPEG audio parser (`mpegaudio_parse`), `PARSER_FLAG_COMPLETE_FRAMES`
 /// off.
 pub const Parser = struct {
-    pc: ParseContext = .{},
+    pc: parser.ParseContext = .{},
     /// The bytes of the current frame still to come.
     frame_size: u32 = 0,
     header: u32 = 0,
@@ -216,7 +187,7 @@ pub const Parser = struct {
     duration: u32 = 0,
 
     pub fn deinit(p: *Parser, gpa: std.mem.Allocator) void {
-        p.pc.buffer.deinit(gpa);
+        p.pc.deinit(gpa);
         p.* = undefined;
     }
 
@@ -281,7 +252,7 @@ pub const Parser = struct {
             }
         }
         p.pc.state = state;
-        const frame = try p.pc.combine(gpa, next, buf) orelse return .{ .consumed = buf.len, .frame = null };
+        const frame = try p.pc.combine(gpa, if (next) |n| @intCast(n) else null, buf) orelse return .{ .consumed = buf.len, .frame = null };
         const end = next orelse 0;
         // At the end, an ID3v1 or APE tag is no frame.
         if (flush and frame.len >= 128 and std.mem.startsWith(u8, frame, "TAG")) return .{ .consumed = end, .frame = null };

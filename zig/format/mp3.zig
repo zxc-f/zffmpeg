@@ -143,63 +143,7 @@ pub const StreamInfo = struct {
     tags: metadata.Dictionary = .empty,
 };
 
-/// The source with a window of bytes read ahead: `window` holds the bytes
-/// from `window_start` up to where the reader is.
-const Source = struct {
-    reader: *std.Io.Reader,
-    seeker: ?seek.Seeker,
-    window: std.ArrayList(u8) = .empty,
-    window_start: i64 = 0,
-    eof: bool = false,
-
-    fn deinit(s: *Source, gpa: std.mem.Allocator) void {
-        s.window.deinit(gpa);
-    }
-
-    fn windowEnd(s: *const Source) i64 {
-        return s.window_start + @as(i64, @intCast(s.window.items.len));
-    }
-
-    /// Reads ahead until the window reaches `end` or the input ends.
-    fn fill(s: *Source, gpa: std.mem.Allocator, end: i64) Error!void {
-        while (!s.eof and s.windowEnd() < end) {
-            const want: usize = @intCast(@min(end - s.windowEnd(), 64 * 1024));
-            const old = s.window.items.len;
-            try s.window.resize(gpa, old + want);
-            const n = s.reader.readSliceShort(s.window.items[old..]) catch return error.IoFailure;
-            s.window.shrinkRetainingCapacity(old + n);
-            if (n < want) s.eof = true;
-        }
-    }
-
-    /// The bytes at `pos`, at most `len`: fewer at the end of the input.
-    /// `pos` must not be before the window.
-    fn bytesAt(s: *Source, gpa: std.mem.Allocator, pos: i64, len: usize) Error![]const u8 {
-        std.debug.assert(pos >= s.window_start);
-        try s.fill(gpa, pos + @as(i64, @intCast(len)));
-        if (pos >= s.windowEnd()) return &.{};
-        const at: usize = @intCast(pos - s.window_start);
-        return s.window.items[at..][0..@min(len, s.window.items.len - at)];
-    }
-
-    /// Forgets the window's bytes before `pos`.
-    fn drop(s: *Source, pos: i64) void {
-        if (pos <= s.window_start) return;
-        const n: usize = @intCast(@min(pos - s.window_start, @as(i64, @intCast(s.window.items.len))));
-        std.mem.copyForwards(u8, s.window.items[0 .. s.window.items.len - n], s.window.items[n..]);
-        s.window.shrinkRetainingCapacity(s.window.items.len - n);
-        s.window_start += @intCast(n);
-    }
-
-    /// `avio_seek` on a seekable source; `IoFailure` on a pipe.
-    fn seekTo(s: *Source, pos: i64) Error!void {
-        const seeker = s.seeker orelse return error.IoFailure;
-        seeker.seekTo(std.math.cast(u64, pos) orelse return error.IoFailure) catch return error.IoFailure;
-        s.window.clearRetainingCapacity();
-        s.window_start = pos;
-        s.eof = false;
-    }
-};
+const Source = demux.Window;
 
 pub const Demuxer = struct {
     /// The error set demux.zig's layer returns.
@@ -269,18 +213,7 @@ pub const Demuxer = struct {
     fn readHeader(d: *Demuxer, limits: Limits) Error!void {
         var id3: id3v2.Reader = .init(d.gpa);
         defer id3.deinit();
-        // ff_id3v2_read_dict: the tags that follow each other.
-        while (true) {
-            const head = try d.src.bytesAt(d.gpa, d.pos, id3v2.header_size);
-            if (head.len < id3v2.header_size or !id3v2.match(head)) break;
-            const header = head[0..id3v2.header_size].*;
-            const body_len = id3v2.bodyLen(&header);
-            if (body_len > limits.max_id3v2_bytes) return error.LimitExceeded;
-            const body = try d.src.bytesAt(d.gpa, d.pos + id3v2.header_size, body_len);
-            d.pos += id3v2.header_size + @as(i64, @intCast(try id3.parseTag(&header, body)));
-            d.src.drop(@min(d.pos, d.src.windowEnd()));
-        }
-        try id3.finish();
+        try d.src.readId3v2Tags(d.gpa, &d.pos, limits.max_id3v2_bytes, &id3);
         std.mem.swap(metadata.Dictionary, &d.tags, &id3.tags);
         // A tag may claim more bytes than the input has. The frame search
         // then starts past the end and the input is InvalidMp3, where
@@ -321,18 +254,10 @@ pub const Demuxer = struct {
     fn readId3v1(d: *Demuxer, size: ?u64) Error!void {
         const n = size orelse return;
         if (n <= id3v1.tag_size) return;
-        const before = d.src.window_start;
-        const kept = try d.gpa.dupe(u8, d.src.window.items);
-        defer d.gpa.free(kept);
-        const was_eof = d.src.eof;
-        try d.src.seekTo(@intCast(n - id3v1.tag_size));
-        const tag = try d.src.bytesAt(d.gpa, @intCast(n - id3v1.tag_size), id3v1.tag_size);
-        if (tag.len == id3v1.tag_size) try id3v1.parse(d.gpa, tag[0..id3v1.tag_size], &d.tags);
-        // Back where the frames start, the window as it was.
-        try d.src.seekTo(before + @as(i64, @intCast(kept.len)));
-        d.src.window_start = before;
-        try d.src.window.appendSlice(d.gpa, kept);
-        d.src.eof = was_eof;
+        var tag: std.ArrayList(u8) = .empty;
+        defer tag.deinit(d.gpa);
+        try d.src.readElsewhere(d.gpa, @intCast(n - id3v1.tag_size), id3v1.tag_size, &tag);
+        if (tag.items.len == id3v1.tag_size) try id3v1.parse(d.gpa, tag.items[0..id3v1.tag_size], &d.tags);
     }
 
     const check_wrong_header = -1;
@@ -493,7 +418,7 @@ pub const Demuxer = struct {
             .time_base = time_base,
             .sample_rate = 0,
             .channels = 0,
-            .parse_mpegaudio = true,
+            .parser = .mpegaudio,
             .frame_size_unknown = true,
             .bit_rate = d.info.bit_rate,
             .start_skip_samples = d.info.start_skip_samples,

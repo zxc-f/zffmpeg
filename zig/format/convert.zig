@@ -325,8 +325,11 @@ pub const Conversion = struct {
                 .init(request.gpa orelse return error.UnsupportedOperation, source.replay.source, sk, request.diagnostics)
             else
                 .init(request.gpa orelse return error.UnsupportedOperation, source.reader(), null, request.diagnostics) },
-            // Output only: detection never names it.
-            .mp2 => return error.UnsupportedOperation,
+            // Output only: detection never names them.
+            .mp2, .adts => return error.UnsupportedOperation,
+            // ADTS is read without a decoder until T30b, and no PCM or
+            // FLAC output carries AAC: nothing to convert it to.
+            .aac => return error.UnsupportedOperation,
         };
         errdefer deinitParser(&input);
         // A header written before the samples needs their count. A decoded
@@ -334,7 +337,7 @@ pub const Conversion = struct {
         // only when that header cannot be rewritten at the end.
         const header_first = switch (request.output.family()) {
             .wav, .au, .aiff => true,
-            .raw, .flac, .ogg, .caf, .mp3, .mp2 => false,
+            .raw, .flac, .ogg, .caf, .mp3, .mp2, .aac, .adts => false,
         };
         switch (input) {
             .ogg => |*reader| reader.count_ahead = header_first and !request.output_seekable,
@@ -427,7 +430,7 @@ pub const Conversion = struct {
             // No encoder: refused by the operation check below.
             // The MP2 encoders take s16 (T29d).
             .mp2 => .s16le,
-            .vorbis, .opus, .mp1, .mp3 => return error.UnsupportedOperation,
+            .vorbis, .opus, .mp1, .mp3, .aac => return error.UnsupportedOperation,
         };
         // FFmpeg's set_channel_layout: an unspecified request takes the
         // default for its count.
@@ -480,7 +483,8 @@ pub const Conversion = struct {
             },
             // FFmpeg's MP2 encoder before its raw muxer (T29d).
             .mp2 => try mp2mux.Writer.check(summary.output_codec, summary.outputFormat(), request.mp2),
-            .caf, .mp3 => unreachable, // no muxer: refused above as UnsupportedOperation
+            .caf, .mp3, .aac => unreachable, // no muxer: refused above as UnsupportedOperation
+            .adts => unreachable, // no AAC encoder: refused above as UnsupportedOperation
         }
         // For a decoded input, the largest frame its decoder gives: the
         // buffers of `transferResampled`, which takes each frame whole.
@@ -580,11 +584,11 @@ pub const Conversion = struct {
         try swr.Swr.check(summary.format, summary.outputFormat(), packet_frames, .{});
         switch (summary.output.family()) {
             .flac, .ogg => {},
-            .wav, .au, .aiff, .raw, .caf, .mp3, .mp2 => return,
+            .wav, .au, .aiff, .raw, .caf, .mp3, .mp2, .aac, .adts => return,
         }
         switch (summary.input.family()) {
             .wav, .au, .aiff, .caf, .raw => {},
-            .flac, .ogg, .mp3, .mp2 => return,
+            .flac, .ogg, .mp3, .mp2, .aac, .adts => return,
         }
         const count = summary.frame_count orelse return;
         const first = try swr.Swr.firstOutputFrames(summary.format.sample_rate, summary.output_rate, packet_frames, count, .{}) orelse return;
@@ -682,7 +686,7 @@ pub const Conversion = struct {
                 var writer = mp2mux.Writer.begin(out, s.output_codec, s.outputFormat(), c.mp2_options) catch |err| return outputFailure(err);
                 try c.transfer(mp2mux.Writer, &writer);
             },
-            .caf, .mp3 => unreachable, // no muxer: `init` refused it
+            .caf, .mp3, .aac, .adts => unreachable, // no muxer or encoder: `init` refused it
         }
         // Every frame was read: an unknown count is now known, and a FLAC
         // stream's decoded count replaces STREAMINFO's (equal unless raw
@@ -1024,7 +1028,8 @@ fn ffmpegPacketFrames(container: Container, codec: pcm.Codec, format: audio.Form
         .flac => unreachable, // Conversion.init takes STREAMINFO's block size
         .ogg => unreachable, // Conversion.init takes the decoder's frames
         .mp3 => unreachable, // Conversion.init takes the decoder's frames
-        .mp2 => unreachable, // no demuxer
+        .mp2, .adts => unreachable, // no demuxer
+        .aac => unreachable, // Conversion.init refuses it
     };
 }
 
@@ -1307,7 +1312,7 @@ fn decodeOutput(container: Container, bytes: []const u8, storage: []i16, format:
             var parser: caf.Parser = .init(&reader, .{});
             return decodeWith(caf.Parser, &parser, storage);
         },
-        .flac, .ogg, .mp3, .mp2 => unreachable, // not this test's outputs
+        .flac, .ogg, .mp3, .mp2, .aac, .adts => unreachable, // not this test's outputs
     }
 }
 
@@ -1369,7 +1374,7 @@ fn rawOf(container: Container, bytes: []const u8, out: []u8, format: audio.Forma
         .aiff => _ = try aiff.decodeToRaw(&reader, &writer, .{}),
         .caf => _ = try caf.decodeToRaw(&reader, &writer, .{}),
         .raw => _ = try raw.decodeToRaw(&reader, &writer, container.rawCodec().?, paramsOf(format), bytes.len, .{}), // a raw container has a codec
-        .flac, .ogg, .mp3, .mp2 => unreachable, // not this test's outputs
+        .flac, .ogg, .mp3, .mp2, .aac, .adts => unreachable, // not this test's outputs
     }
     return writer.buffered();
 }

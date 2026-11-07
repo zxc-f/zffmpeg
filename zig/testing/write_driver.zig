@@ -57,7 +57,7 @@ fn run(init: std.process.Init) Status {
     // The PCM writers only: FLAC and MP2 encode, Ogg carries no PCM.
     switch (container.family()) {
         .wav, .au, .aiff, .raw => {},
-        .caf, .flac, .ogg, .mp3, .mp2 => return usageError(io),
+        .caf, .flac, .ogg, .mp3, .mp2, .aac, .adts => return usageError(io),
     }
     const codec = codecFromName(args[2]) orelse return usageError(io);
     const gpa = init.gpa;
@@ -168,7 +168,7 @@ fn write(
             try writer.finish();
         },
         // `main` refused the others.
-        .caf, .flac, .ogg, .mp3, .mp2 => unreachable,
+        .caf, .flac, .ogg, .mp3, .mp2, .aac, .adts => unreachable,
     }
 }
 

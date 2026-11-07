@@ -3255,6 +3255,65 @@ def compare_mp3(args, lines, failures):
     record("MP3 fixtures (T29a)", passed, len(fixtures) + stale, understood=understood)
 
 
+def compare_aac(args, lines, failures):
+    """The ADTS fixtures (T30a). Without a decoder in the reference build,
+    ffprobe opens an ADTS stream with no sample rate or channels (0 and 0),
+    and the ffmpeg program can neither decode nor copy it ("sample rate not
+    set"). zffprobe opens it the same way, then refuses with
+    UnsupportedFormat, from a file and a pipe (recorded: notes.md "ADTS
+    without a decoder"); a fixture ffprobe refuses, zffprobe refuses too;
+    zffmpeg refuses every conversion, as the program does. Each packet and
+    seek is in vectors/aac.txt and seek_aac.txt."""
+    rows = []
+    passed = understood = 0
+    fixtures = sorted((FIXTURES / "aac").glob("*.aac"))
+    for path in fixtures:
+        name = path.stem
+        problems = []
+        theirs = run(args.ffprobe, "-v", "error", "-select_streams", "a:0", "-show_entries",
+                     "stream=codec_name,sample_rate,channels:format=format_name", "-of", "default=nw=1", path)
+        ours = run(args.zffprobe, path)
+        piped = subprocess.run([args.zffprobe, "-"], input=path.read_bytes(), capture_output=True)
+        opened = theirs.returncode == 0 and bool(theirs.stdout.strip())
+        if opened:
+            f = dict(line.split("=", 1) for line in text(theirs.stdout).splitlines() if "=" in line)
+            premise = {"codec_name": "aac", "sample_rate": "0", "channels": "0", "format_name": "aac"}
+            if any(f.get(k) != v for k, v in premise.items()):
+                problems.append(f"ffprobe reports {f}, where the recorded refusal assumes no decoder")
+            for process, source in ((ours, path), (piped, "-")):
+                if tool_error(process, "zffprobe", source) != "UnsupportedFormat":
+                    problems.append(f"zffprobe exited {process.returncode} ({first_line(text(process.stderr))}); "
+                                    f"recorded: UnsupportedFormat")
+        else:
+            for process, source in ((ours, path), (piped, "-")):
+                if tool_error(process, "zffprobe", source) is None:
+                    problems.append(f"zffprobe exited {process.returncode} where ffprobe refuses")
+        tp = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", path, "-f", "wav", "-")
+        zp = run(args.zffmpeg, "-i", path, "-f", "wav", "-")
+        if tp.returncode == 0 or zp.returncode == 0 or zp.stdout:
+            problems.append(f"conversion: FFmpeg exited {tp.returncode}, zffmpeg {zp.returncode}; both refuse "
+                            f"without a decoder")
+        if problems:
+            failures.extend(f"aac {name}: {p}" for p in problems)
+            rows.append(f"| `{name}` | **FAIL**: {'; '.join(problems)} |")
+        else:
+            passed += 1
+            understood += opened
+            rows.append(f"| `{name}` | pass ({'recorded: UnsupportedFormat' if opened else 'both refuse'}) |")
+    lines += [
+        "",
+        "## ADTS fixtures (T30a)",
+        "",
+        f"ADTS fixtures that ffprobe opens without a decoder and zffprobe then refuses as recorded, or that both "
+        f"refuse, with every conversion refused by both: {passed}/{len(fixtures)} (vectors/aac.txt holds every "
+        f"packet av_read_frame gives, vectors/seek_aac.txt every seek).",
+        "",
+        "| Fixture | Result |",
+        "| --- | --- |",
+    ] + rows
+    record("ADTS fixtures (T30a)", passed, len(fixtures), understood=understood)
+
+
 def compare_ogg(args, lines, failures):
     """The Ogg fixtures (T27a): zffprobe against ffprobe's first audio
     stream (codec, sample format, channels, layout, rate, duration), and
@@ -3741,6 +3800,7 @@ def main():
     compare_ogg_decode(args, lines, failures)
     compare_mp3_decode(args, lines, failures)
     compare_leading_id3v2(args, lines, failures)
+    compare_aac(args, lines, failures)
     compare_mp2_output(args, lines, failures)
     compare_opus_vectors(args, lines, failures)
     compare_hashes(args, lines, failures)

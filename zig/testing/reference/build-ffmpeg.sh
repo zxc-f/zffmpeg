@@ -33,7 +33,9 @@ build="$root/.references/ffmpeg-build"
 # makes the Opus fixtures (T28), FFmpeg's float MPEG audio decoders, mp3float,
 # the ffmpeg program's default for MP3 (T29b), and mp1float and mp2float for
 # Layers I and II (T29c), FFmpeg's MP2 encoders (mp2, mp2fixed) and its mp2
-# muxer (T29d), and the audio filters T24-T25
+# muxer (T29d), the aac (ADTS) demuxer, the aac parser and the adts muxer
+# (T30a; the AAC decoder and encoder wait for T30b), and the audio filters
+# T24-T25
 # compare. The ffmpeg program
 # selects the few filters it always needs. No GPL, nonfree, external or
 # hardware components.
@@ -49,11 +51,11 @@ configure_args=(
     --disable-ffplay
     --disable-avdevice
     --enable-protocol=file,pipe
-    --enable-demuxer=wav,w64,au,aiff,caf,flac,ogg,mp3,"$pcm_formats"
+    --enable-demuxer=wav,w64,au,aiff,caf,flac,ogg,mp3,aac,"$pcm_formats"
     --enable-decoder="$pcm_codecs",flac,vorbis,opus,mp3float,mp1float,mp2float
     --enable-encoder="$pcm_codecs",flac,vorbis,opus,mp2,mp2fixed
-    --enable-muxer=wav,mp2,w64,au,aiff,flac,ogg,oga,opus,framecrc,framemd5,streamhash,"$pcm_formats"
-    --enable-parser=flac,mpegaudio
+    --enable-muxer=wav,mp2,adts,w64,au,aiff,flac,ogg,oga,opus,framecrc,framemd5,streamhash,"$pcm_formats"
+    --enable-parser=flac,mpegaudio,aac
     --enable-filter=aresample,volume,asetpts,amix,pan,channelmap,channelsplit,asplit
 )
 

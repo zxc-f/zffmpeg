@@ -645,7 +645,7 @@ pub const Demuxer = struct {
             .time_base = info.time_base,
             .sample_rate = info.sample_rate,
             .channels = info.channels,
-            .parse_flac = info.codec == .flac,
+            .parser = if (info.codec == .flac) .flac_headers else .none,
             .decoder = if (info.codec) |codec| switch (codec) {
                 .flac => .flac,
                 .vorbis, .opus => if (info.decoder_refuses) .refuses else .format_at_open,

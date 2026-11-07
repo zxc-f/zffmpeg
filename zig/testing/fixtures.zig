@@ -486,6 +486,17 @@ pub const mp3 = struct {
     }
 };
 
+pub const aac = struct {
+    /// The ADTS fixtures (T30a): whether FFmpeg opens each; what it makes
+    /// of each one opened is vectors/aac.txt.
+    pub const all: []const mp3.Fixture = @import("fixtures/aac/manifest.zon");
+
+    /// The bytes of fixtures/aac/<name>.aac, embedded at compile time.
+    pub fn bytes(comptime name: []const u8) []const u8 {
+        return @embedFile("fixtures/aac/" ++ name ++ ".aac");
+    }
+};
+
 /// This file's own declarations: the WAV contract's `all` and `bytes`.
 const wav_contract = @This();
 
@@ -566,6 +577,7 @@ test "manifest names are unique and expectations are consistent" {
         expectConsistent(flac);
         expectConsistent(ogg);
         expectConsistent(mp3);
+        expectConsistent(aac);
     }
 }
 
@@ -578,6 +590,7 @@ test "every fixture file is present and matches its recorded SHA-256" {
     try expectHashes(flac);
     try expectHashes(ogg);
     try expectHashes(mp3);
+    try expectHashes(aac);
 }
 
 test "fixture names do not collide across contracts" {
@@ -611,6 +624,14 @@ test "fixture names do not collide across contracts" {
         expectDistinct(mp3, caf);
         expectDistinct(mp3, flac);
         expectDistinct(mp3, ogg);
+        expectDistinct(aac, wav_contract);
+        expectDistinct(aac, au);
+        expectDistinct(aac, aiff);
+        expectDistinct(aac, raw);
+        expectDistinct(aac, caf);
+        expectDistinct(aac, flac);
+        expectDistinct(aac, ogg);
+        expectDistinct(aac, mp3);
     }
 }
 

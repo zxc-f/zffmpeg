@@ -47,6 +47,7 @@ const caf = @import("caf.zig");
 const flac = @import("flac.zig");
 const ogg = @import("ogg.zig");
 const mp3 = @import("mp3.zig");
+const aac = @import("aac.zig");
 const rational = @import("../core/rational.zig");
 const demux = @import("demux.zig");
 const seek = @import("seek.zig");
@@ -61,7 +62,7 @@ pub const Container = registry.Container;
 /// The WAV, AU, AIFF, raw PCM, CAF and FLAC contract errors, which share
 /// their common names, `UnknownFormat` for a stream no demuxer recognizes,
 /// and `UnusedOption`.
-pub const Error = wav.Error || au.Error || aiff.Error || raw.Error || caf.Error || flac.Error || ogg.Error || mp3.Error || error{
+pub const Error = wav.Error || au.Error || aiff.Error || raw.Error || caf.Error || flac.Error || ogg.Error || mp3.Error || aac.Error || error{
     /// No demuxer's probe scored the stream, as FFmpeg's "Invalid data found
     /// when processing input"; force a format to parse it anyway.
     UnknownFormat,
@@ -533,9 +534,10 @@ pub fn probeWith(reader: *std.Io.Reader, limits: Limits, options: Options) Error
         },
         .ogg => return probeOgg(reader, &input, options),
         .mp3 => return probeMp3(reader, &input, options),
+        .aac => return probeAac(reader, &input, options),
         // Output only (T29d): detection never names it, nor does a forced
         // input format (`findDemuxer`).
-        .mp2 => return error.UnsupportedFormat,
+        .mp2, .adts => return error.UnsupportedFormat,
     }
 }
 
@@ -628,6 +630,24 @@ fn probeMp3(reader: *std.Io.Reader, input: *Input, options: Options) Error!Probe
         .frame_count = if (duration >= 0) @intCast(rational.rescale(duration, params.sample_rate, mp3.time_base.den)) else null,
         .time_base_duration = if (duration >= 0) .{ .ts = duration, .den = @intCast(mp3.time_base.den) } else null,
     };
+}
+
+/// ADTS (T30a): the demuxer and libavformat's read-ahead, as ffprobe
+/// opens the input, so that an input FFmpeg refuses is refused alike; then
+/// `UnsupportedFormat`, as without a decoder (T30b) the stream has no
+/// sample rate or channels to report (ffprobe prints 0 for both; notes.md
+/// "ADTS without a decoder").
+fn probeAac(reader: *std.Io.Reader, input: *Input, options: Options) Error!Probed {
+    const gpa = options.gpa orelse if (options.tags) |t| t.gpa else return error.UnsupportedFormat;
+    const d = if (options.source.seeker) |sk| blk: {
+        sk.seekTo(0) catch return error.IoFailure;
+        break :blk try aac.Demuxer.initSeekable(gpa, reader, sk, .{});
+    } else try aac.Demuxer.init(gpa, input.reader(), .{});
+    defer d.deinit();
+    var layer = demux.Layer(aac.Demuxer).init(gpa, d);
+    defer layer.deinit();
+    try layer.findStreamInfo();
+    return error.UnsupportedFormat;
 }
 
 /// The bits per sample of an Ogg FLAC stream's STREAMINFO.
@@ -939,8 +959,8 @@ fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
         },
         // Ogg's and MP3's demuxers need an allocator, which this probe has
         // not.
-        .ogg, .mp3 => try std.testing.expectError(error.UnsupportedFormat, got),
-        .raw, .mp2 => unreachable, // no content probe chooses raw PCM or the output-only mp2 format
+        .ogg, .mp3, .aac => try std.testing.expectError(error.UnsupportedFormat, got),
+        .raw, .mp2, .adts => unreachable, // no content probe chooses raw PCM or the output-only formats
     } else try std.testing.expectError(error.UnknownFormat, got);
 }
 
@@ -1024,6 +1044,22 @@ test "WAV and FLAC open after leading ID3v2 tags, whose tags they take only when
     var past: std.Io.Reader = .fixed((comptime testTag("Cut", 100, false))[0..60]);
     try std.testing.expectError(error.Truncated, probeWith(&past, .{}, .{ .source = .{ .format = .wav } }));
     try std.testing.expectEqual(tags.len, id3v2.leadingLen(wav_mono));
+}
+
+test "detection gives every ADTS fixture FFmpeg opens to the aac demuxer, by content or by its extension" {
+    // ffprobe's format for each (`probe_score` 51, 50, 25 or 1); the two
+    // it refuses are refused alike by the demuxer (vectors/aac.txt).
+    const gpa = std.testing.allocator;
+    inline for (fixtures.aac.all) |fixture| {
+        var reader: std.Io.Reader = .fixed(fixtures.aac.bytes(fixture.name));
+        var input: Input = undefined;
+        try input.open(&reader, .{ .file_name = fixture.name ++ ".aac", .gpa = gpa });
+        defer input.deinit();
+        if (fixture.expected == .accept) std.testing.expectEqual(Container.aac, input.container) catch |err| {
+            std.debug.print("aac fixture {s}\n", .{fixture.name});
+            return err;
+        };
+    }
 }
 
 test "a failing reader reports IoFailure" {

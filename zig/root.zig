@@ -68,6 +68,13 @@
 //!   (`codec/mp2enc.zig`).
 //! - `mp2mux`: FFmpeg's mp2 muxer with the encoder before it, a PCM writer
 //!   as the other containers' (`format/mp2mux.zig`).
+//! - `adts`: ADTS frame headers and FFmpeg's AAC parser (`codec/adts.zig`,
+//!   with `codec/parser.zig`'s `ff_combine_frame`).
+//! - `aac`: FFmpeg's raw ADTS demuxer, without decoding, with ID3v1 and
+//!   APEv2 tags (`format/aac.zig`, `format/apetag.zig`).
+//! - `mpeg4audio`: the AudioSpecificConfig as FFmpeg parses it, and its PCE
+//!   copy (`codec/mpeg4audio.zig`).
+//! - `adtsmux`: FFmpeg's ADTS muxer (`format/adtsmux.zig`).
 //! - `oggdecode`: an Ogg stream decoded as the ffmpeg program decodes it
 //!   (`format/oggdecode.zig`, with `format/decoded.zig`).
 //! - `mp3decode`: an MP3 stream decoded as the ffmpeg program decodes it
@@ -140,6 +147,10 @@ pub const mpegaudio = @import("codec/mpegaudio.zig");
 pub const mp3dec = @import("codec/mp3dec.zig");
 pub const mp2enc = @import("codec/mp2enc.zig");
 pub const mp2mux = @import("format/mp2mux.zig");
+pub const adts = @import("codec/adts.zig");
+pub const aac = @import("format/aac.zig");
+pub const mpeg4audio = @import("codec/mpeg4audio.zig");
+pub const adtsmux = @import("format/adtsmux.zig");
 pub const id3v2 = @import("format/id3v2.zig");
 pub const id3v1 = @import("format/id3v1.zig");
 pub const framehash = @import("format/framehash.zig");
@@ -190,6 +201,12 @@ test {
     _ = @import("format/id3v1.zig");
     _ = @import("format/id3v2.zig");
     _ = @import("codec/mpegaudio.zig");
+    _ = @import("codec/parser.zig");
+    _ = @import("codec/adts.zig");
+    _ = @import("format/apetag.zig");
+    _ = @import("format/aac.zig");
+    _ = @import("codec/mpeg4audio.zig");
+    _ = @import("format/adtsmux.zig");
     _ = @import("codec/mp3_tab.zig");
     _ = @import("codec/mpadsp.zig");
     _ = @import("codec/mp3dec.zig");

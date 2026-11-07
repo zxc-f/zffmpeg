@@ -31,7 +31,7 @@ const examples = [_]Example{
 /// The fixture directories, zig/testing/fixtures/<set>/, each named after its
 /// files' extension: wav (WAV and Wave64), au, aiff, raw (raw PCM), caf,
 /// flac, ogg and mp3 (MPEG audio, Layers I to III).
-const FixtureSet = enum { wav, au, aiff, raw, caf, flac, ogg, mp3 };
+const FixtureSet = enum { wav, au, aiff, raw, caf, flac, ogg, mp3, aac };
 
 /// A zffprobe process run with its expected exit code and output.
 const ProbeCase = struct {
@@ -391,7 +391,7 @@ const probe_cases = [_]ProbeCase{
     .{ .name = "malformed AU header", .set = .au, .fixture = "au_offset_too_small", .exit_code = 2, .stderr_contains = ": InvalidAu\n" },
     .{ .name = "a wrong AU magic is not detected", .set = .au, .fixture = "au_bad_magic", .exit_code = 3, .stderr_contains = ": UnknownFormat\n" },
     .{ .name = "a wrong AU magic, forced", .set = .au, .args = &.{ "-f", "au" }, .fixture = "au_bad_magic", .exit_code = 2, .stderr_contains = ": InvalidAu\n" },
-    .{ .name = "an unknown -f", .args = &.{ "-f", "aac" }, .fixture = "mono_8k", .exit_code = 3, .stderr = "zffprobe: aac: unsupported input format\n" },
+    .{ .name = "an unknown -f", .args = &.{ "-f", "ac3" }, .fixture = "mono_8k", .exit_code = 3, .stderr = "zffprobe: ac3: unsupported input format\n" },
     .{ .name = "unsupported AU encoding", .set = .au, .fixture = "au_encoding_g726", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
     .{ .name = "unknown AU size", .set = .au, .fixture = "au_unknown_size", .exit_code = 3, .stderr_contains = ": UnsupportedStreamingSize\n" },
     .{ .name = "AU rate limit", .set = .au, .fixture = "au_rate_over_limit", .exit_code = 5, .stderr_contains = ": LimitExceeded\n" },
@@ -475,6 +475,13 @@ const probe_cases = [_]ProbeCase{
     // Named .mp3, it is MP3 by the extension hint at the end of the input,
     // as to FFmpeg, whose demuxer then finds no frames.
     .{ .name = "MPEG audio with no frames", .set = .mp3, .fixture = "mp3_no_frames", .exit_code = 2, .stderr_contains = ": InvalidMp3\n" },
+    // T30a: ADTS opens as ffprobe opens it, then has no rate or channels
+    // to report without a decoder (T30b); what FFmpeg refuses is refused.
+    .{ .name = "ADTS without a decoder", .set = .aac, .fixture = "aac_lc_stereo_44k", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
+    .{ .name = "ADTS from a pipe without a decoder", .set = .aac, .args = &.{"-"}, .stdin_fixture = "aac_id3v2_between", .exit_code = 3, .stderr = "zffprobe: -: UnsupportedFormat\n" },
+    .{ .name = "ADTS without a sync word", .set = .aac, .fixture = "aac_no_sync", .exit_code = 2, .stderr_contains = ": Truncated\n" },
+    // Forced, the resync finds a sync word in the samples, as FFmpeg's does.
+    .{ .name = "ADTS forced on a WAV file", .args = &.{ "-f", "aac" }, .fixture = "mono_8k", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
     .{ .name = "Ogg Vorbis", .set = .ogg, .fixture = "ogg_vorbis_ffmpeg_44k", .exit_code = 0, .stdout = "format=ogg\ncodec=vorbis\nsample_fmt=fltp\nchannels=2\nchannel_layout=stereo\nsample_rate=44100\nnb_samples=30000\nduration_num=30000\nduration_den=44100\n", .stderr = "" },
     .{ .name = "Ogg Vorbis whose setup header the decoder refuses", .set = .ogg, .fixture = "ogg_vorbis_stereo", .exit_code = 2, .stderr_contains = ": InvalidVorbis\n" },
     .{ .name = "Ogg FLAC", .set = .ogg, .fixture = "ogg_flac_stereo", .exit_code = 0, .stdout_contains = "codec=flac\nsample_fmt=s16\nchannels=2\nchannel_layout=stereo\n", .stderr = "" },
@@ -668,7 +675,7 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "a truncated pipe", .set = .au, .args = &.{ "-i", "-" }, .stdin_input = "au_truncated_data", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stderr = "zffmpeg: -: Truncated\n" },
     .{ .name = "unknown content", .args = &.{"-i"}, .input = "not_riff", .tail = &.{ "-f", "au", "-" }, .exit_code = 3, .stderr_contains = ": UnknownFormat\n" },
     .{ .name = "a malformed header, forced", .args = &.{ "-f", "wav", "-i" }, .input = "not_riff", .tail = &.{ "-f", "au", "-" }, .exit_code = 2, .stderr_contains = ": InvalidRiff\n" },
-    .{ .name = "an unknown input -f", .args = &.{ "-f", "aac", "-i" }, .input = "mono_8k", .tail = &.{ "-f", "au", "-" }, .exit_code = 3, .stderr = "zffmpeg: aac: unsupported input format\n" },
+    .{ .name = "an unknown input -f", .args = &.{ "-f", "ac3", "-i" }, .input = "mono_8k", .tail = &.{ "-f", "au", "-" }, .exit_code = 3, .stderr = "zffmpeg: ac3: unsupported input format\n" },
     .{ .name = "an unsupported input", .args = &.{"-i"}, .input = "rifx_big_endian", .tail = &.{ "-f", "au", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
     .{ .name = "an input limit", .args = &.{"-i"}, .input = "chunks_over_limit", .tail = &.{ "-f", "au", "-" }, .exit_code = 5, .stderr_contains = ": LimitExceeded\n" },
     .{ .name = "a missing input", .args = &.{ "-i", "no-such-file.wav", "-f", "wav", "-" }, .exit_code = 4, .stderr = "zffmpeg: no-such-file.wav: FileNotFound\n" },
@@ -779,6 +786,9 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "MP1 from a pipe to raw PCM", .set = .mp3, .args = &.{ "-i", "-" }, .stdin_input = "mp1_layer1_44k", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stdout_raw = .{ .args = &.{ "-f", "s16le", "-ch_layout", "stereo", "-sample_rate", "44100" }, .nb_samples = 11520 }, .stderr = "" },
     .{ .name = "MP2 to WAV", .set = .mp3, .args = &.{"-i"}, .input = "mp2_layer2_mpeg2_joint", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt ", .stderr = "" },
     .{ .name = "MP3 whose frames mostly fail to decode", .set = .mp3, .args = &.{"-i"}, .input = "mp3_rate_change", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stdout = "", .stderr_contains = ": DecodeErrorRate\n" },
+    // T30a: ADTS has no decoder before T30b.
+    .{ .name = "ADTS output has no AAC encoder", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-f", "adts", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
+    .{ .name = "ADTS input has no decoder", .set = .aac, .args = &.{"-i"}, .input = "aac_lc_stereo_44k", .tail = &.{ "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
     // T29d: MP2 encoded; compare.py checks the bytes against FFmpeg's. The
     // default bit rate (384 kbit/s, an MPEG-1 header), and mp2fixed at an
     // LSF rate from a pipe; the encoder's refusals come before any output.

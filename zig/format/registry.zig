@@ -31,6 +31,7 @@ const caf = @import("caf.zig");
 const flac = @import("flac.zig");
 const ogg = @import("ogg.zig");
 const mp3 = @import("mp3.zig");
+const aac = @import("aac.zig");
 
 pub const Container = enum {
     wav,
@@ -53,6 +54,11 @@ pub const Container = enum {
     /// FFmpeg's mp2 muxer (T29d): MP2 packets, written only (the mp3
     /// demuxer reads them).
     mp2,
+    /// Raw ADTS AAC (T30a), read without decoding: FFmpeg's `aac` demuxer.
+    aac,
+    /// FFmpeg's ADTS muxer (T30a): AAC packets, written only (the aac
+    /// demuxer reads them); no encoder here gives it any yet.
+    adts,
     // Raw PCM (T22c), one format per codec FFmpeg has a raw format for, named
     // as the codec: every PCM codec but s64.
     u8,
@@ -71,7 +77,7 @@ pub const Container = enum {
     mulaw,
 
     /// The parser and writer family that reads and writes a container.
-    pub const Family = enum { wav, au, aiff, caf, flac, ogg, mp3, mp2, raw };
+    pub const Family = enum { wav, au, aiff, caf, flac, ogg, mp3, mp2, aac, adts, raw };
 
     pub fn family(container: Container) Family {
         return switch (container) {
@@ -83,6 +89,8 @@ pub const Container = enum {
             .ogg, .oga, .opus => .ogg,
             .mp3 => .mp3,
             .mp2 => .mp2,
+            .aac => .aac,
+            .adts => .adts,
             // Checked below: exactly the raw formats, each named as its codec.
             else => .raw,
         };
@@ -99,7 +107,7 @@ pub const Container = enum {
     /// The codec of a raw PCM format, which shares its name; null otherwise.
     pub fn rawCodec(container: Container) ?pcm.Codec {
         return switch (container) {
-            .wav, .w64, .au, .aiff, .caf, .flac, .ogg, .oga, .opus, .mp3, .mp2 => null,
+            .wav, .w64, .au, .aiff, .caf, .flac, .ogg, .oga, .opus, .mp3, .mp2, .aac, .adts => null,
             // Compiles only if every other tag names a codec.
             inline else => |tag| @field(pcm.Codec, @tagName(tag)),
         };
@@ -263,6 +271,22 @@ pub const formats = [_]Format{
         .demuxer = null,
         .muxer = .{ .extensions = &.{ "mp2", "m2a", "mpa" }, .mime_type = "audio/mpeg", .audio_codec = .mp2, .carries = mp2Only },
     },
+    .{
+        .container = .aac,
+        .name = "aac",
+        .long_name = "raw ADTS AAC (Advanced Audio Coding)",
+        // FFmpeg's aac demuxer (T30a); its adts muxer is another format.
+        .demuxer = .{ .probe = aac.probeScore, .extensions = &.{"aac"} },
+        .muxer = null,
+    },
+    .{
+        .container = .adts,
+        .name = "adts",
+        .long_name = "ADTS AAC (Advanced Audio Coding)",
+        // FFmpeg's adts muxer (T30a), which carries AAC only.
+        .demuxer = null,
+        .muxer = .{ .extensions = &.{ "aac", "adts" }, .mime_type = "audio/aac", .audio_codec = .aac, .carries = aacOnly },
+    },
     rawFormat(.u8, "PCM unsigned 8-bit", &.{"ub"}),
     rawFormat(.s8, "PCM signed 8-bit", &.{"sb"}),
     // FFmpeg gives `sw` to the native byte order's 16-bit format (`AV_NE`).
@@ -309,7 +333,7 @@ fn pcmOnly(comptime carries: fn (pcm.Codec) bool) *const fn (codecs.Codec) bool 
         fn f(codec: codecs.Codec) bool {
             return switch (codec) {
                 .pcm => |p| carries(p),
-                .flac, .vorbis, .opus, .mp1, .mp2, .mp3 => false,
+                .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac => false,
             };
         }
     }.f;
@@ -317,6 +341,10 @@ fn pcmOnly(comptime carries: fn (pcm.Codec) bool) *const fn (codecs.Codec) bool 
 
 fn flacOnly(codec: codecs.Codec) bool {
     return codec == .flac;
+}
+
+fn aacOnly(codec: codecs.Codec) bool {
+    return codec == .aac;
 }
 
 fn mp2Only(codec: codecs.Codec) bool {
@@ -328,7 +356,7 @@ fn mp2Only(codec: codecs.Codec) bool {
 fn oggCodecs(codec: codecs.Codec) bool {
     return switch (codec) {
         .flac, .opus, .vorbis => true,
-        .pcm, .mp1, .mp2, .mp3 => false,
+        .pcm, .mp1, .mp2, .mp3, .aac => false,
     };
 }
 
@@ -436,7 +464,7 @@ test "formats are found by name, with a demuxer or a muxer" {
     try std.testing.expectEqual(Container.aiff, findDemuxer("aiff"));
     try std.testing.expectEqual(Container.w64, findMuxer("w64"));
     try std.testing.expectEqual(Container.mp3, findDemuxer("mp3"));
-    try std.testing.expectEqual(null, findDemuxer("aac"));
+    try std.testing.expectEqual(null, findDemuxer("ac3"));
     try std.testing.expectEqual(null, findMuxer("mp3")); // read only (T29a)
     try std.testing.expectEqual(null, findMuxer("WAV")); // names are exact, as FFmpeg's
     try std.testing.expectEqualStrings("Audio IFF", Container.aiff.format().long_name);

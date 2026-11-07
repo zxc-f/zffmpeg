@@ -2041,7 +2041,8 @@ def ffmpeg_probe_round(buf):
         else:
             nodat = "greater" if id3len < 1 << 20 else "greater_max"
             break
-    scores = {"wav": 0, "w64": 0, "au": 0, "aiff": 0, "caf": 0, "flac": 0, "mp3": mp3_probe_score(buf)}
+    scores = {"wav": 0, "w64": 0, "au": 0, "aiff": 0, "caf": 0, "flac": 0, "mp3": mp3_probe_score(buf),
+              "aac": adts_probe_score(buf)}
     head = buf[:2048]
     if len(head) > 32 and head[8:12] == b"WAVE":
         if head[:4] in (b"RIFF", b"RIFX"):
@@ -3488,6 +3489,9 @@ def render_ogg_table(fixtures):
 MP3_DIR = HERE / "mp3"
 MP3_MANIFEST = MP3_DIR / "manifest.zon"
 MP3_README = MP3_DIR / "README.md"
+AAC_DIR = HERE / "aac"
+AAC_MANIFEST = AAC_DIR / "manifest.zon"
+AAC_README = AAC_DIR / "README.md"
 
 # mpegaudiotabs.h: kbit/s by [lsf][layer - 1][index], and the MPEG-1 rates.
 MPA_BITRATES = (
@@ -4507,6 +4511,166 @@ def build_mp3_fixtures():
     return fx
 
 
+ADTS_RATES = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350]
+
+
+def adts_frame(seed, payload=200, rate=4, channels=2, profile=1, crc=False, blocks=1, mpeg2=False,
+               length=None, private=0):
+    """An ADTS frame: the 7-byte header (ISO/IEC 13818-7 / 14496-3), a
+    CRC word when protected, then `payload` bytes of the LCG with no
+    0xFF byte, so no payload holds a sync word. `length` overrides the
+    header's frame length."""
+    body = (bytes(2) if crc else b"") + mpa_payload(seed, payload)
+    size = 7 + len(body) if length is None else length
+    v = 0xFFF
+    v = v << 1 | int(mpeg2)
+    v = v << 2 | 0
+    v = v << 1 | int(not crc)
+    v = v << 2 | profile
+    v = v << 4 | rate
+    v = v << 1 | private
+    v = v << 3 | channels
+    v = v << 4 | 0
+    v = v << 13 | (size & 0x1FFF)
+    v = v << 11 | 0x7FF
+    v = v << 2 | (blocks - 1)
+    return v.to_bytes(7, "big") + body
+
+
+def adts_frames(count, seed, sizes=(180, 260, 210, 320, 150), **kw):
+    return b"".join(adts_frame(seed * 1000 + i, payload=sizes[i % len(sizes)], **kw) for i in range(count))
+
+
+def ape_binary_item(key, name, data):
+    """An APE item with the binary flag: a file name, a NUL, then data."""
+    value = name + b"\0" + data
+    return struct.pack("<II", len(value), 2) + key + b"\0" + value
+
+
+def ape_tag_raw(items, count, header=False):
+    """An APEv2 tag of ready-made items (any flags), with `count` declared."""
+    body = b"".join(items)
+    size = len(body) + 32
+    flags = 0x80000000 if header else 0
+    head = b"APETAGEX" + struct.pack("<IIII", 2000, size, count, flags | 0x20000000) + bytes(8)
+    foot = b"APETAGEX" + struct.pack("<IIII", 2000, size, count, flags) + bytes(8)
+    return (head if header else b"") + body + foot
+
+
+def ape_text_item(key, value):
+    return struct.pack("<II", len(value), 0) + key + b"\0" + value
+
+
+def build_aac_fixtures():
+    """The T30a ADTS fixtures: frames with LCG payloads (no decoder reads
+    them before T30b), every header field and FFmpeg's demuxer paths:
+    resync, ID3v2 tags before and between frames, ID3v1 and APE tags at
+    the end, probing by content and by extension, and damaged frames."""
+    fx = []
+
+    def ok(name, rule, data, group="accepted"):
+        fx.append(Mp3Fixture(name, group, rule, data))
+
+    def bad(name, rule, data, error, group="rejected"):
+        fx.append(Mp3Fixture(name, group, rule, data, reject=error))
+
+    title = id3_text_frame(b"TIT2", 0, "ADTS title")
+    ok("aac_lc_stereo_44k", "AAC LC, 44100 Hz, stereo, 40 frames of varied lengths.", adts_frames(40, 1))
+    ok("aac_mono_48k_crc", "AAC LC, 48000 Hz, mono, every frame protected by a CRC word.",
+       adts_frames(24, 2, rate=3, channels=1, crc=True))
+    ok("aac_main_96k", "AAC Main (profile 0), 96000 Hz: the largest rates' bit rates.",
+       adts_frames(20, 3, rate=0, profile=0))
+    ok("aac_ssr_8k_6ch", "AAC SSR (profile 2), 8000 Hz, channel configuration 6 (5.1).",
+       adts_frames(20, 4, rate=11, profile=2, channels=6))
+    ok("aac_ltp_7350_8ch", "AAC LTP (profile 3), 7350 Hz (index 12), channel configuration 7 (eight).",
+       adts_frames(20, 5, rate=12, profile=3, channels=7))
+    ok("aac_four_blocks", "Four raw data blocks a frame (4096 samples), 22050 Hz.",
+       adts_frames(20, 6, rate=7, blocks=4, sizes=(700, 640, 820)))
+    ok("aac_pce_mpeg2", "Channel configuration 0 (a PCE in the payload) and the MPEG-2 ID bit, 16000 Hz.",
+       adts_frames(20, 7, rate=8, channels=0, mpeg2=True, private=1))
+    ok("aac_many_frames", "150 short frames after 40 junk bytes: the probe's run from a later position "
+       "(over 100 frames, score 50).", mpa_payload(70, 40) + adts_frames(150, 8, sizes=(9, 12, 15)))
+    ok("aac_junk_before", "Junk before the first frame, which the open's resync skips.",
+       mpa_payload(71, 333) + adts_frames(20, 9))
+    ok("aac_junk_between", "Junk between frames: the next read is no header, its 10 bytes no ID3v2 tag, and "
+       "the resync skips to the next frame.", adts_frames(10, 10) + mpa_payload(72, 99) + adts_frames(10, 11))
+    ok("aac_short_junk_between", "Four junk bytes between frames: the resync starts after the 10 bytes read, "
+       "inside the next frame's header, and skips that frame too.",
+       adts_frames(10, 12) + mpa_payload(73, 4) + adts_frames(10, 13))
+    ok("aac_id3v2_leading", "An ID3v2.3 tag before the frames: the format's tags.",
+       id3v2_tag([title, id3_text_frame(b"TPE1", 0, "ADTS artist")]) + adts_frames(20, 14))
+    ok("aac_id3v2_between", "An ID3v2 tag between frames, which the demuxer reads into the format's tags.",
+       adts_frames(10, 15) + id3v2_tag([id3_text_frame(b"TALB", 0, "Mid-stream")]) + adts_frames(10, 16))
+    ok("aac_id3v1", "An ID3v1 tag at the end: the format's tags; the resync at it ends the stream.",
+       adts_frames(20, 17) + id3v1_tag(title=b"V1 title", artist=b"V1 artist", genre=13))
+    ok("aac_id3v2_and_id3v1", "ID3v2 at the start and ID3v1 at the end: the demuxer's ID3v1 tags win, and "
+       "avformat_open_input discards the ID3v2 ones.",
+       id3v2_tag([title]) + adts_frames(20, 18) + id3v1_tag(title=b"End title"))
+    ok("aac_ape_tag", "ID3v2 at the start and an APEv2 tag (with a header) at the end: APE's tags win.",
+       id3v2_tag([title]) + adts_frames(20, 19)
+       + ape_tag([(b"Title", b"APE title"), (b"Artist", b"APE artist"), (b"title", b"Replaced")]))
+    ok("aac_ape_binary", "An APEv2 tag with a cover-art and an other binary item between text items.",
+       adts_frames(20, 20) + ape_tag_raw([ape_text_item(b"Album", b"With art"),
+                                          ape_binary_item(b"Cover Art (Front)", b"front.jpg", mpa_payload(74, 50)),
+                                          ape_binary_item(b"Extra", b"notes.bin", mpa_payload(75, 20)),
+                                          ape_text_item(b"Year", b"2026")], 4))
+    ok("aac_ape_fields_past_end", "An APEv2 tag declaring more items than it holds: the first missing item "
+       "reads zeros at the end and fails.",
+       adts_frames(20, 21) + ape_tag_raw([ape_text_item(b"Album", b"Short")], 3))
+    ok("aac_bad_rate_index", "Frames whose sampling index is 13 (reserved) between good ones: the demuxer "
+       "keeps them, the parser finds no header there and joins them to the frame before.",
+       adts_frames(8, 22) + adts_frames(3, 23, rate=13) + adts_frames(8, 24))
+    ok("aac_length_short", "A frame whose header claims 40 bytes fewer than it has: the next read lands in its "
+       "payload and resyncs.", adts_frames(8, 25) + adts_frame(26, payload=200, length=167) + adts_frames(8, 27))
+    ok("aac_truncated", "The last frame cut short: the demuxer's packet holds what remains.",
+       adts_frames(12, 28)[:-57])
+    ok("aac_header_at_end", "Five bytes of a header at the end: a short read, AVERROR_INVALIDDATA.",
+       adts_frames(12, 29) + adts_frame(30)[:5])
+    ok("aac_frame_length_6", "A frame header claiming 6 bytes after 12 frames: AVERROR_INVALIDDATA there.",
+       adts_frames(12, 31) + adts_frame(32, length=6) + adts_frames(4, 33))
+    ok("aac_probe_one_frame", "One frame, then junk: the probe scores 1, the extension 1, and the open finds "
+       "the frame.", adts_frame(34) + mpa_payload(76, 3000))
+    ok("aac_three_frames_late", "Junk, then three frames at the end of the probe buffer: score 25.",
+       mpa_payload(77, 500) + adts_frames(3, 35))
+    bad("aac_no_sync", "No sync word: the open's resync reaches the end (AVERROR_EOF).", mpa_payload(78, 3000),
+        "EOF")
+    bad("aac_id3v2_only", "An ID3v2 tag and nothing after it.", id3v2_tag([title], padding=100), "EOF")
+    return fx
+
+
+def adts_probe_score(buf):
+    """adts_aac_probe on a probe buffer (after any ID3v2 tags)."""
+    end = len(buf) - 7
+    max_frames = first_frames = 0
+    start = 0
+    while start < end:
+        pos = start
+        frames = 0
+        while pos < end:
+            if (buf[pos] << 8 | buf[pos + 1]) & 0xFFF6 != 0xFFF0:
+                if start != 0:
+                    frames = 0
+                break
+            fsize = (int.from_bytes(buf[pos + 3:pos + 7], "big") >> 13) & 0x1FFF
+            if fsize < 7:
+                break
+            pos += min(fsize, end - pos)
+            frames += 1
+        max_frames = max(max_frames, frames)
+        if start == 0:
+            first_frames = frames
+        start = pos + 1
+    if first_frames >= 3:
+        return 51
+    if max_frames > 100:
+        return 50
+    if max_frames >= 3:
+        return 25
+    if first_frames >= 1:
+        return 1
+    return 0
+
+
 def render_mp3_manifest(fixtures):
     lines = ["// Generated by zig/testing/fixtures/generate.py from its MP3 fixtures; do not edit.",
              "// Each entry names mp3/<name>.mp3; see mp3/README.md. Streams, tags and packets are",
@@ -4523,7 +4687,7 @@ def render_mp3_manifest(fixtures):
 
 
 def outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures, flac_fixtures, ogg_fixtures,
-            mp3_fixtures):
+            mp3_fixtures, aac_fixtures):
     files = {WAV_DIR / f"{f.name}.wav": f.data for f in fixtures}
     files[MANIFEST] = render_manifest(
         fixtures, "// Each entry names wav/<name>.wav; see README.md for the rules and decisions.")
@@ -4553,6 +4717,11 @@ def outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures, fl
     files.update({MP3_DIR / f"{f.name}.mp3": f.data for f in mp3_fixtures})
     files[MP3_MANIFEST] = render_mp3_manifest(mp3_fixtures).encode()
     files[MP3_README] = render_readme(MP3_README, render_ogg_table(mp3_fixtures))
+    files.update({AAC_DIR / f"{f.name}.aac": f.data for f in aac_fixtures})
+    files[AAC_MANIFEST] = render_mp3_manifest(aac_fixtures).replace(
+        "MP3 fixtures", "ADTS fixtures").replace("mp3/<name>.mp3; see mp3/README.md", "aac/<name>.aac; see aac/README.md").replace(
+        "vectors/mp3.txt", "vectors/aac.txt").encode()
+    files[AAC_README] = render_readme(AAC_README, render_ogg_table(aac_fixtures))
     return files
 
 
@@ -4601,19 +4770,20 @@ def main():
     flac_fixtures = build_flac_fixtures()
     ogg_fixtures = build_ogg_fixtures()
     mp3_fixtures = build_mp3_fixtures()
+    aac_fixtures = build_aac_fixtures()
     expected = outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures, flac_fixtures, ogg_fixtures,
-                       mp3_fixtures)
+                       mp3_fixtures, aac_fixtures)
     stale = [path for path, content in expected.items() if not path.exists() or path.read_bytes() != content]
     ffmpeg_made = ({FLAC_DIR / f"{f.name}.flac" for f in flac_fixtures if f.made_by == "ffmpeg"}
                    | {OGG_DIR / f"{name}.ogg" for name in OGG_FFMPEG})
     extra = sorted((set(WAV_DIR.glob("*.wav")) | set(AU_DIR.glob("*.au")) | set(AIFF_DIR.glob("*.aiff"))
              | set(RAW_DIR.glob("*.raw")) | set(CAF_DIR.glob("*.caf")) | set(FLAC_DIR.glob("*.flac"))
-             | set(OGG_DIR.glob("*.ogg")) | set(MP3_DIR.glob("*.mp3")))
+             | set(OGG_DIR.glob("*.ogg")) | set(MP3_DIR.glob("*.mp3")) | set(AAC_DIR.glob("*.aac")))
                    - set(expected) - ffmpeg_made)
     problems = check_ffmpeg_made(flac_fixtures)
     counts = (f"{len(fixtures)} WAV, {len(au_fixtures)} AU, {len(aiff_fixtures)} AIFF, {len(raw_fixtures)} raw PCM, "
-              f"{len(caf_fixtures)} CAF, {len(flac_fixtures)} FLAC, {len(ogg_fixtures)} Ogg and {len(mp3_fixtures)} MP3 "
-              f"fixtures")
+              f"{len(caf_fixtures)} CAF, {len(flac_fixtures)} FLAC, {len(ogg_fixtures)} Ogg, {len(mp3_fixtures)} MP3 "
+              f"and {len(aac_fixtures)} ADTS fixtures")
 
     if args.check:
         for path in stale:
@@ -4639,6 +4809,7 @@ def main():
     FLAC_DIR.mkdir(exist_ok=True)
     OGG_DIR.mkdir(exist_ok=True)
     MP3_DIR.mkdir(exist_ok=True)
+    AAC_DIR.mkdir(exist_ok=True)
     for path in extra:
         path.unlink()
     for path in stale:
