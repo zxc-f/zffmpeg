@@ -298,10 +298,10 @@ pub const formats = [_]Format{
         .container = .ac3,
         .name = "ac3",
         .long_name = "raw AC-3",
-        // FFmpeg's ac3 demuxer (T32a); its ac3 muxer waits for an AC-3
-        // encoder (T32c).
+        // FFmpeg's ac3 demuxer (T32a) and its raw ac3 muxer (T32c), which
+        // carries AC-3 only.
         .demuxer = .{ .probe = ac3.probeScore, .extensions = &.{"ac3"} },
-        .muxer = null,
+        .muxer = .{ .extensions = &.{"ac3"}, .mime_type = "audio/x-ac3", .audio_codec = .ac3, .carries = ac3Only },
     },
     .{
         .container = .eac3,
@@ -405,6 +405,10 @@ fn aacOnly(codec: codecs.Codec) bool {
 
 fn mp2Only(codec: codecs.Codec) bool {
     return codec == .mp2;
+}
+
+fn ac3Only(codec: codecs.Codec) bool {
+    return codec == .ac3;
 }
 
 /// The Ogg muxers' codecs (ogg_init): FLAC, Opus and Vorbis, of those the
@@ -521,7 +525,7 @@ test "formats are found by name, with a demuxer or a muxer" {
     try std.testing.expectEqual(Container.w64, findMuxer("w64"));
     try std.testing.expectEqual(Container.mp3, findDemuxer("mp3"));
     try std.testing.expectEqual(Container.ac3, findDemuxer("ac3")); // T32a
-    try std.testing.expectEqual(null, findMuxer("ac3")); // no AC-3 encoder until T32c
+    try std.testing.expectEqual(Container.ac3, findMuxer("ac3")); // T32c
     try std.testing.expectEqual(null, findDemuxer("dts"));
     try std.testing.expectEqual(null, findMuxer("mp3")); // read only (T29a)
     try std.testing.expectEqual(null, findMuxer("WAV")); // names are exact, as FFmpeg's

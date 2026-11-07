@@ -79,6 +79,8 @@ const aacdecode = @import("aacdecode.zig");
 const ac3decode = @import("ac3decode.zig");
 const mp2mux = @import("mp2mux.zig");
 const mp2enc = @import("../codec/mp2enc.zig");
+const ac3mux = @import("ac3mux.zig");
+const ac3enc = @import("../codec/ac3enc.zig");
 const flacenc = @import("../codec/flacenc.zig");
 const flac_codec = @import("../codec/flac.zig");
 const seek = @import("seek.zig");
@@ -122,6 +124,10 @@ pub const Request = struct {
     /// The MP2 encoder's options (T29d), for an MP2 output: the bit rate
     /// (FFmpeg's `-b:a`) and the fixed-point quantizer (`-c:a mp2fixed`).
     mp2: mp2enc.Options = .{},
+    /// The AC-3 encoder's options (T32c), for an AC-3 output: `-b:a`,
+    /// `-cutoff`, `-audio_service_type` and the encoder's own. Encoding
+    /// AC-3 needs `gpa`.
+    ac3: ac3enc.Options = .{},
     /// The ADPCM encoders' options (T31a), for `adpcm_ima_wav` or
     /// `adpcm_ms` into WAV: FFmpeg's `-block_size` and `-trellis`. Encoding
     /// ADPCM needs `gpa`.
@@ -203,7 +209,12 @@ pub const InitError = detect.Error || wav.HeaderError || au.HeaderError || aiff.
 };
 
 /// Failures once output has started: the rest of the input, or the output.
-pub const RunError = detect.Error || std.Io.Writer.Error || resample.Error;
+pub const RunError = detect.Error || std.Io.Writer.Error || resample.Error || error{
+    /// The AC-3 encoder found no allocation that fits a frame at the bit
+    /// rate (FFmpeg's "Bit allocation failed. Try increasing the bitrate.",
+    /// EINVAL), which depends on the samples (T32c).
+    InvalidOption,
+};
 
 pub const Error = InitError || RunError;
 
@@ -290,6 +301,8 @@ pub const Conversion = struct {
     flac_options: flacenc.Options = .{},
     /// The MP2 encoder's options, for an MP2 output (T29d).
     mp2_options: mp2enc.Options = .{},
+    /// The AC-3 encoder's options, for an AC-3 output (T32c).
+    ac3_options: ac3enc.Options = .{},
     /// The ADPCM encoders' options, for an ADPCM output (T31a).
     adpcm_options: wavadpcm.EncodeOptions = .{},
     /// The ALAC encoder's options, for an ALAC output (T31b).
@@ -525,7 +538,10 @@ pub const Conversion = struct {
             .mp2, .adpcm_ima_wav, .adpcm_ms, .adpcm_g722, .adpcm_g726le => .s16le,
             // ALAC's encoder takes s16p or s32p, picked as FLAC's (T31b).
             .alac => flacStorage(summary.format.sample_format),
-            .vorbis, .opus, .mp1, .mp3, .aac, .ac3, .eac3 => return error.UnsupportedOperation,
+            // The AC-3 encoder takes fltp, which the writer makes of
+            // packed float (T32c).
+            .ac3 => .f32le,
+            .vorbis, .opus, .mp1, .mp3, .aac, .eac3 => return error.UnsupportedOperation,
         };
         // FFmpeg's set_channel_layout: an unspecified request takes the
         // default for its count.
@@ -546,6 +562,7 @@ pub const Conversion = struct {
                 (adpcmOutput(summary.output_stream) == null or request.gpa != null) and
                 (g72xOutput(summary.output_stream) == null or request.gpa != null) and
                 (summary.output_stream != .alac or request.gpa != null) and
+                (summary.output_stream != .ac3 or request.gpa != null) and
                 (summary.output_stream != .flac or request.gpa != null),
         };
         if (!supported) return error.UnsupportedOperation;
@@ -588,7 +605,13 @@ pub const Conversion = struct {
             // FFmpeg's MP2 encoder before its raw muxer (T29d).
             .mp2 => try mp2mux.Writer.check(summary.output_codec, summary.outputFormat(), request.mp2),
             .caf => try cafmux.Writer.check(cafCoding(summary.output_stream, summary.output_codec, request.alac), summary.outputFormat(), request.output_seekable, tags),
-            .mp3, .aac, .ac3 => unreachable, // no muxer: refused above as UnsupportedOperation
+            // FFmpeg's AC-3 encoder before its raw muxer (T32c).
+            .ac3 => ac3mux.Writer.check(request.gpa.?, summary.output_codec, summary.outputFormat(), request.ac3) catch |err| return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                error.UnsupportedFormat => error.UnsupportedFormat,
+                error.InvalidOption => error.InvalidOption,
+            },
+            .mp3, .aac => unreachable, // no muxer: refused above as UnsupportedOperation
             .adts => unreachable, // no AAC encoder: refused above as UnsupportedOperation
         }
         // For a decoded input, the largest frame its decoder gives: the
@@ -665,6 +688,7 @@ pub const Conversion = struct {
             .packet_frames = packet_frames,
             .flac_options = request.flac,
             .mp2_options = request.mp2,
+            .ac3_options = request.ac3,
             .adpcm_options = request.adpcm,
             .alac_options = request.alac,
             .g72x_options = request.g72x,
@@ -866,7 +890,12 @@ pub const Conversion = struct {
                 defer writer.deinit();
                 try c.transfer(cafmux.Writer, &writer);
             },
-            .mp3, .aac, .adts, .ac3 => unreachable, // no muxer or encoder: `init` refused it
+            .ac3 => {
+                var writer = ac3mux.Writer.begin(c.gpa.?, out, s.output_codec, s.outputFormat(), c.ac3_options) catch |err| return outputFailure(err);
+                defer writer.deinit();
+                try c.transfer(ac3mux.Writer, &writer);
+            },
+            .mp3, .aac, .adts => unreachable, // no muxer or encoder: `init` refused it
         }
         // Every frame was read: an unknown count is now known, and a FLAC
         // stream's decoded count replaces STREAMINFO's (equal unless raw
@@ -1394,7 +1423,7 @@ fn rawOptions(limits: Limits) raw.WriteOptions {
 
 /// Every error a writer's `begin`, `writeData` or `finish` returns. A new
 /// one fails to compile in `outputFailure`'s switch until it is classified.
-const WriterError = wav.RewriteError || au.RewriteError || aiff.RewriteError || raw.WriteError || flacmux.WriteError || mp2mux.WriteError || wavadpcm.RewriteError || cafmux.WriteError || aug72x.RewriteError;
+const WriterError = wav.RewriteError || au.RewriteError || aiff.RewriteError || raw.WriteError || flacmux.WriteError || mp2mux.WriteError || wavadpcm.RewriteError || cafmux.WriteError || aug72x.RewriteError || ac3mux.WriteError || ac3mux.HeaderError;
 
 /// A writer's failure once output started: the output's, or FLAC's that
 /// only its first frame reveals (T26c: the encoder refusing the block size
@@ -1426,6 +1455,8 @@ fn outputFailure(err: WriterError) RunError {
         error.TrellisOverflow => error.UnsupportedFormat,
         // ALAC into CAF run without the seeker `init` was promised.
         error.UnsupportedStreamingSize => error.UnsupportedStreamingSize,
+        // The AC-3 encoder's search, which depends on the samples.
+        error.BitAllocationFailed => error.InvalidOption,
     };
 }
 

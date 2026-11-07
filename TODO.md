@@ -75,8 +75,9 @@ there with its CAF muxer, which also writes PCM; and T31c, FFmpeg's G.722
 and G.726 codecs packet for packet and sample for sample, read from AU and
 written there, which completes T31; and T32a, FFmpeg's raw AC-3 demuxer,
 parser and float decoder sample for sample, and T32b, its E-AC-3
-decoder sample for sample with the raw eac3 demuxer. **Next: T32c (the
-AC-3 encoder).
+decoder sample for sample with the raw eac3 demuxer, and T32c, its float
+AC-3 encoder packet for packet with the raw ac3 muxer. **Next: T32d (the
+AAC-LC encoder).
 See [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
@@ -4003,9 +4004,52 @@ names, not as an empty framework.
       pipe; the native build at 0.90x.
     Remaining work or blocker / next action: none; T32c is next.
     ```
-  - [ ] **T32c — AC-3 encoder.** Needs T32a.
+  - [x] **T32c — AC-3 encoder.** Needs T32a.
     Done when FFmpeg decodes our output, with bitrate and a declared quality
     metric recorded against FFmpeg's encoder.
+
+    ```text
+    ID / parent: T32c / T32
+    State: verified (G5, local Linux x86-64 runs)
+    Supported behavior and explicit exclusions: FFmpeg's float ac3 encoder
+      and raw ac3 muxer, packet for packet and byte for byte the program's
+      -bitexact output: MDCT, coupling with phase flags, rematrixing,
+      exponent strategies, the constant bit rate search, 44.1 kHz frame
+      padding, both CRCs; every option of the encoder and the codec
+      context's -b:a, -cutoff, -audio_service_type; the reference build's
+      wrapping on over-range input and its unmasked put_bits. The bit rate
+      and quality are FFmpeg's encoder's by construction (identical bytes).
+      Excluded (notes.md "AC-3 encoding"): rates and layouts the encoder
+      does not take (refused where the program converts), AC-3 in another
+      container, stream copy into ac3, ac3_fixed, the E-AC-3 encoder.
+    Contract and source provenance: port.md "AC-3"; ac3enc.c,
+      ac3enc_template.c, ac3enc_float.c, ac3dsp.c, audiodsp.c, me_cmp.c,
+      audio_frame_queue.c (derived); rawenc.c and the program's frame
+      grouping (restated); the bit allocation moved to ac3_bitalloc.zig.
+    Required fixtures: ac3enc.txt (56 cases from ac3enc_vectors.c);
+      compare.py's AC-3 output inputs (the FLAC output section's WAVs,
+      AC-3, E-AC-3, MP3, Vorbis and WAV fixtures).
+    Comparison rule: every packet of ac3enc.txt equals the pinned
+      encoder's; zffmpeg's files and pipes equal the program's, decoded
+      back by FFmpeg and zffmpeg to the same samples.
+    Evidence: the commit that checks this card. G3: the encoder's fuzz
+      entry over arbitrary float bits, layouts and options, a 2000-round
+      mutation smoke in ReleaseSafe (it found the grouped mantissas'
+      wrapping and unmasked writes, now vector cases huge and huge_51),
+      an allocation and remap sweep, the writer's checks; process cases
+      (WAV to AC-3 on stdout, AC-3 re-encoded with options, AC-3 into WAV,
+      a refused rate, layout and option, an invalid option value, copy
+      refused, a bit allocation failing on the samples). G5 locally on
+      Linux x86-64 (no CI run link): zig fmt, the fixture check, zig build
+      test 625/625 (390 steps) in Debug, ReleaseSafe and ReleaseFast, the
+      cross builds, every vector generator, compare.py 11378/0/0 required
+      (AC-3 output 691 cells, 62 recorded refusals; the registry with
+      FFmpeg's AC-3 encoder and muxer no longer recorded) and 66/66
+      optional. Speed check (10 minutes of stereo 44.1 kHz, one core): WAV
+      to AC-3 0.92x the reference build from a file and from a pipe; the
+      native build at 0.84x.
+    Remaining work or blocker / next action: none; T32d is next.
+    ```
   - [ ] **T32d — AAC-LC encoder.** Needs T30b.
     Done under the same rule as T32c.
 

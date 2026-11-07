@@ -399,6 +399,18 @@ clang -I.references/ffmpeg -I.references/ffmpeg-build zig/testing/reference/eac3
 ./eac3-tab | diff -u <(sed -n '/^pub const bits_vs_hebap/,$p' zig/codec/eac3_data.zig | head -n "$(./eac3-tab | wc -l)") -
 ```
 
+`ac3enc_vectors.c` (T32c) prints what the pinned AC-3 encoder makes of
+56 cases through the public API: each layout, rate and option set, its
+bit rate after opening, and every packet's timestamp, duration, size and
+MD5 (the samples are `alac_vectors.c`'s 16-bit signals over 32768, with
+over-range and special values); the Zig test renders the same lines from
+the port:
+
+```bash
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/ac3enc_vectors.c .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o ac3enc-vectors
+./ac3enc-vectors | diff -u zig/testing/vectors/ac3enc.txt -
+```
+
 `adpcm_wav_vectors.sh` (T31a) prints, for every ADPCM WAV fixture, the
 stream the pinned ffprobe reports (codec, sample format, channels, rate,
 `duration_ts`) and the count and SHA-256 of the samples the pinned ffmpeg
@@ -932,6 +944,16 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   is present, FATE's five E-AC-3 samples (`FATE_EAC3`: spectral
   extension, AHT, 5.1 and 7.1 with dependent frames), probed and decoded
   to s16le.
+- **AC-3 output (T32c).** zffmpeg's AC-3 (the `ac3` muxer, with every
+  option of the encoder) against the ffmpeg program's with `-bitexact`,
+  for the FLAC output section's inputs, decoded AC-3, E-AC-3, MP3 and
+  Ogg Vorbis, a 7.1 WAV, resampled (`-ar`) and remixed (`-ac`): the same
+  bytes as a file and on a pipe, each decoded back by FFmpeg and zffmpeg
+  to the same samples. An output rate or layout the encoder does not take,
+  which the program's filters convert, is refused by zffmpeg with
+  `UnsupportedFormat` (status 3) and no output (`ac3_expected_refusal`); a
+  bit allocation that fails on the samples (5.1 at 32 kbit/s) fails both,
+  zffmpeg with `InvalidOption` naming its output, which it removes.
 - **MP2 output (T29d).** zffmpeg's MP2 (the `mp2` muxer, with `mp2` or
   `-c:a mp2fixed`) against the ffmpeg program's with `-bitexact`, for the
   FLAC output section's inputs and a decoded MP3, MP2 and Ogg Vorbis

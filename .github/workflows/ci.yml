@@ -415,6 +415,15 @@ jobs:
           ./ac3-vectors $(sed -n 's/^ *\.name = "\(.*\)",$/zig\/testing\/fixtures\/eac3\/\1.eac3/p' zig/testing/fixtures/eac3/manifest.zon) |
             diff -u zig/testing/vectors/eac3_decode.txt -
 
+      # The committed T32c oracle must be what this build's AC-3 encoder
+      # makes of its cases.
+      - name: Check the AC-3 encoder vectors (T32c)
+        run: |
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/ac3enc_vectors.c \
+            .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a \
+            .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o ac3enc-vectors
+          ./ac3enc-vectors | diff -u zig/testing/vectors/ac3enc.txt -
+
       # The committed T28a oracle must be what this build's Opus decoder
       # makes of every Ogg fixture's first Opus stream.
       - name: Check the Opus decoder vectors (T28a)

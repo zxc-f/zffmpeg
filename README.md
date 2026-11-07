@@ -94,7 +94,8 @@ AU (`-c:a g722` with `-trellis`, `-c:a g726le` with `-code_size` or
 `-b:a`), byte for byte the ffmpeg program's output. Since T32a raw AC-3 is
 read with FFmpeg's demuxer and parser and decoded sample for sample with
 its float decoder, and since T32b raw E-AC-3 too, with spectral extension,
-AHT and dependent frames.
+AHT and dependent frames. Since T32c FFmpeg's AC-3 encoder writes raw AC-3
+(`-c:a ac3`, with its options), byte for byte the ffmpeg program's output.
 [TODO.md](TODO.md) holds the completion
 evidence and the roadmap. Development is verified on Linux only. The compiler
 is **Zig 0.17.0**, enforced by the build.

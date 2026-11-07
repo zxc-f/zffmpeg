@@ -2393,6 +2393,150 @@ def compare_mp2_output(args, lines, failures):
     ] + rows
 
 
+AC3_OUTPUT_OPTIONS = [[], ["-b:a", "96k"], ["-b:a", "384k"], ["-b:a", "100k"], ["-ar", "48000"],
+                      ["-ar", "32000", "-b:a", "128k"], ["-ac", "1"], ["-ac", "2", "-ar", "44100"],
+                      ["-channel_coupling", "1"], ["-channel_coupling", "0", "-stereo_rematrixing", "0"],
+                      ["-dialnorm", "-12", "-dsur_mode", "on", "-copyright", "1", "-original", "0"],
+                      ["-mixing_level", "95", "-room_type", "small", "-ad_conv_type", "hdcd"],
+                      ["-dmix_mode", "ltrt", "-ltrt_cmixlev", "0.5", "-loro_surmixlev", "0.5", "-center_mixlev", "0.707"],
+                      ["-cutoff", "12000"], ["-audio_service_type", "vi"],
+                      ["-channel_coupling", "1", "-cpl_start_band", "4"], ["-per_frame_metadata", "1"],
+                      ["-b:a", "32k"], ["-mixing_level", "70"]]
+AC3_RATES = (48000, 44100, 32000)
+# ff_ac3_ch_layouts by ffprobe's names (those without a name are not
+# among the inputs).
+AC3_LAYOUTS = {"mono", "stereo", "3.0(back)", "3.0", "quad(side)", "quad", "4.0", "5.0(side)", "5.0", "2.1",
+               "3.1", "4.1", "5.1(side)", "5.1"}
+
+
+def ac3_expected_refusal(rate, layout, opts):
+    """The refusal zffmpeg makes where the ffmpeg program converts or fails,
+    as (program fails, status, error), or None: an output rate or layout the
+    encoder does not take is refused by zffmpeg (UnsupportedFormat) where
+    the program's filters pick one it takes (notes.md "AC-3 encoding");
+    a mixing level below 80 fails both when the encoder opens."""
+    pairs = dict(zip(opts[0::2], opts[1::2]))
+    out_rate = int(pairs.get("-ar", rate))
+    out_layout = {"1": "mono", "2": "stereo"}.get(pairs.get("-ac"), layout)
+    bad_mixing_level = pairs.get("-mixing_level") == "70"
+    # zffmpeg checks the format before the options, as avcodec_open2 checks
+    # the rate and layout before the encoder's init; the program, having
+    # converted the format, still fails on the option.
+    if out_rate not in AC3_RATES or out_layout not in AC3_LAYOUTS:
+        return (bad_mixing_level, 3, "UnsupportedFormat")
+    if bad_mixing_level:
+        return (True, 1, "InvalidOption")
+    return None
+
+
+def compare_ac3_output(args, lines, failures):
+    """zffmpeg's AC-3 output (T32c) against the ffmpeg program's with
+    `-bitexact`: the same bytes as a file and on a pipe, decoded back by
+    FFmpeg and by zffmpeg to the same samples, for the FLAC output
+    section's inputs and decoded AC-3, E-AC-3, MP3 and Ogg inputs and a
+    7.1 WAV, with the encoder's options, resampled and remixed; refusals as
+    `ac3_expected_refusal` records them, each with its status and error and
+    no output. Where the encoder's bit allocation fails on the samples,
+    both fail and zffmpeg names its output and removes it."""
+    rows = []
+    same = total = understood = 0
+    with tempfile.TemporaryDirectory() as work:
+        work = pathlib.Path(work)
+        inputs = dict(flac_output_inputs(work))
+        for fixture in ("ac3/ac3_ffmpeg_51_48k.ac3", "eac3/eac3_ffmpeg_stereo_48k.eac3", "mp3/mp3_l3_long_stereo.mp3",
+                        "ogg/ogg_vorbis_ffmpeg_44k.ogg", "wav/extensible_7point1_s24.wav", "wav/stereo_44k1.wav"):
+            inputs[pathlib.Path(fixture).stem] = FIXTURES / fixture
+        for name, source in inputs.items():
+            probe = run(args.ffprobe, "-v", "error", "-select_streams", "a:0", "-show_entries",
+                        "stream=sample_rate,channel_layout,channels", "-of", "default=nw=1", source)
+            fields = dict(line.split("=", 1) for line in text(probe.stdout).splitlines() if "=" in line)
+            rate = int(fields["sample_rate"])
+            layout = fields.get("channel_layout", "unknown")
+            if layout == "unknown":
+                # The program's guess for an unspecified layout.
+                layout = {"1": "mono", "2": "stereo", "6": "5.1"}.get(fields["channels"], layout)
+            problems = []
+            for opts in AC3_OUTPUT_OPTIONS:
+                total += 1
+                theirs, ours = work / "theirs.ac3", work / "ours.ac3"
+                for path in (theirs, ours):
+                    path.unlink(missing_ok=True)
+                tp = run(args.ffmpeg, "-nostdin", "-v", "error", "-y", "-i", source, "-bitexact", "-c:a", "ac3", *opts, theirs)
+                zp = run(args.zffmpeg, "-y", "-i", source, *opts, ours)
+                label = " ".join(opts) or "defaults"
+                refusal = ac3_expected_refusal(rate, layout, opts)
+                if refusal is not None:
+                    fails, code, error = refusal
+                    program_ok = (tp.returncode != 0) if fails else tp.returncode == 0
+                    named = (text(zp.stderr) == f"zffmpeg: {source}: {error}" if code == 1
+                             else tool_error(zp, "zffmpeg", source) == error)
+                    if not program_ok or zp.returncode != code or not named or ours.exists():
+                        problems.append(f"{label}: FFmpeg exited {tp.returncode}, zffmpeg {zp.returncode} "
+                                        f"({first_line(text(zp.stderr)) or 'no error'}); recorded: zffmpeg refuses "
+                                        f"with {error} (status {code}) and writes nothing")
+                    else:
+                        same += 1
+                        understood += not fails
+                    continue
+                if tp.returncode != 0 and b"Bit allocation failed" in tp.stderr:
+                    # Both fail on the samples; zffmpeg names its output and
+                    # removes it.
+                    if zp.returncode != 1 or text(zp.stderr) != f"zffmpeg: {ours}: InvalidOption" or ours.exists():
+                        problems.append(f"{label}: FFmpeg's bit allocation failed, zffmpeg exited {zp.returncode} "
+                                        f"({first_line(text(zp.stderr)) or 'no error'})")
+                    else:
+                        same += 1
+                    continue
+                if tp.returncode != 0 or zp.returncode != 0:
+                    problems.append(f"{label}: FFmpeg {tp.returncode}, zffmpeg {zp.returncode} "
+                                    f"({first_line(text(zp.stderr))})")
+                    continue
+                if theirs.read_bytes() != ours.read_bytes():
+                    problems.append(f"{label}: the files differ")
+                    continue
+                if not ours.read_bytes():
+                    # No samples after resampling a tiny input: no packets,
+                    # in both.
+                    same += 1
+                    continue
+                # FFmpeg's decoder and the port's read the output back to the
+                # same samples; a stream of a frame or two is not detected,
+                # so the format is named.
+                total += 1
+                tdec = run(args.ffmpeg, "-nostdin", "-v", "error", "-f", "ac3", "-i", ours, "-f", "f32le", "-")
+                zdec = run(args.zffmpeg, "-f", "ac3", "-i", ours, "-f", "f32le", "-")
+                if tdec.returncode != 0 or tdec.stderr or zdec.returncode != 0 or not tdec.stdout \
+                        or tdec.stdout != zdec.stdout:
+                    problems.append(f"{label}: decoded, FFmpeg {tdec.returncode}, zffmpeg {zdec.returncode}, "
+                                    f"{len(tdec.stdout)} and {len(zdec.stdout)} bytes")
+                    continue
+                same += 1
+                total += 1
+                tpipe = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", source, "-bitexact", "-c:a", "ac3", *opts,
+                            "-f", "ac3", "-")
+                zpipe = run(args.zffmpeg, "-i", source, *opts, "-f", "ac3", "-")
+                if tpipe.returncode != 0 or zpipe.returncode != 0 or not zpipe.stdout or tpipe.stdout != zpipe.stdout:
+                    problems.append(f"{label}: piped, FFmpeg {tpipe.returncode}, zffmpeg {zpipe.returncode}, "
+                                    f"{len(tpipe.stdout)} and {len(zpipe.stdout)} bytes")
+                    continue
+                same += 2
+            result = "pass" if not problems else "**FAIL**: " + "; ".join(problems)
+            rows.append(f"| `{name}` | {rate} Hz, {layout} | {result} |")
+            failures.extend(f"AC-3 output {name}: {p}" for p in problems)
+    record("AC-3 output (T32c)", same, total, understood=understood)
+    lines += [
+        "",
+        "## AC-3 output (T32c)",
+        "",
+        f"zffmpeg's AC-3 equal to the ffmpeg program's with `-bitexact`, as a file and on a pipe, and decoded back "
+        f"by FFmpeg and zffmpeg to the same samples, or refused or failed as recorded: {same}/{total}, "
+        f"{understood} of them refusals where the program converts the rate or the layout.",
+        "",
+        "| Input | Format | Result |",
+        "| --- | --- | --- |",
+    ] + rows
+
+
 def compare_flac_output(args, lines, failures):
     """zffmpeg's FLAC output (T26c) against the ffmpeg program's with
     `-bitexact`: the same bytes, as a file (STREAMINFO rewritten at the
@@ -4399,10 +4543,6 @@ KNOWN_REGISTRY_DIFFERENCES = {
                         "the port has no Opus encoder"),
     ("codec", "aac"): (("D.A.L.", "DEA.L."), "FFmpeg's native AAC encoder makes the AAC fixtures (T30b); "
                        "the port has no AAC encoder (T32d)"),
-    ("codec", "ac3"): (("D.AIL.", "DEAIL."), "FFmpeg's AC-3 encoder makes the AC-3 fixtures (T32a); the port has no "
-                       "AC-3 encoder (T32c)"),
-    ("format", "ac3"): (("D.", "DE"), "FFmpeg's raw AC-3 muxer writes the AC-3 fixtures (T32a); the port writes no "
-                        "AC-3 before its encoder (T32c)"),
     ("codec", "eac3"): (("D.AIL.", "DEAIL."), "FFmpeg's E-AC-3 encoder makes the E-AC-3 fixtures (T32b); the port "
                         "has no E-AC-3 encoder"),
     ("format", "eac3"): (("D.", "DE"), "FFmpeg's raw E-AC-3 muxer writes the E-AC-3 fixtures (T32b); the port "
@@ -4664,6 +4804,7 @@ def main():
     compare_ac3(args, lines, failures)
     compare_g72x_output(args, lines, failures)
     compare_mp2_output(args, lines, failures)
+    compare_ac3_output(args, lines, failures)
     compare_opus_vectors(args, lines, failures)
     compare_hashes(args, lines, failures)
     compare_fate(args, lines, failures)

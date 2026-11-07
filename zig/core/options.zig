@@ -63,6 +63,8 @@ pub const SetError = error{
 /// each default within its range.
 pub fn check(comptime T: type) void {
     comptime {
+        // Pairwise name checks: quadratic in the specs.
+        @setEvalBranchQuota(20000);
         const specs = T.option_specs;
         const info = @typeInfo(T).@"struct";
         for (info.field_names) |field| {

@@ -12,7 +12,7 @@
 //!             [-ch_layout <layout> | -ac <channels>] -i <input | -> [-c copy|<encoder>]
 //!             [-ar <rate>] [-ac <channels> | -ch_layout <layout>]
 //!             [-dither_method <method>] [-dither_scale <scale>]
-//!             [FLAC or ADPCM encoder options] [-f <format>] <output | ->
+//!             [encoder options] [-f <format>] <output | ->
 //!
 //! `-c:a flac`, the default for a `.flac` output, encodes as FFmpeg's FLAC
 //! encoder and muxer do (T26c), with its options after `-i` in FFmpeg's
@@ -58,21 +58,22 @@ const status = @import("status.zig");
 const ExitStatus = status.ExitStatus;
 const printError = status.printError;
 
-const usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout <layout>] -i <input | -> [-c copy|<encoder>] [-b:a <bit rate>] [-ar <rate>] [-ac <channels> | -ch_layout <layout>] [-dither_method <method>] [-dither_scale <scale>] [FLAC or ADPCM encoder options] [-f <format>] <output | ->\n";
+const usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout <layout>] -i <input | -> [-c copy|<encoder>] [-b:a <bit rate>] [-ar <rate>] [-ac <channels> | -ch_layout <layout>] [-dither_method <method>] [-dither_scale <scale>] [encoder options] [-f <format>] <output | ->\n";
 const help = usage ++
     \\
     \\Converts one WAV, Wave64, AU, AIFF, CAF (PCM, and ALAC), FLAC, Ogg
     \\(Vorbis, Opus and FLAC input, FLAC output), MPEG audio (MP3, MP2 and MP1
-    \\input, MP2 output), ADTS AAC (input) or raw PCM stream (standard input
-    \\or output with -). The
+    \\input, MP2 output), ADTS AAC (input), raw AC-3 or E-AC-3 (input, and
+    \\AC-3 output) or raw PCM stream (standard input or output with -). The
     \\input container is
     \\detected from content, or for raw PCM from the name (.sb, .ub, .al, .ul,
     \\.sw), or forced with -f before -i.
     \\Before -i, -sample_rate (or -ar) and -ch_layout (or -ac) describe raw
     \\PCM input, 44100 Hz mono by default. The output container is the -f after
     \\-i, or the output name's extension (.wav, .w64, .au, .aif, .aiff, .afc,
-    \\.aifc, .caf, .flac, .ogg, .oga, .opus, .sb, .ub, .al, .ul, .sw). Formats:
-    \\wav, w64, au, aiff, caf, flac, ogg, oga, opus and the raw formats u8, s8, s16le,
+    \\.aifc, .caf, .flac, .ogg, .oga, .opus, .mp2, .ac3, .sb, .ub, .al, .ul,
+    \\.sw). Formats: wav, w64, au, aiff, caf, flac, ogg, oga, opus, mp2, ac3
+    \\and the raw formats u8, s8, s16le,
     \\s16be, s24le, s24be, s32le, s32be, f32le, f32be, f64le, f64be, alaw and
     \\mulaw.
     \\After -i, -ac <channels> or -ch_layout <layout> remixes into that layout
@@ -110,6 +111,16 @@ const help = usage ++
     \\FFmpeg's encoder and muxer do, with -compression_level (0 to 2) and
     \\-min_prediction_order and -max_prediction_order (1 to 30); a CAF output
     \\of ALAC must be a file, which the muxer seeks back in.
+    \\-c ac3 (the default for .ac3) encodes AC-3 as FFmpeg's ac3 encoder and
+    \\muxer do, from its layouts (mono to 5.1) at 32, 44.1 or 48 kHz; -b:a
+    \\sets the bit rate (the nearest of 32k to 640k; by default 96k a full
+    \\bandwidth channel, 192k for two, 320k, 384k, 448k), with -cutoff,
+    \\-audio_service_type (ma, ef, vi, hi, di, co, em, vo, ka) and the
+    \\encoder's options: -center_mixlev, -surround_mixlev, -mixing_level,
+    \\-room_type, -per_frame_metadata, -copyright, -dialnorm, -dsur_mode,
+    \\-original, -dmix_mode, -ltrt_cmixlev, -ltrt_surmixlev, -loro_cmixlev,
+    \\-loro_surmixlev, -dsurex_mode, -dheadphone_mode, -ad_conv_type,
+    \\-stereo_rematrixing, -channel_coupling and -cpl_start_band.
     \\-y replaces an existing output; without it (or with -n) an existing output
     \\is an error.
     \\Exit codes: 0 success, 1 usage, 2 invalid or truncated media,
@@ -148,6 +159,8 @@ const Command = struct {
     adpcm: av.adpcm.EncodeOptions,
     /// The G.726 encoder's `-code_size` (T31c).
     g726: av.g726.EncodeOptions,
+    /// The AC-3 encoder's options (T32c), its bit rate aside (`bit_rate`).
+    ac3: av.ac3enc.Options,
     dither: av.dither.Options,
     overwrite: bool,
 };
@@ -259,6 +272,8 @@ fn run(init: std.process.Init) ExitStatus {
             return .usage;
         };
     }
+    var ac3 = command.ac3;
+    ac3.bit_rate = mp2.bit_rate;
     // The input's tags are carried, as FFmpeg's default -map_metadata does
     // (T21c, the project owner's choice).
     var tags: av.metadata.Dictionary = .empty;
@@ -269,6 +284,7 @@ fn run(init: std.process.Init) ExitStatus {
         .codec = encoder,
         .flac = command.flac.toOptions(),
         .mp2 = mp2,
+        .ac3 = ac3,
         .adpcm = command.adpcm,
         .alac = alacOptions(command.flac),
         .g72x = .{ .trellis = command.adpcm.trellis, .code_size = command.g726.code_size, .bit_rate = mp2.bit_rate },
@@ -308,6 +324,7 @@ fn parse(args: []const [:0]const u8) Parsed {
     var flac: av.flacenc.AvOptions = .{};
     var adpcm: av.adpcm.EncodeOptions = .{};
     var g726: av.g726.EncodeOptions = .{};
+    var ac3: av.ac3enc.Options = .{};
     var dither_method: ?[]const u8 = null;
     var dither_scale: ?[]const u8 = null;
     var yes = false;
@@ -379,6 +396,15 @@ fn parse(args: []const [:0]const u8) Parsed {
                     return .{ .usage = .{ .reason = "invalid value for", .arg = arg } };
                 continue;
             }
+            if (isAc3Option(arg)) {
+                // The AC-3 encoder's options and the codec context's
+                // -cutoff and -audio_service_type (T32c), likewise.
+                i += 1;
+                if (i == args.len) return .{ .usage = .{ .reason = "missing value for", .arg = arg } };
+                av.options.set(av.ac3enc.Options, &ac3, arg[1..], args[i]) catch
+                    return .{ .usage = .{ .reason = "invalid value for", .arg = arg } };
+                continue;
+            }
             if (arg.len > 1 and arg[0] == '-') return .{ .usage = .{ .reason = "unknown option", .arg = arg } };
             output = arg;
             continue;
@@ -410,6 +436,7 @@ fn parse(args: []const [:0]const u8) Parsed {
         .flac = flac,
         .adpcm = adpcm,
         .g726 = g726,
+        .ac3 = ac3,
         .dither = dither,
         .overwrite = yes,
     } };
@@ -465,6 +492,15 @@ fn isG726Option(arg: []const u8) bool {
     if (arg.len < 2 or arg[0] != '-') return false;
     inline for (av.g726.EncodeOptions.option_specs) |spec| {
         if (std.mem.eql(u8, arg[1..], spec.name)) return true;
+    }
+    return false;
+}
+
+/// The AC-3 encoder's options but `b`, which `-b:a` sets.
+fn isAc3Option(arg: []const u8) bool {
+    if (arg.len < 2 or arg[0] != '-') return false;
+    inline for (av.ac3enc.Options.option_specs) |spec| {
+        if (!std.mem.eql(u8, spec.name, "b") and std.mem.eql(u8, arg[1..], spec.name)) return true;
     }
     return false;
 }
@@ -615,6 +651,9 @@ fn runFailure(
         const cause: status.Error = if (writer.err) |e| e else if (writer.seek_err) |e| e else error.WriteFailed;
         return fail(io, command.output, cause);
     }
+    // The AC-3 encoder's bit allocation failing on the samples: the
+    // output's encoder (T32c).
+    if (err == error.InvalidOption) return fail(io, command.output, err);
     return fail(io, command.input, withReadCause(err, reader));
 }
 

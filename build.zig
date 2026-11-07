@@ -631,7 +631,7 @@ const RawStdout = struct {
     nb_samples: u64,
 };
 
-const zffmpeg_usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout <layout>] -i <input | -> [-c copy|<encoder>] [-b:a <bit rate>] [-ar <rate>] [-ac <channels> | -ch_layout <layout>] [-dither_method <method>] [-dither_scale <scale>] [FLAC or ADPCM encoder options] [-f <format>] <output | ->\n";
+const zffmpeg_usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout <layout>] -i <input | -> [-c copy|<encoder>] [-b:a <bit rate>] [-ar <rate>] [-ac <channels> | -ch_layout <layout>] [-dither_method <method>] [-dither_scale <scale>] [encoder options] [-f <format>] <output | ->\n";
 
 // The paired WAV and AU fixtures hold the same samples, so each is the exact
 // expected output of converting the other.
@@ -897,7 +897,16 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "AC-3 from a pipe to raw PCM", .set = .ac3, .args = &.{ "-i", "-" }, .stdin_input = "ac3_ffmpeg_mono_32k", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stdout_raw = .{ .args = &.{ "-f", "s16le", "-ch_layout", "mono", "-sample_rate", "32000" }, .nb_samples = 7680 }, .stderr = "" },
     .{ .name = "AC-3 with junk after a frame", .set = .ac3, .args = &.{"-i"}, .input = "ac3_junk_between_long", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt ", .stderr = "" },
     .{ .name = "AC-3 copy is unsupported", .set = .ac3, .args = &.{"-i"}, .input = "ac3_ffmpeg_stereo_48k", .tail = &.{ "-c", "copy", "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
-    .{ .name = "no AC-3 encoder", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-c:a", "ac3", "-f", "wav", "-" }, .exit_code = 1, .stdout = "", .stderr_contains = "unknown encoder: ac3" },
+    // T32c: AC-3 encoded; compare.py checks the bytes against FFmpeg's.
+    .{ .name = "WAV to AC-3 on standard output", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-f", "ac3", "-" }, .exit_code = 0, .stdout_contains = "\x0b\x77", .stderr = "" },
+    .{ .name = "AC-3 to AC-3 with the encoder's options", .set = .ac3, .args = &.{"-i"}, .input = "ac3_ffmpeg_51_48k", .tail = &.{ "-b:a", "256k", "-dialnorm", "-20", "-dmix_mode", "ltrt", "-channel_coupling", "0", "-f", "ac3", "-" }, .exit_code = 0, .stdout_contains = "\x0b\x77", .stderr = "" },
+    .{ .name = "AC-3 into WAV is unsupported", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-c:a", "ac3", "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
+    .{ .name = "a rate the AC-3 encoder refuses", .args = &.{"-i"}, .input = "mono_8k", .tail = &.{ "-f", "ac3", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedFormat\n" },
+    .{ .name = "a layout the AC-3 encoder refuses", .args = &.{"-i"}, .input = "extensible_7point1_s24", .tail = &.{ "-ar", "48000", "-f", "ac3", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedFormat\n" },
+    .{ .name = "an AC-3 option the encoder refuses", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-mixing_level", "70", "-f", "ac3", "-" }, .exit_code = 1, .stdout = "", .stderr_contains = ": InvalidOption\n" },
+    .{ .name = "an invalid AC-3 option value", .args = &.{ "-i", "a.wav", "-dsur_mode", "bogus", "b.ac3" }, .exit_code = 1, .stderr_contains = "zffmpeg: invalid value for: -dsur_mode\n" },
+    .{ .name = "AC-3 copy into AC-3 is unsupported", .set = .ac3, .args = &.{"-i"}, .input = "ac3_ffmpeg_stereo_48k", .tail = &.{ "-c", "copy", "-f", "ac3", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
+    .{ .name = "AC-3 bit allocation failing on the samples", .set = .ac3, .args = &.{"-i"}, .input = "ac3_ffmpeg_51_48k", .tail = &.{ "-b:a", "32k", "-f", "ac3", "-" }, .exit_code = 1, .stdout = "", .stderr = "zffmpeg: -: InvalidOption\n" },
     .{ .name = "E-AC-3 to raw PCM", .set = .eac3, .args = &.{"-i"}, .input = "eac3_ffmpeg_51side_44k", .tail = &.{ "-f", "f32le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stdout_raw = .{ .args = &.{ "-f", "f32le", "-ch_layout", "5.1(side)", "-sample_rate", "44100" }, .nb_samples = 7680 }, .stderr = "" },
     .{ .name = "E-AC-3 at a reduced rate: the packet dropped", .set = .eac3, .args = &.{"-i"}, .input = "eac3_reduced_rate", .tail = &.{ "-f", "f32le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stdout_raw = .{ .args = &.{ "-f", "f32le", "-ch_layout", "stereo", "-sample_rate", "48000" }, .nb_samples = 9216 }, .stderr = "" },
     .{ .name = "E-AC-3 substream 1: its packet dropped", .set = .eac3, .args = &.{"-i"}, .input = "eac3_substream", .tail = &.{ "-f", "f32le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stdout_raw = .{ .args = &.{ "-f", "f32le", "-ch_layout", "stereo", "-sample_rate", "48000" }, .nb_samples = 7680 }, .stderr = "" },

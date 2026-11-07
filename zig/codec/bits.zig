@@ -334,6 +334,41 @@ pub const BitWriter = struct {
         }
     }
 
+    /// FFmpeg's `put_bits` given a value wider than `n` bits (1 to 56),
+    /// which it does not mask (its assert is compiled out), as the 64-bit
+    /// big-endian writer of x86-64 (`BUF_BITS` 64) leaves the stream: the
+    /// low `n` bits are written, and bit `j >= n` of the value is OR'ed
+    /// into the bits already written, at `P + n - 1 - j` (`P` the position
+    /// before the write), when that lies in the same 64-bit word as `P`
+    /// (words counted from the slice's start); further back it is shifted
+    /// out of the buffer and lost. The AC-3 encoder's grouped mantissas of
+    /// huge coefficients reach this (notes.md "AC-3 encoding").
+    pub fn bitsUnmasked(w: *BitWriter, n: u6, value: u64) void {
+        std.debug.assert(n >= 1 and n <= 56);
+        const p = w.count();
+        w.bits(n, value & ((@as(u64, 1) << n) - 1));
+        if (value >> n == 0 or w.overflow) return;
+        const word_start = p - p % 64;
+        var j: u7 = n;
+        while (j < 64) : (j += 1) {
+            if ((value >> @intCast(j)) & 1 == 0) continue;
+            if (p + n - 1 < j) break; // before the slice
+            const t = p + n - 1 - j;
+            if (t < word_start) break;
+            w.orBit(t);
+        }
+    }
+
+    /// Sets the already written bit at `t`.
+    fn orBit(w: *BitWriter, t: usize) void {
+        if (t < w.pos * 8) {
+            w.bytes[t / 8] |= @as(u8, 0x80) >> @intCast(t % 8);
+        } else {
+            const index: u6 = @intCast(@as(usize, w.acc_len) - 1 - (t - w.pos * 8));
+            w.acc |= @as(u64, 1) << index;
+        }
+    }
+
     /// `put_sbits` and `put_sbits63`: the low `n` bits (0 to 64) of a
     /// signed value, two's complement.
     pub fn signed(w: *BitWriter, n: u7, value: i64) void {
@@ -367,6 +402,24 @@ pub const BitWriter = struct {
         return w.bytes[0..w.pos];
     }
 };
+
+test "an unmasked put_bits ORs its high bits back within the 64-bit word" {
+    var buf: [16]u8 = @splat(0);
+    var w: BitWriter = .init(&buf);
+    w.bits(60, 0);
+    // 5 bits of 0b1_0110_0001 at 60: bits 60..64 hold 00001; the high
+    // 1011 lands at 59, 58 (0), 57, 56.
+    w.bitsUnmasked(5, 0b1_0110_0001);
+    w.flush();
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0, 0, 0, 0, 0b1011_0000, 0b1000_0000 }, w.written());
+    // At a word's start the high bits fall before it and are lost.
+    var buf2: [16]u8 = @splat(0);
+    var w2: BitWriter = .init(&buf2);
+    w2.bits(64, 0);
+    w2.bitsUnmasked(7, 0xffff);
+    w2.flush();
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0, 0, 0, 0, 0, 0b1111_1110 }, w2.written());
+}
 
 /// The bit at `at` of `bytes`, MSB first, 0 past the end: the reference the
 /// reader is checked against.
