@@ -12,7 +12,7 @@
 //!             [-ch_layout <layout> | -ac <channels>] -i <input | -> [-c copy|<encoder>]
 //!             [-ar <rate>] [-ac <channels> | -ch_layout <layout>]
 //!             [-dither_method <method>] [-dither_scale <scale>]
-//!             [FLAC encoder options] [-f <format>] <output | ->
+//!             [FLAC or ADPCM encoder options] [-f <format>] <output | ->
 //!
 //! `-c:a flac`, the default for a `.flac` output, encodes as FFmpeg's FLAC
 //! encoder and muxer do (T26c), with its options after `-i` in FFmpeg's
@@ -58,7 +58,7 @@ const status = @import("status.zig");
 const ExitStatus = status.ExitStatus;
 const printError = status.printError;
 
-const usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout <layout>] -i <input | -> [-c copy|<encoder>] [-b:a <bit rate>] [-ar <rate>] [-ac <channels> | -ch_layout <layout>] [-dither_method <method>] [-dither_scale <scale>] [FLAC encoder options] [-f <format>] <output | ->\n";
+const usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout <layout>] -i <input | -> [-c copy|<encoder>] [-b:a <bit rate>] [-ar <rate>] [-ac <channels> | -ch_layout <layout>] [-dither_method <method>] [-dither_scale <scale>] [FLAC or ADPCM encoder options] [-f <format>] <output | ->\n";
 const help = usage ++
     \\
     \\Converts one WAV, Wave64, AU, AIFF, CAF (input only), FLAC, Ogg (Vorbis,
@@ -97,6 +97,10 @@ const help = usage ++
     \\-max_partition_order, -ch_mode (auto, indep, left_side, right_side,
     \\mid_side), -exact_rice_parameters, -multi_dim_quant, and -strict
     \\experimental for 32 bits per sample.
+    \\-c adpcm_ima_wav and -c adpcm_ms encode IMA WAV and Microsoft ADPCM into
+    \\WAV as FFmpeg's encoders do, from mono or stereo, with -block_size (32
+    \\to 8192, a power of two, default 1024) and -trellis (0 to 16); WAV
+    \\input in either is decoded as FFmpeg decodes it.
     \\-y replaces an existing output; without it (or with -n) an existing output
     \\is an error.
     \\Exit codes: 0 success, 1 usage, 2 invalid or truncated media,
@@ -130,6 +134,8 @@ const Command = struct {
     bit_rate: ?[]const u8,
     /// The FLAC encoder's options after `-i` (T26c).
     flac: av.flacenc.AvOptions,
+    /// The ADPCM encoders' options (T31a).
+    adpcm: av.adpcm.EncodeOptions,
     dither: av.dither.Options,
     overwrite: bool,
 };
@@ -250,6 +256,7 @@ fn run(init: std.process.Init) ExitStatus {
         .codec = encoder,
         .flac = command.flac.toOptions(),
         .mp2 = mp2,
+        .adpcm = command.adpcm,
         .dither = command.dither,
         .input = .{ .format = input_container, .raw = raw_params },
         // FFmpeg's input -ch_layout names the stream's layout, which its
@@ -284,6 +291,7 @@ fn parse(args: []const [:0]const u8) Parsed {
     var codec: ?[]const u8 = null;
     var bit_rate: ?[]const u8 = null;
     var flac: av.flacenc.AvOptions = .{};
+    var adpcm: av.adpcm.EncodeOptions = .{};
     var dither_method: ?[]const u8 = null;
     var dither_scale: ?[]const u8 = null;
     var yes = false;
@@ -338,6 +346,15 @@ fn parse(args: []const [:0]const u8) Parsed {
                     return .{ .usage = .{ .reason = "invalid value for", .arg = arg } };
                 continue;
             }
+            if (isAdpcmOption(arg)) {
+                // The ADPCM encoders' options (T31a), unused for another
+                // encoder, as FFmpeg leaves them.
+                i += 1;
+                if (i == args.len) return .{ .usage = .{ .reason = "missing value for", .arg = arg } };
+                av.options.set(av.adpcm.EncodeOptions, &adpcm, arg[1..], args[i]) catch
+                    return .{ .usage = .{ .reason = "invalid value for", .arg = arg } };
+                continue;
+            }
             if (arg.len > 1 and arg[0] == '-') return .{ .usage = .{ .reason = "unknown option", .arg = arg } };
             output = arg;
             continue;
@@ -367,6 +384,7 @@ fn parse(args: []const [:0]const u8) Parsed {
         .codec = codec,
         .bit_rate = bit_rate,
         .flac = flac,
+        .adpcm = adpcm,
         .dither = dither,
         .overwrite = yes,
     } };
@@ -397,6 +415,14 @@ fn parseBitRate(text: []const u8) ?i64 {
     const d = av.number.parseNumber(text, .int64, 0, max) catch return null;
     // 2^63 itself is the double nearest INT64_MAX.
     return if (d >= max) std.math.maxInt(i64) else @intFromFloat(d);
+}
+
+fn isAdpcmOption(arg: []const u8) bool {
+    if (arg.len < 2 or arg[0] != '-') return false;
+    inline for (av.adpcm.EncodeOptions.option_specs) |spec| {
+        if (std.mem.eql(u8, arg[1..], spec.name)) return true;
+    }
+    return false;
 }
 
 fn isFlacOption(arg: []const u8) bool {

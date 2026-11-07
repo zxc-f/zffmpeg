@@ -2771,12 +2771,20 @@ def same_decode_refusal(ffmpeg_process, error):
         return False
     if ffmpeg_refuses_input(ffmpeg_process):
         return True
+    # The IMA WAV tag at 8 bits is adpcm_zork, which the reference build
+    # does not decode and the port's WAV parser refuses (notes.md "ADPCM").
+    if b"no decoder found for: adpcm_zork" in ffmpeg_process.stderr:
+        return error == "UnsupportedFormat"
     if b"Decoding requested, but no decoder found for: " in ffmpeg_process.stderr:
         return error == "UnsupportedOperation"
     # An ADTS stream no packet of which decodes has no sample rate: the
     # program fails to open its encoder at the end, zffmpeg before any
     # output (notes.md "AAC decoder scope").
     if b"Could not open encoder before EOF" in ffmpeg_process.stderr:
+        return error == "UnsupportedFormat"
+    # An ADPCM stream FFmpeg's decoder does not open (its channels, IMA
+    # WAV's bits), which zffmpeg refuses before any output (T31a).
+    if b"Error while opening decoder: " in ffmpeg_process.stderr:
         return error == "UnsupportedFormat"
     return b"Decode error rate " in ffmpeg_process.stderr and error == "DecodeErrorRate"
 
@@ -3416,6 +3424,229 @@ def compare_aac_decode(args, lines, failures):
     ] + rows
 
 
+# ADPCM fixtures zffprobe and zffmpeg refuse where FFmpeg opens or decodes
+# them (notes.md "ADPCM"): fixture -> (status, error, reason). Each must
+# still be refused with that error, and opened by FFmpeg.
+KNOWN_ADPCM_REFUSALS = {
+    "adpcm_block_align_zero": (3, "UnsupportedFormat", "`block_align` 0, which FFmpeg reads in 4096-byte packets"),
+    "adpcm_fact_short": (3, "UnsupportedFormat", "a `fact` chunk shorter than its count, which FFmpeg reads from "
+                                                 "the bytes after it"),
+    "adpcm_w64": (3, "UnsupportedFormat", "ADPCM in Wave64, not ported"),
+    "adpcm_truncated": (2, "Truncated", "data shorter than its chunk: the WAV contract's `Truncated`, where FFmpeg "
+                                        "decodes what is there"),
+    "adpcm_ima_bits8": (3, "UnsupportedFormat", "the IMA WAV tag at 8 bits, FFmpeg's `adpcm_zork`, which the port "
+                                                "does not name (the reference build has no decoder for it)"),
+}
+
+# The ADPCM decodes zffmpeg refuses where the program decodes (every
+# output): the probe refusals above, but `adpcm_zork`, which neither
+# decodes.
+KNOWN_ADPCM_DECODE_DIFFERENCES = {
+    (name, None): (("refused", status, error), reason)
+    for name, (status, error, reason) in KNOWN_ADPCM_REFUSALS.items() if name != "adpcm_ima_bits8"
+} | {
+    # Into Ogg the program's frames keep their packets' timestamps, and the
+    # Ogg muxer's granules follow them (notes.md "Decoded ADPCM into Ogg").
+    ("adpcm_ima_3bit", "-f ogg"): ("granules", "the same pages and samples but the granules: FFmpeg's packet durations "
+                                               "count 1321 samples a 3-bit block, its decoder 1313"),
+    ("adpcm_ima_bad_step", "-f ogg"): ("granules", "the same pages and samples but the granules: the refused frames "
+                                                   "leave gaps in the program's timestamps"),
+    ("adpcm_ima_odd_align", "-f ogg"): ("granules", "the same pages and samples but the granules, as for "
+                                                    "`adpcm_ima_bad_step`"),
+    ("adpcm_ms_bad_predictor", "-f ogg"): ("granules", "the same pages and samples but the granules, as for "
+                                                       "`adpcm_ima_bad_step`"),
+}
+
+# The encoding cells (T31a): generated inputs (name -> channels, rate,
+# frames, kind) encoded with each option set by both programs.
+ADPCM_ENCODE_SOURCES = {
+    "st44": (2, 44100, 20011, "smooth"),
+    "mono8": (1, 8000, 5003, "noise"),
+    "tiny": (1, 22050, 5, "tones"),
+    "st96": (2, 96000, 3001, "tones"),
+    "quad": (4, 16000, 2000, "smooth"),
+}
+ADPCM_ENCODE_OPTIONS = [[], ["-block_size", "256"], ["-block_size", "32"], ["-block_size", "8192"],
+                        ["-trellis", "4"], ["-trellis", "8", "-block_size", "512"], ["-ar", "22050"], ["-ac", "1"]]
+# Requests both programs refuse; zffmpeg before creating its output.
+ADPCM_REFUSED_OPTIONS = [["-block_size", "100"], ["-block_size", "16"], ["-trellis", "17"], ["-trellis", "-1"]]
+
+
+def adpcm_source(work, name):
+    """An s16le WAV of generate.py's signal for ADPCM_ENCODE_SOURCES[name]."""
+    channels, rate, frames, kind = ADPCM_ENCODE_SOURCES[name]
+    samples = generate.signal_input(channels, rate, frames, 91 + len(name), kind)
+    data = b"".join(struct.pack("<h", v) for v in samples)
+    path = work / f"{name}.wav"
+    path.write_bytes(b"RIFF" + struct.pack("<I", 36 + len(data)) + b"WAVEfmt "
+                     + struct.pack("<IHHIIHH", 16, 1, channels, rate, rate * 2 * channels, 2 * channels, 16)
+                     + b"data" + struct.pack("<I", len(data)) + data)
+    return path
+
+
+def ms_mono_trellis_defined(data):
+    """An MS mono WAV written with -trellis, without the bytes of each block
+    FFmpeg's encoder leaves unwritten (notes.md "ADPCM": its trellis codes
+    half the block's nibbles, the rest stale heap memory, and the last byte
+    it writes takes one nibble it never set): the header, then each block's
+    first 7 + (block_size - 7) // 2 bytes, as vectors/adpcm.txt's H lines."""
+    position = 12
+    block = None
+    while position + 8 <= len(data):
+        chunk_id, size = data[position:position + 4], int.from_bytes(data[position + 4:position + 8], "little")
+        if chunk_id == b"fmt ":
+            block = int.from_bytes(data[position + 20:position + 22], "little")
+        if chunk_id == b"data":
+            body = data[position + 8:position + 8 + size]
+            kept = 7 + (block - 7) // 2
+            return data[:position + 8] + b"".join(body[i:i + kept] for i in range(0, len(body), block))
+        position += 8 + size + (size & 1)
+    return None
+
+
+def compare_adpcm(args, lines, failures):
+    """ADPCM in WAV (T31a): every ADPCM fixture's zffprobe report against
+    ffprobe's (both refusing a stream FFmpeg's decoder does not open), its
+    decoding by zffmpeg into each output against the program's
+    (`decode_cells`), and generated inputs encoded by `-c:a adpcm_ima_wav`
+    and `-c:a adpcm_ms` with each option set, byte for byte, into a file
+    and (the sample data) to a pipe; a request both refuse is refused by
+    zffmpeg before creating its output."""
+    rows = []
+    same = total = understood = 0
+    notes = set()
+    paths = sorted((FIXTURES / "adpcm").glob("*.wav"))
+    for path in paths:
+        total += 1
+        problems = []
+        code, fields, err = ffprobe(args.ffprobe, path)
+        zcode, zfields, zerr = zffprobe(args.zffprobe, path)
+        known = KNOWN_ADPCM_REFUSALS.get(path.stem)
+        if known:
+            status, error, reason = known
+            if code != 0 or zcode != status or not zerr.endswith(f": {error}"):
+                problems.append(f"ffprobe exited {code}, zffprobe {zcode} ({zerr}); recorded: zffprobe refuses with "
+                                f"{error}")
+            else:
+                understood += 1
+                notes.add(f"`{path.stem}`: {reason}")
+        elif code != 0:
+            # ffprobe opens the decoder, which refuses the stream.
+            if zcode != EXIT_STATUS["UnsupportedFormat"] or not zerr.endswith(": UnsupportedFormat"):
+                problems.append(f"ffprobe fails ({first_line(err)}), zffprobe exited {zcode} ({zerr})")
+        else:
+            want = {"format": fields.get("format_name"), "codec": fields.get("codec_name"),
+                    "sample_fmt": fields.get("sample_fmt"), "channels": fields.get("channels"),
+                    "channel_layout": fields.get("channel_layout"), "sample_rate": fields.get("sample_rate"),
+                    "nb_samples": fields.get("duration_ts"), "duration_num": fields.get("duration_ts"),
+                    "duration_den": fields.get("sample_rate")}
+            if zcode != 0 or zfields != want:
+                problems.append(f"zffprobe exited {zcode} with {zfields or zerr}, ffprobe's {want}")
+        if not problems:
+            same += 1
+        failures.extend(f"ADPCM probe {path.stem}: {p}" for p in problems)
+        rows.append(f"| `{path.stem}` | probe | {'pass' if not problems else '**FAIL**: ' + '; '.join(problems)} |")
+    decode_rows, dsame, dtotal, dunderstood, dnotes, compared = decode_cells(
+        args, [(path, "adpcm") for path in paths], KNOWN_ADPCM_DECODE_DIFFERENCES, "KNOWN_ADPCM_DECODE_DIFFERENCES",
+        "ADPCM decode", failures)
+    dtotal += unmatched_entries(KNOWN_ADPCM_DECODE_DIFFERENCES, compared, "KNOWN_ADPCM_DECODE_DIFFERENCES", failures)
+    same, total, understood = same + dsame, total + dtotal, understood + dunderstood
+    notes |= dnotes
+    rows += [row.replace("| adpcm |", "| decode |") for row in decode_rows]
+    with tempfile.TemporaryDirectory() as work:
+        work = pathlib.Path(work)
+        for name in ADPCM_ENCODE_SOURCES:
+            source = adpcm_source(work, name)
+            channels = ADPCM_ENCODE_SOURCES[name][0]
+            problems = []
+            for codec in ("adpcm_ima_wav", "adpcm_ms"):
+                for opts in ADPCM_ENCODE_OPTIONS:
+                    total += 1
+                    theirs, ours = work / "theirs.wav", work / "ours.wav"
+                    for f in (theirs, ours):
+                        f.unlink(missing_ok=True)
+                    tp = run(args.ffmpeg, "-nostdin", "-v", "error", "-y", "-i", source, "-c:a", codec, *opts,
+                             "-bitexact", theirs)
+                    zp = run(args.zffmpeg, "-y", "-i", source, "-c:a", codec, *opts, ours)
+                    label = f"{codec} {' '.join(opts)}".strip()
+                    out_channels = 1 if opts == ["-ac", "1"] else channels
+                    if channels > 2 and opts != ["-ac", "1"]:
+                        # The encoders take mono and stereo: the program
+                        # downmixes, zffmpeg refuses (notes.md "ADPCM").
+                        if (tp.returncode != 0 or zp.returncode != EXIT_STATUS["UnsupportedFormat"]
+                                or tool_error(zp, "zffmpeg", source) != "UnsupportedFormat" or ours.exists()):
+                            problems.append(f"{label}: FFmpeg {tp.returncode}, zffmpeg {zp.returncode} "
+                                            f"({first_line(text(zp.stderr))}); recorded: zffmpeg refuses more than "
+                                            f"two channels")
+                        else:
+                            same += 1
+                            understood += 1
+                            notes.add("more than two channels into an ADPCM encoder: FFmpeg's filters downmix to "
+                                      "stereo, zffmpeg refuses (`UnsupportedFormat`)")
+                        continue
+                    if tp.returncode != 0 or zp.returncode != 0:
+                        problems.append(f"{label}: FFmpeg {tp.returncode}, zffmpeg {zp.returncode} "
+                                        f"({first_line(text(zp.stderr))})")
+                        continue
+                    a, b = theirs.read_bytes(), ours.read_bytes()
+                    if codec == "adpcm_ms" and out_channels == 1 and "-trellis" in opts:
+                        # FFmpeg's stale bytes may happen to be zeros, as
+                        # the port's are.
+                        if ms_mono_trellis_defined(a) is None or ms_mono_trellis_defined(a) != ms_mono_trellis_defined(b):
+                            problems.append(f"{label}: the written bytes differ")
+                            continue
+                        understood += 1
+                        notes.add("MS mono with -trellis: FFmpeg leaves half of each block's bytes unwritten "
+                                  "(stale heap memory), zeros in zffmpeg's; the written bytes are equal")
+                        same += 1
+                    elif a != b:
+                        problems.append(f"{label}: the outputs differ ({len(a)} and {len(b)} bytes)")
+                    else:
+                        same += 1
+                # To a pipe: the sample data (FFmpeg's header there lacks
+                # the sizes and `fact`).
+                if channels <= 2:
+                    total += 1
+                    tp = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", source, "-c:a", codec, "-bitexact",
+                             "-f", "wav", "-")
+                    zp = run(args.zffmpeg, "-i", source, "-c:a", codec, "-f", "wav", "-")
+                    if tp.returncode != 0 or zp.returncode != 0 or wav_payload(tp.stdout) != wav_payload(zp.stdout):
+                        problems.append(f"{codec} to a pipe: FFmpeg {tp.returncode}, zffmpeg {zp.returncode}, the data "
+                                        f"{'differs' if tp.returncode == zp.returncode == 0 else 'is missing'}")
+                    else:
+                        same += 1
+                for opts in ADPCM_REFUSED_OPTIONS:
+                    total += 1
+                    ours = work / "ours.wav"
+                    ours.unlink(missing_ok=True)
+                    tp = run(args.ffmpeg, "-nostdin", "-v", "error", "-y", "-i", source, "-c:a", codec, *opts,
+                             "-bitexact", work / "theirs.wav")
+                    zp = run(args.zffmpeg, "-y", "-i", source, "-c:a", codec, *opts, ours)
+                    if tp.returncode == 0 or zp.returncode == 0 or ours.exists():
+                        problems.append(f"{codec} {' '.join(opts)}: FFmpeg {tp.returncode}, zffmpeg {zp.returncode}, "
+                                        f"output {'created' if ours.exists() else 'absent'}; expected both to refuse")
+                    else:
+                        same += 1
+            failures.extend(f"ADPCM encode {name}: {p}" for p in problems)
+            rows.append(f"| `{name}` | encode | {'pass' if not problems else '**FAIL**: ' + '; '.join(problems)} |")
+    record("ADPCM in WAV (T31a)", same, total, understood=understood)
+    lines += [
+        "",
+        "## ADPCM in WAV (T31a)",
+        "",
+        f"ADPCM fixtures probed by zffprobe as ffprobe probes them (or refused by both), decoded by zffmpeg into "
+        f"WAV, AU, AIFF, FLAC, Ogg and raw PCM (and resampled, and downmixed), into raw PCM from a pipe to stdout, "
+        f"and from a pipe into a WAV file, equal to the ffmpeg program's with `-bitexact` or refused by both; and "
+        f"generated inputs encoded by `-c:a adpcm_ima_wav` and `-c:a adpcm_ms` with each option set into WAV, byte "
+        f"for byte, and to a pipe: {same}/{total}, {understood} of them as understood differences:",
+        "",
+    ] + [f"- {note}" for note in sorted(notes)] + [
+        "",
+        "| Fixture or input | Cells | Result |",
+        "| --- | --- | --- |",
+    ] + rows
+
+
 def compare_ogg(args, lines, failures):
     """The Ogg fixtures (T27a): zffprobe against ffprobe's first audio
     stream (codec, sample format, channels, layout, rate, duration), and
@@ -3906,6 +4137,7 @@ def main():
     compare_leading_id3v2(args, lines, failures)
     compare_aac(args, lines, failures)
     compare_aac_decode(args, lines, failures)
+    compare_adpcm(args, lines, failures)
     compare_mp2_output(args, lines, failures)
     compare_opus_vectors(args, lines, failures)
     compare_hashes(args, lines, failures)

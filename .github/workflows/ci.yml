@@ -216,6 +216,7 @@ jobs:
           LC_ALL=C ./seek-vectors zig/testing/fixtures/ogg/*.ogg | diff -u zig/testing/vectors/seek_ogg.txt -
           LC_ALL=C ./seek-vectors zig/testing/fixtures/mp3/*.mp3 | diff -u zig/testing/vectors/seek_mp3.txt -
           LC_ALL=C ./seek-vectors zig/testing/fixtures/aac/*.aac | diff -u zig/testing/vectors/seek_aac.txt -
+          LC_ALL=C ./seek-vectors zig/testing/fixtures/adpcm/*.wav | diff -u zig/testing/vectors/seek_adpcm.txt -
 
       # The committed T15 oracle must be what this build's libavutil gives.
       - name: Check the rational vectors (T15)
@@ -367,14 +368,17 @@ jobs:
             .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o aac-tab-vectors
           ./aac-tab-vectors | diff -u zig/testing/vectors/aac_tab.txt -
 
-      # The committed T31a oracle must be what this build's IMA WAV and
-      # Microsoft ADPCM encoders and decoders make of its cases.
+      # The committed T31a oracles must be what this build's IMA WAV and
+      # Microsoft ADPCM encoders and decoders make of their cases, and what
+      # its ffprobe and ffmpeg make of every ADPCM WAV fixture.
       - name: Check the ADPCM vectors (T31a)
         run: |
           clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/adpcm_vectors.c \
             .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a \
             .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o adpcm-vectors
           ./adpcm-vectors | diff -u zig/testing/vectors/adpcm.txt -
+          bash zig/testing/reference/adpcm_wav_vectors.sh .references/ffmpeg-install |
+            diff -u zig/testing/vectors/adpcm_wav.txt -
 
       # The committed T28a oracle must be what this build's Opus decoder
       # makes of every Ogg fixture's first Opus stream.

@@ -22,6 +22,7 @@
 
 const std = @import("std");
 const bits = @import("bits.zig");
+const options_zig = @import("../core/options.zig");
 
 /// `ff_adpcm_index_table`.
 const index_table = [16]i8{ -1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8 };
@@ -127,7 +128,102 @@ pub const Params = struct {
         };
         return if (n <= 0) 0 else @intCast(n);
     }
+
+    /// The bytes `Decoder.decode` takes from a packet of `size` bytes that
+    /// decodes to `nb_samples` (`samplesIn`, not 0), whatever its block
+    /// headers hold: adpcm_decode_frame's bytestream2_tell, at most `size`.
+    pub fn consumed(p: Params, size: usize, nb_samples: u32) usize {
+        std.debug.assert(nb_samples > 0);
+        const ch: u64 = p.channels;
+        const n: i64 = nb_samples;
+        const read: u64 = switch (p.codec) {
+            .ima_wav => if (p.bits_per_coded_sample == 4)
+                4 * ch + @as(u64, @intCast(@divTrunc(n - 1, 8))) * 4 * ch
+            else if (p.block_align >= 4 * ch)
+                // The header, then bytestream2_skip to the block's end.
+                p.block_align
+            else
+                // A negative skip, unsigned in C, goes to the packet's end.
+                size,
+            // The headers, then the nibble bytes the decoder's loops read.
+            .ms => if (ch > 2)
+                ch * (7 + @as(u64, @intCast(@max(0, (n - 2) >> 1))))
+            else
+                7 * ch + @as(u64, @intCast(@max(0, (n - 2) >> @intCast(2 - ch)))),
+        };
+        return @intCast(@min(read, size));
+    }
+
+    /// The samples a channel FFmpeg's decoder gives for a packet of `len`
+    /// bytes whose block headers are valid: frames decoded from it, each
+    /// taking `consumed` bytes, until the rest is too short for a sample.
+    pub fn samplesInPacket(p: Params, len: usize) u64 {
+        var left = len;
+        var total: u64 = 0;
+        while (left > 0) {
+            const n = p.samplesIn(left);
+            if (n == 0) break; // "invalid number of samples in packet": the rest is dropped
+            total += n;
+            // At least one byte: every frame reads a header.
+            left -= p.consumed(left, n);
+        }
+        return total;
+    }
+
+    /// The samples a channel of `data_len` bytes of blocks decode to, read in
+    /// the demuxer's packets of `packet_len` bytes (the last one shorter),
+    /// when every block's header is valid; null when the count passes 64
+    /// bits. Work is proportional to one packet, not to the data.
+    pub fn samplesInData(p: Params, packet_len: usize, data_len: u64) ?u64 {
+        std.debug.assert(packet_len > 0);
+        const full = data_len / packet_len;
+        const rest: usize = @intCast(data_len % packet_len);
+        const in_full = std.math.mul(u64, full, p.samplesInPacket(packet_len)) catch return null;
+        return std.math.add(u64, in_full, p.samplesInPacket(rest)) catch null;
+    }
+
+    /// `get_audio_frame_duration` for a block of `block_align` bytes, as
+    /// riffdec.c's compute_bitrate calls it: its samples a channel, 0 when
+    /// FFmpeg finds none (IMA WAV bits outside 2 to 5, a block too short).
+    pub fn blockDuration(p: Params) u32 {
+        const ch: i64 = p.channels;
+        const ba: i64 = p.block_align;
+        if (ba <= 0 or ch <= 0) return 0;
+        const tmp: i64 = switch (p.codec) {
+            .ima_wav => blk: {
+                const bps: i64 = p.bits_per_coded_sample;
+                if (bps < 2 or bps > 5) return 0;
+                break :blk 1 + @divTrunc(ba - 4 * ch, bps * ch) * 8;
+            },
+            .ms => 2 + @divTrunc((ba - 7 * ch) * 2, ch),
+        };
+        // `tmp != (int)tmp` gives 0, and a negative duration FFMAX(0, ...).
+        return std.math.cast(u31, @max(0, tmp)) orelse 0;
+    }
 };
+
+/// The extradata FFmpeg's MS encoder writes (adpcm_encode_init): the
+/// samples a channel of a block (`frame_size`, to 16 bits), the 7
+/// coefficient pairs.
+pub fn msExtradataFor(frame_size: u32) [32]u8 {
+    var out: [32]u8 = undefined;
+    std.mem.writeInt(u16, out[0..2], @truncate(frame_size), .little);
+    std.mem.writeInt(u16, out[2..4], 7, .little);
+    for (0..7) |i| {
+        std.mem.writeInt(i16, out[4 + 4 * i ..][0..2], @intCast(adapt_coeff1[i] * 4), .little);
+        std.mem.writeInt(i16, out[6 + 4 * i ..][0..2], @intCast(adapt_coeff2[i] * 4), .little);
+    }
+    return out;
+}
+
+/// The samples a channel each packet of FFmpeg's encoder takes
+/// (adpcm_encode_init's `frame_size`) for blocks of `block_size` bytes.
+pub fn encoderFrameSize(codec: Codec, channels: u32, block_size: u32) u32 {
+    return switch (codec) {
+        .ima_wav => (block_size - 4 * channels) * 8 / (4 * channels) + 1,
+        .ms => (block_size - 7 * channels) * 2 / channels + 2,
+    };
+}
 
 /// One channel's samples, or several channels' interleaved (MS with one or
 /// two channels, which FFmpeg decodes to s16).
@@ -261,6 +357,7 @@ pub const Decoder = struct {
         std.debug.assert(gb.at > 0);
         // "Overread of %d < %d": the packet's size.
         const consumed = @min(gb.at, packet.len);
+        std.debug.assert(consumed == p.consumed(packet.len, nb_samples));
         return .{ .samples = nb_samples, .consumed = consumed };
     }
 };
@@ -353,17 +450,35 @@ fn msExpandNibble(c: *ChannelStatus, nibble: u8) i16 {
 
 // ---- Encoding ----
 
+/// The encoders' options, as FFmpeg's ints: the private `block_size` and
+/// the codec context's `trellis`.
 pub const EncodeOptions = struct {
-    /// `block_size`: 32 to 8192, a power of two.
-    block_size: u32 = 1024,
-    /// `-trellis`: 0 (off) to 16.
-    trellis: u32 = 0,
+    /// `block_size`: 32 to 8192 (the option's range), a power of two.
+    block_size: i32 = 1024,
+    /// `-trellis`: 0 (off) to 16; the option takes any int, which the
+    /// encoder then refuses.
+    trellis: i32 = 0,
 
     pub const Error = error{
         /// "block size must be power of 2", "invalid trellis size", or a
-        /// block too small for a sample (FFmpeg's frame size of 1 or less).
+        /// block size outside the option's range.
         InvalidOption,
     };
+
+    pub const option_specs = [_]options_zig.Spec{
+        .{ .name = "block_size", .field = "block_size", .kind = .int, .help = "set the block size", .min = 32, .max = 8192 },
+        .{ .name = "trellis", .field = "trellis", .kind = .int, .help = "rate-distortion optimal quantization", .min = std.math.minInt(i32), .max = std.math.maxInt(i32) },
+    };
+
+    /// adpcm_encode_init's checks: the block size, as a byte count.
+    pub fn check(o: EncodeOptions) Error!u32 {
+        if (o.block_size < 32 or o.block_size > 8192) return error.InvalidOption;
+        const bs: u32 = @intCast(o.block_size);
+        if (!std.math.isPowerOfTwo(bs)) return error.InvalidOption;
+        // `(unsigned)avctx->trellis > 16U`.
+        if (o.trellis != 0 and @as(u32, @bitCast(o.trellis)) > 16) return error.InvalidOption;
+        return bs;
+    }
 };
 
 /// FFmpeg's IMA WAV or MS encoder for a stream of one or two channels.
@@ -382,15 +497,12 @@ pub const Encoder = struct {
     /// adpcm_encode_init for 1 or 2 channels.
     pub fn init(gpa: std.mem.Allocator, codec: Codec, channels: u32, options: EncodeOptions) (EncodeOptions.Error || error{OutOfMemory})!Encoder {
         std.debug.assert(channels == 1 or channels == 2);
-        const bs = options.block_size;
-        if (bs < 32 or bs > 8192 or !std.math.isPowerOfTwo(bs)) return error.InvalidOption;
-        if (options.trellis > 16) return error.InvalidOption;
-        const frame_size: u32 = switch (codec) {
-            .ima_wav => (bs - 4 * channels) * 8 / (4 * channels) + 1,
-            .ms => (bs - 7 * channels) * 2 / channels + 2,
-        };
-        var e: Encoder = .{ .codec = codec, .channels = channels, .block_size = bs, .trellis = options.trellis, .frame_size = frame_size, .gpa = gpa };
-        if (options.trellis != 0) e.trellis_state = try Trellis.create(gpa, options.trellis);
+        const bs = try options.check();
+        // 0 to 16 once checked.
+        const trellis: u32 = @intCast(options.trellis);
+        const frame_size = encoderFrameSize(codec, channels, bs);
+        var e: Encoder = .{ .codec = codec, .channels = channels, .block_size = bs, .trellis = trellis, .frame_size = frame_size, .gpa = gpa };
+        if (trellis != 0) e.trellis_state = try Trellis.create(gpa, trellis);
         return e;
     }
 
@@ -402,14 +514,7 @@ pub const Encoder = struct {
     /// The MS stream's extradata (32 bytes): the samples per block, 7
     /// coefficient pairs.
     pub fn msExtradata(e: *const Encoder) [32]u8 {
-        var out: [32]u8 = undefined;
-        std.mem.writeInt(u16, out[0..2], @intCast(e.frame_size), .little);
-        std.mem.writeInt(u16, out[2..4], 7, .little);
-        for (0..7) |i| {
-            std.mem.writeInt(i16, out[4 + 4 * i ..][0..2], @intCast(adapt_coeff1[i] * 4), .little);
-            std.mem.writeInt(i16, out[6 + 4 * i ..][0..2], @intCast(adapt_coeff2[i] * 4), .little);
-        }
-        return out;
+        return msExtradataFor(e.frame_size);
     }
 
     /// adpcm_encode_frame: one block of `block_size` bytes from
@@ -497,6 +602,11 @@ pub const Encoder = struct {
                     const buf = try e.gpa.alloc(u8, 2 * n);
                     defer e.gpa.free(buf);
                     if (channels == 1) {
+                        // n is odd, so the last byte takes buf[n], which
+                        // FFmpeg's trellis never writes (stale memory):
+                        // zero here, as the unwritten rest (notes.md
+                        // "ADPCM").
+                        @memset(buf, 0);
                         try t.compress(.ms, planes[0][2..][0..n], 1, buf[0..n], &e.status[0]);
                         var i: usize = 0;
                         while (i < n) : (i += 2) {
@@ -878,8 +988,8 @@ fn renderVectors(gpa: std.mem.Allocator, w: *std.Io.Writer) !void {
             const encoder = f.next().?;
             const signal = f.next().?;
             const channels = try std.fmt.parseInt(u32, f.next().?, 10);
-            const block_size = try std.fmt.parseInt(u32, f.next().?, 10);
-            const trellis = try std.fmt.parseInt(u32, f.next().?, 10);
+            const block_size = try std.fmt.parseInt(i32, f.next().?, 10);
+            const trellis = try std.fmt.parseInt(i32, f.next().?, 10);
             const samples = try std.fmt.parseInt(usize, f.next().?, 10);
             try w.print("E {s} {s} {s} {d} {d} {d} {d}\n", .{ name, encoder, signal, channels, block_size, trellis, samples });
             const codec: Codec = if (std.mem.eql(u8, encoder, "adpcm_ima_wav")) .ima_wav else .ms;
@@ -894,7 +1004,7 @@ fn renderVectors(gpa: std.mem.Allocator, w: *std.Io.Writer) !void {
             try w.print("O ok\nI {d} {d} ", .{ e.frame_size, e.block_size });
             if (codec == .ms) try w.print("{x}\n", .{&e.msExtradata()}) else try w.writeAll("-\n");
             var d = try Decoder.init(.{ .codec = codec, .channels = channels, .block_align = e.block_size });
-            var rng: Rng = .{ .state = 0x9E3779B9 ^ (channels * 1000003 + @as(u32, @intCast(samples)) + block_size) };
+            var rng: Rng = .{ .state = 0x9E3779B9 ^ (channels * 1000003 + @as(u32, @intCast(samples)) + @as(u32, @intCast(block_size))) };
             var state: [2]i32 = .{ 0, 0 };
             const plane_store = try gpa.alloc(i16, 2 * e.frame_size);
             defer gpa.free(plane_store);
@@ -994,7 +1104,7 @@ fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
     const frame = d.decode(packet, planes[0..channels]) catch return;
     try testing.expect(frame.samples == n and frame.consumed <= packet.len);
     if (channels <= 2 and n >= 2) {
-        const options: EncodeOptions = .{ .block_size = 256, .trellis = bps % 3 };
+        const options: EncodeOptions = .{ .block_size = 256, .trellis = @intCast(bps % 3) };
         var e = try Encoder.init(gpa, codec, channels, options);
         defer e.deinit();
         const frame_planes = try gpa.alloc(i16, e.frame_size * channels);

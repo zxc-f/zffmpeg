@@ -497,6 +497,18 @@ pub const aac = struct {
     }
 };
 
+pub const adpcm = struct {
+    /// The ADPCM WAV fixtures (T31a): whether the port opens and decodes
+    /// each (`.reject` for its errors, which its tests name); what FFmpeg
+    /// makes of each is vectors/adpcm_wav.txt.
+    pub const all: []const mp3.Fixture = @import("fixtures/adpcm/manifest.zon");
+
+    /// The bytes of fixtures/adpcm/<name>.wav, embedded at compile time.
+    pub fn bytes(comptime name: []const u8) []const u8 {
+        return @embedFile("fixtures/adpcm/" ++ name ++ ".wav");
+    }
+};
+
 /// This file's own declarations: the WAV contract's `all` and `bytes`.
 const wav_contract = @This();
 
@@ -578,6 +590,7 @@ test "manifest names are unique and expectations are consistent" {
         expectConsistent(ogg);
         expectConsistent(mp3);
         expectConsistent(aac);
+        expectConsistent(adpcm);
     }
 }
 
@@ -591,6 +604,7 @@ test "every fixture file is present and matches its recorded SHA-256" {
     try expectHashes(ogg);
     try expectHashes(mp3);
     try expectHashes(aac);
+    try expectHashes(adpcm);
 }
 
 test "fixture names do not collide across contracts" {
@@ -632,6 +646,15 @@ test "fixture names do not collide across contracts" {
         expectDistinct(aac, flac);
         expectDistinct(aac, ogg);
         expectDistinct(aac, mp3);
+        expectDistinct(adpcm, wav_contract);
+        expectDistinct(adpcm, au);
+        expectDistinct(adpcm, aiff);
+        expectDistinct(adpcm, raw);
+        expectDistinct(adpcm, caf);
+        expectDistinct(adpcm, flac);
+        expectDistinct(adpcm, ogg);
+        expectDistinct(adpcm, mp3);
+        expectDistinct(adpcm, aac);
     }
 }
 

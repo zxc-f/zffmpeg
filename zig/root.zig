@@ -83,6 +83,8 @@
 //!   (`format/mp3decode.zig`).
 //! - `aacdecode`: an ADTS stream decoded as the ffmpeg program decodes it
 //!   (`format/aacdecode.zig`).
+//! - `wavadpcm`: IMA WAV and Microsoft ADPCM in WAV, decoded and encoded as
+//!   the ffmpeg program does (`format/wavadpcm.zig`, T31a).
 //! - `framehash`: FFmpeg's framecrc, framemd5 and streamhash muxers' text
 //!   for one audio stream (`format/framehash.zig`).
 //! - `seek`: the seek API, FFmpeg's `av_seek_frame` and
@@ -136,6 +138,7 @@ pub const raw = @import("format/raw.zig");
 pub const caf = @import("format/caf.zig");
 pub const flac = @import("format/flac.zig");
 pub const flacenc = @import("codec/flacenc.zig");
+pub const adpcm = @import("codec/adpcm.zig");
 pub const flacmux = @import("format/flacmux.zig");
 pub const ogg = @import("format/ogg.zig");
 pub const demux = @import("format/demux.zig");
@@ -157,6 +160,7 @@ pub const mpeg4audio = @import("codec/mpeg4audio.zig");
 pub const adtsmux = @import("format/adtsmux.zig");
 pub const aacdec = @import("codec/aacdec.zig");
 pub const aacdecode = @import("format/aacdecode.zig");
+pub const wavadpcm = @import("format/wavadpcm.zig");
 pub const id3v2 = @import("format/id3v2.zig");
 pub const id3v1 = @import("format/id3v1.zig");
 pub const framehash = @import("format/framehash.zig");
@@ -231,6 +235,7 @@ test {
     _ = @import("format/decoded.zig");
     _ = @import("format/mp3decode.zig");
     _ = @import("format/aacdecode.zig");
+    _ = @import("format/wavadpcm.zig");
     _ = @import("format/pcmdata.zig");
     _ = @import("codec/adpcm.zig");
     _ = @import("codec/tx.zig");

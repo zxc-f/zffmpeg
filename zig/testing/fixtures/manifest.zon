@@ -603,8 +603,8 @@
         .detected = .wav,
     },
     .{
-        .name = "fmt_adpcm",
-        .sha256 = "c78e8f744ef4ced5c34c22eec2da08691efa8147278c06937ab88e69c50d1609",
+        .name = "fmt_gsm",
+        .sha256 = "3a189de855aabc8f1f6341e70f76296fc82608ed0868728fdd91e9e98063b498",
         .expected = .{ .reject = .UnsupportedFormat },
         .detected = .wav,
     },
@@ -633,8 +633,8 @@
         .detected = .wav,
     },
     .{
-        .name = "extensible_subformat_adpcm",
-        .sha256 = "7550344848c60d2ae9b2d6b4f28bdcb3b905097ef8d4a1821f4318dda4a5e860",
+        .name = "extensible_subformat_gsm",
+        .sha256 = "e9a3511c85ebc439aee8b248c11d39c79045a66d60c861811ca80d461e613338",
         .expected = .{ .reject = .UnsupportedFormat },
         .detected = .wav,
     },
@@ -733,7 +733,7 @@
     },
     .{
         .name = "fmt_unsupported_before_invalid",
-        .sha256 = "6d875c806f3d508b7c1ae459a1a3bc97360e14c81c7c60145f10522679b3bac2",
+        .sha256 = "c12fd19038313d689108efddafd0ad52c59c6e2234eb194602b2a201cd165344",
         .expected = .{ .reject = .UnsupportedFormat },
         .detected = .wav,
     },

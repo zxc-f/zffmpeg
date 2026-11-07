@@ -68,8 +68,9 @@ WAV and FLAC read after leading ID3v2 tags; and T30b, FFmpeg's float AAC
 decoder for AAC-LC bit for bit, with ADTS decoded by zffmpeg and reported
 by zffprobe; and T30c, FFmpeg's SBR decoder bit for bit, with HE-AAC
 decoded, and T30d, its parametric stereo decoder bit for bit, with
-HE-AACv2 decoded, which completes T30. **Next: T31a (IMA and Microsoft
-ADPCM).
+HE-AACv2 decoded, which completes T30; and T31a, FFmpeg's IMA WAV and
+Microsoft ADPCM codecs packet for packet and sample for sample, decoded
+and encoded in WAV. **Next: T31b (ALAC).
 See [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as

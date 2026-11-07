@@ -81,7 +81,11 @@ it. Since T30b FFmpeg's float AAC decoder decodes AAC-LC bit for bit:
 `zffprobe` reports ADTS as ffprobe does and `zffmpeg` converts it into
 every output as the ffmpeg program does, HE-AAC's SBR (T30c) and
 HE-AACv2's parametric stereo (T30d) included. WAV and FLAC
-open after leading ID3v2 tags, as in FFmpeg.
+open after leading ID3v2 tags, as in FFmpeg. Since T31a FFmpeg's IMA WAV
+and Microsoft ADPCM codecs read and write WAV: `zffprobe` reports them as
+ffprobe does, and `zffmpeg` decodes them as the ffmpeg program does and
+encodes them (`-c:a adpcm_ima_wav`, `-c:a adpcm_ms`, with `-block_size`
+and `-trellis`) byte for byte as FFmpeg's encoders and muxer write them.
 [TODO.md](TODO.md) holds the completion
 evidence and the roadmap. Development is verified on Linux only. The compiler
 is **Zig 0.17.0**, enforced by the build.

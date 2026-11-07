@@ -907,8 +907,9 @@ def build_fixtures():
                        riff(fmt_chunk(tag=3, bits=16), data_chunk(MONO[:4])), "UnsupportedFormat"))
     fx.append(rejected("fmt_alaw_bits16", "fmt", "A-law (tag 6) declaring 16 bits: A-law is 8 bits.",
                        riff(fmt_chunk(tag=6, bits=16), data_chunk(MONO[:4])), "UnsupportedFormat"))
-    fx.append(rejected("fmt_adpcm", "fmt", "Tag 2 (Microsoft ADPCM) is not a contract encoding.",
-                       riff(fmt_chunk(tag=2, bits=4, block_align=1), data_chunk(MONO[:4])), "UnsupportedFormat"))
+    fx.append(rejected("fmt_gsm", "fmt", "Tag 0x0031 (GSM 6.10) is not a contract encoding (ADPCM, tags 2 and "
+                       "0x0011, is T31a's: the adpcm fixtures).",
+                       riff(fmt_chunk(tag=0x31, bits=0, block_align=65), data_chunk(MONO[:4])), "UnsupportedFormat"))
     fx.append(rejected("fmt_s24_block_align_mismatch", "fmt", "24-bit stereo with `block_align` 4 instead of 6.",
                        riff(fmt_chunk(channels=2, bits=24, block_align=4), data_chunk(STEREO[:4])),
                        "InvalidFormat"))
@@ -923,9 +924,9 @@ def build_fixtures():
                        riff(chunk(b"fmt ", extensible_fmt(
                            subformat=bytes.fromhex("2c806de046dbcf11b4d100805f6cbbea"))), data_chunk(MONO[:4])),
                        "UnsupportedFormat"))
-    fx.append(rejected("extensible_subformat_adpcm", "extensible",
-                       "The base subformat GUID with tag 2 (ADPCM).",
-                       riff(chunk(b"fmt ", extensible_fmt(sub_tag=2, bits=4, block_align=1)), data_chunk(MONO[:4])),
+    fx.append(rejected("extensible_subformat_gsm", "extensible",
+                       "The base subformat GUID with tag 0x0031 (GSM 6.10).",
+                       riff(chunk(b"fmt ", extensible_fmt(sub_tag=0x31, bits=0, block_align=65)), data_chunk(MONO[:4])),
                        "UnsupportedFormat"))
     fx.append(rejected("extensible_valid_bits_mismatch", "extensible",
                        "24-bit samples declaring 20 valid bits: only all bits valid. FFmpeg reads them as s24.",
@@ -988,8 +989,8 @@ def build_fixtures():
     fx.append(rejected("fmt_block_align_mismatch", "fmt", "Stereo with `block_align` 2 instead of 4.",
                        riff(fmt_chunk(channels=2, block_align=2), data_chunk(STEREO)), "InvalidFormat"))
     fx.append(rejected("fmt_unsupported_before_invalid", "fmt",
-                       "Precedence: tag 2 (ADPCM) with zero channels reports the unsupported tag first.",
-                       riff(fmt_chunk(tag=2, bits=4, channels=0, block_align=1), data_chunk([])),
+                       "Precedence: tag 0x0031 (GSM 6.10) with zero channels reports the unsupported tag first.",
+                       riff(fmt_chunk(tag=0x31, bits=0, channels=0, block_align=65), data_chunk([])),
                        "UnsupportedFormat"))
 
     # Chunk order and duplicates.
@@ -4616,25 +4617,7 @@ AAC_FFMPEG = {
 def aac_ffmpeg_input(name):
     """The s16 samples, interleaved, that aac_fixtures.sh encodes."""
     channels, rate, count, seed, kind, _, _ = AAC_FFMPEG[name]
-    if kind == "smooth":
-        return interleave(flac_signal(count, channels, seed=seed))
-    if kind == "noise":
-        return interleave(flac_signal(count, channels, seed=seed, amplitude=30000))
-    data = []
-    for c in range(channels):
-        out = []
-        for i in range(count):
-            t = i / rate
-            if kind == "tones":
-                v = 9000 * math.sin(2 * math.pi * (220 * (c + 1)) * t) + 4000 * math.sin(2 * math.pi * 3150 * t)
-            else:
-                # Clicks every 4000 samples over a quiet tone: short windows.
-                v = 2000 * math.sin(2 * math.pi * 440 * t)
-                if i % 4000 < 40:
-                    v += 24000 * (1 if (i // 7) % 2 else -1)
-            out.append(max(-32768, min(32767, round(v))))
-        data.append(out)
-    return interleave(data)
+    return signal_input(channels, rate, count, seed, kind)
 
 
 def build_aac_fixtures():
@@ -4725,6 +4708,267 @@ def build_aac_fixtures():
     return fx
 
 
+# --- ADPCM in WAV (T31a) ------------------------------------------------------
+#
+# IMA WAV (tag 0x0011) and Microsoft ADPCM (tag 0x0002) streams. The
+# adpcm_ffmpeg_* files are FFmpeg's encoders' output, made by
+# zig/testing/reference/adpcm_fixtures.sh from inputs this script writes
+# (`--adpcm-input NAME`) and committed; the others are built here, their
+# blocks pseudo-random bytes under valid (or deliberately invalid) block
+# headers, to reach every bit depth, channel count, block size, packet
+# split and duration rule of FFmpeg's demuxer and decoders. What FFmpeg
+# makes of each is vectors/adpcm_wav.txt (adpcm_wav_vectors.sh).
+
+ADPCM_DIR = HERE / "adpcm"
+ADPCM_MANIFEST = ADPCM_DIR / "manifest.zon"
+ADPCM_README = ADPCM_DIR / "README.md"
+
+# Each entry: channels, rate, sample count, seed, signal kind (as
+# AAC_FFMPEG's), the encoder options, and the file's SHA-256.
+ADPCM_FFMPEG = {
+    "adpcm_ffmpeg_ima_stereo_44k": (2, 44100, 30000, 81, "smooth", "-c:a adpcm_ima_wav",
+                                    "09a14251e9a11d0bf9ada25cf10269b1b1c5d6cdd3169c7a957886425cc9f203"),
+    "adpcm_ffmpeg_ima_mono_8k_256": (1, 8000, 9000, 82, "noise", "-c:a adpcm_ima_wav -block_size 256",
+                                     "f661ba792cf45d2b26ae56d0961584e83e8249a800f48edbbfca2a9057d6ddb6"),
+    "adpcm_ffmpeg_ima_trellis": (2, 22050, 12000, 83, "tones", "-c:a adpcm_ima_wav -trellis 6 -block_size 512",
+                                 "f0a9fcffeaa3cf15a210d8776079450a58c5eef2cd9735f1d7a8a9e5a3d2a3b2"),
+    "adpcm_ffmpeg_ima_96k": (1, 96000, 20000, 84, "transients", "-c:a adpcm_ima_wav",
+                             "b48dc5a801ad1753d6693487d0123a2842816b2773115ef4b36fb189acc1ee7e"),
+    "adpcm_ffmpeg_ms_stereo_44k": (2, 44100, 30000, 85, "smooth", "-c:a adpcm_ms",
+                                   "9c84b428724e14e7a0e1e76b6c6eb88fa72b198d3828b2f7de3c12121bf79733"),
+    "adpcm_ffmpeg_ms_mono_16k_8192": (1, 16000, 40000, 86, "noise", "-c:a adpcm_ms -block_size 8192",
+                                      "87dcb6bb6bb57b3107924789cf529601d5c64a504c4c414c27082044faa2785a"),
+    "adpcm_ffmpeg_ms_trellis": (2, 32000, 15000, 87, "tones", "-c:a adpcm_ms -trellis 5",
+                                "57cb1be50069f9368fc69ab9838bcb39c97e23726d08d0a111a23a8864036421"),
+    "adpcm_ffmpeg_ms_mono_32": (1, 11025, 3000, 88, "transients", "-c:a adpcm_ms -block_size 32",
+                                "81d3c91ae677626cd2b11b5efefa7ab6079d3806abfed547f2381a9263fd8b5d"),
+    "adpcm_ffmpeg_ms_short": (2, 48000, 100, 89, "smooth", "-c:a adpcm_ms",
+                              "891221726ac54fab079f0c110206f6673bed8cfced8d2c6ea2b51d4b443a0c5b"),
+}
+
+
+def adpcm_ffmpeg_input(name):
+    """The s16 samples, interleaved, that adpcm_fixtures.sh encodes."""
+    channels, rate, count, seed, kind, _, _ = ADPCM_FFMPEG[name]
+    return signal_input(channels, rate, count, seed, kind)
+
+
+def signal_input(channels, rate, count, seed, kind):
+    """AAC_FFMPEG's signal kinds: smoothed noise, loud noise, two tones, or
+    clicks over a quiet tone."""
+    if kind == "smooth":
+        return interleave(flac_signal(count, channels, seed=seed))
+    if kind == "noise":
+        return interleave(flac_signal(count, channels, seed=seed, amplitude=30000))
+    data = []
+    for c in range(channels):
+        out = []
+        for i in range(count):
+            t = i / rate
+            if kind == "tones":
+                v = 9000 * math.sin(2 * math.pi * (220 * (c + 1)) * t) + 4000 * math.sin(2 * math.pi * 3150 * t)
+            else:
+                # Clicks every 4000 samples over a quiet tone: short windows.
+                v = 2000 * math.sin(2 * math.pi * 440 * t)
+                if i % 4000 < 40:
+                    v += 24000 * (1 if (i // 7) % 2 else -1)
+            out.append(max(-32768, min(32767, round(v))))
+        data.append(out)
+    return interleave(data)
+
+
+class AdpcmLcg:
+    """A 64-bit LCG (flac_signal's) for the crafted ADPCM blocks."""
+
+    def __init__(self, seed):
+        self.state = seed & 0xFFFFFFFFFFFFFFFF
+
+    def next32(self):
+        self.state = (self.state * 6364136223846793005 + 1442695040888963407) & 0xFFFFFFFFFFFFFFFF
+        return self.state >> 32
+
+    def byte(self):
+        return self.next32() >> 24
+
+    def randrange(self, lo, hi=None):
+        if hi is None:
+            lo, hi = 0, lo
+        return lo + self.next32() % (hi - lo)
+
+
+def adpcm_bytes(rng, n):
+    return bytes(rng.byte() for _ in range(n))
+
+
+def ima_blocks(seed, channels, block_align, count, bad=()):
+    """`count` IMA WAV blocks: random bytes under headers with a valid step
+    index (an invalid one, 89 to 255, in the blocks listed in `bad`)."""
+    rng = AdpcmLcg(seed)
+    out = bytearray()
+    for k in range(count):
+        b = bytearray(adpcm_bytes(rng, block_align))
+        for c in range(channels):
+            if 4 * c + 3 < block_align:
+                b[4 * c + 2] = rng.randrange(89, 256) if k in bad else rng.randrange(89)
+                b[4 * c + 3] = 0
+        out += b
+    return bytes(out)
+
+
+def ms_blocks(seed, channels, block_align, count, bad=()):
+    """`count` Microsoft ADPCM blocks of `block_align` bytes (a channel's,
+    above two channels): random bytes under predictor indices 0 to 6 (7 to
+    255 in the blocks listed in `bad`)."""
+    rng = AdpcmLcg(seed)
+    out = bytearray()
+    for k in range(count):
+        if channels > 2:
+            for _ in range(channels):
+                b = bytearray(adpcm_bytes(rng, block_align))
+                b[0] = rng.randrange(7, 256) if k in bad else rng.randrange(7)
+                out += b
+        else:
+            b = bytearray(adpcm_bytes(rng, block_align))
+            for c in range(channels):
+                b[c] = rng.randrange(7, 256) if k in bad else rng.randrange(7)
+            out += b
+    return bytes(out)
+
+
+def ima_frame_size(channels, block_align, bits=4):
+    """av_get_audio_frame_duration2 for one IMA WAV block."""
+    return 1 + (block_align - 4 * channels) // (bits * channels) * 8
+
+
+def ms_frame_size(channels, block_align):
+    return 2 + (block_align - 7 * channels) * 2 // channels
+
+
+def adpcm_fmt(tag, channels, rate, block_align, bits=4, frame_size=None, byte_rate=None, cb=True, extra=None):
+    """A plain `fmt ` body as FFmpeg's muxer writes it: `cbSize` and the
+    extradata (IMA WAV's samples a block, MS's coefficients)."""
+    if frame_size is None:
+        frame_size = ima_frame_size(channels, block_align, bits) if tag == 0x11 else ms_frame_size(channels, block_align)
+    if byte_rate is None:
+        byte_rate = rate * block_align // max(frame_size, 1)
+    if extra is None:
+        if tag == 0x11:
+            extra = u16(frame_size & 0xFFFF)
+        else:
+            extra = u16(frame_size & 0xFFFF) + u16(7) + b"".join(
+                struct.pack("<hh", a * 4, b * 4) for a, b in zip((64, 128, 0, 48, 60, 115, 98), (0, -64, 0, 16, 0, -52, -58)))
+    return fmt_body(channels, rate, bits, tag=tag, block_align=block_align, byte_rate=byte_rate,
+                    cb_size=len(extra) if cb else None, extra=extra if cb else b"")
+
+
+def adpcm_wav(fmt, data, fact=None, before_fmt=(), after_data=()):
+    chunks = [*before_fmt, chunk(b"fmt ", fmt)]
+    if fact is not None:
+        chunks.append(chunk(b"fact", fact if isinstance(fact, bytes) else u32(fact)))
+    return riff(*chunks, chunk(b"data", data), *after_data)
+
+
+def build_adpcm_fixtures():
+    fx = []
+
+    def ok(name, rule, data, group="accepted"):
+        fx.append(Mp3Fixture(name, group, rule, data))
+
+    def bad(name, rule, data, error, group="rejected"):
+        fx.append(Mp3Fixture(name, group, rule, data, reject=error))
+
+    ima, ms = 0x11, 0x02
+    st = ima_blocks(1, 2, 1024, 6)
+    ok("adpcm_ima_stereo", "IMA WAV, stereo, 22050 Hz, six 1024-byte blocks and a fact count of their samples.",
+       adpcm_wav(adpcm_fmt(ima, 2, 22050, 1024), st, fact=6 * 1017))
+    for bits, align in ((2, 520), (3, 1000), (5, 1288)):
+        ok(f"adpcm_ima_{bits}bit", f"IMA WAV at {bits} bits a sample (FFmpeg's grouped codes), mono and stereo blocks "
+           f"of {align} bytes.", adpcm_wav(adpcm_fmt(ima, 2, 16000, align, bits=bits), ima_blocks(bits, 2, align, 5)))
+    ok("adpcm_ima_partial_block", "IMA WAV mono whose data ends 300 bytes into a block: a shorter last frame.",
+       adpcm_wav(adpcm_fmt(ima, 1, 8000, 512), ima_blocks(5, 1, 512, 4)[:3 * 512 + 300]))
+    ok("adpcm_ima_odd_align", "IMA WAV stereo with `block_align` 1030: each frame takes 1024 bytes, so the "
+       "decoder starts its next frame 6 bytes early, as FFmpeg's does inside a packet.",
+       adpcm_wav(adpcm_fmt(ima, 2, 44100, 1030), ima_blocks(6, 2, 1030, 9)))
+    ok("adpcm_ima_bad_step", "IMA WAV blocks 2 and 5 of 8 with a step index past 88: FFmpeg's decoder fails "
+       "those packets' frames, which the program drops.",
+       adpcm_wav(adpcm_fmt(ima, 1, 8000, 256), ima_blocks(7, 1, 256, 8, bad=(2, 5))))
+    bad("adpcm_ima_all_bad", "Every IMA WAV block with a bad step index: every decode fails, past the program's "
+        "error rate.", adpcm_wav(adpcm_fmt(ima, 1, 8000, 256), ima_blocks(8, 1, 256, 4, bad=(0, 1, 2, 3))),
+        "DecodeErrorRate")
+    bad("adpcm_ima_align_short", "IMA WAV stereo with `block_align` 6, shorter than its 8-byte header: no frame "
+        "has a sample.", adpcm_wav(adpcm_fmt(ima, 2, 8000, 6, frame_size=1), ima_blocks(9, 2, 6, 20)),
+        "DecodeErrorRate")
+    bad("adpcm_ima_bits8", "IMA WAV tag with 8 bits a sample: FFmpeg's adpcm_zork.",
+        adpcm_wav(adpcm_fmt(ima, 1, 8000, 256, bits=8, frame_size=505), ima_blocks(10, 1, 256, 2)),
+        "UnsupportedFormat")
+    bad("adpcm_ima_bits6", "IMA WAV at 6 bits: the demuxer's stream, which FFmpeg's decoder does not open.",
+        adpcm_wav(adpcm_fmt(ima, 1, 8000, 256, bits=6, frame_size=337), ima_blocks(11, 1, 256, 2)),
+        "UnsupportedFormat")
+    bad("adpcm_ima_3ch", "IMA WAV with three channels, which FFmpeg's decoder does not open.",
+        adpcm_wav(adpcm_fmt(ima, 3, 8000, 768), ima_blocks(12, 3, 768, 2)), "UnsupportedFormat")
+    ok("adpcm_ms_stereo", "Microsoft ADPCM stereo, 44100 Hz, 1024-byte blocks with a fact count.",
+       adpcm_wav(adpcm_fmt(ms, 2, 44100, 1024), ms_blocks(13, 2, 1024, 7), fact=7 * 1012))
+    ok("adpcm_ms_mono_fmt16", "Microsoft ADPCM mono in a 16-byte `fmt ` (no `cbSize`, no coefficients).",
+       adpcm_wav(adpcm_fmt(ms, 1, 8000, 256, cb=False), ms_blocks(14, 1, 256, 5)))
+    ok("adpcm_ms_6ch", "Microsoft ADPCM in 5.1's six channels, a 256-byte block each: FFmpeg's demuxer "
+       "multiplies `block_align` by the channels, and the decoder gives s16p.",
+       adpcm_wav(adpcm_fmt(ms, 6, 48000, 256, frame_size=500), ms_blocks(15, 6, 256, 4)))
+    ok("adpcm_ms_3ch", "Microsoft ADPCM with three channels and 100-byte blocks.",
+       adpcm_wav(adpcm_fmt(ms, 3, 16000, 100, frame_size=188), ms_blocks(16, 3, 100, 6)))
+    ok("adpcm_ms_tiny_blocks", "Microsoft ADPCM stereo with 13-byte blocks: one sample a frame, whose second "
+       "header sample FFmpeg writes past it.",
+       adpcm_wav(adpcm_fmt(ms, 2, 8000, 13, frame_size=1), ms_blocks(17, 2, 13, 30)))
+    ok("adpcm_ms_bad_predictor", "Microsoft ADPCM blocks 1 and 3 of 6 with a predictor index past 6.",
+       adpcm_wav(adpcm_fmt(ms, 2, 22050, 512), ms_blocks(18, 2, 512, 6, bad=(1, 3))))
+    bad("adpcm_ms_7ch", "Microsoft ADPCM with seven channels, which FFmpeg's decoder does not open.",
+        adpcm_wav(adpcm_fmt(ms, 7, 8000, 64, frame_size=116), ms_blocks(19, 7, 64, 2)), "UnsupportedFormat")
+    ok("adpcm_ms_extensible", "Microsoft ADPCM as the subformat of an extensible `fmt ` (96000 Hz), the "
+       "coefficients after the extension, as FFmpeg's muxer writes above 48 kHz.",
+       adpcm_wav(fmt_body(2, 96000, 4, tag=0xFFFE, block_align=1024, byte_rate=96000 * 1024 // 1012, cb_size=22 + 32,
+                          extra=u16(4) + u32(3) + u32(ms) + SUBFORMAT_BASE + adpcm_fmt(ms, 2, 96000, 1024)[20:]),
+                 ms_blocks(20, 2, 1024, 3), fact=3 * 1012))
+    ok("adpcm_ima_fmt_garbage", "IMA WAV whose `fmt ` declares `cbSize` 2 but holds 10 more bytes, which "
+       "FFmpeg skips.", adpcm_wav(adpcm_fmt(ima, 1, 8000, 256, extra=u16(505) + bytes(range(1, 11))[:10])[:18]
+                                  + u16(505) + bytes(range(1, 11)), ima_blocks(21, 1, 256, 3)))
+    ok("adpcm_fact_all_channels", "A fact count of every channel's samples (2 × 3 × 1017): the bit rate says so, "
+       "and FFmpeg's demuxer divides it by the channels.",
+       adpcm_wav(adpcm_fmt(ima, 2, 22050, 1024), ima_blocks(22, 2, 1024, 3), fact=2 * 3 * 1017))
+    ok("adpcm_fact_wrong", "A fact count far below the data's (10 samples for three blocks): FFmpeg ignores it "
+       "and takes the duration from the data's size.",
+       adpcm_wav(adpcm_fmt(ms, 1, 8000, 256), ms_blocks(23, 1, 256, 3), fact=10))
+    ok("adpcm_fact_zero_then_count", "A fact count of 0, then a second fact chunk: FFmpeg reads the second.",
+       riff(chunk(b"fmt ", adpcm_fmt(ms, 1, 8000, 256)), chunk(b"fact", u32(0)), chunk(b"fact", u32(1000)),
+            chunk(b"data", ms_blocks(24, 1, 256, 2))))
+    ok("adpcm_no_fact", "No fact chunk: the duration from the data's size at 4 bits a sample.",
+       adpcm_wav(adpcm_fmt(ima, 2, 11025, 512), ima_blocks(25, 2, 512, 5)))
+    ok("adpcm_fact_wrong_byte_rate", "A header byte rate the block size contradicts, which FFmpeg's demuxer "
+       "replaces, with a fact count of every channel's samples.",
+       adpcm_wav(adpcm_fmt(ms, 2, 8000, 256, byte_rate=1234), ms_blocks(26, 2, 256, 4), fact=2 * 4 * 500))
+    ok("adpcm_rf64", "Microsoft ADPCM in RF64, the sample count in `ds64`.",
+       rf64_wav(chunk(b"fmt ", adpcm_fmt(ms, 1, 8000, 256)), chunk(b"data", ms_blocks(27, 1, 256, 3)),
+                data_size=768, frames=1500))
+    ok("adpcm_ms_large_packets", "Microsoft ADPCM mono at 192000 Hz with 32-byte blocks: FFmpeg's demuxer reads "
+       "a power of two of blocks (8192 bytes) a packet.",
+       adpcm_wav(adpcm_fmt(ms, 1, 192000, 32), ms_blocks(28, 1, 32, 600)))
+    bad("adpcm_block_align_zero", "IMA WAV with `block_align` 0, which the port refuses (notes.md \"ADPCM\").",
+        adpcm_wav(adpcm_fmt(ima, 1, 8000, 0, frame_size=1, byte_rate=4000), ima_blocks(29, 1, 256, 2)),
+        "UnsupportedFormat")
+    bad("adpcm_fact_short", "A two-byte fact chunk, whose count FFmpeg reads from the bytes after it; the port "
+        "refuses (notes.md \"ADPCM\").", adpcm_wav(adpcm_fmt(ima, 1, 8000, 256), ima_blocks(30, 1, 256, 2), fact=b"\x10\x00"),
+        "UnsupportedFormat")
+    bad("adpcm_w64", "IMA WAV in Wave64, which the port does not read (notes.md \"ADPCM\").",
+        w64(w64_chunk(w64_guid(b"fmt "), adpcm_fmt(ima, 1, 8000, 256)), w64_chunk(w64_guid(b"data"), ima_blocks(31, 1, 256, 2))),
+        "UnsupportedFormat")
+    bad("adpcm_truncated", "IMA WAV whose `data` declares four blocks and holds three.",
+        riff(chunk(b"fmt ", adpcm_fmt(ima, 1, 8000, 256)), chunk(b"data", ima_blocks(32, 1, 256, 3), size=1024),
+             size_delta=256), "Truncated")
+    for name, (channels, rate, count, _, kind, options, _) in ADPCM_FFMPEG.items():
+        path = ADPCM_DIR / f"{name}.wav"
+        rule = (f"FFmpeg's encoder, {count} {kind} samples of {channels} channels at {rate} Hz, `{options}`.")
+        fx.append(Mp3Fixture(name, "ffmpeg", rule, path.read_bytes() if path.exists() else b"", made_by="ffmpeg"))
+    return fx
+
+
 def adts_probe_score(buf):
     """adts_aac_probe on a probe buffer (after any ID3v2 tags)."""
     end = len(buf) - 7
@@ -4774,7 +5018,7 @@ def render_mp3_manifest(fixtures):
 
 
 def outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures, flac_fixtures, ogg_fixtures,
-            mp3_fixtures, aac_fixtures):
+            mp3_fixtures, aac_fixtures, adpcm_fixtures):
     files = {WAV_DIR / f"{f.name}.wav": f.data for f in fixtures}
     files[MANIFEST] = render_manifest(
         fixtures, "// Each entry names wav/<name>.wav; see README.md for the rules and decisions.")
@@ -4809,6 +5053,12 @@ def outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures, fl
         "MP3 fixtures", "ADTS fixtures").replace("mp3/<name>.mp3; see mp3/README.md", "aac/<name>.aac; see aac/README.md").replace(
         "vectors/mp3.txt", "vectors/aac.txt").encode()
     files[AAC_README] = render_readme(AAC_README, render_ogg_table(aac_fixtures))
+    files.update({ADPCM_DIR / f"{f.name}.wav": f.data for f in adpcm_fixtures if f.made_by != "ffmpeg"})
+    files[ADPCM_MANIFEST] = render_mp3_manifest(adpcm_fixtures).replace(
+        "MP3 fixtures", "ADPCM fixtures").replace("mp3/<name>.mp3; see mp3/README.md", "adpcm/<name>.wav; see adpcm/README.md").replace(
+        "Streams, tags and packets are", "Streams and decoded samples are").replace(
+        "vectors/mp3.txt", "vectors/adpcm_wav.txt").encode()
+    files[ADPCM_README] = render_readme(ADPCM_README, render_ogg_table(adpcm_fixtures))
     return files
 
 
@@ -4837,6 +5087,12 @@ def check_ffmpeg_made(flac_fixtures):
             problems.append(f"missing FFmpeg-made fixture: {path.relative_to(HERE)}")
         elif digest is None or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
             problems.append(f"FFmpeg-made fixture differs from its recorded hash: {path.relative_to(HERE)}")
+    for name, (*_, digest) in ADPCM_FFMPEG.items():
+        path = ADPCM_DIR / f"{name}.wav"
+        if not path.exists():
+            problems.append(f"missing FFmpeg-made fixture: {path.relative_to(HERE)}")
+        elif digest is None or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            problems.append(f"FFmpeg-made fixture differs from its recorded hash: {path.relative_to(HERE)}")
     return problems
 
 
@@ -4849,6 +5105,8 @@ def main():
                         help="write the s16le input of FFmpeg-made Ogg fixture NAME to stdout and stop")
     parser.add_argument("--aac-input", metavar="NAME",
                         help="write the s16le input of FFmpeg-made AAC fixture NAME to stdout and stop")
+    parser.add_argument("--adpcm-input", metavar="NAME",
+                        help="write the s16le input of FFmpeg-made ADPCM fixture NAME to stdout and stop")
     args = parser.parse_args()
     if args.flac_input:
         sys.stdout.buffer.write(b"".join(struct.pack("<h", v) for v in flac_ffmpeg_input(args.flac_input)))
@@ -4858,6 +5116,9 @@ def main():
         return 0
     if args.aac_input:
         sys.stdout.buffer.write(b"".join(struct.pack("<h", v) for v in aac_ffmpeg_input(args.aac_input)))
+        return 0
+    if args.adpcm_input:
+        sys.stdout.buffer.write(b"".join(struct.pack("<h", v) for v in adpcm_ffmpeg_input(args.adpcm_input)))
         return 0
 
     fixtures = build_fixtures()
@@ -4869,20 +5130,23 @@ def main():
     ogg_fixtures = build_ogg_fixtures()
     mp3_fixtures = build_mp3_fixtures()
     aac_fixtures = build_aac_fixtures()
+    adpcm_fixtures = build_adpcm_fixtures()
     expected = outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures, flac_fixtures, ogg_fixtures,
-                       mp3_fixtures, aac_fixtures)
+                       mp3_fixtures, aac_fixtures, adpcm_fixtures)
     stale = [path for path, content in expected.items() if not path.exists() or path.read_bytes() != content]
     ffmpeg_made = ({FLAC_DIR / f"{f.name}.flac" for f in flac_fixtures if f.made_by == "ffmpeg"}
                    | {OGG_DIR / f"{name}.ogg" for name in OGG_FFMPEG}
-                   | {AAC_DIR / f"{name}.aac" for name in AAC_FFMPEG})
+                   | {AAC_DIR / f"{name}.aac" for name in AAC_FFMPEG}
+                   | {ADPCM_DIR / f"{name}.wav" for name in ADPCM_FFMPEG})
     extra = sorted((set(WAV_DIR.glob("*.wav")) | set(AU_DIR.glob("*.au")) | set(AIFF_DIR.glob("*.aiff"))
              | set(RAW_DIR.glob("*.raw")) | set(CAF_DIR.glob("*.caf")) | set(FLAC_DIR.glob("*.flac"))
-             | set(OGG_DIR.glob("*.ogg")) | set(MP3_DIR.glob("*.mp3")) | set(AAC_DIR.glob("*.aac")))
+             | set(OGG_DIR.glob("*.ogg")) | set(MP3_DIR.glob("*.mp3")) | set(AAC_DIR.glob("*.aac"))
+             | set(ADPCM_DIR.glob("*.wav")))
                    - set(expected) - ffmpeg_made)
     problems = check_ffmpeg_made(flac_fixtures)
     counts = (f"{len(fixtures)} WAV, {len(au_fixtures)} AU, {len(aiff_fixtures)} AIFF, {len(raw_fixtures)} raw PCM, "
-              f"{len(caf_fixtures)} CAF, {len(flac_fixtures)} FLAC, {len(ogg_fixtures)} Ogg, {len(mp3_fixtures)} MP3 "
-              f"and {len(aac_fixtures)} ADTS fixtures")
+              f"{len(caf_fixtures)} CAF, {len(flac_fixtures)} FLAC, {len(ogg_fixtures)} Ogg, {len(mp3_fixtures)} MP3"
+              f", {len(aac_fixtures)} ADTS and {len(adpcm_fixtures)} ADPCM fixtures")
 
     if args.check:
         for path in stale:

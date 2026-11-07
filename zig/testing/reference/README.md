@@ -208,6 +208,7 @@ and `seek_vectors.c`'s for their seeks:
 ```bash
 LC_ALL=C ./mp3-vectors zig/testing/fixtures/aac/*.aac | diff -u zig/testing/vectors/aac.txt -
 LC_ALL=C ./seek-vectors zig/testing/fixtures/aac/*.aac | diff -u zig/testing/vectors/seek_aac.txt -
+LC_ALL=C ./seek-vectors zig/testing/fixtures/adpcm/*.wav | diff -u zig/testing/vectors/seek_adpcm.txt -
 ```
 
 The T27d Vorbis vectors come from the reference's `libavformat` and
@@ -315,6 +316,19 @@ only the bytes FFmpeg writes are hashed (notes.md "ADPCM"):
 ```bash
 clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/adpcm_vectors.c .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o adpcm-vectors
 ./adpcm-vectors | diff -u zig/testing/vectors/adpcm.txt -
+```
+
+`adpcm_wav_vectors.sh` (T31a) prints, for every ADPCM WAV fixture, the
+stream the pinned ffprobe reports (codec, sample format, channels, rate,
+`duration_ts`) and the count and SHA-256 of the samples the pinned ffmpeg
+decodes, or that either fails; the Zig tests compare zffprobe's report
+and the decoded reader's samples with it. `adpcm_fixtures.sh` encodes the
+`adpcm_ffmpeg_*` fixtures with the reference build's encoders from
+generate.py's inputs; their hashes are generate.py's:
+
+```bash
+bash zig/testing/reference/adpcm_wav_vectors.sh .references/ffmpeg-install | diff -u zig/testing/vectors/adpcm_wav.txt -
+bash zig/testing/reference/adpcm_fixtures.sh .references/ffmpeg-install
 ```
 
 `opus_vectors.c` is `vorbis_vectors.c` for Opus: the first Opus stream of
@@ -778,6 +792,22 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   EOF"), zffmpeg before any output. `aac_ape_binary`'s AIFF, FLAC and Ogg
   cells are recorded (`KNOWN_AAC_DECODE_DIFFERENCES`: the program maps the
   APE cover art to a video stream and finds no encoder).
+- **ADPCM in WAV (T31a).** Every ADPCM fixture's zffprobe report against
+  ffprobe's (a stream FFmpeg's decoder does not open is refused by both,
+  ffprobe opening the decoder), its decoding by zffmpeg into each output of
+  the Ogg decoding section against the program's, through pipes too, and
+  generated inputs (stereo 44.1 kHz, mono 8 kHz, five samples, stereo
+  96 kHz for the extensible header, four channels) encoded by `-c:a
+  adpcm_ima_wav` and `-c:a adpcm_ms` with the default, 256, 32 and 8192
+  block sizes, trellis 4 and 8, `-ar 22050` and `-ac 1`, byte for byte as
+  WAV files and in their sample data on a pipe; block sizes and trellis
+  values the encoders refuse fail both, zffmpeg before any output.
+  Recorded: the five inputs the port refuses (`KNOWN_ADPCM_REFUSALS`:
+  `block_align` 0, a short `fact`, Wave64, data shorter than its chunk,
+  `adpcm_zork`), four fixtures' Ogg granules (`KNOWN_ADPCM_DECODE_DIFFERENCES`),
+  the four-channel input (FFmpeg downmixes, zffmpeg refuses) and MS mono
+  with trellis, whose unwritten bytes in FFmpeg's blocks are left out
+  (notes.md "ADPCM").
 - **MP2 output (T29d).** zffmpeg's MP2 (the `mp2` muxer, with `mp2` or
   `-c:a mp2fixed`) against the ffmpeg program's with `-bitexact`, for the
   FLAC output section's inputs and a decoded MP3, MP2 and Ogg Vorbis

@@ -479,7 +479,16 @@ pub fn probeWith(reader: *std.Io.Reader, limits: Limits, options: Options) Error
                 try leading.merge(t.dictionary);
             }
             std.debug.assert(Container.ofWav(info.variant) == input.container);
-            return .{ .container = input.container, .codec = .{ .pcm = info.codec }, .format = info.format, .frame_count = info.frame_count };
+            // ADPCM (T31a): the decoder's sample format, the demuxer's
+            // duration. ffprobe opens the decoder, and fails when it refuses
+            // the stream ("Invalid number of channels", IMA WAV bits
+            // outside 2 to 5).
+            if (info.adpcm) |a| a.params.check() catch return error.UnsupportedFormat;
+            const codec: codecs.Codec = if (info.adpcm) |a| switch (a.params.codec) {
+                .ima_wav => .adpcm_ima_wav,
+                .ms => .adpcm_ms,
+            } else .{ .pcm = info.codec };
+            return .{ .container = input.container, .codec = codec, .format = info.format, .frame_count = info.frame_count };
         },
         .au => {
             var parser: au.Parser = .init(input.reader(), limits.au);

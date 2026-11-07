@@ -30,8 +30,9 @@ const examples = [_]Example{
 
 /// The fixture directories, zig/testing/fixtures/<set>/, each named after its
 /// files' extension: wav (WAV and Wave64), au, aiff, raw (raw PCM), caf,
-/// flac, ogg and mp3 (MPEG audio, Layers I to III).
-const FixtureSet = enum { wav, au, aiff, raw, caf, flac, ogg, mp3, aac };
+/// flac, ogg, mp3 (MPEG audio, Layers I to III) and aac (ADTS); and adpcm,
+/// whose files are WAV (T31a).
+const FixtureSet = enum { wav, au, aiff, raw, caf, flac, ogg, mp3, aac, adpcm };
 
 /// A zffprobe process run with its expected exit code and output.
 const ProbeCase = struct {
@@ -489,6 +490,14 @@ const probe_cases = [_]ProbeCase{
     .{ .name = "ADTS none of whose packets decodes", .set = .aac, .fixture = "aac_lc_stereo_44k", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
     .{ .name = "ADTS from a pipe none of whose packets decodes", .set = .aac, .args = &.{"-"}, .stdin_fixture = "aac_id3v2_between", .exit_code = 3, .stderr = "zffprobe: -: UnsupportedFormat\n" },
     .{ .name = "ADTS without a sync word", .set = .aac, .fixture = "aac_no_sync", .exit_code = 2, .stderr_contains = ": Truncated\n" },
+    // T31a: ADPCM in WAV, with the duration FFmpeg's demuxer gives (the
+    // fact count divided by the channels here); a stream FFmpeg's decoder
+    // does not open fails, as ffprobe does; the port's refusals.
+    .{ .name = "IMA WAV ADPCM", .set = .adpcm, .fixture = "adpcm_fact_all_channels", .exit_code = 0, .stdout = "format=wav\ncodec=adpcm_ima_wav\nsample_fmt=s16p\nchannels=2\nchannel_layout=unknown\nsample_rate=22050\nnb_samples=3051\nduration_num=3051\nduration_den=22050\n", .stderr = "" },
+    .{ .name = "Microsoft ADPCM in six channels from a pipe", .set = .adpcm, .args = &.{"-"}, .stdin_fixture = "adpcm_ms_6ch", .exit_code = 0, .stdout = "format=wav\ncodec=adpcm_ms\nsample_fmt=s16p\nchannels=6\nchannel_layout=unknown\nsample_rate=48000\nnb_samples=2048\nduration_num=2048\nduration_den=48000\n", .stderr = "" },
+    .{ .name = "ADPCM with channels FFmpeg's decoder refuses", .set = .adpcm, .fixture = "adpcm_ms_7ch", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
+    .{ .name = "ADPCM with a short fact chunk", .set = .adpcm, .fixture = "adpcm_fact_short", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
+    .{ .name = "ADPCM in Wave64", .set = .adpcm, .fixture = "adpcm_w64", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
     // Forced, the resync finds a sync word in the samples, as FFmpeg's does.
     .{ .name = "ADTS forced on a WAV file", .args = &.{ "-f", "aac" }, .fixture = "mono_8k", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
     .{ .name = "Ogg Vorbis", .set = .ogg, .fixture = "ogg_vorbis_ffmpeg_44k", .exit_code = 0, .stdout = "format=ogg\ncodec=vorbis\nsample_fmt=fltp\nchannels=2\nchannel_layout=stereo\nsample_rate=44100\nnb_samples=30000\nduration_num=30000\nduration_den=44100\n", .stderr = "" },
@@ -591,7 +600,7 @@ const RawStdout = struct {
     nb_samples: u64,
 };
 
-const zffmpeg_usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout <layout>] -i <input | -> [-c copy|<encoder>] [-b:a <bit rate>] [-ar <rate>] [-ac <channels> | -ch_layout <layout>] [-dither_method <method>] [-dither_scale <scale>] [FLAC encoder options] [-f <format>] <output | ->\n";
+const zffmpeg_usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout <layout>] -i <input | -> [-c copy|<encoder>] [-b:a <bit rate>] [-ar <rate>] [-ac <channels> | -ch_layout <layout>] [-dither_method <method>] [-dither_scale <scale>] [FLAC or ADPCM encoder options] [-f <format>] <output | ->\n";
 
 // The paired WAV and AU fixtures hold the same samples, so each is the exact
 // expected output of converting the other.
@@ -818,6 +827,18 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "a bit rate the MP2 encoder refuses", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-b:a", "100k", "-f", "mp2", "-" }, .exit_code = 1, .stdout = "", .stderr_contains = ": InvalidOption\n" },
     .{ .name = "an invalid bit rate value", .args = &.{ "-i", "a.wav", "-b:a", "abc", "b.mp2" }, .exit_code = 1, .stderr = "zffmpeg: abc: invalid bit rate\n" },
     .{ .name = "MP2 copy is unsupported", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-c", "copy", "-f", "mp2", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
+    // T31a: ADPCM in WAV decoded and encoded; compare.py checks the bytes
+    // against FFmpeg's. The encoders' refusals come before any output.
+    .{ .name = "IMA WAV ADPCM from a pipe to raw PCM", .set = .adpcm, .args = &.{ "-i", "-" }, .stdin_input = "adpcm_ima_odd_align", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stdout_raw = .{ .args = &.{ "-f", "s16le", "-ch_layout", "stereo", "-sample_rate", "44100" }, .nb_samples = 4068 }, .stderr = "" },
+    .{ .name = "Microsoft ADPCM to raw PCM", .set = .adpcm, .args = &.{"-i"}, .input = "adpcm_ffmpeg_ms_short", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stdout_raw = .{ .args = &.{ "-f", "s16le", "-ch_layout", "stereo", "-sample_rate", "48000" }, .nb_samples = 1012 }, .stderr = "" },
+    .{ .name = "ADPCM every block of which fails", .set = .adpcm, .args = &.{"-i"}, .input = "adpcm_ima_all_bad", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stdout = "", .stderr_contains = ": DecodeErrorRate\n" },
+    .{ .name = "ADPCM copy is unsupported", .set = .adpcm, .args = &.{"-i"}, .input = "adpcm_ms_stereo", .tail = &.{ "-c", "copy", "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
+    .{ .name = "WAV to IMA WAV ADPCM", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-c:a", "adpcm_ima_wav", "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt \x14\x00\x00\x00\x11\x00\x02\x00", .stderr = "" },
+    .{ .name = "WAV to Microsoft ADPCM with a block size and trellis", .args = &.{"-i"}, .input = "mono_8k", .tail = &.{ "-c:a", "adpcm_ms", "-block_size", "256", "-trellis", "3", "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt \x32\x00\x00\x00\x02\x00\x01\x00", .stderr = "" },
+    .{ .name = "a block size the ADPCM encoder refuses", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-c:a", "adpcm_ms", "-block_size", "100", "-f", "wav", "-" }, .exit_code = 1, .stdout = "", .stderr_contains = ": InvalidOption\n" },
+    .{ .name = "a block size outside the option's range", .args = &.{ "-i", "a.wav", "-c:a", "adpcm_ms", "-block_size", "16", "b.wav" }, .exit_code = 1, .stderr_contains = "invalid value for: -block_size" },
+    .{ .name = "channels the ADPCM encoders refuse", .args = &.{"-i"}, .input = "extensible_5point1", .tail = &.{ "-c:a", "adpcm_ima_wav", "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedFormat\n" },
+    .{ .name = "ADPCM into Wave64 is unsupported", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-c:a", "adpcm_ms", "-f", "w64", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
     // A decoder that refuses the headers fails cleanly, before any output,
     // from a file (after the counting pass) and from a pipe.
     .{ .name = "Ogg Vorbis whose setup header the decoder refuses", .set = .ogg, .args = &.{"-i"}, .input = "ogg_vorbis_stereo", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stdout = "", .stderr_contains = ": InvalidVorbis\n" },
@@ -1114,5 +1135,9 @@ fn otherInputStdOut(b: *std.Build, zffmpeg: *std.Build.Step.Compile, case: Conve
 }
 
 fn fixturePath(b: *std.Build, set: FixtureSet, name: []const u8) std.Build.LazyPath {
-    return b.path(b.fmt("zig/testing/fixtures/{t}/{s}.{t}", .{ set, name, set }));
+    const extension = switch (set) {
+        .adpcm => "wav",
+        else => @tagName(set),
+    };
+    return b.path(b.fmt("zig/testing/fixtures/{t}/{s}.{s}", .{ set, name, extension }));
 }

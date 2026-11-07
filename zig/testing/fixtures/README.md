@@ -95,8 +95,8 @@ so most of the bounds rules here are stricter than FFmpeg's on purpose.
 | Bit depths that are not whole bytes | `UnsupportedFormat` (`fmt_bits12`): tag 1 takes 8, 16, 24, 32 or 64 bits, float 32 or 64, A-law and mu-law 8. | Rounds up to the next byte (12 bits reads as `pcm_s16le`). |
 | Extensible `wValidBitsPerSample` | 0 or equal to the container's bits (`extensible_valid_bits_zero`); anything else is `UnsupportedFormat` (`extensible_valid_bits_mismatch`). | Lets the valid bits override the container size. |
 | Channels and layout (T23b) | 1 to 64 channels (the default `Limits.max_channels`, libswresample's limit; above it `LimitExceeded`: `fmt_channels64`, `fmt_channels65`). The layout is FFmpeg's: an extensible mask naming exactly the channels is a native layout (`extensible_5point1`, `extensible_7point1_s24`, `extensible_mask_high`, whose position 20 WAVE does not define); a mask of 0 or with another channel count, and every plain header, leave it unspecified (`extensible_mask_zero`, `extensible_mask_mismatch`, `extensible_mask_extra`, `fmt_channels3`, `fmt_channels6`), which zffprobe reports as `unknown`, as ffprobe does. Each accepted stream records the layout ffprobe prints. | The same, without a channel limit. |
-| Extensible subformat | Tag 1, 3, 6 or 7 in a GUID of the three families FFmpeg reads as a format tag (`parse_waveformatex`): KSDATAFORMAT, ambisonic B-format and FFmpeg's "broken" shifted KSDATAFORMAT; another GUID or tag is `UnsupportedFormat` (`extensible_unknown_subformat`, `extensible_subformat_adpcm`; the other two families are unit tests in `wav.zig`). | Maps more GUIDs. |
-| `fact` chunk | Skipped like any unknown chunk: the frame count comes from `data` (`fmt_float32` has none). | Uses it for the duration of non-PCM codecs. |
+| Extensible subformat | Tag 1, 3, 6 or 7 (and ADPCM's 2 and 0x0011, T31a: the [adpcm fixtures](adpcm/README.md)) in a GUID of the three families FFmpeg reads as a format tag (`parse_waveformatex`): KSDATAFORMAT, ambisonic B-format and FFmpeg's "broken" shifted KSDATAFORMAT; another GUID or tag is `UnsupportedFormat` (`extensible_unknown_subformat`, `extensible_subformat_gsm`; the other two families are unit tests in `wav.zig`). | Maps more GUIDs. |
+| `fact` chunk | Skipped like any unknown chunk: the frame count comes from `data` (`fmt_float32` has none). ADPCM (T31a) takes its duration from it as FFmpeg does ([adpcm fixtures](adpcm/README.md)). | Uses it for the duration of non-PCM codecs. |
 | Odd `data` size | Possible for 8-bit mono and odd frame counts of 24-bit; the pad byte inside the extent is skipped like a chunk's, and the writer writes it. | Same pad rule. |
 | mu-law's negative zero (0x7F) | Decodes to 0 like 0xFF; the writer, like FFmpeg's encoder, writes 0 as 0xFF, so writer output never contains 0x7F. | Same. |
 | Sample rate above 192,000 Hz | `LimitExceeded`, a configurable policy limit (`fmt_rate_over_limit`). | No such limit. |
@@ -160,8 +160,8 @@ Within one structure, checks run in this order:
 4. **End of the extent**: a missing `fmt ` or `data` is `InvalidWave`.
 
 Fixtures that pin precedence: `rifx_truncated` (tag before truncation),
-`fmt_unsupported_before_invalid` (tag 2 before channels; before T21a it used
-tag 3, now supported), `extensible_mask_mismatch` (mask after channels),
+`fmt_unsupported_before_invalid` (tag 0x0031 before channels; before T21a it
+used tag 3, and before T31a tag 2, both now supported), `extensible_mask_mismatch` (mask after channels),
 `data_size_unknown`
 (sentinel before extent), `chunks_over_limit` (count before any other check on
 the 4,097th chunk) and `duplicate_data` (an error after audio).
@@ -288,12 +288,12 @@ of the Zig tables.
 | `fmt_bits12` | fmt | 52 | reject: `UnsupportedFormat` | Tag 1 with 12 bits in 2-byte samples: only whole-byte depths. FFmpeg rounds up and reads s16. | `30177bc9f218a9e3666d52fc9ee87abeeb2f682980a38bad4ffd26f699c31c64` |
 | `fmt_float_bits16` | fmt | 52 | reject: `UnsupportedFormat` | Tag 3 with 16-bit samples: float is 32 or 64 bits. | `35b8b9356cd816d5b43b03804b08e0bcd692580d12125460990aacb37eb3d21f` |
 | `fmt_alaw_bits16` | fmt | 52 | reject: `UnsupportedFormat` | A-law (tag 6) declaring 16 bits: A-law is 8 bits. | `379389d4268891ae69f192943e769a2975948fd00e010f32ba15a37e27cf3244` |
-| `fmt_adpcm` | fmt | 52 | reject: `UnsupportedFormat` | Tag 2 (Microsoft ADPCM) is not a contract encoding. | `c78e8f744ef4ced5c34c22eec2da08691efa8147278c06937ab88e69c50d1609` |
+| `fmt_gsm` | fmt | 52 | reject: `UnsupportedFormat` | Tag 0x0031 (GSM 6.10) is not a contract encoding (ADPCM, tags 2 and 0x0011, is T31a's: the adpcm fixtures). | `3a189de855aabc8f1f6341e70f76296fc82608ed0868728fdd91e9e98063b498` |
 | `fmt_s24_block_align_mismatch` | fmt | 52 | reject: `InvalidFormat` | 24-bit stereo with `block_align` 4 instead of 6. | `fbd7a6c580a15ebd14575426ed3e7febae1fe89d2a60358f6ada105f3eafeef4` |
 | `extensible_fmt18` | extensible | 54 | reject: `UnsupportedFormat` | Tag 0xFFFE in an 18-byte `fmt ` with `cbSize` 0. | `810fed57ee6ed5e35ae9ddd8d8c9492ea0bdff74a05bdbf4c107568f99294200` |
 | `extensible_cbsize_short` | extensible | 76 | reject: `UnsupportedFormat` | A 40-byte extensible `fmt ` declaring `cbSize` 10. | `9c3fe2614e94d8957e13a3f6bbc3872d2a2b1d80f641442a2d9d6c35e3a82a2f` |
 | `extensible_unknown_subformat` | extensible | 76 | reject: `UnsupportedFormat` | An extensible `fmt ` whose subformat is the AC-3 GUID. | `23b39f19a48d0f8c8b7f8837519dc4ccc07bff6a7453fac179145b5ff3482a3b` |
-| `extensible_subformat_adpcm` | extensible | 76 | reject: `UnsupportedFormat` | The base subformat GUID with tag 2 (ADPCM). | `7550344848c60d2ae9b2d6b4f28bdcb3b905097ef8d4a1821f4318dda4a5e860` |
+| `extensible_subformat_gsm` | extensible | 76 | reject: `UnsupportedFormat` | The base subformat GUID with tag 0x0031 (GSM 6.10). | `e9a3511c85ebc439aee8b248c11d39c79045a66d60c861811ca80d461e613338` |
 | `extensible_valid_bits_mismatch` | extensible | 80 | reject: `UnsupportedFormat` | 24-bit samples declaring 20 valid bits: only all bits valid. FFmpeg reads them as s24. | `ff3624938ccceda00f9422e69154bb0f73d9b587a5e70f9edbc65db72ea2daec` |
 | `extensible_mask_mismatch` | extensible | 84 | accept: 2 channels, 8000 Hz, 4 frames | Stereo with the mono channel mask (front center): FFmpeg ignores a mask that does not name exactly the channels, so the layout is unspecified (rejected before T23b). | `85cfb57100d4ba0f41662960bd0bd61a088299886aeab4d0fb11953d3b9fcb88` |
 | `extensible_truncated` | extensible | 50 | reject: `Truncated` | Input ends inside the 40-byte extensible `fmt `. | `84fa3ea6ecc07b9e08c7e5531ba04078b3bc8049146dc0b93aef67ddb0f888f4` |
@@ -309,7 +309,7 @@ of the Zig tables.
 | `fmt_rate0` | fmt | 52 | reject: `InvalidFormat` | Zero sample rate. | `1d7080024c4773fdaf47ecc1ff6174a424a6c339f348d3f680fb865d33e0b96b` |
 | `fmt_rate_over_limit` | fmt | 52 | reject: `LimitExceeded` | Sample rate 192,001 Hz, above the default limit. | `fb68abcc3c4d8912777b9d78d89cff6a0f7d645e9daca283fc0ecf42f93b780f` |
 | `fmt_block_align_mismatch` | fmt | 60 | reject: `InvalidFormat` | Stereo with `block_align` 2 instead of 4. | `7487494878462bb126a2858c54b4164bca7dac59d53a82c0ba68f1aee072f2df` |
-| `fmt_unsupported_before_invalid` | fmt | 44 | reject: `UnsupportedFormat` | Precedence: tag 2 (ADPCM) with zero channels reports the unsupported tag first. | `6d875c806f3d508b7c1ae459a1a3bc97360e14c81c7c60145f10522679b3bac2` |
+| `fmt_unsupported_before_invalid` | fmt | 44 | reject: `UnsupportedFormat` | Precedence: tag 0x0031 (GSM 6.10) with zero channels reports the unsupported tag first. | `c12fd19038313d689108efddafd0ad52c59c6e2234eb194602b2a201cd165344` |
 | `data_before_fmt` | order | 52 | reject: `InvalidWave` | `data` appears before any `fmt `. | `6dc6ff3326113206fd7c7766df7fd7bd8ee057a06dec6a6a9d042154c2c6462c` |
 | `missing_data` | order | 36 | reject: `InvalidWave` | `fmt ` but no `data` within the RIFF extent. | `96b0b94deea11168966c72d7ec8d7fbff14d4dd6ad06dbbd5089b034e0b4bb70` |
 | `duplicate_fmt` | order | 76 | reject: `InvalidWave` | Two `fmt ` chunks (FFmpeg ignores the second). | `c9d98fda8d44b0d655a71cd2858f5a6d905e647386e67bc01c800c703f837efc` |

@@ -185,7 +185,7 @@ pub const formats = [_]Format{
         .name = "wav",
         .long_name = "WAV / WAVE (Waveform Audio)",
         .demuxer = .{ .probe = wav.probeScore },
-        .muxer = .{ .extensions = &.{"wav"}, .mime_type = "audio/x-wav", .audio_codec = .{ .pcm = .s16le }, .carries = pcmOnly(wav.carries) },
+        .muxer = .{ .extensions = &.{"wav"}, .mime_type = "audio/x-wav", .audio_codec = .{ .pcm = .s16le }, .carries = wavCodecs },
     },
     .{
         .container = .w64,
@@ -333,11 +333,20 @@ fn pcmOnly(comptime carries: fn (pcm.Codec) bool) *const fn (codecs.Codec) bool 
         fn f(codec: codecs.Codec) bool {
             return switch (codec) {
                 .pcm => |p| carries(p),
-                // ADPCM goes in WAV once its writer path lands (T31a).
                 .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac, .adpcm_ima_wav, .adpcm_ms => false,
             };
         }
     }.f;
+}
+
+/// The WAV muxer's codecs: its PCM encodings, and IMA WAV and Microsoft
+/// ADPCM (T31a), which the Wave64 writer does not port (notes.md "ADPCM").
+fn wavCodecs(codec: codecs.Codec) bool {
+    return switch (codec) {
+        .pcm => |p| wav.carries(p),
+        .adpcm_ima_wav, .adpcm_ms => true,
+        .flac, .vorbis, .opus, .mp1, .mp2, .mp3, .aac => false,
+    };
 }
 
 fn flacOnly(codec: codecs.Codec) bool {

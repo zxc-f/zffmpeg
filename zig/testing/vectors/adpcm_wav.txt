@@ -1,0 +1,123 @@
+F adpcm_ima_stereo
+S adpcm_ima_wav s16p 2 22050 6102
+D 6102 290f2f298c527413a827011ba39b3793d38cc1a4b3bb5b76326200136c7001b6
+F adpcm_ima_2bit
+S adpcm_ima_wav s16p 2 16000 2600
+D 5125 eef072d7494748526ba8b6ed9270c952ab981ec959ca195cc5d2375fee65951c
+F adpcm_ima_3bit
+S adpcm_ima_wav s16p 2 16000 5000
+D 6565 2dfb5cfd20c905d28cfbb98c9988f28bbe3d0a3dba3beaeadb1385f77780a183
+F adpcm_ima_5bit
+S adpcm_ima_wav s16p 2 16000 6440
+D 5125 0cc6ab7a387365038cba112d94b6c747160f1b2e38cfbfc6b24fa7a695917d52
+F adpcm_ima_partial_block
+S adpcm_ima_wav s16p 1 8000 3672
+D 3644 9f6636f0bdb5b60adcde08dac2fefdd103b1db2a3b2303eeeac467d0826894e3
+F adpcm_ima_odd_align
+S adpcm_ima_wav s16p 2 44100 9270
+D 4068 302f286857a16b751e09ab34b7118460e168252a2bf9278258f746943eb53747
+F adpcm_ima_bad_step
+S adpcm_ima_wav s16p 1 8000 4096
+D 3030 07e361ec5bfe71c117626134f4e35cb871f74c7378db534f992f4da012b51802
+F adpcm_ima_all_bad
+S adpcm_ima_wav s16p 1 8000 2048
+D error
+F adpcm_ima_align_short
+S adpcm_ima_wav s16p 2 8000 120
+D error
+F adpcm_ima_bits8
+S adpcm_zork unknown 1 8000 1010
+D error
+F adpcm_ima_bits6
+S error
+D error
+F adpcm_ima_3ch
+S error
+D error
+F adpcm_ms_stereo
+S adpcm_ms s16 2 44100 7084
+D 7084 e75788c325cdbc53b82b415f31909008ccb8d6f6ac452ab92a8c93e7779787d5
+F adpcm_ms_mono_fmt16
+S adpcm_ms s16 1 8000 2560
+D 2500 bfcf2dc5e688c1269d46c254c8c39a0804eba753eaa71a8e0ac85a4c301ce05f
+F adpcm_ms_6ch
+S adpcm_ms s16p 6 48000 2048
+D 2000 45a2ece1a00fadf575e615c92e8a8211ab4c2c96effd570fa80f6a06ec9e2bfb
+F adpcm_ms_3ch
+S adpcm_ms s16p 3 16000 1200
+D 1128 c3aaf5e8f8b30fdc98e17bc7bdd8cdbc1424f12d8cb7a9e23c8710ca3e7b4517
+F adpcm_ms_tiny_blocks
+S adpcm_ms s16 2 8000 390
+D 1 b48df29bc19a6a5d78edb98c5b1f092fe22f35f173735b2f6326d5fda3f19974
+F adpcm_ms_bad_predictor
+S adpcm_ms s16 2 22050 3072
+D 1500 198a9282e621285552b63312e342c93056020ee579c27c03daea97227d2a1698
+F adpcm_ms_7ch
+S error
+D error
+F adpcm_ms_extensible
+S adpcm_ms s16 2 96000 3036
+D 3036 b36dbbb34d4be492e107e3d8bdf5251a92411c9598b17e0f96ac68c93ccdfb1e
+F adpcm_ima_fmt_garbage
+S adpcm_ima_wav s16p 1 8000 1536
+D 1515 987d36a8fc44eba80d1e02b3acbda9207e0af9a2aa48c98092a32a37b332a190
+F adpcm_fact_all_channels
+S adpcm_ima_wav s16p 2 22050 3051
+D 3051 ffd472b4c87273bba2f0fb5957facf96cf40fa2d66e6da8256b2ed188e5da093
+F adpcm_fact_wrong
+S adpcm_ms s16 1 8000 1536
+D 1500 ebe71b43dc827b8859b003586f08ca1f2b79d3efb5bfc04f7c6d785408a550c5
+F adpcm_fact_zero_then_count
+S adpcm_ms s16 1 8000 1000
+D 1000 9124f5f04b416c2fdf5525353f54a56160383f5cc3d8b03c2590d4072ec5bde9
+F adpcm_no_fact
+S adpcm_ima_wav s16p 2 11025 2560
+D 2525 09fa2e863855d50c0abd4f2406a6d39946e234428e0fc4a2ff42c500457facde
+F adpcm_fact_wrong_byte_rate
+S adpcm_ms s16 2 8000 4000
+D 976 ac0be506687e8cf1331ec869208b15c3fbbc591ab46c925661e06e12da8e95a3
+F adpcm_rf64
+S adpcm_ms s16 1 8000 1500
+D 1500 f832dfdc1328bb9e6c105a214bd9f0fb1fe1302c34cdee44241110d7a4c07b9a
+F adpcm_ms_large_packets
+S adpcm_ms s16 1 192000 38400
+D 31200 1d4302c9a732a66cdeb32eee267605df052cdea9e0108ffe7f2d113f223016eb
+F adpcm_block_align_zero
+S adpcm_ima_wav s16p 1 8000 1024
+D 1017 00e37a77dcf9dc75fe4b06242bfd1484605c165cef2e018a9ac406ffe403cf03
+F adpcm_fact_short
+S adpcm_ima_wav s16p 1 8000 1633943568
+D 1010 296857fc03eadf4be1ae386e7e990f0e0afea597487b914395364722acce595d
+F adpcm_w64
+S adpcm_ima_wav s16p 1 8000 1010
+D 1010 bcd29e2b8e05ef7691b27056403ea2cb91f68528a0661f840e9af84f84c7d653
+F adpcm_truncated
+S adpcm_ima_wav s16p 1 8000 1515
+D 1515 1b6c777b0239228a1f2ba4dd3f38ecd8d0f348af9230966c9f2c398477f520ae
+F adpcm_ffmpeg_ima_stereo_44k
+S adpcm_ima_wav s16p 2 44100 30000
+D 30510 a5c973edcf2d967989d0039b17efe6e8343ed4c12906619f81960342033ffa1c
+F adpcm_ffmpeg_ima_mono_8k_256
+S adpcm_ima_wav s16p 1 8000 9000
+D 9090 117fe5434d13b713c4fb1766fcd4ca5393037688111ecaf9dcf70016410f515b
+F adpcm_ffmpeg_ima_trellis
+S adpcm_ima_wav s16p 2 22050 12000
+D 12120 761437a2c292dc1fbd28a6502befccd235ed846213604bd2baeb6eda4b3f6b50
+F adpcm_ffmpeg_ima_96k
+S adpcm_ima_wav s16p 1 96000 20000
+D 20410 0dc1f64694ff2e1cafc87497cb2920178503d52e16e4adc18b6db52f113d525a
+F adpcm_ffmpeg_ms_stereo_44k
+S adpcm_ms s16 2 44100 30000
+D 30360 849b5f1ba31612fcacbb4ce22728f132b8217debd75e1abe2758664387c38f9f
+F adpcm_ffmpeg_ms_mono_16k_8192
+S adpcm_ms s16 1 16000 40000
+D 49116 71d655ddf70c7200a7bc0572cffde22f8cfe28991e1bce144a1189cc8111b3a9
+F adpcm_ffmpeg_ms_trellis
+S adpcm_ms s16 2 32000 15000
+D 15180 37618053cab8ae54a53b4304ebd9a5605abfd7ca0dcc88a5c5dd67d0c783c914
+F adpcm_ffmpeg_ms_mono_32
+S adpcm_ms s16 1 11025 3000
+D 3016 a9aea2675f58dba4827e531d2166356ea3a8733f7a92899bb7c5e4b8a513f0f5
+F adpcm_ffmpeg_ms_short
+S adpcm_ms s16 2 48000 1024
+D 1012 65620ac278de8acf7303058849f72fc5c575139b719111f8583ab93be0cb894d

@@ -36,6 +36,7 @@ const audio = @import("../core/audio.zig");
 const samples_storage = @import("../core/samples.zig");
 const metadata = @import("../core/metadata.zig");
 const pcm = @import("../codec/pcm.zig");
+const adpcm = @import("../codec/adpcm.zig");
 const skip = @import("../io/skip.zig");
 const pcmdata = @import("pcmdata.zig");
 const seek = @import("seek.zig");
@@ -82,14 +83,50 @@ pub const Limits = struct {
 };
 
 pub const Info = struct {
+    /// The PCM encoding of `data`; for ADPCM (`adpcm`), s16le, the
+    /// decoded samples' encoding.
     codec: pcm.Codec,
-    /// The decoded stream: `sample_format` is `codec.storage()`.
+    /// The decoded stream: `sample_format` is `codec.storage()`; for ADPCM,
+    /// FFmpeg's decoder's format (s16p for IMA WAV and for Microsoft ADPCM
+    /// above two channels, else s16).
     format: audio.Format,
     /// Sample frames in the `data` chunk; null when its length is unknown
     /// (`Limits.unknown_length`) and the data runs to the end of the stream.
+    /// For ADPCM, the stream's duration as FFmpeg's demuxer sets it (from
+    /// `ds64` or `fact`, else from the data's size), null without one; the
+    /// decoder may give another count (`Adpcm.samples`).
     frame_count: ?u64,
     /// RIFF (or RF64/BW64), or Wave64.
     variant: Variant,
+    /// Set when `data` holds ADPCM blocks (T31a): `readData` then gives
+    /// their bytes, and `readSamples` refuses.
+    adpcm: ?Adpcm = null,
+};
+
+/// An ADPCM stream in WAV (T31a): FFmpeg's `adpcm_ima_wav` (tag 0x0011) or
+/// `adpcm_ms` (tag 0x0002), plain or as an extensible subformat. RIFF and
+/// RF64 only (notes.md "ADPCM").
+pub const Adpcm = struct {
+    /// The decoder's parameters, as FFmpeg's demuxer sets them:
+    /// `block_align` multiplied by the channels for Microsoft ADPCM above
+    /// two (wavdec.c).
+    params: adpcm.Params,
+    /// The bytes of each packet FFmpeg's demuxer reads (`wav_read_packet`
+    /// with `ff_pcm_default_packet_size`), the last one aside.
+    packet_len: u32,
+    /// Bytes of `data`; null when the data runs to the end of the stream.
+    data_len: ?u64,
+    /// The stream's bit rate as `ff_get_wav_header` leaves it: the byte
+    /// rate's, unless the block's duration gives another (compute_bitrate).
+    bit_rate: i64,
+
+    /// The samples a channel FFmpeg's decoder gives when every block's
+    /// header is valid; null for data of unknown length, or a count past
+    /// 64 bits.
+    pub fn samples(a: Adpcm) ?u64 {
+        const len = a.data_len orelse return null;
+        return a.params.samplesInData(a.packet_len, len);
+    }
 };
 
 /// Where a parser puts the tags it reads (T21c): the `LIST`/`INFO` and `bext`
@@ -114,6 +151,8 @@ const tag_pcm = 1;
 const tag_float = 3;
 const tag_alaw = 6;
 const tag_mulaw = 7;
+const tag_ms_adpcm = 0x0002;
+const tag_ima_adpcm = 0x0011;
 const tag_extensible = 0xFFFE;
 
 /// The KSDATAFORMAT subformat GUIDs share these last 12 bytes; the first 4
@@ -298,8 +337,16 @@ pub const Parser = struct {
     /// Set together by the `fmt ` chunk.
     format: ?audio.Format = null,
     codec: pcm.Codec = .s16le,
-    /// Bytes of one encoded frame.
+    /// Bytes of one encoded frame; 1 for ADPCM, whose blocks are read as bytes.
     frame_bytes: u32 = 0,
+    /// ADPCM blocks (T31a): set by `fmt `, the data's length by `data`.
+    adpcm: ?Adpcm = null,
+    /// FFmpeg's `sample_count`, for an ADPCM stream's duration: `ds64`'s,
+    /// else the first nonzero `fact` count before `data`.
+    sample_count: u64 = 0,
+    /// A `fact` chunk too short for its count came while `sample_count`
+    /// was 0: FFmpeg reads the count from the bytes after it.
+    short_fact: bool = false,
     /// The sample data's reader (T65b): the bytes of `data` not yet
     /// delivered (none when the data runs to the end of the stream), and
     /// whether a byte seek landed inside a frame, so that reads keep whole
@@ -433,6 +480,7 @@ pub const Parser = struct {
     /// `OutputTooSmall`, and before `readHeader` the end. Only for encodings stored as s16 (others are `UnsupportedFormat`) (s16le, A-law,
     /// mu-law); use `readData` and `pcm.decode` for the others.
     pub fn readSamples(p: *Parser, output: []i16) Error![]i16 {
+        if (p.adpcm != null) return error.UnsupportedFormat;
         return p.data.readSamples(p.codec, output);
     }
 
@@ -502,7 +550,10 @@ pub const Parser = struct {
 
     /// The `fmt ` checks, in the contract's order: the format tag, the
     /// extensible layout and subformat, the bit depth, channels and mask,
-    /// rate, `block_align`, then the size of a plain chunk.
+    /// rate, `block_align`, then the size of a plain chunk. ADPCM (T31a)
+    /// takes any `block_align` but 0 and any chunk size from 16 bytes,
+    /// skipping its `cbSize` and extra bytes, as `ff_get_wav_header` reads
+    /// them.
     fn readFormat(p: *Parser, size: u64) Error!void {
         if (p.format != null) return error.InvalidWave;
         if (size < 16) return error.InvalidFormat;
@@ -511,7 +562,7 @@ pub const Parser = struct {
         const tag = std.mem.readInt(u16, fields[0..2], .little);
         const channels = std.mem.readInt(u16, fields[2..4], .little);
         const rate = std.mem.readInt(u32, fields[4..8], .little);
-        // fields[8..12] is byte_rate: informational, never validated or used.
+        const byte_rate = std.mem.readInt(u32, fields[8..12], .little);
         const block_align = std.mem.readInt(u16, fields[12..14], .little);
         const bits = std.mem.readInt(u16, fields[14..16], .little);
 
@@ -519,26 +570,65 @@ pub const Parser = struct {
         var sub_tag: u32 = tag;
         var mask: ?u32 = null;
         var valid_bits: u16 = 0;
+        var cb_size: u16 = 0;
+        // Bytes of the chunk read so far.
+        var read: u64 = 16;
         if (extensible) {
-            if (size != 40) return error.UnsupportedFormat;
+            if (size < 40) return error.UnsupportedFormat;
             const extension = try p.readArray(24);
-            if (std.mem.readInt(u16, extension[0..2], .little) != 22) return error.UnsupportedFormat;
+            read = 40;
+            cb_size = std.mem.readInt(u16, extension[0..2], .little);
+            if (cb_size < 22) return error.UnsupportedFormat;
             valid_bits = std.mem.readInt(u16, extension[2..4], .little);
             mask = std.mem.readInt(u32, extension[4..8], .little);
             if (!tagBasedSubformat(extension[12..24])) return error.UnsupportedFormat;
             sub_tag = std.mem.readInt(u32, extension[8..12], .little);
         }
-        switch (sub_tag) {
-            tag_pcm, tag_float, tag_alaw, tag_mulaw => {},
+        const adpcm_codec: ?adpcm.Codec = switch (sub_tag) {
+            tag_pcm, tag_float, tag_alaw, tag_mulaw => null,
+            // ff_wav_codec_get_id: 8 bits make it adpcm_zork.
+            tag_ima_adpcm => if (bits == 8) return error.UnsupportedFormat else .ima_wav,
+            tag_ms_adpcm => .ms,
             else => return error.UnsupportedFormat,
-        }
-        const codec = codecFor(sub_tag, bits) orelse return error.UnsupportedFormat;
+        };
+        // The PCM extensible chunk is exactly the 22-byte extension.
+        if (adpcm_codec == null and extensible and (size != 40 or cb_size != 22)) return error.UnsupportedFormat;
+        // ADPCM has no PCM encoding; s16le stands for its decoded samples.
+        const codec: pcm.Codec = if (adpcm_codec != null) .s16le else codecFor(sub_tag, bits) orelse return error.UnsupportedFormat;
         if (valid_bits != 0 and valid_bits != bits) return error.UnsupportedFormat;
         if (channels == 0) return error.InvalidFormat;
         if (channels > p.limits.max_channels) return error.LimitExceeded;
         const layout = layoutFor(mask, channels);
         if (rate == 0) return error.InvalidFormat;
         if (rate > p.limits.max_sample_rate) return error.LimitExceeded;
+        if (adpcm_codec) |ac| {
+            // Wave64's demuxer reads ADPCM differently (notes.md "ADPCM").
+            if (p.variant == .w64) return error.UnsupportedFormat;
+            if (block_align == 0) return error.UnsupportedFormat;
+            // `cbSize`, the extradata (neither decoder reads it) and any
+            // bytes after it.
+            skip.discardAll(p.reader, size - read) catch |err| return mapRead(err);
+            p.consumeExtent(size);
+            try p.skipPad(p.variant.padAfter(size));
+            var params: adpcm.Params = .{ .codec = ac, .channels = channels, .block_align = block_align, .bits_per_coded_sample = bits };
+            // compute_bitrate: the byte rate a block's duration gives
+            // replaces the header's when it differs.
+            var bit_rate: i64 = @as(i64, byte_rate) * 8;
+            const duration = params.blockDuration();
+            if (duration > 0) {
+                const expected = @divTrunc(8 * @as(i64, rate) * block_align, duration);
+                if (@divTrunc(bit_rate, 8) != @divTrunc(expected, 8)) bit_rate = expected;
+            }
+            // wavdec.c: Microsoft ADPCM above two channels holds a block a
+            // channel.
+            if (ac == .ms and channels > 2 and block_align < std.math.maxInt(i32) / @as(u32, channels)) params.block_align *= channels;
+            const sample_format: audio.SampleFormat = if (ac == .ima_wav or channels > 2) .s16p else .s16;
+            p.format = .{ .sample_rate = rate, .layout = layout, .sample_format = sample_format };
+            p.codec = codec;
+            p.frame_bytes = 1;
+            p.adpcm = .{ .params = params, .packet_len = adpcmPacketLen(params.block_align, rate, channels), .data_len = null, .bit_rate = bit_rate };
+            return;
+        }
         // At most 8 bytes times 65535 channels: no overflow.
         const sample_bytes: u32 = codec.bytesPerSample();
         const frame_bytes = sample_bytes * channels;
@@ -564,6 +654,7 @@ pub const Parser = struct {
 
     fn beginData(p: *Parser, header: ChunkHeader) Error!Info {
         const format = p.format orelse return error.InvalidWave;
+        if (p.adpcm != null) return p.beginAdpcmData(header, format);
         const size: u64 = if (!header.unknown) header.size else p.ds64_data_size orelse {
             if (!p.limits.unknown_length) return error.UnsupportedStreamingSize;
             // The data is the rest of the stream; `finish` reads nothing after it.
@@ -588,9 +679,49 @@ pub const Parser = struct {
         return .{ .codec = p.codec, .format = format, .frame_count = size / p.frame_bytes, .variant = p.variant };
     }
 
+    /// `data` holding ADPCM blocks: any length, and the duration FFmpeg's
+    /// demuxer gives the stream (wav_read_header after its chunk loop).
+    fn beginAdpcmData(p: *Parser, header: ChunkHeader, format: audio.Format) Error!Info {
+        const a = &p.adpcm.?;
+        // A `fact` FFmpeg reads past (notes.md "ADPCM").
+        if (p.short_fact) return error.UnsupportedFormat;
+        // FFmpeg refuses a negative `ds64` count.
+        if (p.sample_count > std.math.maxInt(i64)) return error.InvalidRiff;
+        const known: ?u64 = if (!header.unknown) header.size else p.ds64_data_size;
+        if (known) |size| {
+            try p.checkExtent(size);
+            p.consumeExtent(size);
+            p.data_pad = p.variant.padAfter(size);
+        } else if (!p.limits.unknown_length) return error.UnsupportedStreamingSize;
+        a.data_len = known;
+        p.data = .init(p.reader, 1, known);
+        p.state = .data;
+        if (p.seeker) |seeker| {
+            p.data_offset = seeker.position();
+            if (known) |size| p.data_end = std.math.add(u64, p.data_offset, size) catch return error.InvalidRiff;
+        }
+        const duration = adpcmDuration(a.*, format, known orelse 0, p.sample_count);
+        return .{ .codec = p.codec, .format = format, .frame_count = duration, .variant = p.variant, .adpcm = a.* };
+    }
+
     /// A chunk other than `fmt ` and `data`: tags when collecting them from a
     /// RIFF stream, else skipped.
     fn otherChunk(p: *Parser, header: ChunkHeader) Error!void {
+        // wavdec.c reads the first nonzero count before `data`; it matters
+        // only to ADPCM's duration.
+        if (p.state == .header and p.variant == .wav and p.sample_count == 0 and !p.short_fact and std.mem.eql(u8, &header.id, "fact")) {
+            if (header.size < 4) {
+                p.short_fact = true;
+            } else {
+                try p.checkExtent(header.size);
+                const count = try p.readArray(4);
+                p.consumeExtent(4);
+                p.sample_count = std.mem.readInt(u32, &count, .little);
+                skip.discardAll(p.reader, header.size - 4) catch |err| return mapRead(err);
+                p.consumeExtent(header.size - 4);
+                return p.skipPad(p.variant.padAfter(header.size));
+            }
+        }
         if (p.tags) |tags| if (p.variant == .wav) {
             // wavdec.c accepts both spellings of LIST.
             if (std.mem.eql(u8, &header.id, "LIST") or std.mem.eql(u8, &header.id, "list")) {
@@ -690,9 +821,15 @@ pub const Parser = struct {
         if (stream != 0 and stream != -1) return error.InvalidStream;
         const format = p.format.?; // set before `data`
         const rate: i64 = format.sample_rate;
-        const block_align: i64 = p.frame_bytes;
-        // FFmpeg replaces a PCM header's byte rate with this one.
-        const byte_rate = block_align * rate;
+        // ff_pcm_read_seek's block and byte rate: for PCM FFmpeg replaces
+        // the header's byte rate with the frames'; ADPCM's comes from its
+        // bit rate (T31a).
+        const block_align: i64, const byte_rate: i64 = if (p.adpcm) |a|
+            .{ a.params.block_align, if (a.bit_rate != 0) a.bit_rate >> 3 else a.params.block_align * rate }
+        else
+            .{ p.frame_bytes, @as(i64, p.frame_bytes) * rate };
+        // ff_pcm_read_seek's -1: no byte rate (an ADPCM bit rate below 8).
+        if (byte_rate <= 0) return error.InvalidStream;
         var ts = timestamp;
         if (stream == -1) ts = seek.defaultStreamTimestamp(ts, .{ .num = 1, .den = @intCast(rate) });
         const offset: i64 = @intCast(p.data_offset);
@@ -742,7 +879,8 @@ pub const Parser = struct {
         const fields = try p.readArray(28);
         const riff_size = std.mem.readInt(u64, fields[0..8], .little);
         const data_size = std.mem.readInt(u64, fields[8..16], .little);
-        // fields[16..24] is the sample count: informational, never used.
+        // The sample count: an ADPCM stream's duration, else unused.
+        p.sample_count = std.mem.readInt(u64, fields[16..24], .little);
         const table_len = std.mem.readInt(u32, fields[24..28], .little);
         // The extent after the form type must hold this chunk and its pad.
         const body: u64 = size;
@@ -774,6 +912,48 @@ pub const Parser = struct {
         return bytes;
     }
 };
+
+/// The bytes of the packets FFmpeg's WAV demuxer reads from ADPCM data
+/// (`set_max_size` with `ff_pcm_default_packet_size`, then
+/// `wav_read_packet`): whole blocks for a tenth of a second at 4 bits a
+/// sample, a power of two of them, at least one.
+fn adpcmPacketLen(block_align: u32, rate: u32, channels: u32) u32 {
+    std.debug.assert(block_align > 0);
+    const max_samples: i64 = @divTrunc(std.math.maxInt(i32), block_align);
+    const bit_rate: i64 = 4 * @as(i64, rate) * channels;
+    const n = std.math.clamp(@divTrunc(bit_rate, 8 * 10 * @as(i64, block_align)), 1, max_samples);
+    // `1 << av_log2(n)`, n at least 1; at most INT_MAX bytes.
+    const blocks = std.math.floorPowerOfTwo(i64, n);
+    return @intCast(blocks * block_align);
+}
+
+/// An ADPCM stream's duration as wav_read_header sets it from `data_size`
+/// (0 when unknown) and `sample_count` (`ds64`'s or `fact`'s): the count
+/// divided by the channels when the bit rate says it counts every
+/// channel's samples, dropped when it is implausible for the data, else
+/// the data at 4 bits a sample (`av_get_bits_per_sample`); null for none.
+fn adpcmDuration(a: Adpcm, format: audio.Format, data_len: u64, sample_count_in: u64) ?u64 {
+    const ch: i64 = format.channelCount();
+    const rate: i64 = format.sample_rate;
+    // "Data size %ld is too large": ignored.
+    const data_size: i64 = if (data_len > std.math.maxInt(i64) >> 3) 0 else @intCast(data_len);
+    // beginAdpcmData refused counts past INT64_MAX.
+    var sample_count: i64 = @intCast(sample_count_in);
+    if (a.bit_rate > 0 and data_size > 0 and sample_count > 0 and ch > 1 and @rem(sample_count, ch) == 0) {
+        // C's double arithmetic, left to right.
+        const ratio = 8.0 * @as(f64, @floatFromInt(data_size)) * @as(f64, @floatFromInt(ch)) * @as(f64, @floatFromInt(rate)) /
+            @as(f64, @floatFromInt(sample_count)) / @as(f64, @floatFromInt(a.bit_rate));
+        if (@abs(ratio - 1.0) < 0.3) sample_count = @divTrunc(sample_count, ch);
+    }
+    // "ignoring wrong sample_count": more bits a sample than coded, plus one.
+    if (data_size > 0 and sample_count != 0 and @divTrunc(@divTrunc(data_size << 3, sample_count), ch) > @as(i64, a.params.bits_per_coded_sample) + 1) {
+        sample_count = 0;
+    }
+    if (sample_count == 0 and data_size > 0) {
+        sample_count = @intCast(@as(u64, @intCast(data_size << 3)) / (@as(u64, @intCast(ch)) * 4));
+    }
+    return if (sample_count != 0) @intCast(sample_count) else null;
+}
 
 fn mapRead(err: std.Io.Reader.Error) Error {
     return switch (err) {
@@ -1111,6 +1291,8 @@ pub const DecodeError = Error || std.Io.Writer.Error;
 pub fn decodeToRaw(reader: *std.Io.Reader, out: *std.Io.Writer, limits: Limits) DecodeError!Info {
     var parser: Parser = .init(reader, limits);
     const info = try parser.readHeader();
+    // ADPCM decodes through `format/wavadpcm.zig`.
+    if (info.adpcm != null) return error.UnsupportedFormat;
     // readData delivers nothing when a frame does not fit, which would end
     // the loop below early; only a channel limit above the default allows it.
     if (parser.frame_bytes > pcmdata.scratch_len) return error.LimitExceeded;
@@ -1174,15 +1356,88 @@ pub const WriteOptions = struct {
 /// The header layouts the writer emits.
 pub const HeaderForm = enum { riff, rf64, w64 };
 
-/// The largest header: Wave64's, with a 40-byte extensible `fmt ` and `fact`.
-const max_header_len = w64_header_len + (w64_chunk_header_len + 40) + (w64_chunk_header_len + 8) + w64_chunk_header_len;
+/// An ADPCM stream the writer emits (T31a): FFmpeg's encoder's blocks of
+/// `block_size` bytes, each holding `frame_size` samples a channel, the
+/// last one padded.
+pub const AdpcmCoding = struct {
+    codec: adpcm.Codec,
+    /// `block_align`: the encoder's `block_size`.
+    block_size: u16,
+    /// The samples a channel of a block (`frame_size`).
+    frame_size: u32,
+
+    fn tag(a: AdpcmCoding) u16 {
+        return switch (a.codec) {
+            .ima_wav => tag_ima_adpcm,
+            .ms => tag_ms_adpcm,
+        };
+    }
+
+    /// The bytes ff_put_wav_header writes after `cbSize`: IMA WAV's
+    /// samples a block, MS's extradata from its encoder.
+    fn extradata(a: AdpcmCoding) Extradata {
+        var e: Extradata = .{ .bytes = undefined, .len = 0 };
+        switch (a.codec) {
+            .ima_wav => {
+                std.mem.writeInt(u16, e.bytes[0..2], @truncate(a.frame_size), .little);
+                e.len = 2;
+            },
+            .ms => {
+                e.bytes = adpcm.msExtradataFor(a.frame_size);
+                e.len = 32;
+            },
+        }
+        return e;
+    }
+
+    /// The blocks that hold `frames` samples a channel.
+    pub fn blocks(a: AdpcmCoding, frames: u64) u64 {
+        return frames / a.frame_size + @intFromBool(frames % a.frame_size != 0);
+    }
+
+    const Extradata = struct { bytes: [32]u8, len: usize };
+};
+
+/// What the writer's `data` holds: PCM frames, or ADPCM blocks (T31a).
+pub const Coding = union(enum) {
+    pcm: pcm.Codec,
+    adpcm: AdpcmCoding,
+
+    fn tag(c: Coding) ?u16 {
+        return switch (c) {
+            .pcm => |codec| tagFor(codec),
+            .adpcm => |a| a.tag(),
+        };
+    }
+
+    /// `av_get_bits_per_sample`, which ff_put_wav_header writes: 4 for
+    /// both ADPCM codecs.
+    fn bits(c: Coding) u16 {
+        return switch (c) {
+            .pcm => |codec| @as(u16, codec.bytesPerSample()) * 8,
+            .adpcm => 4,
+        };
+    }
+
+    fn extraLen(c: Coding) usize {
+        return switch (c) {
+            .pcm => 0,
+            .adpcm => |a| a.extradata().len,
+        };
+    }
+};
+
+/// The largest header: Wave64's, with an extensible `fmt ` holding MS
+/// ADPCM's 32 bytes of extradata, and `fact`.
+const max_header_len = w64_header_len + (w64_chunk_header_len + 40 + 32) + (w64_chunk_header_len + 8) + w64_chunk_header_len;
 
 /// Bytes of the `ds64` chunk, header included.
 const ds64_len = 8 + 28;
 
 comptime {
-    // RF64 header, `ds64`, extensible `fmt `, `fact` and the `data` header.
-    std.debug.assert(max_header_len >= 12 + ds64_len + 8 + 40 + 12 + 8);
+    // RF64 header, `ds64`, extensible `fmt ` with extradata, `fact` and the
+    // `data` header.
+    std.debug.assert(max_header_len >= 12 + ds64_len + 8 + 40 + 32 + 12 + 8);
 }
 
 /// The fixed part of a header; the tag chunks go between `bytes[0..data_at]`
@@ -1200,8 +1455,12 @@ const Header = struct {
 /// The bytes before the samples, without tags, as the writer emits them for
 /// `codec` and `format` in `form`.
 pub fn headerLen(codec: pcm.Codec, format: audio.Format, form: HeaderForm) usize {
-    const fmt_len = fmtLen(codec, format);
-    const fact = tagFor(codec) != tag_pcm;
+    return headerLenOf(.{ .pcm = codec }, format, form);
+}
+
+fn headerLenOf(coding: Coding, format: audio.Format, form: HeaderForm) usize {
+    const fmt_len = fmtLen(coding, format);
+    const fact = coding.tag() != tag_pcm;
     return switch (form) {
         .riff, .rf64 => {
             const ds64: usize = if (form == .rf64) ds64_len else 0;
@@ -1217,37 +1476,38 @@ pub fn headerLen(codec: pcm.Codec, format: audio.Format, form: HeaderForm) usize
 }
 
 /// Bytes of the `fmt ` body the writer emits: 16 for tag 1, 18 for the other
-/// tags, 40 for WAVE_FORMAT_EXTENSIBLE.
-fn fmtLen(codec: pcm.Codec, format: audio.Format) usize {
-    if (useExtensible(codec, format)) return 40;
-    return if (tagFor(codec) == tag_pcm) 16 else 18;
+/// tags, 40 for WAVE_FORMAT_EXTENSIBLE, plus ADPCM's extradata.
+fn fmtLen(coding: Coding, format: audio.Format) usize {
+    if (useExtensible(coding, format)) return 40 + coding.extraLen();
+    return if (coding.tag() == tag_pcm) 16 else 18 + coding.extraLen();
 }
 
 /// `riffenc.c`'s choice: extensible for a native layout other than mono
 /// and stereo, above 48 kHz, or above 16 bits unless the samples are float.
-fn useExtensible(codec: pcm.Codec, format: audio.Format) bool {
-    const sample_bytes: u32 = codec.bytesPerSample();
-    const bits = sample_bytes * 8;
+fn useExtensible(coding: Coding, format: audio.Format) bool {
     const named_order = switch (format.layout) {
         .native => |mask| mask != audio.ChannelLayout.mono.native and mask != audio.ChannelLayout.stereo.native,
         .unspecified, .custom => false,
     };
-    return named_order or format.sample_rate > max_plain_rate or (bits > 16 and tagFor(codec) != tag_float);
+    return named_order or format.sample_rate > max_plain_rate or (coding.bits() > 16 and coding.tag() != tag_float);
 }
 
 /// Writes one WAV or Wave64 stream to a borrowed writer: the header with
 /// exact sizes (RIFF, or RF64 as `WriteOptions.rf64` decides, or Wave64),
-/// then the samples. With a known length (`begin`) nothing seeks. Without one
-/// (`beginDeferred`, a seekable output) the header is written for no frames
-/// and `rewriteHeader` writes the real sizes over it at the end, as FFmpeg's
+/// then the samples, or ADPCM blocks (T31a, RIFF and RF64 only). With a
+/// known length (`begin`) nothing seeks. Without one (`beginDeferred`, a
+/// seekable output) the header is written for no frames and
+/// `rewriteHeader` writes the real sizes over it at the end, as FFmpeg's
 /// muxer rewrites a seekable output's header.
 pub const Writer = struct {
     out: *std.Io.Writer,
-    codec: pcm.Codec,
+    coding: Coding,
     format: audio.Format,
     variant: Variant,
     frames_expected: u64,
     frames_written: u64 = 0,
+    /// ADPCM: the blocks written.
+    blocks_written: u64 = 0,
     /// Begun by `beginDeferred`: any number of frames, the header rewritten.
     deferred: bool = false,
     /// For `rewriteHeader`; its tags are borrowed until then.
@@ -1256,7 +1516,14 @@ pub const Writer = struct {
     /// Checks every size, then writes the header. Nothing is written when a
     /// check fails. `format.sample_format` must be `codec.storage()`.
     pub fn begin(out: *std.Io.Writer, codec: pcm.Codec, format: audio.Format, frame_count: u64, options: WriteOptions) WriteError!Writer {
-        const header = try encodeHeader(codec, format, frame_count, options);
+        return beginCoding(out, .{ .pcm = codec }, format, frame_count, options);
+    }
+
+    /// `begin` for any coding; for ADPCM, `frame_count` counts the
+    /// samples a channel, which `fact` holds, and `format.sample_format`
+    /// is the encoder's input, s16 or s16p.
+    pub fn beginCoding(out: *std.Io.Writer, coding: Coding, format: audio.Format, frame_count: u64, options: WriteOptions) WriteError!Writer {
+        const header = try encodeHeader(coding, format, frame_count, options);
         try out.writeAll(header.bytes[0..header.data_at]);
         // wavenc.c's order: `bext`, then `LIST`, then `data`.
         if (header.bext_body) |body| try writeBext(out, options.tags, body);
@@ -1265,14 +1532,18 @@ pub const Writer = struct {
             try writeInfoList(out, options.tags orelse unreachable, header.info_len);
         }
         try out.writeAll(header.bytes[header.data_at..header.len]);
-        return .{ .out = out, .codec = codec, .format = format, .variant = options.variant, .frames_expected = frame_count, .options = options };
+        return .{ .out = out, .coding = coding, .format = format, .variant = options.variant, .frames_expected = frame_count, .options = options };
     }
 
     /// `begin` for a stream whose length is unknown until its end: the header
     /// says no frames until `rewriteHeader`. `options.tags` must stay valid
     /// until then.
     pub fn beginDeferred(out: *std.Io.Writer, codec: pcm.Codec, format: audio.Format, options: WriteOptions) WriteError!Writer {
-        var w = try begin(out, codec, format, 0, options);
+        return beginDeferredCoding(out, .{ .pcm = codec }, format, options);
+    }
+
+    pub fn beginDeferredCoding(out: *std.Io.Writer, coding: Coding, format: audio.Format, options: WriteOptions) WriteError!Writer {
+        var w = try beginCoding(out, coding, format, 0, options);
         w.frames_expected = std.math.maxInt(u64);
         w.deferred = true;
         return w;
@@ -1286,8 +1557,8 @@ pub const Writer = struct {
     pub fn rewriteHeader(w: *Writer, seeker: seek.OutputSeeker) RewriteError!void {
         // A known-length header is already right.
         if (!w.deferred) return;
-        const provisional = try encodeHeader(w.codec, w.format, 0, w.options);
-        const header = try encodeHeader(w.codec, w.format, w.frames_written, w.options);
+        const provisional = try encodeHeader(w.coding, w.format, 0, w.options);
+        const header = try encodeHeader(w.coding, w.format, w.frames_written, w.options);
         if (header.len != provisional.len) return error.SizeOverflow;
         // The tag chunks between the header's two parts keep their bytes.
         const bext_len: u64 = if (header.bext_body) |body| 8 + body + body % 2 else 0;
@@ -1303,22 +1574,44 @@ pub const Writer = struct {
     /// Runs `begin`'s checks without writing, so a caller can reject an
     /// operation before its output exists.
     pub fn check(codec: pcm.Codec, format: audio.Format, frame_count: u64, options: WriteOptions) HeaderError!void {
-        _ = try encodeHeader(codec, format, frame_count, options);
+        _ = try encodeHeader(.{ .pcm = codec }, format, frame_count, options);
     }
 
-    fn encodeHeader(codec: pcm.Codec, format: audio.Format, frame_count: u64, options: WriteOptions) HeaderError!Header {
-        const tag = tagFor(codec) orelse return error.UnsupportedFormat;
-        if (format.sample_format != codec.storage()) return error.UnsupportedFormat;
+    pub fn checkCoding(coding: Coding, format: audio.Format, frame_count: u64, options: WriteOptions) HeaderError!void {
+        _ = try encodeHeader(coding, format, frame_count, options);
+    }
+
+    fn encodeHeader(coding: Coding, format: audio.Format, frame_count: u64, options: WriteOptions) HeaderError!Header {
+        const tag = coding.tag() orelse return error.UnsupportedFormat;
+        switch (coding) {
+            .pcm => |codec| if (format.sample_format != codec.storage()) return error.UnsupportedFormat,
+            // Wave64's muxer is not ported for ADPCM (notes.md "ADPCM").
+            .adpcm => if (options.variant == .w64 or format.sample_format.packedForm() != .s16) return error.UnsupportedFormat,
+        }
         // avcodec_open2 refuses an encoder without channels; frame sizes divide by the count.
         if (format.sample_rate == 0 or format.channelCount() == 0) return error.InvalidFormat;
         if (format.sample_rate > options.max_sample_rate) return error.LimitExceeded;
         if (format.channelCount() > options.max_channels) return error.LimitExceeded;
-        const sample_bytes: u16 = codec.bytesPerSample();
-        const bits = sample_bytes * 8;
-        // `block_align` is a 16-bit field.
-        const block_align = std.math.mul(u16, sample_bytes, format.channelCount()) catch return error.UnsupportedFormat;
-        const byte_rate = std.math.mul(u32, format.sample_rate, block_align) catch return error.SizeOverflow;
-        const data_bytes = std.math.mul(u64, frame_count, block_align) catch return error.SizeOverflow;
+        const bits = coding.bits();
+        const block_align: u16, const byte_rate: u32, const data_bytes: u64 = switch (coding) {
+            .pcm => |codec| pcm: {
+                const sample_bytes: u16 = codec.bytesPerSample();
+                // `block_align` is a 16-bit field.
+                const ba = std.math.mul(u16, sample_bytes, format.channelCount()) catch return error.UnsupportedFormat;
+                break :pcm .{
+                    ba,
+                    std.math.mul(u32, format.sample_rate, ba) catch return error.SizeOverflow,
+                    std.math.mul(u64, frame_count, ba) catch return error.SizeOverflow,
+                };
+            },
+            .adpcm => |a| .{
+                a.block_size,
+                // `(int64_t)sample_rate * blkalign / frame_size`, stored
+                // in 32 bits.
+                @truncate(@as(u64, format.sample_rate) * a.block_size / a.frame_size),
+                std.math.mul(u64, a.blocks(frame_count), a.block_size) catch return error.SizeOverflow,
+            },
+        };
         const max32 = std.math.maxInt(u32);
         // The tag chunks of a RIFF stream, each limited to a 32-bit size.
         const riff_tags_dictionary = if (options.variant == .wav) options.tags else null;
@@ -1332,7 +1625,7 @@ pub const Writer = struct {
         const form: HeaderForm = switch (options.variant) {
             .w64 => .w64,
             .wav => form: {
-                const plain_riff = std.math.add(u64, after_header, headerLen(codec, format, .riff) - 8) catch return error.SizeOverflow;
+                const plain_riff = std.math.add(u64, after_header, headerLenOf(coding, format, .riff) - 8) catch return error.SizeOverflow;
                 break :form switch (options.rf64) {
                     .always => .rf64,
                     .auto => if (plain_riff > max32) .rf64 else .riff,
@@ -1340,13 +1633,17 @@ pub const Writer = struct {
                 };
             },
         };
-        const header_len = headerLen(codec, format, form);
-        const fmt_len = fmtLen(codec, format);
+        const header_len = headerLenOf(coding, format, form);
+        const fmt_len = fmtLen(coding, format);
 
         // The `fmt ` body, shared by both layouts.
-        var fmt_bytes: [40]u8 = undefined;
+        var fmt_bytes: [40 + 32]u8 = undefined;
         var f: std.Io.Writer = .fixed(&fmt_bytes);
-        const extensible = fmt_len == 40;
+        const extensible = useExtensible(coding, format);
+        const extra: AdpcmCoding.Extradata = switch (coding) {
+            .pcm => .{ .bytes = undefined, .len = 0 },
+            .adpcm => |a| a.extradata(),
+        };
         writeLittle(&f, u16, if (extensible) tag_extensible else tag);
         writeLittle(&f, u16, format.channelCount());
         writeLittle(&f, u32, format.sample_rate);
@@ -1354,14 +1651,15 @@ pub const Writer = struct {
         writeLittle(&f, u16, block_align);
         writeLittle(&f, u16, bits);
         if (extensible) {
-            writeLittle(&f, u16, 22);
+            writeLittle(&f, u16, @intCast(22 + extra.len));
             writeLittle(&f, u16, bits);
             writeLittle(&f, u32, extensibleMask(format.layout));
             writeLittle(&f, u32, tag);
             f.writeAll(&subformat_base) catch unreachable;
         } else if (tag != tag_pcm) {
-            writeLittle(&f, u16, 0);
+            writeLittle(&f, u16, @intCast(extra.len));
         }
+        f.writeAll(extra.bytes[0..extra.len]) catch unreachable;
         std.debug.assert(f.buffered().len == fmt_len);
 
         const data_header_len: usize = if (form == .w64) w64_chunk_header_len else 8;
@@ -1433,11 +1731,15 @@ pub const Writer = struct {
     /// the writer's codec (which must be stored as s16). Fails without writing
     /// when the frames are incomplete or exceed the declared count.
     pub fn writeFrames(w: *Writer, samples: []const i16) WriteError!void {
-        std.debug.assert(w.codec.storage() == .s16);
+        const codec = switch (w.coding) {
+            .pcm => |codec| codec,
+            .adpcm => return error.UnsupportedFormat, // `writeBlock`
+        };
+        std.debug.assert(codec.storage() == .s16);
         const channels = w.format.channelCount();
         if (samples.len % channels != 0) return error.IncompleteFrame;
         if (samples.len / channels > w.frames_expected - w.frames_written) return error.TooManyFrames;
-        try pcmdata.writeS16(w.out, w.codec, samples);
+        try pcmdata.writeS16(w.out, codec, samples);
         w.frames_written += samples.len / channels;
     }
 
@@ -1445,13 +1747,36 @@ pub const Writer = struct {
     /// the stream-copy counterpart of `writeFrames`. Fails without writing
     /// when the frames are incomplete or exceed the declared count.
     pub fn writeData(w: *Writer, bytes: []const u8) WriteError!void {
-        const sample_bytes: usize = w.codec.bytesPerSample();
+        const codec = switch (w.coding) {
+            .pcm => |codec| codec,
+            .adpcm => return error.UnsupportedFormat, // `writeBlock`
+        };
+        const sample_bytes: usize = codec.bytesPerSample();
         const frame_bytes = sample_bytes * w.format.channelCount();
         if (bytes.len % frame_bytes != 0) return error.IncompleteFrame;
         const frames = bytes.len / frame_bytes;
         if (frames > w.frames_expected - w.frames_written) return error.TooManyFrames;
         try w.out.writeAll(bytes);
         w.frames_written += frames;
+    }
+
+    /// ADPCM (T31a): one encoded block holding `samples` of the stream's
+    /// samples a channel: the coding's `frame_size`, fewer in the last,
+    /// padded block. Fails without writing when the block is not
+    /// `block_size` bytes, follows a short one, or passes the declared
+    /// count.
+    pub fn writeBlock(w: *Writer, block: []const u8, samples: u32) WriteError!void {
+        const a = switch (w.coding) {
+            .pcm => return error.UnsupportedFormat,
+            .adpcm => |a| a,
+        };
+        if (block.len != a.block_size or samples == 0 or samples > a.frame_size) return error.IncompleteFrame;
+        // Only the last block is short.
+        if (w.frames_written % a.frame_size != 0) return error.TooManyFrames;
+        if (samples > w.frames_expected - w.frames_written) return error.TooManyFrames;
+        try w.out.writeAll(block);
+        w.frames_written += samples;
+        w.blocks_written += 1;
     }
 
     /// Verifies that every declared frame was written, writes the pad bytes
@@ -1461,7 +1786,10 @@ pub const Writer = struct {
         if (!w.deferred and w.frames_written != w.frames_expected) return error.TooFewFrames;
         // begin checked that the data size fits in u64; a deferred stream's
         // frames were written, so their bytes fit too.
-        const data_bytes = w.frames_written * w.codec.bytesPerSample() * w.format.channelCount();
+        const data_bytes = switch (w.coding) {
+            .pcm => |codec| w.frames_written * codec.bytesPerSample() * w.format.channelCount(),
+            .adpcm => |a| w.blocks_written * a.block_size,
+        };
         try w.out.splatByteAll(0, w.variant.padAfter(data_bytes));
         try w.out.flush();
     }
@@ -1927,9 +2255,12 @@ test "extensible subformats of every base parse_waveformatex maps by tag" {
         try std.testing.expectEqual(audio.ChannelLayout.mono, decoded.info.format.layout);
         try std.testing.expectEqual(4, decoded.info.frame_count);
         try std.testing.expectEqualSlices(u8, &.{ 0, 0, 1, 0, 0xff, 0xff, 0xff, 0x7f }, decoded.raw);
-        // The tag still selects the codec: ADPCM is refused in any family.
-        const adpcm = extensibleWav(2, suffix);
-        var refused: std.Io.Reader = .fixed(&adpcm);
+        // The tag still selects the codec: tag 2 is Microsoft ADPCM in any
+        // family (T31a), whose blocks `decodeToRaw` does not decode.
+        const ms = extensibleWav(tag_ms_adpcm, suffix);
+        var ms_reader: std.Io.Reader = .fixed(&ms);
+        try std.testing.expectEqual(adpcm.Codec.ms, (try probe(&ms_reader, .{})).adpcm.?.params.codec);
+        var refused: std.Io.Reader = .fixed(&ms);
         try std.testing.expectError(error.UnsupportedFormat, decodeAll(&refused, .{}, &storage));
     }
     // A GUID outside the three families (one suffix byte changed).
