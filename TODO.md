@@ -331,7 +331,6 @@ Left open, each with the task it must land before:
 | The allocation-free FLAC `readHeader` keeps its own channel-mask scanner | `flac.zig` | T65a |
 | `oggdecode` refuses a decoder that reconfigures its channel count (FFmpeg reallocates the frame) | `oggdecode.zig` | T33a, T35a |
 | WAV seek with a sample rate above `maxInt(i32)` (a raised limit) panics | `wav.zig` | T60 |
-| `readSamples` returns nothing while data remains; its `catch unreachable` on non-s16 storage (library) | five PCM parsers | T65b, T54 at the latest |
 | A failed WAV seek leaves `data_left` at the target | `wav.zig` | T52b, T53c |
 | C number scanners: `bext` UMID, `-dither_scale`/`-dither_method` through `std.fmt` (T17a's accepted forms), values over 256 bytes, boolean options FFmpeg truncates, eval's `random()` seeds of 2^64 or more, long hex mantissas | `wav.zig`, `dither.zig`, `options.zig`, `eval.zig`, `number.zig` | T53a, with T65e |
 | A failed optional argument's nodes still trigger the RTCTIME exclusion | `eval.zig` | T53b |

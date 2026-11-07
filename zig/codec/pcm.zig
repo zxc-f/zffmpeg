@@ -83,6 +83,26 @@ pub fn decodeToS16(codec: Codec, bytes: []const u8, output: []i16) DecodeError![
     return output[0..count];
 }
 
+/// Decodes in place: `out.len` samples of `codec` (stored as s16) whose
+/// encoded bytes fill the last `out.len * width` bytes of `out`'s memory.
+/// Going forward, sample `i` is written to bytes `2i` and `2i + 1`, which
+/// are at or before the bytes of sample `i` and past none still unread.
+pub fn decodeToS16InPlace(codec: Codec, out: []i16) void {
+    std.debug.assert(codec.storage() == .s16);
+    const bytes = std.mem.sliceAsBytes(out);
+    switch (codec) {
+        inline .s16le, .s16be, .alaw, .mulaw => |c| {
+            const w = comptime c.bytesPerSample();
+            const offset = bytes.len - out.len * w;
+            for (0..out.len) |i| {
+                const raw: [w]u8 = bytes[offset + i * w ..][0..w].*;
+                out[i] = decodeSample(c, &raw);
+            }
+        },
+        else => unreachable, // asserted above
+    }
+}
+
 /// Encodes `samples` as `codec` into the start of `output` and returns that
 /// prefix. `codec` must be stored as s16.
 pub fn encodeFromS16(codec: Codec, samples: []const i16, output: []u8) EncodeError![]u8 {

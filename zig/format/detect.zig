@@ -503,7 +503,7 @@ pub fn probeWith(reader: *std.Io.Reader, limits: Limits, options: Options) Error
             var parser = input.rawParser(limits.raw);
             const info = try parser.readHeader();
             try parser.finish();
-            return .{ .container = input.container, .codec = .{ .pcm = info.codec }, .format = info.format, .frame_count = parser.frames_read };
+            return .{ .container = input.container, .codec = .{ .pcm = info.codec }, .format = info.format, .frame_count = parser.framesRead() };
         },
         .flac => {
             // The frames are the decoder's to check; FFmpeg's probe reads

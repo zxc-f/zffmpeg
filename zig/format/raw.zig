@@ -23,6 +23,7 @@ const audio = @import("../core/audio.zig");
 const samples_storage = @import("../core/samples.zig");
 const pcm = @import("../codec/pcm.zig");
 const skip = @import("../io/skip.zig");
+const pcmdata = @import("pcmdata.zig");
 
 /// Contract errors (see the raw fixture README), plus `IoFailure` for a
 /// failing reader.
@@ -31,6 +32,11 @@ pub const Error = error{
     Truncated,
     LimitExceeded,
     IoFailure,
+    /// `readSamples` or `readData` got an output that cannot hold one frame
+    /// while data remains (T65b).
+    OutputTooSmall,
+    /// `readSamples` with a codec not stored as s16.
+    UnsupportedFormat,
 };
 
 /// The stream parameters FFmpeg's raw demuxers take as options.
@@ -67,9 +73,6 @@ pub fn carries(codec: pcm.Codec) bool {
     };
 }
 
-/// Bytes moved per read; a whole number of frames of every encoding.
-const scratch_len = 4096;
-
 /// Reads one raw stream from a borrowed reader.
 ///
 /// Call `readHeader` once, which reads nothing, then `readData` (or, for
@@ -83,10 +86,11 @@ pub const Parser = struct {
     limits: Limits,
     /// Bytes of one encoded frame; set by `readHeader`.
     frame_bytes: u32 = 0,
-    /// Bytes not yet delivered; null when the data runs to the end of the input.
-    data_left: ?u64,
-    /// Frames delivered or skipped so far.
-    frames_read: u64 = 0,
+    /// The input's size in bytes, when known.
+    length: ?u64,
+    /// The data's reader (T65b), set by `readHeader`: it counts the frames
+    /// delivered or skipped.
+    data: pcmdata.Data = .{},
     state: State = .header,
 
     const State = enum { header, data, done };
@@ -94,7 +98,7 @@ pub const Parser = struct {
     /// `length` is the input's size in bytes, when known.
     pub fn init(reader: *std.Io.Reader, codec: pcm.Codec, params: Params, length: ?u64, limits: Limits) Parser {
         std.debug.assert(carries(codec));
-        return .{ .reader = reader, .codec = codec, .params = params, .limits = limits, .data_left = length };
+        return .{ .reader = reader, .codec = codec, .params = params, .limits = limits, .length = length };
     }
 
     /// Checks the parameters, then a known length; reads nothing.
@@ -112,57 +116,30 @@ pub const Parser = struct {
         const sample_bytes: u32 = p.codec.bytesPerSample();
         p.frame_bytes = sample_bytes * format.channelCount();
         var frame_count: ?u64 = null;
-        if (p.data_left) |length| {
+        if (p.length) |length| {
             // The input would end inside its last frame.
             if (length % p.frame_bytes != 0) return error.Truncated;
             frame_count = length / p.frame_bytes;
         }
+        p.data = .init(p.reader, p.frame_bytes, p.length);
         p.state = .data;
         return .{ .codec = p.codec, .format = format, .frame_count = frame_count };
     }
 
     /// Decodes whole frames of interleaved samples into the start of `output`
-    /// and returns the decoded prefix. Returns no samples once the data is
-    /// exhausted, or when `output` cannot hold one frame. Only for encodings
-    /// stored as s16; use `readData` and `pcm.decode` for the others.
+    /// and returns the decoded prefix, empty at the end of the data; an
+    /// output that cannot hold one frame while data remains is
+    /// `OutputTooSmall`, and before `readHeader` the end. Only for encodings stored as s16 (others are `UnsupportedFormat`); use `readData` and
+    /// `pcm.decode` for the others.
     pub fn readSamples(p: *Parser, output: []i16) Error![]i16 {
-        std.debug.assert(p.codec.storage() == .s16);
-        const width = p.codec.bytesPerSample();
-        var scratch: [scratch_len]u8 = undefined;
-        var produced: usize = 0;
-        while (true) {
-            // At most 2 bytes per sample: an i16 slice already spans that much.
-            const room_bytes = @min(scratch_len, (output.len - produced) * width);
-            const bytes = try p.readData(scratch[0..room_bytes]);
-            if (bytes.len == 0) break;
-            // Whole frames of at most room_bytes bytes fit in the output.
-            const decoded = pcm.decodeToS16(p.codec, bytes, output[produced..]) catch unreachable;
-            produced += decoded.len;
-        }
-        return output[0..produced];
+        return p.data.readSamples(p.codec, output);
     }
 
-    /// Reads whole frames, still encoded, into the start of `output` and
-    /// returns that prefix. Returns no bytes once the data is exhausted, or
-    /// when `output` cannot hold one frame.
+    /// Reads whole frames of data, still encoded, into the start of `output`
+    /// and returns that prefix: the stream-copy counterpart of `readSamples`,
+    /// with its end and `OutputTooSmall`.
     pub fn readData(p: *Parser, output: []u8) Error![]u8 {
-        std.debug.assert(p.state == .data);
-        const whole = output[0 .. output.len - output.len % p.frame_bytes];
-        const len = if (p.data_left) |data_left| len: {
-            const want = @min(std.math.cast(usize, data_left) orelse std.math.maxInt(usize), whole.len);
-            p.reader.readSliceAll(whole[0..want]) catch |err| return mapRead(err);
-            p.data_left = data_left - want;
-            break :len want;
-        } else len: {
-            // The data runs to the end of the input: a short read ends it.
-            const len = p.reader.readSliceShort(whole) catch |err| switch (err) {
-                error.ReadFailed => return error.IoFailure,
-            };
-            if (len % p.frame_bytes != 0) return error.Truncated;
-            break :len len;
-        };
-        p.frames_read += len / p.frame_bytes;
-        return whole[0..len];
+        return p.data.readData(output);
     }
 
     /// Skips any unread data, counting its frames. With a known length, input
@@ -170,27 +147,13 @@ pub const Parser = struct {
     /// otherwise the input must end on a whole frame.
     pub fn finish(p: *Parser) Error!void {
         std.debug.assert(p.state == .data);
-        if (p.data_left) |data_left| {
-            skip.discardAll(p.reader, data_left) catch |err| return mapRead(err);
-            p.frames_read += data_left / p.frame_bytes;
-        } else {
-            const step = 1 << 16;
-            var partial: u64 = 0;
-            while (true) {
-                const skipped = p.reader.discardShort(step) catch |err| switch (err) {
-                    error.ReadFailed => return error.IoFailure,
-                };
-                // Whole frames are counted as they pass; at most one partial
-                // frame is carried, so nothing overflows.
-                partial += skipped;
-                p.frames_read += partial / p.frame_bytes;
-                partial %= p.frame_bytes;
-                if (skipped < step) break;
-            }
-            if (partial != 0) return error.Truncated;
-        }
-        p.data_left = 0;
+        try p.data.skipRest();
         p.state = .done;
+    }
+
+    /// Frames delivered or skipped so far.
+    pub fn framesRead(p: *const Parser) u64 {
+        return p.data.frames_read;
     }
 };
 
@@ -207,7 +170,7 @@ pub fn probe(reader: *std.Io.Reader, codec: pcm.Codec, params: Params, length: ?
     var parser: Parser = .init(reader, codec, params, length, limits);
     var info = try parser.readHeader();
     try parser.finish();
-    info.frame_count = parser.frames_read;
+    info.frame_count = parser.framesRead();
     return info;
 }
 
@@ -223,23 +186,10 @@ pub fn decodeToRaw(reader: *std.Io.Reader, out: *std.Io.Writer, codec: pcm.Codec
     var info = try parser.readHeader();
     // readData delivers nothing when a frame does not fit, which would end
     // the loop below early; only a channel limit above the default allows it.
-    if (parser.frame_bytes > scratch_len) return error.LimitExceeded;
-    var encoded: [scratch_len]u8 = undefined;
-    // Storage is at most twice the encoded size (A-law and µ-law to s16).
-    var stored: [2 * scratch_len]u8 = undefined;
-    const channels = info.format.channelCount();
-    while (true) {
-        const bytes = try parser.readData(&encoded);
-        if (bytes.len == 0) break;
-        const frames: u32 = @intCast(bytes.len / parser.frame_bytes);
-        const layout = samples_storage.Layout.init(info.format.sample_format, channels, frames, .{ .line = 1 }) catch unreachable;
-        const buffer = samples_storage.Buffer.init(layout, &stored) catch unreachable;
-        _ = pcm.decode(info.codec, bytes, buffer, 0) catch unreachable;
-        pcm.storedToLittle(info.format.sample_format, buffer.bytes);
-        try out.writeAll(buffer.bytes);
-    }
+    if (parser.frame_bytes > pcmdata.scratch_len) return error.LimitExceeded;
+    try parser.data.decodeToRaw(info.codec, info.format, out);
     try parser.finish();
-    info.frame_count = parser.frames_read;
+    info.frame_count = parser.framesRead();
     return info;
 }
 
@@ -296,16 +246,7 @@ pub const Writer = struct {
         const channels = w.format.channelCount();
         if (samples.len % channels != 0) return error.IncompleteFrame;
         try w.reserve(samples.len / channels);
-        var bytes: [scratch_len]u8 = undefined;
-        var rest = samples;
-        while (rest.len > 0) {
-            // The frames were checked above, so a chunk need not end on a
-            // frame. scratch_len / 2 samples encode into at most scratch_len
-            // bytes.
-            const take = @min(rest.len, scratch_len / 2);
-            try w.out.writeAll(pcm.encodeFromS16(w.codec, rest[0..take], &bytes) catch unreachable);
-            rest = rest[take..];
-        }
+        try pcmdata.writeS16(w.out, w.codec, samples);
         w.frames_written += samples.len / channels;
     }
 

@@ -231,6 +231,7 @@ test {
     _ = @import("format/decoded.zig");
     _ = @import("format/mp3decode.zig");
     _ = @import("format/aacdecode.zig");
+    _ = @import("format/pcmdata.zig");
     _ = @import("codec/tx.zig");
     _ = @import("codec/vlc.zig");
     _ = @import("codec/xiph.zig");
