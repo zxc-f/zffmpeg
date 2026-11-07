@@ -3270,6 +3270,17 @@ def aac_unset_rate(process):
     return (b"sample rate not set" in process.stderr or b"Could not open encoder before EOF" in process.stderr)
 
 
+# ADTS fixtures FFmpeg opens and the port refuses for an understood reason:
+# fixture -> reason. zffprobe (file and pipe) and the hash driver's copy
+# must refuse with UnsupportedFormat while FFmpeg reports and copies the
+# stream.
+KNOWN_AAC_REFUSALS = {
+    "aac_fdk_hev2_44k": "HE-AACv2: the read-ahead's decoder refuses its parametric stereo until T30d, so the "
+                        "stream has no rate (notes.md \"AAC decoder scope\")",
+    "aac_fdk_hev2_32k_noise": "HE-AACv2, as aac_fdk_hev2_44k",
+}
+
+
 def compare_aac(args, lines, failures):
     """The ADTS fixtures (T30a, T30b): zffprobe against ffprobe's first
     audio stream (codec, sample format, channels, layout, rate, and the
@@ -3292,7 +3303,15 @@ def compare_aac(args, lines, failures):
         ours = run(args.zffprobe, path)
         piped = subprocess.run([args.zffprobe, "-"], input=path.read_bytes(), capture_output=True)
         unset = aac_unset_rate(theirs)
-        if theirs.returncode != 0 or not theirs.stdout.strip():
+        refusal = KNOWN_AAC_REFUSALS.get(name)
+        if refusal is not None:
+            if theirs.returncode != 0 or unset:
+                problems.append(f"listed in KNOWN_AAC_REFUSALS, but ffprobe does not report a rate")
+            for process, source in ((ours, path), (piped, "-")):
+                if tool_error(process, "zffprobe", source) != "UnsupportedFormat":
+                    problems.append(f"zffprobe exited {process.returncode} ({first_line(text(process.stderr))}); "
+                                    f"recorded: UnsupportedFormat ({refusal})")
+        elif theirs.returncode != 0 or not theirs.stdout.strip():
             for process, source in ((ours, path), (piped, "-")):
                 if tool_error(process, "zffprobe", source) is None:
                     problems.append(f"zffprobe exited {process.returncode} where ffprobe refuses")
@@ -3320,7 +3339,13 @@ def compare_aac(args, lines, failures):
                         problems.append(f"{key} ({source}): zffprobe {o.get(key)}, ffprobe {value}")
         copy_ref = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", path, "-c", "copy", "-fflags", "+bitexact", "-f",
                        "framecrc", "-")
-        if aac_unset_rate(copy_ref):
+        if refusal is not None:
+            mine = run(args.hasher, "framecrc", "copy", path)
+            if copy_ref.returncode != 0 or tool_error(mine, "hash-driver", path) != "UnsupportedFormat":
+                problems.append(f"copy: FFmpeg exited {copy_ref.returncode}, the hash driver {mine.returncode} "
+                                f"({first_line(text(mine.stderr)) or 'no error'}); recorded: FFmpeg copies, the hash "
+                                f"driver refuses with UnsupportedFormat")
+        elif aac_unset_rate(copy_ref):
             mine = run(args.hasher, "framecrc", "copy", path)
             if tool_error(mine, "hash-driver", path) != "UnsupportedFormat":
                 problems.append(f"copy: FFmpeg has no sample rate; the hash driver exited {mine.returncode} "
@@ -3332,8 +3357,10 @@ def compare_aac(args, lines, failures):
             rows.append(f"| `{name}` | **FAIL**: {'; '.join(problems)} |")
         else:
             passed += 1
-            understood += unset
-            rows.append(f"| `{name}` | pass{' (recorded: UnsupportedFormat, no sample rate)' if unset else ''} |")
+            understood += unset or refusal is not None
+            note = (f" (recorded: UnsupportedFormat, {refusal})" if refusal is not None
+                    else " (recorded: UnsupportedFormat, no sample rate)" if unset else "")
+            rows.append(f"| `{name}` | pass{note} |")
     lines += [
         "",
         "## ADTS fixtures (T30a, T30b)",
@@ -3346,7 +3373,8 @@ def compare_aac(args, lines, failures):
         "| Fixture | Result |",
         "| --- | --- |",
     ] + rows
-    record("ADTS fixtures (T30a, T30b)", passed, len(fixtures), understood=understood)
+    stale = unmatched_entries(KNOWN_AAC_REFUSALS, {p.stem for p in fixtures}, "KNOWN_AAC_REFUSALS", failures)
+    record("ADTS fixtures (T30a, T30b)", passed, len(fixtures) + stale, understood=understood)
 
 
 # ADTS decodes that differ from the ffmpeg program's for an understood
@@ -3357,7 +3385,12 @@ AAC_APE_COVER = (("other refusal", "Error opening output files: Encoder not foun
                  "and Ogg can carry, and the reference build has no encoder for it; zffmpeg converts the audio "
                  "stream alone, which has no sample rate, and refuses it as it does into WAV, AU and raw PCM "
                  "(notes.md \"APE tags\")")
+AAC_PS = (("refused", 3, "UnsupportedFormat"),
+          "HE-AACv2: FFmpeg decodes its parametric stereo; the port refuses it until T30d, so the stream has no "
+          "rate and zffmpeg refuses it before any output (notes.md \"AAC decoder scope\")")
 KNOWN_AAC_DECODE_DIFFERENCES = {
+    ("aac_fdk_hev2_44k", None): AAC_PS,
+    ("aac_fdk_hev2_32k_noise", None): AAC_PS,
     ("aac_ape_binary", "-f aiff"): AAC_APE_COVER,
     ("aac_ape_binary", "-f flac"): AAC_APE_COVER,
     ("aac_ape_binary", "-f ogg"): AAC_APE_COVER,
@@ -3365,7 +3398,7 @@ KNOWN_AAC_DECODE_DIFFERENCES = {
 
 
 def compare_aac_decode(args, lines, failures):
-    """ADTS decoded (T30b): every ADTS fixture converted by zffmpeg and by
+    """ADTS decoded (T30b, T30c): every ADTS fixture, HE-AAC included, converted by zffmpeg and by
     the ffmpeg program with `-bitexact` into each output, byte for byte,
     each raw PCM output again through pipes and the WAV from a pipe into a
     file; a stream no packet of which decodes is refused by both (the
@@ -3374,10 +3407,10 @@ def compare_aac_decode(args, lines, failures):
     rows, same, total, understood, understood_notes, compared = decode_cells(
         args, paths, KNOWN_AAC_DECODE_DIFFERENCES, "KNOWN_AAC_DECODE_DIFFERENCES", "AAC decode", failures)
     total += unmatched_entries(KNOWN_AAC_DECODE_DIFFERENCES, compared, "KNOWN_AAC_DECODE_DIFFERENCES", failures)
-    record("AAC decoding (T30b)", same, total, understood=understood)
+    record("AAC decoding (T30b, T30c)", same, total, understood=understood)
     lines += [
         "",
-        "## AAC decoding (T30b)",
+        "## AAC decoding (T30b, T30c)",
         "",
         f"ADTS fixtures decoded by zffmpeg into WAV, AU, AIFF, FLAC, Ogg and raw PCM (and resampled, and "
         f"downmixed), into raw PCM from a pipe to stdout, and from a pipe into a WAV file, equal to the ffmpeg "

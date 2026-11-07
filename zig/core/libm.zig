@@ -51,6 +51,7 @@ pub const cbrtf = @import("libm/cbrtf.zig").cbrtf;
 /// float x for eight exponents and every integer exponent to 2^20 of the
 /// AAC decoder's four coupling bases, and by vectors/libm.txt (T30b).
 pub const powf = @import("libm/powf.zig").powf;
+pub const log2f = @import("libm/log2f.zig").log2f;
 /// Exact apart from one rounding (libm/ldexp.zig: std.math.ldexp
 /// mis-scales a zero); checked against glibc's in its tests.
 pub const ldexp = @import("libm/ldexp.zig").ldexp;
@@ -188,6 +189,7 @@ test {
     _ = @import("libm/cbrt.zig");
     _ = @import("libm/cbrtf.zig");
     _ = @import("libm/powf.zig");
+    _ = @import("libm/log2f.zig");
 }
 
 test "exp2f, sinf and cosf return glibc's results (vectors/libm.txt)" {

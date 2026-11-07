@@ -57,6 +57,10 @@ extern union CBRT {
 
 extern VLCElem ff_vlc_scalefactors[352];
 extern const VLCElem *ff_vlc_spectral[11];
+// The SBR decoder's (T30c): its Huffman tables, one after another in
+// init_sbr_tables' buffer, and its noise values (the 512 the C code reads).
+extern const VLCElem *ff_aac_sbr_vlc[10];
+extern const float ff_sbr_noise_table[][2];
 
 void ff_aac_float_common_init(void);
 void ff_cbrt_tableinit(void);
@@ -171,5 +175,13 @@ int main(void)
         print_vlc("spectral_vlc", i, ff_vlc_spectral[i], (int)(end - ff_vlc_spectral[i]));
     }
     print_vlc("scalefactor_vlc", -1, ff_vlc_scalefactors, 352);
+
+    static const int sbr_vlc_sizes[10] = { 1098, 1092, 768, 1026, 1058, 1052, 544, 544, 592, 512 };
+    for (int i = 0; i < 10; i++) {
+        if (i < 9 && ff_aac_sbr_vlc[i] + sbr_vlc_sizes[i] != ff_aac_sbr_vlc[i + 1])
+            return 1;
+        print_vlc("sbr_vlc", i, ff_aac_sbr_vlc[i], sbr_vlc_sizes[i]);
+    }
+    print_f32("sbr_noise_table", -1, &ff_sbr_noise_table[0][0], 1024);
     return 0;
 }

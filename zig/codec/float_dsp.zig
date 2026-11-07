@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Derived from FFmpeg's libavutil/float_dsp.c (vector_fmul_window_c,
-// vector_fmac_scalar_c, vector_fmul_scalar_c, butterflies_float_c) at the
+// vector_fmac_scalar_c, vector_fmul_scalar_c, butterflies_float_c,
+// vector_fmul_c, vector_fmul_add_c, vector_fmul_reverse_c) at the
 // pinned reference revision. Copyright 2005 Balatoni Denes, copyright 2006
 // Loren Merritt.
 // FFmpeg is free software; you can redistribute it and/or modify it under
 // the terms of the GNU Lesser General Public License as published by the
 // Free Software Foundation; either version 2.1 of the License, or (at your
 // option) any later version.
-//! libavutil's float DSP kernels the decoders call (Vorbis, Opus, MP3), as
+//! libavutil's float DSP kernels the decoders call (Vorbis, Opus, MP3, AAC's
+//! SBR), as
 //! their C versions compute them: the reference build has no assembly, and
 //! the same operation order keeps every result bit-exact.
 //! The slices may alias where the C callers' pointers do.
@@ -80,4 +82,20 @@ test "butterflies give the sum and the difference" {
     butterflies(&a, &b);
     try testing.expectEqualSlices(f32, &.{ 4, 0, 1 }, &a);
     try testing.expectEqualSlices(f32, &.{ -2, -4, 0 }, &b);
+}
+
+/// vector_fmul_c: `dst[i] = src0[i] * src1[i]` for `len` elements.
+pub fn fmul(dst: []f32, src0: []const f32, src1: []const f32, len: usize) void {
+    for (dst[0..len], src0[0..len], src1[0..len]) |*d, a, b| d.* = a * b;
+}
+
+/// vector_fmul_add_c: `dst[i] = src0[i] * src1[i] + src2[i]`, unfused;
+/// `dst` may be `src2`.
+pub fn fmulAdd(dst: []f32, src0: []const f32, src1: []const f32, src2: []const f32, len: usize) void {
+    for (0..len) |i| dst[i] = src0[i] * src1[i] + src2[i];
+}
+
+/// vector_fmul_reverse_c: `dst[i] = src0[i] * src1[len - 1 - i]`.
+pub fn fmulReverse(dst: []f32, src0: []const f32, src1: []const f32, len: usize) void {
+    for (0..len) |i| dst[i] = src0[i] * src1[len - 1 - i];
 }

@@ -192,4 +192,44 @@
         .sha256 = "7d8bd3894c076e6ecd55945e4f37d9ee08a30ed5cdf18bc365d4a0c320c000b2",
         .expected = .accept,
     },
+    .{
+        .name = "aac_fdk_he_44k_stereo",
+        .sha256 = "dd386f0424b65206574094629a0cf96b92310cba884a40119af2d5e896d01a10",
+        .expected = .accept,
+    },
+    .{
+        .name = "aac_fdk_he_48k_mono",
+        .sha256 = "8ce1d5257300611aa3e92b8ac596200abe65de9fc1d884d185b78511dc781e0b",
+        .expected = .accept,
+    },
+    .{
+        .name = "aac_fdk_he_32k_transients",
+        .sha256 = "b461978b7e0769a2f6c561e0268fa32f35c3b3ffec1562a11f7afed27af567f5",
+        .expected = .accept,
+    },
+    .{
+        .name = "aac_fdk_he_22k_mono",
+        .sha256 = "3b4d3f3ae597cd4a490624f5e49a8243f37a46638dc9d694e2b1785b4ba92bbd",
+        .expected = .accept,
+    },
+    .{
+        .name = "aac_fdk_he_48k_noise",
+        .sha256 = "9e244d35d9dc1340e0abe083c4e27d66a6033f72be010fca23f50092ddb452da",
+        .expected = .accept,
+    },
+    .{
+        .name = "aac_fdk_he_5point1",
+        .sha256 = "8b06edf75f228d16d634f00834034626ac586803daa269e370d3206c826714de",
+        .expected = .accept,
+    },
+    .{
+        .name = "aac_fdk_hev2_44k",
+        .sha256 = "831415065673a1b9eec38cd726f62baf423f5f25ade60098d9daa7f1dec98e07",
+        .expected = .accept,
+    },
+    .{
+        .name = "aac_fdk_hev2_32k_noise",
+        .sha256 = "709fe9ed6664fa8d58a122bd78ab4ae11316921477491bf98cda401ccd9f6f6c",
+        .expected = .accept,
+    },
 }

@@ -55,4 +55,12 @@ port.md's "ADTS contract" says which behavior the port follows.
 | `aac_ffmpeg_5point1` | ffmpeg | yes | FFmpeg's AAC encoder, 10000 smooth samples of 6 channels at 48000 Hz, `-c:a aac`; decoded by the T30b oracle. |
 | `aac_ffmpeg_7point1_wide` | ffmpeg | yes | FFmpeg's AAC encoder, 8000 tones samples of 8 channels at 48000 Hz, `-c:a aac -ch_layout 7.1(wide)`; decoded by the T30b oracle. |
 | `aac_ffmpeg_short` | ffmpeg | yes | FFmpeg's AAC encoder, 700 smooth samples of 2 channels at 44100 Hz, `-c:a aac`; decoded by the T30b oracle. |
+| `aac_fdk_he_44k_stereo` | ffmpeg | yes | The FDK AAC library's HE-AAC (SBR) at 48000 bit/s, 30000 smooth samples of 2 channels at 44100 Hz; decoded by the T30b oracle. |
+| `aac_fdk_he_48k_mono` | ffmpeg | yes | The FDK AAC library's HE-AAC (SBR) at 32000 bit/s, 20000 tones samples of 1 channels at 48000 Hz; decoded by the T30b oracle. |
+| `aac_fdk_he_32k_transients` | ffmpeg | yes | The FDK AAC library's HE-AAC (SBR) at 40000 bit/s, 24000 transients samples of 2 channels at 32000 Hz; decoded by the T30b oracle. |
+| `aac_fdk_he_22k_mono` | ffmpeg | yes | The FDK AAC library's HE-AAC (SBR) at 16000 bit/s, 15000 noise samples of 1 channels at 22050 Hz; decoded by the T30b oracle. |
+| `aac_fdk_he_48k_noise` | ffmpeg | yes | The FDK AAC library's HE-AAC (SBR) at 64000 bit/s, 20000 noise samples of 2 channels at 48000 Hz; decoded by the T30b oracle. |
+| `aac_fdk_he_5point1` | ffmpeg | yes | The FDK AAC library's HE-AAC (SBR) at 128000 bit/s, 10000 smooth samples of 6 channels at 48000 Hz; decoded by the T30b oracle. |
+| `aac_fdk_hev2_44k` | ffmpeg | yes | The FDK AAC library's HE-AACv2 (SBR and PS) at 32000 bit/s, 30000 tones samples of 2 channels at 44100 Hz; decoded by the T30b oracle. |
+| `aac_fdk_hev2_32k_noise` | ffmpeg | yes | The FDK AAC library's HE-AACv2 (SBR and PS) at 24000 bit/s, 20000 noise samples of 2 channels at 32000 Hz; decoded by the T30b oracle. |
 <!-- END GENERATED FIXTURE TABLE -->

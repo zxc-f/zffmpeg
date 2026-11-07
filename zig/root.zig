@@ -213,6 +213,8 @@ test {
     _ = @import("format/aac.zig");
     _ = @import("codec/mpeg4audio.zig");
     _ = @import("codec/aacdec.zig");
+    _ = @import("codec/aacsbr.zig");
+    _ = @import("codec/sbr_tab.zig");
     _ = @import("format/adtsmux.zig");
     _ = @import("codec/mp3_tab.zig");
     _ = @import("codec/aac_tab.zig");

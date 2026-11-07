@@ -480,6 +480,11 @@ const probe_cases = [_]ProbeCase{
     // whose packets decodes has no rate to report (notes.md "AAC decoder
     // scope"); what FFmpeg refuses is refused.
     .{ .name = "ADTS", .set = .aac, .fixture = "aac_ffmpeg_5point1", .exit_code = 0, .stdout = "format=aac\ncodec=aac\nsample_fmt=fltp\nchannels=6\nchannel_layout=5.1\nsample_rate=48000\nnb_samples=11264\nduration_num=6623272\nduration_den=28224000\n", .stderr = "" },
+    // T30c: SBR doubles the rate, and HE-AAC mono is output as stereo, as
+    // FFmpeg's decoder outputs it; HE-AACv2's parametric stereo waits for
+    // T30d (notes.md "AAC decoder scope").
+    .{ .name = "HE-AAC mono is reported as stereo at twice the core rate", .set = .aac, .fixture = "aac_fdk_he_48k_mono", .exit_code = 0, .stdout = "format=aac\ncodec=aac\nsample_fmt=fltp\nchannels=2\nchannel_layout=stereo\nsample_rate=48000\nnb_samples=26625\nduration_num=15655307\nduration_den=28224000\n", .stderr = "" },
+    .{ .name = "HE-AACv2 is refused", .set = .aac, .fixture = "aac_fdk_hev2_44k", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
     .{ .name = "ADTS from a pipe has no duration", .set = .aac, .args = &.{"-"}, .stdin_fixture = "aac_ffmpeg_lc_44k_stereo", .exit_code = 0, .stdout_contains = "sample_rate=44100\nnb_samples=N/A\n", .stderr = "" },
     .{ .name = "ADTS none of whose packets decodes", .set = .aac, .fixture = "aac_lc_stereo_44k", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
     .{ .name = "ADTS from a pipe none of whose packets decodes", .set = .aac, .args = &.{"-"}, .stdin_fixture = "aac_id3v2_between", .exit_code = 3, .stderr = "zffprobe: -: UnsupportedFormat\n" },
@@ -799,6 +804,8 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "ADTS to WAV", .set = .aac, .args = &.{"-i"}, .input = "aac_ffmpeg_lc_44k_stereo", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt ", .stderr = "" },
     .{ .name = "ADTS from a pipe to raw PCM", .set = .aac, .args = &.{ "-i", "-" }, .stdin_input = "aac_ffmpeg_mono_8k", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stdout_raw = .{ .args = &.{ "-f", "s16le", "-ch_layout", "mono", "-sample_rate", "8000" }, .nb_samples = 9216 }, .stderr = "" },
     .{ .name = "ADTS input none of whose packets decodes", .set = .aac, .args = &.{"-i"}, .input = "aac_lc_stereo_44k", .tail = &.{ "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedFormat\n" },
+    .{ .name = "HE-AAC from a pipe to raw PCM", .set = .aac, .args = &.{ "-i", "-" }, .stdin_input = "aac_fdk_he_22k_mono", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stdout_raw = .{ .args = &.{ "-f", "s16le", "-ch_layout", "stereo", "-sample_rate", "22050" }, .nb_samples = 20480 }, .stderr = "" },
+    .{ .name = "HE-AACv2 input is refused", .set = .aac, .args = &.{"-i"}, .input = "aac_fdk_hev2_32k_noise", .tail = &.{ "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedFormat\n" },
     .{ .name = "ADTS Main profile is refused", .set = .aac, .args = &.{"-i"}, .input = "aac_main_96k", .tail = &.{ "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedFormat\n" },
     .{ .name = "ADTS copy is unsupported", .set = .aac, .args = &.{"-i"}, .input = "aac_ffmpeg_lc_44k_stereo", .tail = &.{ "-c", "copy", "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
     // T29d: MP2 encoded; compare.py checks the bytes against FFmpeg's. The

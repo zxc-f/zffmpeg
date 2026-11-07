@@ -2,9 +2,11 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 # Original file for this project.
 #
-# Makes the FFmpeg-encoded AAC fixtures, the zig/testing/fixtures/aac/
-# aac_ffmpeg_*.aac files (T30b), with the reference build's native AAC
-# encoder and its adts muxer:
+# Makes the encoded AAC fixtures: the zig/testing/fixtures/aac/
+# aac_ffmpeg_*.aac files (T30b) with the reference build's native AAC
+# encoder and its adts muxer, and the aac_fdk_*.aac files (HE-AAC and
+# HE-AACv2, T30c and T30d) with heaac_encode.c, which links the system's
+# libfdk-aac (3.0.0 made the committed files):
 #
 #   bash zig/testing/reference/aac_fixtures.sh <ffmpeg-install-prefix>
 #
@@ -20,6 +22,9 @@ prefix=$(realpath "${1:?usage: aac_fixtures.sh <ffmpeg-install-prefix>}")
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 generate="$root/zig/testing/fixtures/generate.py"
 out="$root/zig/testing/fixtures/aac"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+cc -O1 "$root/zig/testing/reference/heaac_encode.c" -lfdk-aac -o "$work/heaac-encode"
 
 python3 - "$generate" <<'PY' |
 import importlib.util, sys
@@ -30,11 +35,17 @@ for name, (channels, rate, _, _, _, options, _) in g.AAC_FFMPEG.items():
     print(name, channels, rate, options)
 PY
 while read -r name channels rate options; do
-    # shellcheck disable=SC2086 # the options are words
-    python3 "$generate" --aac-input "$name" |
-        "$prefix/bin/ffmpeg" -nostdin -hide_banner -loglevel error -y \
-            -f s16le -ar "$rate" -ac "$channels" -i pipe:0 \
-            -map_metadata -1 -fflags +bitexact -flags:a +bitexact \
-            $options -f adts "$out/$name.aac"
+    if [[ $options == fdk\ * ]]; then
+        read -r _ aot bit_rate <<<"$options"
+        python3 "$generate" --aac-input "$name" |
+            "$work/heaac-encode" "$aot" "$rate" "$channels" "$bit_rate" >"$out/$name.aac"
+    else
+        # shellcheck disable=SC2086 # the options are words
+        python3 "$generate" --aac-input "$name" |
+            "$prefix/bin/ffmpeg" -nostdin -hide_banner -loglevel error -y \
+                -f s16le -ar "$rate" -ac "$channels" -i pipe:0 \
+                -map_metadata -1 -fflags +bitexact -flags:a +bitexact \
+                $options -f adts "$out/$name.aac"
+    fi
     printf '%s %s\n' "$name" "$(sha256sum "$out/$name.aac" | cut -d' ' -f1)"
 done

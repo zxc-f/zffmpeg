@@ -42,6 +42,11 @@
 //                              AAC decoder takes it of (T30b)
 //   S cbrtf <d> <count> <md5>  cbrtf of count floats drawn from float
 //                              distribution d
+//   L log2f <count> <md5>      log2f(a / (float)b) for every a and b from 1
+//                              to count, the ratios of QMF subband indices
+//                              FFmpeg's SBR decoder takes it of (T30c)
+//   G log2f <d> <count> <md5>  log2f of count floats drawn from float
+//                              distribution d
 //
 // Each MD5 covers the results as float32 (or float64 for D, C and I lines)
 // little-endian, in order (sinf before cosf). See zig/testing/reference/README.md for the build commands.
@@ -334,6 +339,22 @@ int main(void)
         for (int i = 0; i < 20000; i++)
             put(md5, cbrtf_fn(from_bits(sample_float(d))));
         snprintf(head, sizeof(head), "S cbrtf %d 20000", d);
+        print(head, md5);
+    }
+
+    /* T30c: log2f, which the SBR decoder takes of ratios of subbands. */
+    float (*volatile log2f_fn)(float) = log2f;
+    av_md5_init(md5);
+    for (int a = 1; a <= 192; a++)
+        for (int b = 1; b <= 192; b++)
+            put(md5, log2f_fn(a / (float)b));
+    print("L log2f 192", md5);
+    for (int d = 0; d < 8; d++) {
+        xs_state = 0x9E3779B97F4A7C15ull + 1000003ull * (3000 + d);
+        av_md5_init(md5);
+        for (int i = 0; i < 20000; i++)
+            put(md5, log2f_fn(from_bits(sample_float(d))));
+        snprintf(head, sizeof(head), "G log2f %d 20000", d);
         print(head, md5);
     }
 

@@ -31,6 +31,7 @@
 
 const std = @import("std");
 const vlc = @import("vlc.zig");
+const sbr_tab = @import("sbr_tab.zig");
 const libm = @import("../core/libm.zig");
 const bessel = @import("../core/bessel.zig");
 
@@ -986,6 +987,8 @@ fn render(w: *std.Io.Writer) !void {
     try w.writeAll("\n");
     for (spectral_vlc, 0..) |table, i| try t.table("spectral_vlc", i, table);
     try t.table("scalefactor_vlc", null, &scalefactor_vlc);
+    for (sbr_tab.huff_vlc, 0..) |table, i| try t.table("sbr_vlc", i, table);
+    try t.floats("sbr_noise_table", null, @as(*const [1024]f32, @ptrCast(&sbr_tab.noise_table)));
 }
 
 test "every table equals FFmpeg's (vectors/aac_tab.txt)" {

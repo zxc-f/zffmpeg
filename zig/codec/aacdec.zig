@@ -37,9 +37,10 @@
 //! IMDCT and window overlap, frame for frame as the pinned decoder computes
 //! them (vectors/aac_decode.txt). SSR streams decode with the general
 //! syntax, their gain control parsed and ignored, as FFmpeg decodes them.
-//! Main prediction and LTP, the ER and low-delay object types, and SBR and
-//! PS (T30c, T30d) are refused with `UnsupportedFeature` (notes.md "AAC
-//! decoder scope").
+//! SBR (HE-AAC, T30c) runs through `codec/aacsbr.zig`, each element's state
+//! allocated on first use. Main prediction and LTP, the ER and low-delay
+//! object types, and parametric stereo (T30d) are refused with
+//! `UnsupportedFeature` (notes.md "AAC decoder scope").
 
 const std = @import("std");
 const bits = @import("bits.zig");
@@ -49,6 +50,7 @@ const adts = @import("adts.zig");
 const mpeg4audio = @import("mpeg4audio.zig");
 const tx = @import("tx.zig");
 const float_dsp = @import("float_dsp.zig");
+const aacsbr = @import("aacsbr.zig");
 
 pub const Error = error{
     /// FFmpeg's AVERROR_INVALIDDATA.
@@ -278,8 +280,14 @@ const ChannelCoupling = struct {
     gain: [16][120]f32 = @splat(@splat(0)),
 };
 
-/// `ChannelElement`.
+/// `ChannelElement`, with FFmpeg's `ExtChannelElement`'s SBR state.
 const ChannelElement = struct {
+    /// The type `che_configure` allocated it for, which its SBR state
+    /// starts with.
+    alloc_type: u3,
+    /// `ff_aac_sbr_ctx_alloc_init`'s state, allocated when the element
+    /// first needs it (it starts in the same state either way).
+    sbr: ?*aacsbr.Sbr = null,
     present: bool = false,
     ch: [2]Sce = .{ .{}, .{} },
     ms_mask: [max_sfb_total]u1 = @splat(0),
@@ -376,7 +384,10 @@ pub const Decoder = struct {
 
     /// Frees the channel elements and the output planes.
     fn deinitElements(d: *Decoder) void {
-        for (&d.che) |*row| for (row) |c| if (c) |p| d.gpa.destroy(p);
+        for (&d.che) |*row| for (row) |c| if (c) |p| {
+            if (p.sbr) |sbr| sbr.destroy(d.gpa);
+            d.gpa.destroy(p);
+        };
         d.planes.deinit(d.gpa);
     }
 
@@ -389,7 +400,7 @@ pub const Decoder = struct {
         if (pos != Position.off) {
             if (d.che[ty][id] == null) {
                 const c = try d.gpa.create(ChannelElement);
-                c.* = .{};
+                c.* = .{ .alloc_type = ty };
                 d.che[ty][id] = c;
             }
             const c = d.che[ty][id].?;
@@ -411,6 +422,7 @@ pub const Decoder = struct {
                 for (&d.tag_che_map) |*row| for (row) |*m| if (m.* == c) {
                     m.* = null;
                 };
+                if (c.sbr) |sbr| sbr.destroy(d.gpa);
                 d.gpa.destroy(c);
             }
             d.che[ty][id] = null;
@@ -643,6 +655,7 @@ pub const Decoder = struct {
     fn decodeFrameGa(d: *Decoder, r: *bits.BitReader) Error!u32 {
         var che_presence: [4][max_elem_id]u8 = @splat(@splat(0));
         var che_prev: ?*ChannelElement = null;
+        var elem_type_prev: ElemType = .fil;
         var samples: u32 = 0;
         var audio_found = false;
         var pce_found = false;
@@ -693,20 +706,26 @@ pub const Decoder = struct {
                     if (elem_id == 15) elem_id += @as(i64, r.bits(8)) - 1;
                     if (r.left() < 8 * elem_id) return error.InvalidData;
                     while (elem_id > 0) {
-                        const used = try d.decodeExtensionPayload(r, @intCast(elem_id), che_prev);
+                        const used = try d.decodeExtensionPayload(r, @intCast(elem_id), che_prev, elem_type_prev);
                         elem_id -= used;
                     }
                 },
                 .end => unreachable,
             }
-            if (@backingInt(elem_type) < @backingInt(ElemType.dse)) che_prev = che;
+            if (@backingInt(elem_type) < @backingInt(ElemType.dse)) {
+                che_prev = che;
+                elem_type_prev = elem_type;
+            }
             if (r.left() < 3) return error.InvalidData;
         }
         if (d.channels == 0) return 0;
-        // Without SBR (T30c) the sample rate is not doubled.
-        d.spectralToSample(samples);
+        // SBR doubles the samples and the rate, unless it is downsampled.
+        const m4ac = &d.oc[1].m4ac;
+        const multiplier: u5 = if (m4ac.sbr == 1) @intFromBool(m4ac.ext_sample_rate > m4ac.sample_rate) else 0;
+        samples <<= multiplier;
+        try d.spectralToSample(samples);
         if (d.oc[1].status != .none and audio_found) {
-            d.sample_rate = @intCast(d.oc[1].m4ac.sample_rate);
+            d.sample_rate = @as(u32, @intCast(d.oc[1].m4ac.sample_rate)) << multiplier;
             d.frame_size = samples;
             // Implicit SBR is only known once found in a frame.
             d.seek_preroll = @max(d.seek_preroll, seekPreroll(&d.oc[1].m4ac));
@@ -718,7 +737,7 @@ pub const Decoder = struct {
 
     /// spectral_to_sample without coupling, LTP or SBR: each present
     /// element's TNS and IMDCT; an absent one's output silenced.
-    fn spectralToSample(d: *Decoder, samples: u32) void {
+    fn spectralToSample(d: *Decoder, samples: u32) Error!void {
         var ty: usize = 4;
         while (ty > 0) {
             ty -= 1;
@@ -733,6 +752,10 @@ pub const Decoder = struct {
                     if (ty != @backingInt(ElemType.cce) or c.coup.coupling_point == Coupling.after_imdct) {
                         imdctAndWindowing(d, &c.ch[0]);
                         if (ty == @backingInt(ElemType.cpe)) imdctAndWindowing(d, &c.ch[1]);
+                        if (d.oc[1].m4ac.sbr > 0) {
+                            const sbr = try d.sbrOf(c);
+                            sbr.apply(@intCast(ty), &d.oc[1].m4ac, c.ch[0].out(), c.ch[1].out());
+                        }
                     }
                     if (ty <= @backingInt(ElemType.cce)) d.applyChannelCoupling(c, elem, i, Coupling.after_imdct, .independent);
                     c.present = false;
@@ -755,11 +778,11 @@ pub const Decoder = struct {
             for (0..coup.num_coupled + 1) |c| {
                 if (coup.type[c] == ty and coup.id_select[c] == elem_id) {
                     if (coup.ch_select[c] != 1) {
-                        applyCoupling(&cc.ch[0], cce, index, method == .dependent);
+                        applyCoupling(&cc.ch[0], cce, index, method == .dependent, d.oc[1].m4ac.sbr == 1);
                         if (coup.ch_select[c] != 0) index += 1;
                     }
                     if (coup.ch_select[c] != 2) {
-                        applyCoupling(&cc.ch[1], cce, index, method == .dependent);
+                        applyCoupling(&cc.ch[1], cce, index, method == .dependent, d.oc[1].m4ac.sbr == 1);
                         index += 1;
                     }
                 } else index += 1 + @as(usize, @intFromBool(coup.ch_select[c] == 3));
@@ -767,18 +790,54 @@ pub const Decoder = struct {
         }
     }
 
-    /// decode_extension_payload: the bytes used of `cnt`.
-    fn decodeExtensionPayload(d: *Decoder, r: *bits.BitReader, cnt: u32, che: ?*ChannelElement) Error!u32 {
+    /// The element's SBR state, allocated on first use.
+    fn sbrOf(d: *Decoder, c: *ChannelElement) Error!*aacsbr.Sbr {
+        if (c.sbr) |sbr| return sbr;
+        const sbr = aacsbr.Sbr.create(d.gpa, c.alloc_type) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.UnsupportedFeature => unreachable, // creating reads no data
+        };
+        c.sbr = sbr;
+        return sbr;
+    }
+
+    /// decode_extension_payload: the bytes used of `cnt`, after the
+    /// element `che` of type `elem_type`.
+    fn decodeExtensionPayload(d: *Decoder, r: *bits.BitReader, cnt: u32, che_in: ?*ChannelElement, elem_type: ElemType) Error!u32 {
         const ext_type = r.bits(4);
         switch (ext_type) {
             // EXT_SBR_DATA, EXT_SBR_DATA_CRC.
             0xd, 0xe => {
-                if (che == null) return cnt; // "SBR was found before the first channel element"
-                if (d.oc[1].m4ac.sbr == 0 or (d.oc[1].m4ac.sbr == -1 and d.oc[1].status == .locked)) {
+                const che = che_in orelse return cnt; // "SBR was found before the first channel element"
+                const m4ac = &d.oc[1].m4ac;
+                if (m4ac.sbr == 0) {
+                    // "SBR signaled to be not-present but was found in the
+                    // bitstream."
                     r.skipLong(8 * @as(i64, cnt) - 4);
                     return cnt;
+                } else if (m4ac.sbr == -1 and d.oc[1].status == .locked) {
+                    // "Implicit SBR was found with a first occurrence after
+                    // the first frame."
+                    r.skipLong(8 * @as(i64, cnt) - 4);
+                    return cnt;
+                } else if (m4ac.ps == -1 and @backingInt(d.oc[1].status) < @backingInt(OcStatus.locked) and d.channels == 1) {
+                    // HE-AAC mono is output as stereo, FFmpeg's implicit
+                    // parametric stereo.
+                    m4ac.sbr = 1;
+                    m4ac.ps = 1;
+                    const tags = d.oc[1].layout_map_tags;
+                    var map: [max_elem_id * 4]Tag = undefined;
+                    @memcpy(map[0..tags], d.oc[1].layout_map[0..tags]);
+                    try d.outputConfigure(map[0..tags], d.oc[1].status, true);
+                } else {
+                    m4ac.sbr = 1;
                 }
-                return error.UnsupportedFeature; // SBR (T30c)
+                const sbr = try d.sbrOf(che);
+                _ = sbr.decodeExtension(r, ext_type == 0xe, cnt, @intCast(@backingInt(elem_type)), &d.oc[1].m4ac) catch |err| return switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    error.UnsupportedFeature => error.UnsupportedFeature,
+                };
+                return cnt;
             },
             // EXT_DYNAMIC_RANGE.
             0xb => return decodeDynamicRange(r),
@@ -1820,7 +1879,7 @@ test "every ADTS fixture decodes as FFmpeg's aac decoder decodes it (vectors/aac
     var checked: usize = 0;
     inline for (fixtures.aac.all) |fixture| {
         // Main and LTP streams are refused (notes.md "AAC decoder
-        // scope"), from their first frame.
+        // scope"), from their first frame; PS (T30d) when its data comes.
         const other_profile = comptime for ([_][]const u8{ "aac_main_96k", "aac_ltp_7350_8ch" }) |n| {
             if (std.mem.eql(u8, n, fixture.name)) break true;
         } else false;
@@ -1830,6 +1889,11 @@ test "every ADTS fixture decodes as FFmpeg's aac decoder decodes it (vectors/aac
             defer d.deinit();
             const first = try adts.parseHeader(bytes[0..adts.header_size]);
             try testing.expectError(error.UnsupportedFeature, d.decode(bytes[0..first.frame_length]));
+            checked += 1;
+        } else if (comptime std.mem.startsWith(u8, fixture.name, "aac_fdk_hev2_")) {
+            var got: std.ArrayList(u8) = .empty;
+            defer got.deinit(gpa);
+            try testing.expectError(error.UnsupportedFeature, decodeVectorLines(gpa, fixture.name, fixtures.aac.bytes(fixture.name), &got));
             checked += 1;
         } else if (comptime fixture.expected == .accept) {
             const want = vectorBlock(fixture.name) orelse return error.MissingVector;
@@ -1843,16 +1907,17 @@ test "every ADTS fixture decodes as FFmpeg's aac decoder decodes it (vectors/aac
             checked += 1;
         }
     }
-    try testing.expectEqual(36, checked);
+    try testing.expectEqual(44, checked);
 }
 
 /// apply_dependent_coupling (before the IMDCT) and
-/// apply_independent_coupling (after it, `vector_fmac_scalar`; without SBR
-/// over 1024 samples).
-fn applyCoupling(target: *Sce, cce: *ChannelElement, index: usize, dependent: bool) void {
+/// apply_independent_coupling (after it, `vector_fmac_scalar` over 1024
+/// samples, 2048 with SBR).
+fn applyCoupling(target: *Sce, cce: *ChannelElement, index: usize, dependent: bool, sbr: bool) void {
     if (!dependent) {
         const gain = cce.coup.gain[index][0];
-        float_dsp.fmacScalar(target.out()[0..1024], cce.ch[0].out()[0..1024], gain);
+        const len: usize = @as(usize, 1024) << @intFromBool(sbr);
+        float_dsp.fmacScalar(target.out()[0..len], cce.ch[0].out()[0..len], gain);
         return;
     }
     const ics = &cce.ch[0].ics;
@@ -1979,7 +2044,7 @@ fn fuzzRun(smith: *std.testing.Smith) !u32 {
             try testing.expect(got.consumed > 0 or got.frame != null);
             data = data[@min(got.consumed, data.len)..];
             const f = got.frame orelse continue;
-            try testing.expect(f.samples == 1024);
+            try testing.expect(f.samples == 1024 or f.samples == 2048);
             try testing.expect(f.planes.len > 0 and f.planes.len <= max_channels);
             for (f.planes) |plane| for (plane[0..f.samples]) |v| std.mem.doNotOptimizeAway(v);
             frames += 1;
@@ -2003,6 +2068,11 @@ const fuzz_corpus: []const []const u8 = &.{
     hostile.fuzzSeed(fixtures.aac.bytes("aac_ffmpeg_5point1"), &.{ 0, 4096, 4, 6 }),
     hostile.fuzzSeed(fixtures.aac.bytes("aac_ffmpeg_7point1_wide"), &.{ 0, 4096, 4, 8 }),
     hostile.fuzzSeed(fixtures.aac.bytes("aac_ffmpeg_96k_256k"), &.{ 1, 700, 5, 2 }),
+    // SBR (T30c): stereo, mono output as stereo, transients, 5.1.
+    hostile.fuzzSeed(fixtures.aac.bytes("aac_fdk_he_44k_stereo"), &.{ 0, 4096, 2, 2 }),
+    hostile.fuzzSeed(fixtures.aac.bytes("aac_fdk_he_48k_mono"), &.{ 0, 4096, 2, 1 }),
+    hostile.fuzzSeed(fixtures.aac.bytes("aac_fdk_he_32k_transients"), &.{ 1, 900, 0, 0 }),
+    hostile.fuzzSeed(fixtures.aac.bytes("aac_fdk_he_5point1"), &.{ 0, 4096, 4, 6 }),
 };
 
 test "fuzz: the AAC decoder on arbitrary streams, framed or in raw pieces" {

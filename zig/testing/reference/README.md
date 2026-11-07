@@ -250,8 +250,9 @@ superframes of every bandwidth, duration and channel count (T28b).
 glibc's `exp2f`, `sinf` and `cosf` return on sampled floats and on every
 angle CELT's spreading rotation can take, what `powf` returns on the AAC
 decoder's coupling gains and sampled pairs and `cbrtf` on every integer
-below 65536 (its pulse amplitudes) and sampled floats (T30b), and of the
-fifteen double
+below 65536 (its pulse amplitudes) and sampled floats (T30b), what `log2f`
+returns on the ratios of SBR's subband indices and sampled floats (T30c),
+and of the fifteen double
 functions `core/libm.zig` ports over eight input distributions, inputs
 from 1e8 up on lines of their own (glibc 2.39 reduces sin, cos and tan's
 there differently) and sinh, cosh and tanh on `C` lines (correctly rounded
@@ -287,8 +288,12 @@ band offsets, TNS tables, `ff_aac_pow2sf_tab`, the KBD and sine windows,
 `ff_cbrt_tab` and the spectral and scalefactor VLCs), which
 `codec/aac_tab.zig`'s test renders from its own. The fixtures that decode
 to audio are the `aac_ffmpeg_*` streams, which `aac_fixtures.sh` encodes
-with the reference build's native AAC encoder from generate.py's samples
-(their hashes are generate.py's `AAC_FFMPEG`); generate.py's own ADTS
+with the reference build's native AAC encoder from generate.py's samples,
+and the HE-AAC and HE-AACv2 `aac_fdk_*` streams (T30c, T30d), which it
+encodes with `heaac_encode.c` and the system's libfdk-aac 3.0.0, as the
+pinned encoder writes AAC-LC only (their hashes are generate.py's
+`AAC_FFMPEG`; the library is needed only to remake them). The tables
+include SBR's Huffman tables and noise values. generate.py's own ADTS
 fixtures carry arbitrary payloads, which no packet of decodes:
 
 ```bash
@@ -752,13 +757,14 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   with `UnsupportedFormat` (notes.md "A stream none of whose packets
   decodes"). Packets and seeks are the Zig tests' (vectors/aac.txt,
   seek_aac.txt).
-- **AAC decoding (T30b).** Every ADTS fixture decoded by zffmpeg and by the
+- **AAC decoding (T30b, T30c).** Every ADTS fixture, HE-AAC included, decoded by zffmpeg and by the
   ffmpeg program with `-bitexact` into each output of the Ogg decoding
   section, byte for byte, through pipes too; a stream without a rate is
   refused by both, the program at the end ("Could not open encoder before
   EOF"), zffmpeg before any output. `aac_ape_binary`'s AIFF, FLAC and Ogg
   cells are recorded (`KNOWN_AAC_DECODE_DIFFERENCES`: the program maps the
-  APE cover art to a video stream and finds no encoder).
+  APE cover art to a video stream and finds no encoder), and so are the
+  HE-AACv2 fixtures' cells and probes until T30d (`KNOWN_AAC_REFUSALS`).
 - **MP2 output (T29d).** zffmpeg's MP2 (the `mp2` muxer, with `mp2` or
   `-c:a mp2fixed`) against the ffmpeg program's with `-bitexact`, for the
   FLAC output section's inputs and a decoded MP3, MP2 and Ogg Vorbis

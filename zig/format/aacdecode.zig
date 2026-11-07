@@ -413,6 +413,8 @@ const fuzz_corpus: []const []const u8 = &.{
     hostile.fuzzSeed(fixtures.aac.bytes("aac_ffmpeg_5point1"), &.{ 0, 1 }),
     hostile.fuzzSeed(fixtures.aac.bytes("aac_id3v2_between"), &.{ 1, 0 }),
     hostile.fuzzSeed(fixtures.aac.bytes("aac_pce_mpeg2"), &.{ 1, 0 }),
+    hostile.fuzzSeed(fixtures.aac.bytes("aac_fdk_he_22k_mono"), &.{ 1, 0 }),
+    hostile.fuzzSeed(fixtures.aac.bytes("aac_fdk_he_48k_noise"), &.{ 0, 1 }),
 };
 
 test "fuzz: an ADTS stream decoded from arbitrary input" {

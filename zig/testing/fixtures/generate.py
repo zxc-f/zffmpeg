@@ -4564,10 +4564,13 @@ def ape_text_item(key, value):
     return struct.pack("<II", len(value), 0) + key + b"\0" + value
 
 
-# The FFmpeg-made AAC fixtures (T30b): FFmpeg's native AAC encoder on
-# generated inputs, written by zig/testing/reference/aac_fixtures.sh and
-# committed. Each entry: channels, rate, sample count, seed, signal kind,
-# the encoder options, and the file's SHA-256.
+# The encoded AAC fixtures: FFmpeg's native AAC encoder (T30b; options
+# starting with "-") and, for HE-AAC and HE-AACv2, which it cannot write,
+# the Fraunhofer FDK AAC library 3.0.0 through heaac_encode.c (T30c, T30d;
+# options "fdk <aot> <bit rate>"), on generated inputs, written by
+# zig/testing/reference/aac_fixtures.sh and committed. Each entry:
+# channels, rate, sample count, seed, signal kind, the encoder options,
+# and the file's SHA-256.
 AAC_FFMPEG = {
     "aac_ffmpeg_lc_44k_stereo": (2, 44100, 30000, 31, "smooth", "-c:a aac",
                            "f7f5363936d2fa9060b930418f1e9e16f1a07169b871d9d40f4113a2b0d01886"),
@@ -4591,6 +4594,22 @@ AAC_FFMPEG = {
                            "ec84f1bcb729ae67b31a4db483ae4f32484ad4d29bb1dcd0454ac0a8266713ec"),
     "aac_ffmpeg_short": (2, 44100, 700, 51, "smooth", "-c:a aac",
                            "7d8bd3894c076e6ecd55945e4f37d9ee08a30ed5cdf18bc365d4a0c320c000b2"),
+    "aac_fdk_he_44k_stereo": (2, 44100, 30000, 61, "smooth", "fdk 5 48000",
+                           "dd386f0424b65206574094629a0cf96b92310cba884a40119af2d5e896d01a10"),
+    "aac_fdk_he_48k_mono": (1, 48000, 20000, 63, "tones", "fdk 5 32000",
+                           "8ce1d5257300611aa3e92b8ac596200abe65de9fc1d884d185b78511dc781e0b"),
+    "aac_fdk_he_32k_transients": (2, 32000, 24000, 65, "transients", "fdk 5 40000",
+                           "b461978b7e0769a2f6c561e0268fa32f35c3b3ffec1562a11f7afed27af567f5"),
+    "aac_fdk_he_22k_mono": (1, 22050, 15000, 67, "noise", "fdk 5 16000",
+                           "3b4d3f3ae597cd4a490624f5e49a8243f37a46638dc9d694e2b1785b4ba92bbd"),
+    "aac_fdk_he_48k_noise": (2, 48000, 20000, 69, "noise", "fdk 5 64000",
+                           "9e244d35d9dc1340e0abe083c4e27d66a6033f72be010fca23f50092ddb452da"),
+    "aac_fdk_he_5point1": (6, 48000, 10000, 71, "smooth", "fdk 5 128000",
+                           "8b06edf75f228d16d634f00834034626ac586803daa269e370d3206c826714de"),
+    "aac_fdk_hev2_44k": (2, 44100, 30000, 73, "tones", "fdk 29 32000",
+                           "831415065673a1b9eec38cd726f62baf423f5f25ade60098d9daa7f1dec98e07"),
+    "aac_fdk_hev2_32k_noise": (2, 32000, 20000, 75, "noise", "fdk 29 24000",
+                           "709fe9ed6664fa8d58a122bd78ab4ae11316921477491bf98cda401ccd9f6f6c"),
 }
 
 
@@ -4694,9 +4713,15 @@ def build_aac_fixtures():
     bad("aac_id3v2_only", "An ID3v2 tag and nothing after it.", id3v2_tag([title], padding=100), "EOF")
     for name, (channels, rate, count, _, kind, options, _) in AAC_FFMPEG.items():
         path = AAC_DIR / f"{name}.aac"
-        fx.append(Mp3Fixture(name, "ffmpeg", f"FFmpeg's AAC encoder, {count} {kind} samples of {channels} channels "
-                             f"at {rate} Hz, `{options}`; decoded by the T30b oracle.",
-                             path.read_bytes() if path.exists() else b"", made_by="ffmpeg"))
+        if options.startswith("fdk "):
+            _, aot, bit_rate = options.split()
+            profile = {"5": "HE-AAC (SBR)", "29": "HE-AACv2 (SBR and PS)"}[aot]
+            rule = (f"The FDK AAC library's {profile} at {bit_rate} bit/s, {count} {kind} samples of {channels} "
+                    f"channels at {rate} Hz; decoded by the T30b oracle.")
+        else:
+            rule = (f"FFmpeg's AAC encoder, {count} {kind} samples of {channels} channels at {rate} Hz, `{options}`; "
+                    f"decoded by the T30b oracle.")
+        fx.append(Mp3Fixture(name, "ffmpeg", rule, path.read_bytes() if path.exists() else b"", made_by="ffmpeg"))
     return fx
 
 
