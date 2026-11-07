@@ -60,7 +60,8 @@ packets, RFC 8251's twelve vectors decoded as FFmpeg decodes them, which
 completes T28; and T29a, FFmpeg's MP3 demuxer and mpegaudio parser with
 ID3 tags, the gapless headers and FFmpeg's probe rounds; and T29b, the
 Layer III decoder bit for bit FFmpeg's mp3float, with MP3 decoded by
-zffmpeg as the ffmpeg program decodes it. **Next: T29c (Layers I and II).
+zffmpeg as the ffmpeg program decodes it, and T29c, Layers I and II bit
+for bit FFmpeg's mp1float and mp2float. **Next: T29d (the MP2 encoder).
 See [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
@@ -3459,9 +3460,53 @@ names, not as an empty framework.
     Remaining work or blocker / next action: none; Layers I and II are
       T29c.
     ```
-  - [ ] **T29c — Layers I and II.** Needs T29b.
+  - [x] **T29c — Layers I and II.** Needs T29b.
     Done when the required Layer I and II streams match within the same
     tolerance.
+
+    ```text
+    ID / parent: T29c / T29
+    State: verified (G5, local Linux x86-64 runs)
+    Supported behavior and explicit exclusions: FFmpeg's mp1float and
+      mp2float (mpegaudiodec_template.c's Layer I and II paths as
+      mpegaudiodec_float.c builds them), sharing mp3dec's decoder, so every
+      decoder decodes every layer; MPEG-1, 2 and 2.5, mono, stereo, dual
+      channel and joint stereo; CRC skipped as FFmpeg skips it. Excluded:
+      the fixed-point decoders, err_detect.
+    Contract and source provenance: port.md's MP3 contract, "Decoding";
+      mpegaudiodec_template.c (mp_decode_layer1, mp_decode_layer2,
+      l1_unscale, l2_unscale_group, decode_init_static's
+      scale_factor_mult, scale_factor_mult2), mpegaudiodec_common.c
+      (ff_scale_factor_modshift, the division tables), mpegaudiodata.c
+      (allocation and quantizer tables), mpegaudio.c
+      (ff_mpa_l2_select_table).
+    Required fixtures: generate.py's pseudo-random-payload Layer I and II
+      streams, which Layers I and II always decode: 12 (three before
+      T29c, nine added: Layer I mono, joint stereo with every mode
+      extension and CRC, MPEG-2; Layer II tables 1 to 4 with dual channel,
+      joint stereo with CRC, MPEG-2 joint stereo, MPEG-2.5), plus
+      mp3_layer_change, which mixes layers.
+    Comparison rule: every decoded frame bit for bit, as mp3_decode.txt
+      records the pinned decoders' (now the decoder for the stream's
+      codec), the decoded frame after every seek (seek_mp3.txt), and the
+      ffmpeg program's conversions in compare.py.
+    Evidence: e18f740. build-ffmpeg.sh enables mp1float and mp2float;
+      mp3.txt only gains the new fixtures' blocks; mp3_decode.txt and
+      seek_mp3.txt decode the MP1 and MP2 streams; every frame of the 71
+      fixtures equals the reference's. A new test over every header found
+      a 2881-byte frame (MPEG-2.5 Layer II, 160 kbit/s, 8 kHz) past the
+      decoder's 1800-byte frame buffer, which only a debug assert guarded;
+      the buffer now holds it, and a regression test decodes it. G3:
+      MP1/MP2/mixed seeds in the decoder's and mp3decode's fuzz corpora
+      and mutation smokes; the decoder does not allocate, and mp3decode's
+      sweeps are unchanged. G5 at e18f740, locally on Linux x86-64 (no
+      CI run link): zig fmt, the fixture check (71 MP3 among 475), zig
+      build test 498/498 (267 steps) in Debug, ReleaseSafe and
+      ReleaseFast, the cross builds, every vector generator, compare.py
+      7317/0/0 required (MPEG audio decoding 852 cells, 11 recorded
+      differences) and 61/61 optional.
+    Remaining work or blocker / next action: none.
+    ```
   - [ ] **T29d — MP2 encoder.** Needs T29c.
     Done when FFmpeg decodes our output, and bitrate and a declared quality
     metric are recorded against FFmpeg's own MP2 encoder at the same settings.

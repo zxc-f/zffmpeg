@@ -15,8 +15,8 @@ tags as FFmpeg does. Codec and format registries name everything as FFmpeg
 does. The `zffprobe` tool detects WAV, Wave64, AU, AIFF or CAF from the content
 with FFmpeg's scored probes, and raw PCM from `-f` or a raw file extension,
 validates the file and reports its stream and tags. Both are checked against
-129 WAV, 41 AU, 57 AIFF, 25 raw PCM and 58 CAF fixtures (466 in all with
-today's 57 FLAC, 37 Ogg and 62 MP3 ones) and against a pinned FFmpeg
+129 WAV, 41 AU, 57 AIFF, 25 raw PCM and 58 CAF fixtures (475 in all with
+today's 57 FLAC, 37 Ogg and 71 MPEG audio ones) and against a pinned FFmpeg
 build in CI (Linux). The `zffmpeg` tool converts and stream-copies
 between WAV, Wave64, AU, AIFF and raw PCM, and from CAF, carrying tags as FFmpeg does, through the
 library's synchronous pipeline (T13), which runs on packets, frames and
@@ -68,10 +68,10 @@ decode as FFmpeg decodes them. MPEG audio demuxes since T29a as FFmpeg's
 mp3 demuxer and parser split it, its ID3v2 and ID3v1 tags, Xing, LAME,
 VBRI and iTunSMPB headers and gapless side data included, and detection
 follows FFmpeg's probe rounds and ID3v2 skip: `zffprobe` reports MP3 as
-ffprobe does. The Layer III decoder (T29b) is bit for bit FFmpeg's
-mp3float, gapless trimming included: `zffmpeg` converts MP3 into every PCM
-output and into FLAC as the ffmpeg program does; Layers I and II follow
-(T29c).
+ffprobe does. The MPEG audio decoders are bit for bit FFmpeg's mp3float
+(Layer III, T29b) and mp1float and mp2float (Layers I and II, T29c),
+gapless trimming included: `zffmpeg` converts MP3, MP2 and MP1 into every
+PCM output and into FLAC as the ffmpeg program does.
 [TODO.md](TODO.md) holds the completion
 evidence and the roadmap. Development is verified on Linux only. The compiler
 is **Zig 0.17.0**, enforced by the build.
