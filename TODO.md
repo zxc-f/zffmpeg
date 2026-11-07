@@ -61,7 +61,9 @@ completes T28; and T29a, FFmpeg's MP3 demuxer and mpegaudio parser with
 ID3 tags, the gapless headers and FFmpeg's probe rounds; and T29b, the
 Layer III decoder bit for bit FFmpeg's mp3float, with MP3 decoded by
 zffmpeg as the ffmpeg program decodes it, and T29c, Layers I and II bit
-for bit FFmpeg's mp1float and mp2float. **Next: T29d (the MP2 encoder).
+for bit FFmpeg's mp1float and mp2float, and T29d, FFmpeg's MP2 encoders
+packet for packet with its mp2 muxer, which completes T29. **Next: T30a
+(ADTS and AudioSpecificConfig).
 See [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
@@ -3247,7 +3249,7 @@ names, not as an empty framework.
       timestamps into Ogg (T53); no Opus encoder; not optimized.
     ```
 
-- [ ] **T29 — MPEG audio: MP1, MP2 and MP3.** Checked when T29a–T29d are.
+- [x] **T29 — MPEG audio: MP1, MP2 and MP3.** Checked when T29a–T29d are.
   Reference: `libavformat/mp3dec.c`, `mp3enc.c`,
   `libavcodec/mpegaudiodec_template.c`, `mpegaudiodecheader.c`,
   `mpegaudio_parser.c`, `mpegaudiodsp*.c`, `mpegaudioenc*.c`;
@@ -3507,9 +3509,51 @@ names, not as an empty framework.
       differences) and 61/61 optional.
     Remaining work or blocker / next action: none.
     ```
-  - [ ] **T29d — MP2 encoder.** Needs T29c.
+  - [x] **T29d — MP2 encoder.** Needs T29c.
     Done when FFmpeg decodes our output, and bitrate and a declared quality
     metric are recorded against FFmpeg's own MP2 encoder at the same settings.
+
+    ```text
+    ID / parent: T29d / T29
+    State: verified (G5, local Linux x86-64 runs)
+    Supported behavior and explicit exclusions: FFmpeg's mp2 and mp2fixed
+      encoders (mpegaudioenc.c): MPEG-1 and LSF Layer II at 32, 44.1, 48,
+      16, 22.05 and 24 kHz, mono or stereo, s16 frames of 1152 samples,
+      the fixed SMR bit allocation, -b:a with FFmpeg's default and
+      refusals; the mp2 muxer (rawenc.c) behind the program's frame
+      grouping and encode.c's padding of the last frame. Excluded: MP2 in
+      other containers (WAV), the program's conversion of rates and
+      channels the encoder does not take (refused, notes.md "MP2
+      encoding"), Layer I and III encoding, the mp3 muxer.
+    Contract and source provenance: port.md's MP3 contract, "Encoding",
+      and zffmpeg's "MP2 output"; mpegaudioenc.c, mpegaudiotab.h,
+      mpegaudiodata.c and mpegaudiodsp's window, shared with the decoder.
+    Required fixtures: mp2enc_vectors.c's 18 cases (mp2 and mp2fixed,
+      tones, noise, low-passed noise, silence, full-scale extremes, a
+      short stream, a refused bit rate and rate), and compare.py's inputs:
+      the FLAC output section's PCM, FLAC and resampled inputs plus a
+      decoded MP3, MP2 and Ogg Vorbis stream.
+    Comparison rule: every packet byte for byte the pinned encoders'
+      (mp2enc.txt); zffmpeg's output byte for byte the ffmpeg program's
+      with -bitexact, as a file and on a pipe, at eleven option sets
+      (bit rates, mp2fixed, -ar, -ac), each output decoded back by
+      FFmpeg's mp2float and by zffmpeg to the same samples. The bit rate
+      is the requested one, and the quality metric is FFmpeg's own by
+      construction: the bytes are the same.
+    Evidence: 3c1897d. G3: the encoder's fuzz entry over samples, rates,
+      bit rates and quantizers (each packet's header gives its own size,
+      rate and channels), every seed encoding frames, a mutation smoke;
+      the encoder and muxer do not allocate; a frame of the wrong length
+      is InvalidFrame, not an assert. Process cases: WAV to MP2, raw PCM
+      from a pipe with mp2fixed at 64 kbit/s, and the refusals (rate,
+      channels, bit rate, an invalid -b:a, copy). G5 at 3c1897d, locally
+      on Linux x86-64 (no CI run link): zig fmt, the fixture check, zig
+      build test 506/506 (274 steps) in Debug, ReleaseSafe and
+      ReleaseFast, the cross builds, every vector generator (mp2enc.txt
+      new), compare.py 7643/0/0 required (MP2 output 324 cells, 20
+      recorded refusals) and 61/61 optional.
+    Remaining work or blocker / next action: none.
+    ```
 
 - [ ] **T30 — AAC.** Checked when T30a–T30d are. Reference:
   `libavcodec/aac/`, `aacsbr*.c`, `aacps*.c`, `mpeg4audio.c`,

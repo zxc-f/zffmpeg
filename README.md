@@ -71,7 +71,10 @@ follows FFmpeg's probe rounds and ID3v2 skip: `zffprobe` reports MP3 as
 ffprobe does. The MPEG audio decoders are bit for bit FFmpeg's mp3float
 (Layer III, T29b) and mp1float and mp2float (Layers I and II, T29c),
 gapless trimming included: `zffmpeg` converts MP3, MP2 and MP1 into every
-PCM output and into FLAC as the ffmpeg program does.
+PCM output and into FLAC as the ffmpeg program does. And `zffmpeg` writes
+MP2 since T29d: FFmpeg's mp2 and mp2fixed encoders with its raw mp2
+muxer, byte for byte the ffmpeg program's `-bitexact` output, with `-b:a`
+for the bit rate.
 [TODO.md](TODO.md) holds the completion
 evidence and the roadmap. Development is verified on Linux only. The compiler
 is **Zig 0.17.0**, enforced by the build.
