@@ -66,7 +66,8 @@ packet for packet with its mp2 muxer, which completes T29; and T30a,
 FFmpeg's ADTS demuxer and muxer and AudioSpecificConfig parsing, with
 WAV and FLAC read after leading ID3v2 tags; and T30b, FFmpeg's float AAC
 decoder for AAC-LC bit for bit, with ADTS decoded by zffmpeg and reported
-by zffprobe. **Next: T30c (SBR, HE-AAC v1).
+by zffprobe; and T30c, FFmpeg's SBR decoder bit for bit, with HE-AAC
+decoded. **Next: T30d (parametric stereo, HE-AAC v2).
 See [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
@@ -3661,8 +3662,53 @@ names, not as an empty framework.
     Remaining work or blocker / next action: none; Main and LTP need
       fixtures from another encoder; T30c adds SBR.
     ```
-  - [ ] **T30c — SBR (HE-AAC v1).** Needs T30b.
+  - [x] **T30c — SBR (HE-AAC v1).** Needs T30b.
     Done when the required SBR streams match within tolerance.
+
+    ```text
+    ID / parent: T30c / T30
+    State: verified (G5, local Linux x86-64 runs)
+    Supported behavior and explicit exclusions: FFmpeg's float SBR
+      decoder (aacsbr.c, aacsbr_template.c, sbrdsp) on ADTS's implicit
+      signaling: header, grid, delta coding, inverse filtering modes,
+      envelope and noise data, harmonics, the master and derived band
+      tables, QMF analysis, patches, LPC inverse filtering, chirp,
+      envelope estimation, gains and limiter, noise and sinusoids, QMF
+      synthesis at twice the rate; HE-AAC mono output as stereo as
+      FFmpeg's (the left channel copied without PS data); coupling over
+      2048 samples. glibc's log2f ported. Excluded: parametric stereo
+      (T30d; HE-AACv2 refused, so such a stream has no rate), USAC's
+      SBR, downsampled SBR from explicit signaling (MP4, T33a). Where
+      hostile headers would make FFmpeg overflow its band tables, the
+      reset fails (notes.md "SBR where FFmpeg's tables would overflow").
+    Contract and source provenance: port.md's ADTS contract, "Decoding";
+      aacsbr.c, aacsbr_template.c, sbrdsp.c, sbrdsp_template.c,
+      aacsbrdata.h, aac/aacdec_tab.c, aac/aacdec.c's SBR hooks; glibc
+      2.44's log2f (FMA variant).
+    Required fixtures: eight aac_fdk_* streams from libfdk-aac 3.0.0
+      through heaac_encode.c (the owner's choice; the pinned encoder
+      writes LC only): HE-AAC stereo at 44.1 kHz, mono at 48 and 22.05
+      kHz, transients at 32 kHz, noise at 48 kHz, 5.1; two HE-AACv2
+      streams for T30d.
+    Comparison rule: every frame's samples bit for bit the pinned
+      decoder's (aac_decode.txt), SBR's VLCs and noise table equal
+      (aac_tab.txt), log2f glibc's (libm.txt), zffprobe ffprobe's and
+      zffmpeg's output the program's byte for byte in every output.
+    Evidence: 73e456c. Debugged by comparing FFmpeg's SBR state in gdb
+      with the port's (a window sign the table script dropped, a swapped
+      vector_fmul_reverse). G3: the decoder's fuzz entry and mutation
+      smoke with four SBR seeds (2000 rounds clean in ReleaseSafe once,
+      48 kept), aacdecode's with two; unit tests for exp2fi, make_bands
+      and the state's start; process cases for HE-AAC mono as stereo,
+      HE-AAC from a pipe, and HE-AACv2 refused by both tools. G5 at
+      73e456c, locally on Linux x86-64 (no CI run link): zig fmt, the
+      fixture check (46 ADTS among 521), zig build test 547/547 (294
+      steps) in Debug, ReleaseSafe and ReleaseFast, the cross builds,
+      every vector generator, compare.py 8274/0/0 required (AAC decoding
+      552 cells with 21 recorded, ADTS fixtures 46 with 27) and 61/61
+      optional.
+    Remaining work or blocker / next action: none; T30d adds PS.
+    ```
   - [ ] **T30d — PS (HE-AAC v2).** Needs T30c.
     Done when the required PS streams match within tolerance. LATM comes later.
 
