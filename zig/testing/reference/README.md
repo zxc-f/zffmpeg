@@ -411,6 +411,24 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/ac3enc_vect
 ./ac3enc-vectors | diff -u zig/testing/vectors/ac3enc.txt -
 ```
 
+`aacpsy_vectors.c` (T32d) drives the pinned AAC encoder's psychoacoustic
+model (`ff_psy_init` and `ff_aac_psy_model` from the static libavcodec,
+with aacenc.c's band tables) through 26 cases of element maps, rates, bit
+rates, QSCALE, `unbounded_pe`, cutoffs and `pair_decoupled`, as aacenc.c
+drives it: samples shifted through per-channel buffers of 3 * 1024, the
+window decision on the lookahead (the pair decision for a CPE, the flush
+without lookahead), and deterministic spectra analyzed once or again under
+the same `frame_num`. It prints every window decision, `bitres.alloc` and
+each analyzed band's bits, energy, threshold and spread as IEEE bits; the
+Zig test renders the same lines from the port. It declares the internal
+structures it uses itself (copied from `psymodel.h`), so the installed
+headers suffice:
+
+```bash
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/aacpsy_vectors.c .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o aacpsy-vectors
+./aacpsy-vectors | diff -u zig/testing/vectors/aacpsy.txt -
+```
+
 `adpcm_wav_vectors.sh` (T31a) prints, for every ADPCM WAV fixture, the
 stream the pinned ffprobe reports (codec, sample format, channels, rate,
 `duration_ts`) and the count and SHA-256 of the samples the pinned ffmpeg

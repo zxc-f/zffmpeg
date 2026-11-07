@@ -424,6 +424,15 @@ jobs:
             .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o ac3enc-vectors
           ./ac3enc-vectors | diff -u zig/testing/vectors/ac3enc.txt -
 
+      # The committed T32d oracle must be what this build's AAC psy model
+      # makes of its cases.
+      - name: Check the AAC psy model vectors (T32d)
+        run: |
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/aacpsy_vectors.c \
+            .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a \
+            .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o aacpsy-vectors
+          ./aacpsy-vectors | diff -u zig/testing/vectors/aacpsy.txt -
+
       # The committed T28a oracle must be what this build's Opus decoder
       # makes of every Ogg fixture's first Opus stream.
       - name: Check the Opus decoder vectors (T28a)

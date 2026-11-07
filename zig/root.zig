@@ -150,6 +150,7 @@ pub const g726 = @import("codec/g726.zig");
 pub const ac3 = @import("codec/ac3.zig");
 pub const ac3dec = @import("codec/ac3dec.zig");
 pub const ac3enc = @import("codec/ac3enc.zig");
+pub const aacpsy = @import("codec/aacpsy.zig");
 pub const flacmux = @import("format/flacmux.zig");
 pub const ogg = @import("format/ogg.zig");
 pub const demux = @import("format/demux.zig");
@@ -266,6 +267,7 @@ test {
     _ = @import("codec/ac3.zig");
     _ = @import("codec/ac3dec.zig");
     _ = @import("codec/ac3enc.zig");
+    _ = @import("codec/aacpsy.zig");
     _ = @import("codec/ac3_bitalloc.zig");
     _ = @import("core/lfg.zig");
     _ = @import("testing/signals.zig");
