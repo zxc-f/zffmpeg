@@ -44,6 +44,7 @@ const au = @import("au.zig");
 const aiff = @import("aiff.zig");
 const raw = @import("raw.zig");
 const caf = @import("caf.zig");
+const alac = @import("../codec/alac.zig");
 const flac = @import("flac.zig");
 const ogg = @import("ogg.zig");
 const mp3 = @import("mp3.zig");
@@ -503,10 +504,32 @@ pub fn probeWith(reader: *std.Io.Reader, limits: Limits, options: Options) Error
             return .{ .container = .aiff, .codec = .{ .pcm = info.codec }, .format = info.format, .frame_count = info.frame_count };
         },
         .caf => {
-            var parser: caf.Parser = .init(input.reader(), limits.caf);
+            // ALAC (T31b) needs an allocator for the packet table, and a
+            // table after the samples a seekable input read from its start.
+            const gpa = options.gpa orelse if (options.tags) |t| t.gpa else null;
+            var parser: caf.Parser = if (gpa != null and options.source.seeker != null) seekable: {
+                const sk = options.source.seeker.?;
+                sk.seekTo(0) catch return error.IoFailure;
+                break :seekable .init(reader, limits.caf);
+            } else .init(input.reader(), limits.caf);
+            if (gpa) |g| parser.enableAlac(g, options.source.seeker);
+            defer parser.deinit();
             const info = try parser.readHeader();
+            if (info.alac) |a| {
+                // ffprobe opens the decoder, and fails when it refuses the
+                // stream: no cookie, a sample size or channel count it does
+                // not take.
+                const cookie = a.cookie orelse return error.UnsupportedFormat;
+                _ = alac.Config.parse(&cookie, a.channels) catch return error.UnsupportedFormat;
+                var buffer: [4096]u8 = undefined;
+                const big = if (a.max_packet > buffer.len) try gpa.?.alloc(u8, a.max_packet) else null;
+                defer if (big) |b| gpa.?.free(b);
+                const packet_buffer = big orelse buffer[0..];
+                while (try parser.nextPacket(packet_buffer)) |_| {}
+            }
             try parser.finish();
-            return .{ .container = .caf, .codec = .{ .pcm = info.codec }, .format = info.format, .frame_count = info.frame_count };
+            const codec: codecs.Codec = if (info.alac != null) .alac else .{ .pcm = info.codec };
+            return .{ .container = .caf, .codec = codec, .format = info.format, .frame_count = info.frame_count };
         },
         .raw => {
             var parser = input.rawParser(limits.raw);

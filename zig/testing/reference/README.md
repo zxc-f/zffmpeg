@@ -318,6 +318,16 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/adpcm_vecto
 ./adpcm-vectors | diff -u zig/testing/vectors/adpcm.txt -
 ```
 
+`alac_caf_vectors.sh` (T31b) is `adpcm_wav_vectors.sh` for the ALAC
+fixtures, the decoded samples hashed as s32le; `alac_fixtures.sh` encodes
+the `alac_ffmpeg_*` fixtures with the reference build's ALAC encoder and
+CAF muxer, in ALAC's channel layouts:
+
+```bash
+bash zig/testing/reference/alac_caf_vectors.sh .references/ffmpeg-install | diff -u zig/testing/vectors/alac_caf.txt -
+bash zig/testing/reference/alac_fixtures.sh .references/ffmpeg-install
+```
+
 `speed_check.py` is CLAUDE.md's "Speed check": one conversion timed with
 hyperfine, pinned to one core, by zffmpeg in ReleaseFast (from a file and
 from a pipe), this reference build and the native build of the
@@ -831,6 +841,14 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   the four-channel input (FFmpeg downmixes, zffmpeg refuses) and MS mono
   with trellis, whose unwritten bytes in FFmpeg's blocks are left out
   (notes.md "ADPCM").
+- **ALAC in CAF (T31b).** Every ALAC fixture's zffprobe report against
+  ffprobe's (both refusing a stream FFmpeg's demuxer or decoder does not
+  open) and its decoding by zffmpeg into each output of the Ogg decoding
+  section against the program's, through pipes too, where a packet table
+  after the samples fails both. Recorded: the five inputs the port refuses
+  where FFmpeg reads them (`KNOWN_ALAC_REFUSALS`: a zero-size packet, a
+  packet past the data, data past the table, constant-size packets, unknown
+  length) and `alac_damaged_packet`'s Ogg granules.
 - **MP2 output (T29d).** zffmpeg's MP2 (the `mp2` muxer, with `mp2` or
   `-c:a mp2fixed`) against the ffmpeg program's with `-bitexact`, for the
   FLAC output section's inputs and a decoded MP3, MP2 and Ogg Vorbis

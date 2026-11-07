@@ -3647,6 +3647,95 @@ def compare_adpcm(args, lines, failures):
     ] + rows
 
 
+# ALAC fixtures zffprobe and zffmpeg refuse where FFmpeg opens or decodes
+# them (notes.md "ALAC in CAF"): fixture -> (status, error, reason). Each
+# must still be refused with that error, and opened by ffprobe.
+KNOWN_ALAC_REFUSALS = {
+    "alac_packet_size_zero": (2, "InvalidCaf", "a table entry of 0 bytes, which FFmpeg's demuxer refuses after the "
+                                              "packets before it: zffprobe validates the packets, zffmpeg fails"),
+    "alac_table_past_data": (2, "InvalidCaf", "a last packet past the data, as for `alac_packet_size_zero`"),
+    "alac_data_past_table": (2, "InvalidCaf", "data past the table's last packet, which FFmpeg's demuxer refuses after "
+                                             "every packet"),
+    "alac_constant_packets": (3, "UnsupportedFormat", "a constant packet size, not ported"),
+    "alac_data_size_unknown": (3, "UnsupportedStreamingSize", "a `data` size of -1, refused without "
+                                                              "`unknown_length`, as for PCM CAF"),
+}
+
+KNOWN_ALAC_DECODE_DIFFERENCES = {
+    (name, None): (("refused", status, error), reason) for name, (status, error, reason) in KNOWN_ALAC_REFUSALS.items()
+} | {
+    # The refused packet leaves a gap in the program's timestamps, which the
+    # Ogg muxer's granules follow (notes.md "Decoded ADPCM into Ogg").
+    ("alac_damaged_packet", "-f ogg"): ("granules", "the same pages and samples but the granules: the refused "
+                                                    "packet leaves a gap in the program's timestamps"),
+}
+
+
+def compare_alac(args, lines, failures):
+    """ALAC in CAF (T31b): every ALAC fixture's zffprobe report against
+    ffprobe's (both refusing a stream FFmpeg's demuxer or decoder does not
+    open), and its decoding by zffmpeg into each output against the
+    program's (`decode_cells`), through pipes too, where a packet table
+    after the samples fails both."""
+    rows = []
+    same = total = understood = 0
+    notes = set()
+    paths = sorted((FIXTURES / "alac").glob("*.caf"))
+    for path in paths:
+        total += 1
+        problems = []
+        code, fields, err = ffprobe(args.ffprobe, path)
+        zcode, zfields, zerr = zffprobe(args.zffprobe, path)
+        known = KNOWN_ALAC_REFUSALS.get(path.stem)
+        if known:
+            status, error, reason = known
+            if code != 0 or zcode != status or not zerr.endswith(f": {error}"):
+                problems.append(f"ffprobe exited {code}, zffprobe {zcode} ({zerr}); recorded: zffprobe refuses with "
+                                f"{error}")
+            else:
+                understood += 1
+                notes.add(f"`{path.stem}`: {reason}")
+        elif code != 0:
+            # The demuxer or the decoder refuses it in both.
+            refusal = refusal_name(zcode, (zerr + "\n").encode(), "zffprobe", path)
+            if refusal not in ("InvalidCaf", "UnsupportedFormat"):
+                problems.append(f"ffprobe fails ({first_line(err)}), zffprobe exited {zcode} ({zerr})")
+        else:
+            want = {"format": fields.get("format_name"), "codec": fields.get("codec_name"),
+                    "sample_fmt": fields.get("sample_fmt"), "channels": fields.get("channels"),
+                    "channel_layout": fields.get("channel_layout"), "sample_rate": fields.get("sample_rate"),
+                    "nb_samples": fields.get("duration_ts"), "duration_num": fields.get("duration_ts"),
+                    "duration_den": fields.get("sample_rate")}
+            if zcode != 0 or zfields != want:
+                problems.append(f"zffprobe exited {zcode} with {zfields or zerr}, ffprobe's {want}")
+        if not problems:
+            same += 1
+        failures.extend(f"ALAC probe {path.stem}: {p}" for p in problems)
+        rows.append(f"| `{path.stem}` | probe | {'pass' if not problems else '**FAIL**: ' + '; '.join(problems)} |")
+    decode_rows, dsame, dtotal, dunderstood, dnotes, compared = decode_cells(
+        args, [(path, "alac") for path in paths], KNOWN_ALAC_DECODE_DIFFERENCES, "KNOWN_ALAC_DECODE_DIFFERENCES",
+        "ALAC decode", failures)
+    dtotal += unmatched_entries(KNOWN_ALAC_DECODE_DIFFERENCES, compared, "KNOWN_ALAC_DECODE_DIFFERENCES", failures)
+    same, total, understood = same + dsame, total + dtotal, understood + dunderstood
+    notes |= dnotes
+    rows += [row.replace("| alac |", "| decode |") for row in decode_rows]
+    record("ALAC in CAF (T31b)", same, total, understood=understood)
+    lines += [
+        "",
+        "## ALAC in CAF (T31b)",
+        "",
+        f"ALAC fixtures probed by zffprobe as ffprobe probes them (or refused by both), and decoded by zffmpeg into "
+        f"WAV, AU, AIFF, FLAC, Ogg and raw PCM (and resampled, and downmixed), into raw PCM from a pipe to stdout, "
+        f"and from a pipe into a WAV file, equal to the ffmpeg program's with `-bitexact` or refused by both: "
+        f"{same}/{total}, {understood} of them as understood differences:",
+        "",
+    ] + [f"- {note}" for note in sorted(notes)] + [
+        "",
+        "| Fixture | Cells | Result |",
+        "| --- | --- | --- |",
+    ] + rows
+
+
 def compare_ogg(args, lines, failures):
     """The Ogg fixtures (T27a): zffprobe against ffprobe's first audio
     stream (codec, sample format, channels, layout, rate, duration), and
@@ -4140,6 +4229,7 @@ def main():
     compare_aac(args, lines, failures)
     compare_aac_decode(args, lines, failures)
     compare_adpcm(args, lines, failures)
+    compare_alac(args, lines, failures)
     compare_mp2_output(args, lines, failures)
     compare_opus_vectors(args, lines, failures)
     compare_hashes(args, lines, failures)

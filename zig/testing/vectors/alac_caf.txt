@@ -1,0 +1,99 @@
+F alac_pakt_before_data
+S alac s16p 2 44100 9092
+D 9092 303a4de418d45190404dfadc449dce33637b3261d942478bb1ea1760307361fe
+F alac_pakt_after_data
+S alac s16p 2 44100 9092
+D 9092 303a4de418d45190404dfadc449dce33637b3261d942478bb1ea1760307361fe
+F alac_new_kuki
+S alac s16p 2 44100 4096
+D 4096 04edd0015a4bbd2215e67c2752e91a00e5ab4089f928fd3b5a5d6d2fed5fa84c
+F alac_priming
+S alac s16p 2 44100 8092
+D 8092 27d1c9d75a15861802fa128eacadc3d4e8f4b22ee3f958efd5ad7709c5029fe4
+F alac_remainder_cut
+S alac s16p 2 44100 11988
+D 8792 c21a9b90aa0e5b4e8a9434b82e3d7017686c36d8a22e499575f5561ff0792ea9
+F alac_damaged_packet
+S alac s16p 2 44100 9092
+D 4996 c7806a93a6ad610b72b0a5545c310ee9085828d5d132ed08770ace87847663b6
+F alac_all_damaged
+S alac s16p 1 22050 12288
+D error
+F alac_no_end_tag
+S alac s16p 2 44100 8192
+D 4096 04edd0015a4bbd2215e67c2752e91a00e5ab4089f928fd3b5a5d6d2fed5fa84c
+F alac_20bit
+S alac s32p 1 48000 6096
+D 6096 95b8328a451d50442901aa131ba7f4ffefb173c6645eeb124a9800a75e01c02f
+F alac_32bit
+S alac s32p 1 48000 3000
+D 1904 c524dce351bb2efb5d823230cb5422237fb62058bf0ff4b82528fb57f9baeac8
+F alac_32bit_stereo
+S alac s32p 2 48000 8192
+D error
+F alac_5ch
+S alac s16p 5 48000 4196
+D 4196 e1770e70be6e41c94794fe37da68765be3ba0adf12aed5a4d60793eb06b21942
+F alac_no_kuki
+S error
+D error
+F alac_no_pakt
+S error
+D error
+F alac_9ch_cookie
+S error
+D error
+F alac_pakt_short
+S error
+D error
+F alac_pakt_count_past_body
+S error
+D error
+F alac_zero_duration
+S error
+D error
+F alac_packet_size_zero
+S alac s16p 2 44100 12288
+D 4096 04edd0015a4bbd2215e67c2752e91a00e5ab4089f928fd3b5a5d6d2fed5fa84c
+F alac_data_past_table
+S alac s16p 2 44100 9092
+D 9092 303a4de418d45190404dfadc449dce33637b3261d942478bb1ea1760307361fe
+F alac_table_past_data
+S alac s16p 2 44100 12288
+D 8192 274b4b0723fa071712a8765314b860f860fb29da8d1503c1b508e9a0b2b52dd5
+F alac_constant_packets
+S alac s16p 2 44100 4096
+D 4096 04edd0015a4bbd2215e67c2752e91a00e5ab4089f928fd3b5a5d6d2fed5fa84c
+F alac_data_size_unknown
+S alac s16p 2 44100 9092
+D 0 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+F alac_ffmpeg_stereo_44k
+S alac s16p 2 44100 20000
+D 19520 7da78cd8f491f0a920b33f8fcb6bf03fe6a8249a67f68ecaabe47ebc48331039
+F alac_ffmpeg_mono_8k
+S alac s16p 1 8000 9000
+D 9000 d58af44f67f4cebd93577f7c131c103a3bf2cb6b859def6d562aaa45091710e4
+F alac_ffmpeg_stereo24_96k
+S alac s32p 2 96000 12000
+D 11712 27023fe41ed4bb2a3c82afdf62901ee5b86887dbacc6b76c0ce1e2673111ede8
+F alac_ffmpeg_3ch
+S alac s16p 3 48000 6000
+D 6000 e5774ce495255875cfe7ad2f5d8056bf33091da42208deb7d5abb89331f927e3
+F alac_ffmpeg_6ch
+S alac s16p 6 48000 5000
+D 5000 a3732ec7409210ede2bdd8d7b7afedf59126954e1b80886b45f4b5eb8bf9b910
+F alac_ffmpeg_8ch_24
+S alac s32p 8 48000 4500
+D 4500 ca74a6c78e25d966835adebc175bc019825da5881a6e8643c5dd15429b4f6766
+F alac_ffmpeg_level0
+S alac s16p 2 44100 6000
+D 6000 4a1830fd48acf0958a0633d939d771034f222ddfffeb41699a6b02b6288ae8b9
+F alac_ffmpeg_level1
+S alac s16p 2 22050 9000
+D 9000 e7be90915e39014e4e12178d6f20247789c5652f95681b781d3f64402e86a442
+F alac_ffmpeg_orders
+S alac s32p 1 32000 7000
+D 5808 cb644e9a91b5c306cc9b1a55a18e2dc4fbe1c8d9bbf846488579f50f676530b3
+F alac_ffmpeg_one_sample
+S alac s16p 2 44100 1
+D 1 af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc

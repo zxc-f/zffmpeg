@@ -4969,6 +4969,218 @@ def build_adpcm_fixtures():
     return fx
 
 
+# --- ALAC in CAF (T31b) -------------------------------------------------------
+#
+# The alac_ffmpeg_* files are FFmpeg's ALAC encoder and CAF muxer's output,
+# made by zig/testing/reference/alac_fixtures.sh from inputs this script
+# writes (`--alac-input NAME`) and committed; the others are built here with
+# ALAC's verbatim frames (an element header, then every sample at the
+# cookie's width), which need no encoder, in every chunk order and table
+# FFmpeg's demuxer reads. What FFmpeg makes of each is vectors/alac_caf.txt
+# (alac_caf_vectors.sh).
+
+ALAC_DIR = HERE / "alac"
+ALAC_MANIFEST = ALAC_DIR / "manifest.zon"
+ALAC_README = ALAC_DIR / "README.md"
+
+# Each entry: channels, rate, sample count, seed, signal kind (as
+# AAC_FFMPEG's), bits (16 or 24), the encoder options, and the file's
+# SHA-256.
+ALAC_FFMPEG = {
+    "alac_ffmpeg_stereo_44k": (2, 44100, 20000, 101, "smooth", 16, "-c:a alac", "93a9c8207d87856a1b2abcb816daa5c2ca8b4474d6982787d90941bc5ed51b32"),
+    "alac_ffmpeg_mono_8k": (1, 8000, 9000, 102, "tones", 16, "-c:a alac", "77d465ddff2b0b200892699cdbe8964049280530aec80216eba04e12894c0c46"),
+    "alac_ffmpeg_stereo24_96k": (2, 96000, 12000, 103, "noise", 24, "-c:a alac", "98559ac7906de0c255ae25e48fdf1cf6881ebd7cb44eb99868c6704d814690f8"),
+    "alac_ffmpeg_3ch": (3, 48000, 6000, 104, "smooth", 16, "-c:a alac", "025a2cf0506e91ef053d4015a238c112a03a70620a47bbdfd0de18191f295cfb"),
+    "alac_ffmpeg_6ch": (6, 48000, 5000, 105, "tones", 16, "-c:a alac", "048829b1f39bd088a9d75ad9a00e0004a8bbfd6c08a2edf61511fd619f1bd228"),
+    "alac_ffmpeg_8ch_24": (8, 48000, 4500, 106, "smooth", 24, "-c:a alac", "c3dfa3151cc1dbd211bf25f8dc0c8c6a8de9438d50bf805226605c8788779016"),
+    "alac_ffmpeg_level0": (2, 44100, 6000, 107, "transients", 16, "-c:a alac -compression_level 0", "dbb502fa66d4fab68375823c2a09e2e2df45a7e3e265ad77b451f90d5eac4cd2"),
+    "alac_ffmpeg_level1": (2, 22050, 9000, 108, "tones", 16, "-c:a alac -compression_level 1", "4ec5e10b83cd20bcb40abaac78ff06503ab1487cb7e8d9d611fcad49116b2095"),
+    "alac_ffmpeg_orders": (1, 32000, 7000, 109, "smooth", 24, "-c:a alac -min_prediction_order 1 -max_prediction_order 30", "c8f8019471b034a2bf840609401719c9b0b27555706cd4f3572dde01df760a9c"),
+    "alac_ffmpeg_one_sample": (2, 44100, 1, 110, "tones", 16, "-c:a alac", "9e7e9e3f56eb6c603e34be4d61f5dc331a76e7f884ba08d66e5f18f16da69799"),
+}
+
+# ff_alac_channel_layout_offsets and ff_alac_channel_elements (alac_data.c).
+ALAC_OFFSETS = ((0,), (0, 1), (2, 0, 1), (2, 0, 1, 3), (2, 0, 1, 3, 4), (2, 0, 1, 4, 5, 3), (2, 0, 1, 4, 5, 6, 3),
+                (2, 6, 7, 0, 1, 4, 5, 3))
+ALAC_ELEMENTS = ((0,), (1,), (0, 1), (0, 1, 0), (0, 1, 1), (0, 1, 1, 0), (0, 1, 1, 0, 0), (0, 1, 1, 1, 0))
+
+
+def alac_ffmpeg_input(name):
+    """The samples, interleaved, that alac_fixtures.sh encodes: s16, or for
+    24 bits the s16 signal with 8 more bits below, as s32 at the top."""
+    channels, rate, count, seed, kind, bits, _, _ = ALAC_FFMPEG[name]
+    samples = signal_input(channels, rate, count, seed, kind)
+    if bits == 24:
+        rng = AdpcmLcg(seed)
+        return [((v * 256 + rng.byte()) << 8) & 0xFFFFFFFF for v in samples]
+    return samples
+
+
+class BitPacker:
+    def __init__(self):
+        self.bits = []
+
+    def put(self, n, value):
+        for i in range(n - 1, -1, -1):
+            self.bits.append((value >> i) & 1)
+
+    def bytes(self):
+        out = bytearray()
+        bits = self.bits + [0] * (-len(self.bits) % 8)
+        for i in range(0, len(bits), 8):
+            out.append(int("".join(map(str, bits[i:i + 8])), 2))
+        return bytes(out)
+
+
+def alac_verbatim(planes, sample_size, element_type=None, end=True):
+    """One ALAC frame of verbatim elements: `planes` one list of samples per
+    output channel, in the decoder's layout; `element_type` overrides the
+    first element's type (to damage it)."""
+    channels = len(planes)
+    w = BitPacker()
+    ch = 0
+    for k, element in enumerate(ALAC_ELEMENTS[channels - 1]):
+        width = 2 if element == 1 else 1
+        w.put(3, element if (k or element_type is None) else element_type)
+        w.put(4, 0)
+        w.put(12, 0)
+        w.put(1, 1)  # the sample count follows
+        w.put(2, 0)
+        w.put(1, 1)  # verbatim
+        w.put(32, len(planes[0]))
+        mapped = [planes[ALAC_OFFSETS[channels - 1][ch + j]] for j in range(width)]
+        for i in range(len(planes[0])):
+            for p in mapped:
+                w.put(sample_size, p[i] & ((1 << sample_size) - 1))
+        ch += width
+    if end:
+        w.put(3, 7)
+    return w.bytes()
+
+
+def alac_cookie(channels, rate, sample_size=16, frame_length=4096, new_style=False):
+    body = (struct.pack(">IB", frame_length, 0) + bytes([sample_size, 40, 10, 14, channels])
+            + struct.pack(">HIII", 255, 0, 0, rate))
+    if new_style:
+        return body
+    return struct.pack(">I", 12) + b"frma" + b"alac" + struct.pack(">I", 36) + b"alac" + bytes(4) + body
+
+
+def descr_len(value):
+    """put_variable_length_num: 7 bits a byte, the high bit set on all but
+    the last."""
+    out = [value & 0x7F]
+    value >>= 7
+    while value:
+        out.append(0x80 | (value & 0x7F))
+        value >>= 7
+    return bytes(reversed(out))
+
+
+def alac_caf(packets, channels, rate, sample_size=16, valid=None, priming=0, remainder=None, order="before",
+             kuki=True, new_kuki=False, pakt=True, sizes=None, num_packets=None, data_size=None, extra_data=b"",
+             bytes_per_packet=0, frames_per_packet=4096, pakt_body=None):
+    """A CAF file of ALAC `packets` (frames of up to 4096 samples) with its
+    cookie and packet table before or after `data`."""
+    frames = 0
+    desc = (struct.pack(">d", float(rate)) + b"alac" + struct.pack(">IIIII", 1, bytes_per_packet, frames_per_packet,
+                                                                   channels, 0))
+    out = b"caff" + struct.pack(">HH", 1, 0) + b"desc" + struct.pack(">q", 32) + desc
+    kuki_chunk = (b"kuki" + struct.pack(">q", len(alac_cookie(channels, rate, sample_size, new_style=new_kuki)))
+                  + alac_cookie(channels, rate, sample_size, new_style=new_kuki)) if kuki else b""
+    sizes = [len(p) for p in packets] if sizes is None else sizes
+    n = len(packets) if num_packets is None else num_packets
+    if remainder is None:
+        remainder = 0
+    if valid is None:
+        valid = len(packets) * 4096 - priming - remainder
+    body = pakt_body if pakt_body is not None else (struct.pack(">qqII", n, valid, priming, remainder)
+                                                     + b"".join(descr_len(v) for v in sizes))
+    pakt_chunk = b"pakt" + struct.pack(">q", len(body)) + body if pakt else b""
+    payload = b"".join(packets) + extra_data
+    declared = len(payload) + 4 if data_size is None else data_size
+    data_chunk = b"data" + struct.pack(">q", declared) + bytes(4) + payload
+    if order == "before":
+        return out + kuki_chunk + pakt_chunk + data_chunk
+    return out + kuki_chunk + data_chunk + pakt_chunk
+
+
+def build_alac_fixtures():
+    fx = []
+
+    def ok(name, rule, data, group="accepted"):
+        fx.append(Mp3Fixture(name, group, rule, data))
+
+    def bad(name, rule, data, error, group="rejected"):
+        fx.append(Mp3Fixture(name, group, rule, data, reject=error))
+
+    def planes(seed, channels, n, bits=16):
+        rng = AdpcmLcg(seed)
+        top = 1 << (bits - 1)
+        return [[rng.randrange(2 * top) - top for _ in range(n)] for _ in range(channels)]
+
+    st = [alac_verbatim(planes(1, 2, 4096), 16), alac_verbatim(planes(2, 2, 4096), 16),
+          alac_verbatim(planes(3, 2, 900), 16)]
+    ok("alac_pakt_before_data", "Stereo 16-bit verbatim frames, the cookie and packet table before `data`, as "
+       "Apple's tools write them: read from a pipe too.", alac_caf(st, 2, 44100, remainder=4096 - 900))
+    ok("alac_pakt_after_data", "The same packets with the table after `data`, as FFmpeg's muxer writes it on a "
+       "seekable output.", alac_caf(st, 2, 44100, remainder=4096 - 900, order="after"))
+    ok("alac_new_kuki", "A new-style cookie (24 bytes, no `frma` atom), to which FFmpeg adds the first 12.",
+       alac_caf(st[:1], 2, 44100, new_kuki=True))
+    ok("alac_priming", "1000 priming frames: the first packet's skip-samples side data drops them.",
+       alac_caf(st, 2, 44100, priming=1000, remainder=4096 - 900))
+    ok("alac_remainder_cut", "A remainder of 300 frames on a last frame of 900: its last 300 samples dropped.",
+       alac_caf(st, 2, 44100, remainder=300))
+    damaged = [st[0], alac_verbatim(planes(4, 2, 4096), 16, element_type=4), st[2]]
+    ok("alac_damaged_packet", "The second packet's element type is 4 (DSE), which FFmpeg's decoder does not "
+       "decode: that packet dropped.", alac_caf(damaged, 2, 44100, remainder=4096 - 900))
+    bad("alac_all_damaged", "Every packet with element type 2 (CCE): every decode fails.",
+        alac_caf([alac_verbatim(planes(5, 1, 4096), 16, element_type=2)] * 3, 1, 22050), "DecodeErrorRate")
+    ok("alac_no_end_tag", "A last packet without its END element: \"no end tag found\", dropped.",
+       alac_caf([st[0], alac_verbatim(planes(6, 2, 4096), 16, end=False)], 2, 44100))
+    m20 = [alac_verbatim(planes(7, 1, 4096, 20), 20), alac_verbatim(planes(8, 1, 2000, 20), 20)]
+    ok("alac_20bit", "A 20-bit cookie and verbatim frames: s32p, the samples shifted up 12 bits.",
+       alac_caf(m20, 1, 48000, sample_size=20, remainder=4096 - 2000))
+    m32 = [alac_verbatim(planes(9, 1, 3000, 32), 32)]
+    ok("alac_32bit", "A 32-bit mono cookie and verbatim frames.", alac_caf(m32, 1, 48000, sample_size=32,
+                                                                            remainder=4096 - 3000))
+    s32 = [alac_verbatim(planes(13, 2, 3000, 32), 32)] * 2
+    bad("alac_32bit_stereo", "32-bit stereo: a CPE's 33 bits, which FFmpeg's decoder does not decode (\"bps 33\").",
+        alac_caf(s32, 2, 48000, sample_size=32), "DecodeErrorRate")
+    ch5 = [alac_verbatim(planes(10, 5, 4096), 16), alac_verbatim(planes(11, 5, 100), 16)]
+    ok("alac_5ch", "Five channels (5.0): an SCE and two CPEs mapped by FFmpeg's offsets.",
+       alac_caf(ch5, 5, 48000, remainder=4096 - 100))
+    bad("alac_no_kuki", "No magic cookie: FFmpeg's decoder does not open (\"extradata is too small\").",
+        alac_caf(st, 2, 44100, remainder=4096 - 900, kuki=False), "UnsupportedFormat")
+    bad("alac_no_pakt", "No packet table: \"Missing packet table\".", alac_caf(st, 2, 44100, pakt=False),
+        "InvalidCaf")
+    bad("alac_9ch_cookie", "A cookie of nine channels, which FFmpeg's decoder does not open.",
+        alac_caf([alac_verbatim(planes(12, 8, 64), 16)], 8, 48000) .replace(alac_cookie(8, 48000), alac_cookie(9, 48000)),
+        "UnsupportedFormat")
+    bad("alac_pakt_short", "A 20-byte packet table, shorter than its fields.",
+        alac_caf(st, 2, 44100, pakt_body=bytes(20)), "InvalidCaf")
+    bad("alac_pakt_count_past_body", "A table declaring 1000 packets in 3 bytes of sizes.",
+        alac_caf(st, 2, 44100, num_packets=1000), "InvalidCaf")
+    bad("alac_zero_duration", "A table whose remainder cancels every frame: no duration, \"Missing packet "
+        "table\".", alac_caf(st[:1], 2, 44100, remainder=4096), "InvalidCaf")
+    bad("alac_packet_size_zero", "A table entry of 0 bytes, which read_packet refuses mid-stream.",
+        alac_caf(st, 2, 44100, sizes=[len(st[0]), 0, len(st[1]) + len(st[2])]), "InvalidCaf")
+    bad("alac_data_past_table", "Ten bytes of data after the table's last packet.",
+        alac_caf(st, 2, 44100, remainder=4096 - 900, extra_data=bytes(10)), "InvalidCaf")
+    bad("alac_table_past_data", "A last packet the table makes 50 bytes longer than the data holds.",
+        alac_caf(st, 2, 44100, sizes=[len(st[0]), len(st[1]), len(st[2]) + 50]), "InvalidCaf")
+    bad("alac_constant_packets", "A desc with a constant packet size, which the port does not read (notes.md "
+        "\"ALAC in CAF\").", alac_caf([st[0]], 2, 44100, bytes_per_packet=len(st[0])), "UnsupportedFormat")
+    bad("alac_data_size_unknown", "A `data` size of -1 after the table: unknown length, refused by default.",
+        alac_caf(st, 2, 44100, remainder=4096 - 900, data_size=-1), "UnsupportedStreamingSize")
+    for name, (channels, rate, count, _, kind, bits, options, _) in ALAC_FFMPEG.items():
+        path = ALAC_DIR / f"{name}.caf"
+        rule = (f"FFmpeg's encoder and CAF muxer, {count} {kind} samples of {channels} channels at {rate} Hz, "
+                f"{bits} bits, `{options}`.")
+        fx.append(Mp3Fixture(name, "ffmpeg", rule, path.read_bytes() if path.exists() else b"", made_by="ffmpeg"))
+    return fx
+
+
 def adts_probe_score(buf):
     """adts_aac_probe on a probe buffer (after any ID3v2 tags)."""
     end = len(buf) - 7
@@ -5018,7 +5230,7 @@ def render_mp3_manifest(fixtures):
 
 
 def outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures, flac_fixtures, ogg_fixtures,
-            mp3_fixtures, aac_fixtures, adpcm_fixtures):
+            mp3_fixtures, aac_fixtures, adpcm_fixtures, alac_fixtures):
     files = {WAV_DIR / f"{f.name}.wav": f.data for f in fixtures}
     files[MANIFEST] = render_manifest(
         fixtures, "// Each entry names wav/<name>.wav; see README.md for the rules and decisions.")
@@ -5059,6 +5271,12 @@ def outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures, fl
         "Streams, tags and packets are", "Streams and decoded samples are").replace(
         "vectors/mp3.txt", "vectors/adpcm_wav.txt").encode()
     files[ADPCM_README] = render_readme(ADPCM_README, render_ogg_table(adpcm_fixtures))
+    files.update({ALAC_DIR / f"{f.name}.caf": f.data for f in alac_fixtures if f.made_by != "ffmpeg"})
+    files[ALAC_MANIFEST] = render_mp3_manifest(alac_fixtures).replace(
+        "MP3 fixtures", "ALAC fixtures").replace("mp3/<name>.mp3; see mp3/README.md", "alac/<name>.caf; see alac/README.md").replace(
+        "Streams, tags and packets are", "Streams and decoded samples are").replace(
+        "vectors/mp3.txt", "vectors/alac_caf.txt").encode()
+    files[ALAC_README] = render_readme(ALAC_README, render_ogg_table(alac_fixtures))
     return files
 
 
@@ -5087,6 +5305,12 @@ def check_ffmpeg_made(flac_fixtures):
             problems.append(f"missing FFmpeg-made fixture: {path.relative_to(HERE)}")
         elif digest is None or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
             problems.append(f"FFmpeg-made fixture differs from its recorded hash: {path.relative_to(HERE)}")
+    for name, (*_, digest) in ALAC_FFMPEG.items():
+        path = ALAC_DIR / f"{name}.caf"
+        if not path.exists():
+            problems.append(f"missing FFmpeg-made fixture: {path.relative_to(HERE)}")
+        elif digest is None or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            problems.append(f"FFmpeg-made fixture differs from its recorded hash: {path.relative_to(HERE)}")
     for name, (*_, digest) in ADPCM_FFMPEG.items():
         path = ADPCM_DIR / f"{name}.wav"
         if not path.exists():
@@ -5107,6 +5331,8 @@ def main():
                         help="write the s16le input of FFmpeg-made AAC fixture NAME to stdout and stop")
     parser.add_argument("--adpcm-input", metavar="NAME",
                         help="write the s16le input of FFmpeg-made ADPCM fixture NAME to stdout and stop")
+    parser.add_argument("--alac-input", metavar="NAME",
+                        help="write the s16le or s32le input of FFmpeg-made ALAC fixture NAME to stdout and stop")
     args = parser.parse_args()
     if args.flac_input:
         sys.stdout.buffer.write(b"".join(struct.pack("<h", v) for v in flac_ffmpeg_input(args.flac_input)))
@@ -5120,6 +5346,11 @@ def main():
     if args.adpcm_input:
         sys.stdout.buffer.write(b"".join(struct.pack("<h", v) for v in adpcm_ffmpeg_input(args.adpcm_input)))
         return 0
+    if args.alac_input:
+        bits = ALAC_FFMPEG[args.alac_input][5]
+        fmt = "<h" if bits == 16 else "<I"
+        sys.stdout.buffer.write(b"".join(struct.pack(fmt, v) for v in alac_ffmpeg_input(args.alac_input)))
+        return 0
 
     fixtures = build_fixtures()
     au_fixtures = build_au_fixtures()
@@ -5131,22 +5362,24 @@ def main():
     mp3_fixtures = build_mp3_fixtures()
     aac_fixtures = build_aac_fixtures()
     adpcm_fixtures = build_adpcm_fixtures()
+    alac_fixtures = build_alac_fixtures()
     expected = outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures, flac_fixtures, ogg_fixtures,
-                       mp3_fixtures, aac_fixtures, adpcm_fixtures)
+                       mp3_fixtures, aac_fixtures, adpcm_fixtures, alac_fixtures)
     stale = [path for path, content in expected.items() if not path.exists() or path.read_bytes() != content]
     ffmpeg_made = ({FLAC_DIR / f"{f.name}.flac" for f in flac_fixtures if f.made_by == "ffmpeg"}
                    | {OGG_DIR / f"{name}.ogg" for name in OGG_FFMPEG}
                    | {AAC_DIR / f"{name}.aac" for name in AAC_FFMPEG}
-                   | {ADPCM_DIR / f"{name}.wav" for name in ADPCM_FFMPEG})
+                   | {ADPCM_DIR / f"{name}.wav" for name in ADPCM_FFMPEG}
+                   | {ALAC_DIR / f"{name}.caf" for name in ALAC_FFMPEG})
     extra = sorted((set(WAV_DIR.glob("*.wav")) | set(AU_DIR.glob("*.au")) | set(AIFF_DIR.glob("*.aiff"))
              | set(RAW_DIR.glob("*.raw")) | set(CAF_DIR.glob("*.caf")) | set(FLAC_DIR.glob("*.flac"))
              | set(OGG_DIR.glob("*.ogg")) | set(MP3_DIR.glob("*.mp3")) | set(AAC_DIR.glob("*.aac"))
-             | set(ADPCM_DIR.glob("*.wav")))
+             | set(ADPCM_DIR.glob("*.wav")) | set(ALAC_DIR.glob("*.caf")))
                    - set(expected) - ffmpeg_made)
     problems = check_ffmpeg_made(flac_fixtures)
     counts = (f"{len(fixtures)} WAV, {len(au_fixtures)} AU, {len(aiff_fixtures)} AIFF, {len(raw_fixtures)} raw PCM, "
               f"{len(caf_fixtures)} CAF, {len(flac_fixtures)} FLAC, {len(ogg_fixtures)} Ogg, {len(mp3_fixtures)} MP3"
-              f", {len(aac_fixtures)} ADTS and {len(adpcm_fixtures)} ADPCM fixtures")
+              f", {len(aac_fixtures)} ADTS, {len(adpcm_fixtures)} ADPCM and {len(alac_fixtures)} ALAC fixtures")
 
     if args.check:
         for path in stale:

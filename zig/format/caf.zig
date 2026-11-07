@@ -27,6 +27,8 @@ const pcm = @import("../codec/pcm.zig");
 const skip = @import("../io/skip.zig");
 const pcmdata = @import("pcmdata.zig");
 const mov_chan = @import("mov_chan.zig");
+const seek = @import("seek.zig");
+const alac = @import("../codec/alac.zig");
 
 /// Contract errors (see the CAF fixture README), plus `IoFailure` for a
 /// failing reader.
@@ -41,6 +43,8 @@ pub const Error = error{
     /// `readSamples` or `readData` got an output that cannot hold one frame
     /// while data remains (T65b).
     OutputTooSmall,
+    /// The packet table, which only ALAC reads (T31b), allocates.
+    OutOfMemory,
 };
 
 /// Configurable policy limits; exceeding one is `error.LimitExceeded`.
@@ -53,14 +57,41 @@ pub const Limits = struct {
     /// Read a `data` size of -1 to the end of the input, in whole frames,
     /// instead of `UnsupportedStreamingSize`; the frame count is then unknown.
     unknown_length: bool = false,
+    /// The largest `pakt` body an ALAC stream's packet table may have
+    /// (T31b): 16 MiB, four million packets of 4096 samples.
+    max_packet_table_bytes: u32 = 16 << 20,
 };
 
 pub const Info = struct {
+    /// The PCM encoding of `data`; for ALAC (`alac`), the decoded samples'
+    /// encoding: s16le at 16 bits, s32le above.
     codec: pcm.Codec,
-    /// The decoded stream: `sample_format` is `codec.storage()`.
+    /// The decoded stream: `sample_format` is `codec.storage()`; for ALAC,
+    /// FFmpeg's decoder's (s16p or s32p) with its channels and layout
+    /// (`alac.channel_masks`) from the magic cookie.
     format: audio.Format,
-    /// Sample frames in `data`; null when its length is unknown.
+    /// Sample frames in `data`; null when its length is unknown. For ALAC,
+    /// the packet table's count less the priming and remainder frames.
     frame_count: ?u64,
+    /// Set when `data` holds ALAC packets (T31b): read them with
+    /// `Parser.nextPacket`.
+    alac: ?Alac = null,
+};
+
+/// An ALAC stream in CAF (T31b), as cafdec.c reads it.
+pub const Alac = struct {
+    /// The decoder's 36-byte cookie, from `kuki` (a new-style cookie gets
+    /// its first 12 bytes made up, as FFmpeg does); null without one,
+    /// which FFmpeg's decoder does not open.
+    cookie: ?[alac.cookie_len]u8,
+    /// The desc's channels and bits per sample.
+    channels: u32,
+    /// Frames the stream starts and ends with that are not samples: the
+    /// first packet's skip and the last one's discard.
+    priming: u32,
+    remainder: u32,
+    /// The largest packet in the table.
+    max_packet: u32,
 };
 
 /// The default channel limit.
@@ -153,11 +184,47 @@ pub const Parser = struct {
     /// delivered, or none when the data runs to the end of the input.
     data: pcmdata.Data = .{},
     state: State = .header,
+    /// ALAC (T31b): the allocator of the packet table, the seeker that
+    /// reaches a table after `data`, and what `kuki`, `pakt` and `desc`
+    /// gave.
+    gpa: ?std.mem.Allocator = null,
+    seeker: ?seek.Seeker = null,
+    is_alac: bool = false,
+    cookie: ?[alac.cookie_len]u8 = null,
+    /// Each packet's bytes (owned, `gpa`), and the next packet's index.
+    packet_sizes: []u32 = &.{},
+    has_table: bool = false,
+    next_packet: usize = 0,
+    priming: u32 = 0,
+    remainder: u32 = 0,
+    duration: u64 = 0,
+    max_packet: u32 = 0,
+    desc_channels: u32 = 0,
+    desc_bits: u32 = 0,
+    frames_per_packet: u32 = 0,
+    /// The chunks after `data` were read before it (a packet table there).
+    trailing_read: bool = false,
 
     const State = enum { header, data, done };
 
     pub fn init(reader: *std.Io.Reader, limits: Limits) Parser {
         return .{ .reader = reader, .limits = limits };
+    }
+
+    /// Lets the parser read ALAC (T31b): `gpa` holds its packet table, and
+    /// `seeker`, when the input can seek, moves `reader` to a table after
+    /// `data` and back, as cafdec.c does on a seekable input. Call it
+    /// before `readHeader`, and `deinit` after.
+    pub fn enableAlac(p: *Parser, gpa: std.mem.Allocator, seeker: ?seek.Seeker) void {
+        std.debug.assert(p.state == .header);
+        p.gpa = gpa;
+        p.seeker = seeker;
+    }
+
+    /// Frees the packet table.
+    pub fn deinit(p: *Parser) void {
+        if (p.gpa) |gpa| gpa.free(p.packet_sizes);
+        p.packet_sizes = &.{};
     }
 
     /// Reads the file header, `desc`, and every chunk up to the samples.
@@ -179,6 +246,7 @@ pub const Parser = struct {
         const frames_per_packet = std.mem.readInt(u32, desc[20..24], .big);
         const channels = std.mem.readInt(u32, desc[24..28], .big);
         const bits = std.mem.readInt(u32, desc[28..32], .big);
+        if (std.mem.eql(u8, desc[8..12], "alac")) return p.readAlacHeader(rate, bytes_per_packet, frames_per_packet, channels, bits);
         const codec = codecFor(desc[8..12], flags, bits) orelse return error.UnsupportedFormat;
         if (channels == 0) return error.InvalidFormat;
         if (channels > p.limits.max_channels) return error.LimitExceeded;
@@ -210,6 +278,178 @@ pub const Parser = struct {
             }
         }
     }
+
+    /// The chunks of an ALAC stream (T31b), as read_header reads them: its
+    /// cookie and packet table, before `data` or, on an input that can
+    /// seek, after it.
+    fn readAlacHeader(p: *Parser, rate: u32, bytes_per_packet: u32, frames_per_packet: u32, channels: u32, bits: u32) Error!Info {
+        // Constant-size ALAC packets, and packets of variable frames, are
+        // not ported (notes.md "ALAC in CAF").
+        if (bytes_per_packet != 0 or frames_per_packet == 0) return error.UnsupportedFormat;
+        if (p.gpa == null) return error.UnsupportedFormat;
+        if (channels > p.limits.max_channels) return error.LimitExceeded;
+        p.is_alac = true;
+        p.desc_channels = channels;
+        p.desc_bits = bits;
+        p.frames_per_packet = frames_per_packet;
+        var data_at: ?u64 = null;
+        var data_size: i64 = 0;
+        var found_data = false;
+        while (try p.nextChunk()) |chunk| {
+            if (std.mem.eql(u8, &chunk.id, "data")) {
+                if (found_data) return error.InvalidCaf;
+                found_data = true;
+                if (chunk.size != -1 and chunk.size < 4) return error.InvalidCaf;
+                _ = try p.readArray(4); // edit count
+                data_size = if (chunk.size == -1) -1 else chunk.size - 4;
+                // A table already read, an unknown size or an input that
+                // cannot seek: the samples follow (cafdec.c stops there).
+                const seeker = p.seeker orelse break;
+                if (p.has_table or data_size < 0) break;
+                const at = seeker.position();
+                data_at = at;
+                const end = std.math.add(u64, at, @intCast(data_size)) catch return error.InvalidCaf;
+                if (seeker.size()) |size| {
+                    if (end > size) return error.Truncated;
+                }
+                seeker.seekTo(end) catch return error.IoFailure;
+                continue;
+            }
+            if (std.mem.eql(u8, &chunk.id, "kuki")) {
+                try p.readKuki(chunk.size);
+            } else if (std.mem.eql(u8, &chunk.id, "pakt")) {
+                try p.readPakt(chunk.size);
+            } else if (std.mem.eql(u8, &chunk.id, "desc")) {
+                return error.InvalidCaf;
+            } else {
+                if (chunk.size < 0) return error.InvalidCaf;
+                skip.discardAll(p.reader, @intCast(chunk.size)) catch |err| return mapRead(err);
+            }
+        }
+        if (!found_data) return error.InvalidCaf;
+        // read_header's found_data: the table must give a duration.
+        if (!p.has_table or p.duration == 0) return error.InvalidCaf; // "Missing packet table"
+        if (data_at) |at| {
+            p.trailing_read = true;
+            p.seeker.?.seekTo(at) catch return error.IoFailure;
+        }
+        if (data_size < 0 and !p.limits.unknown_length) return error.UnsupportedStreamingSize;
+        p.data = .init(p.reader, 1, if (data_size < 0) null else @as(u64, @intCast(data_size)));
+        p.state = .data;
+        const cookie_channels: u32 = if (p.cookie) |c| c[21] else channels;
+        const sample_size: u8 = if (p.cookie) |c| c[17] else 16;
+        const count = std.math.cast(u16, cookie_channels) orelse return error.LimitExceeded;
+        const layout: audio.ChannelLayout = if (count >= 1 and count <= alac.max_channels) .{ .native = alac.channel_masks[count - 1] } else .{ .unspecified = count };
+        const wide = sample_size > 16;
+        const format: audio.Format = .{ .sample_rate = rate, .layout = layout, .sample_format = if (wide) .s32p else .s16p };
+        return .{
+            .codec = if (wide) .s32le else .s16le,
+            .format = format,
+            .frame_count = p.duration,
+            .alac = .{ .cookie = p.cookie, .channels = channels, .priming = p.priming, .remainder = p.remainder, .max_packet = p.max_packet },
+        };
+    }
+
+    /// `kuki` for ALAC: read_kuki_chunk's two cookie styles.
+    fn readKuki(p: *Parser, size: i64) Error!void {
+        if (size < 24) return error.InvalidCaf; // "invalid ALAC magic cookie"
+        const preamble = try p.readArray(12);
+        var cookie: [alac.cookie_len]u8 = undefined;
+        if (std.mem.eql(u8, preamble[4..12], "frmaalac")) {
+            if (size < 12 + alac.cookie_len) return error.InvalidCaf;
+            cookie = try p.readArray(alac.cookie_len);
+            skip.discardAll(p.reader, @intCast(size - 12 - alac.cookie_len)) catch |err| return mapRead(err);
+        } else {
+            // The new style holds the last 24 bytes; FFmpeg makes up the
+            // atom header before them.
+            std.mem.writeInt(u32, cookie[0..4], alac.cookie_len, .big);
+            cookie[4..8].* = "alac".*;
+            @memset(cookie[8..12], 0);
+            cookie[12..24].* = preamble;
+            cookie[24..36].* = try p.readArray(12);
+            skip.discardAll(p.reader, @intCast(size - 24)) catch |err| return mapRead(err);
+        }
+        p.cookie = cookie;
+    }
+
+    /// `pakt`: read_pakt_chunk for packets of `frames_per_packet` frames
+    /// and variable bytes, each size a descriptor length (up to 4 bytes of
+    /// 7 bits).
+    fn readPakt(p: *Parser, size: i64) Error!void {
+        if (size < 0) return error.InvalidCaf;
+        if (size > p.limits.max_packet_table_bytes) return error.LimitExceeded;
+        if (size < 24) {
+            // FFmpeg reads the fields past the chunk, then finds it short.
+            return error.InvalidCaf; // "error reading packet table"
+        }
+        const gpa = p.gpa.?;
+        const body = try gpa.alloc(u8, @intCast(size));
+        defer gpa.free(body);
+        p.reader.readSliceAll(body) catch |err| return mapRead(err);
+        const num_packets_signed = std.mem.readInt(i64, body[0..8], .big);
+        if (num_packets_signed < 0 or num_packets_signed > std.math.maxInt(i32) / 24) return error.InvalidCaf;
+        const valid = std.mem.readInt(i64, body[8..16], .big);
+        const priming = std.mem.readInt(u32, body[16..20], .big);
+        const remainder = std.mem.readInt(u32, body[20..24], .big);
+        if (valid < 0 or std.math.maxInt(i64) - @as(i64, priming) - remainder < valid) return error.InvalidCaf;
+        // Each entry takes a byte at least: a count past the body fails
+        // there, so work and memory follow the bytes present.
+        const entries = body[24..];
+        const num_packets: usize = @intCast(num_packets_signed);
+        if (num_packets > entries.len) return error.InvalidCaf;
+        const sizes = try gpa.alloc(u32, num_packets);
+        errdefer gpa.free(sizes);
+        var at: usize = 0;
+        var max: u32 = 0;
+        for (sizes) |*entry| {
+            var len: u32 = 0;
+            var count: u32 = 0;
+            while (count < 4) : (count += 1) {
+                if (at >= entries.len) return error.InvalidCaf; // past the chunk
+                const c = entries[at];
+                at += 1;
+                len = (len << 7) | (c & 0x7f);
+                if (c & 0x80 == 0) break;
+            }
+            entry.* = len;
+            max = @max(max, len);
+        }
+        // st->duration: the packets' frames less the priming and remainder.
+        const frames = std.math.mul(i64, @intCast(num_packets), p.frames_per_packet) catch return error.InvalidCaf;
+        const duration = frames - priming - @as(i64, remainder);
+        if (duration < 0) return error.InvalidCaf;
+        if (p.gpa) |g| g.free(p.packet_sizes);
+        p.packet_sizes = sizes;
+        p.has_table = true;
+        p.priming = priming;
+        p.remainder = remainder;
+        p.duration = @intCast(duration);
+        p.max_packet = max;
+    }
+
+    /// ALAC (T31b): the next packet of `data` into `buffer` (at least
+    /// `Alac.max_packet` bytes), with whether it is the first and the
+    /// last; null at the end. A packet the table sizes 0, or past the
+    /// data, and data past the table's last packet are `InvalidCaf`, as
+    /// read_packet's AVERROR_INVALIDDATA.
+    pub fn nextPacket(p: *Parser, buffer: []u8) Error!?Packet {
+        std.debug.assert(p.is_alac and p.state == .data);
+        const index = p.next_packet;
+        if (index == p.packet_sizes.len) {
+            if (p.data.left) |left| if (left != 0) return error.InvalidCaf;
+            return null;
+        }
+        const size = p.packet_sizes[index];
+        if (size == 0) return error.InvalidCaf;
+        if (p.data.left) |left| if (size > left) return error.InvalidCaf;
+        const got = try p.data.readData(buffer[0..size]);
+        // Data of unknown length that ends inside a packet.
+        if (got.len < size) return error.Truncated;
+        p.next_packet += 1;
+        return .{ .data = got, .first = index == 0, .last = index + 1 == p.packet_sizes.len };
+    }
+
+    pub const Packet = struct { data: []const u8, first: bool, last: bool };
 
     /// `chan` before `data`: FFmpeg's `ff_mov_read_chan`. After `data` it is
     /// skipped like any other chunk, as the stream is reported by then.
@@ -287,7 +527,8 @@ pub const Parser = struct {
         std.debug.assert(p.state == .data);
         const runs_to_end = p.data.left == null;
         try p.data.skipRest();
-        if (!runs_to_end) {
+        // ALAC whose table followed the samples: those chunks were read.
+        if (!runs_to_end and !p.trailing_read) {
             while (try p.nextChunk()) |chunk| {
                 if (std.mem.eql(u8, &chunk.id, "data")) return error.InvalidCaf;
                 try p.skipChunk(chunk);

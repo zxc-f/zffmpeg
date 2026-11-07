@@ -31,8 +31,8 @@ const examples = [_]Example{
 /// The fixture directories, zig/testing/fixtures/<set>/, each named after its
 /// files' extension: wav (WAV and Wave64), au, aiff, raw (raw PCM), caf,
 /// flac, ogg, mp3 (MPEG audio, Layers I to III) and aac (ADTS); and adpcm,
-/// whose files are WAV (T31a).
-const FixtureSet = enum { wav, au, aiff, raw, caf, flac, ogg, mp3, aac, adpcm };
+/// whose files are WAV (T31a), and alac, whose files are CAF (T31b).
+const FixtureSet = enum { wav, au, aiff, raw, caf, flac, ogg, mp3, aac, adpcm, alac };
 
 /// A zffprobe process run with its expected exit code and output.
 const ProbeCase = struct {
@@ -498,6 +498,14 @@ const probe_cases = [_]ProbeCase{
     .{ .name = "ADPCM with channels FFmpeg's decoder refuses", .set = .adpcm, .fixture = "adpcm_ms_7ch", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
     .{ .name = "ADPCM with a short fact chunk", .set = .adpcm, .fixture = "adpcm_fact_short", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
     .{ .name = "ADPCM in Wave64", .set = .adpcm, .fixture = "adpcm_w64", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
+    // T31b: ALAC in CAF, with the decoder's layout and the packet table's
+    // duration; a table after the samples needs a seekable input, as
+    // FFmpeg's demuxer does; a stream without a cookie FFmpeg's decoder
+    // does not open.
+    .{ .name = "ALAC in CAF", .set = .alac, .fixture = "alac_ffmpeg_stereo_44k", .exit_code = 0, .stdout = "format=caf\ncodec=alac\nsample_fmt=s16p\nchannels=2\nchannel_layout=stereo\nsample_rate=44100\nnb_samples=20000\nduration_num=20000\nduration_den=44100\n", .stderr = "" },
+    .{ .name = "ALAC with its table before the samples, from a pipe", .set = .alac, .args = &.{"-"}, .stdin_fixture = "alac_pakt_before_data", .exit_code = 0, .stdout_contains = "codec=alac\n", .stderr = "" },
+    .{ .name = "ALAC with its table after the samples, from a pipe", .set = .alac, .args = &.{"-"}, .stdin_fixture = "alac_pakt_after_data", .exit_code = 2, .stderr = "zffprobe: -: InvalidCaf\n" },
+    .{ .name = "ALAC without a magic cookie", .set = .alac, .fixture = "alac_no_kuki", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
     // Forced, the resync finds a sync word in the samples, as FFmpeg's does.
     .{ .name = "ADTS forced on a WAV file", .args = &.{ "-f", "aac" }, .fixture = "mono_8k", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
     .{ .name = "Ogg Vorbis", .set = .ogg, .fixture = "ogg_vorbis_ffmpeg_44k", .exit_code = 0, .stdout = "format=ogg\ncodec=vorbis\nsample_fmt=fltp\nchannels=2\nchannel_layout=stereo\nsample_rate=44100\nnb_samples=30000\nduration_num=30000\nduration_den=44100\n", .stderr = "" },
@@ -838,6 +846,13 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "a block size the ADPCM encoder refuses", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-c:a", "adpcm_ms", "-block_size", "100", "-f", "wav", "-" }, .exit_code = 1, .stdout = "", .stderr_contains = ": InvalidOption\n" },
     .{ .name = "a block size outside the option's range", .args = &.{ "-i", "a.wav", "-c:a", "adpcm_ms", "-block_size", "16", "b.wav" }, .exit_code = 1, .stderr_contains = "invalid value for: -block_size" },
     .{ .name = "channels the ADPCM encoders refuse", .args = &.{"-i"}, .input = "extensible_5point1", .tail = &.{ "-c:a", "adpcm_ima_wav", "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedFormat\n" },
+    // T31b: ALAC in CAF decoded; compare.py checks the bytes against
+    // FFmpeg's.
+    .{ .name = "ALAC at 20 bits to raw PCM", .set = .alac, .args = &.{"-i"}, .input = "alac_20bit", .tail = &.{ "-f", "s32le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stdout_raw = .{ .args = &.{ "-f", "s32le", "-ch_layout", "mono", "-sample_rate", "48000" }, .nb_samples = 6096 }, .stderr = "" },
+    .{ .name = "ALAC from a pipe to raw PCM", .set = .alac, .args = &.{ "-i", "-" }, .stdin_input = "alac_pakt_before_data", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stdout_raw = .{ .args = &.{ "-f", "s16le", "-ch_layout", "stereo", "-sample_rate", "44100" }, .nb_samples = 9092 }, .stderr = "" },
+    .{ .name = "ALAC with its table after the samples to WAV", .set = .alac, .args = &.{"-i"}, .input = "alac_ffmpeg_stereo24_96k", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt ", .stderr = "" },
+    .{ .name = "ALAC every packet of which fails", .set = .alac, .args = &.{"-i"}, .input = "alac_all_damaged", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stdout = "", .stderr_contains = ": DecodeErrorRate\n" },
+    .{ .name = "ALAC copy is unsupported", .set = .alac, .args = &.{"-i"}, .input = "alac_ffmpeg_mono_8k", .tail = &.{ "-c", "copy", "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
     .{ .name = "ADPCM into Wave64 is unsupported", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-c:a", "adpcm_ms", "-f", "w64", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
     // A decoder that refuses the headers fails cleanly, before any output,
     // from a file (after the counting pass) and from a pipe.
@@ -1137,6 +1152,7 @@ fn otherInputStdOut(b: *std.Build, zffmpeg: *std.Build.Step.Compile, case: Conve
 fn fixturePath(b: *std.Build, set: FixtureSet, name: []const u8) std.Build.LazyPath {
     const extension = switch (set) {
         .adpcm => "wav",
+        .alac => "caf",
         else => @tagName(set),
     };
     return b.path(b.fmt("zig/testing/fixtures/{t}/{s}.{s}", .{ set, name, extension }));

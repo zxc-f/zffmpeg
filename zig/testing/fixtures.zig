@@ -509,6 +509,18 @@ pub const adpcm = struct {
     }
 };
 
+pub const alac = struct {
+    /// The ALAC-in-CAF fixtures (T31b): whether the port opens and decodes
+    /// each (`.reject` for its errors, which its tests name); what FFmpeg
+    /// makes of each is vectors/alac_caf.txt.
+    pub const all: []const mp3.Fixture = @import("fixtures/alac/manifest.zon");
+
+    /// The bytes of fixtures/alac/<name>.caf, embedded at compile time.
+    pub fn bytes(comptime name: []const u8) []const u8 {
+        return @embedFile("fixtures/alac/" ++ name ++ ".caf");
+    }
+};
+
 /// This file's own declarations: the WAV contract's `all` and `bytes`.
 const wav_contract = @This();
 
@@ -591,6 +603,7 @@ test "manifest names are unique and expectations are consistent" {
         expectConsistent(mp3);
         expectConsistent(aac);
         expectConsistent(adpcm);
+        expectConsistent(alac);
     }
 }
 
@@ -605,6 +618,7 @@ test "every fixture file is present and matches its recorded SHA-256" {
     try expectHashes(mp3);
     try expectHashes(aac);
     try expectHashes(adpcm);
+    try expectHashes(alac);
 }
 
 test "fixture names do not collide across contracts" {
@@ -655,6 +669,16 @@ test "fixture names do not collide across contracts" {
         expectDistinct(adpcm, ogg);
         expectDistinct(adpcm, mp3);
         expectDistinct(adpcm, aac);
+        expectDistinct(alac, wav_contract);
+        expectDistinct(alac, au);
+        expectDistinct(alac, aiff);
+        expectDistinct(alac, raw);
+        expectDistinct(alac, caf);
+        expectDistinct(alac, flac);
+        expectDistinct(alac, ogg);
+        expectDistinct(alac, mp3);
+        expectDistinct(alac, aac);
+        expectDistinct(alac, adpcm);
     }
 }
 

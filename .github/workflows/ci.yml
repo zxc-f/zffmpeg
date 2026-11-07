@@ -388,6 +388,8 @@ jobs:
             .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a \
             .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o alac-vectors
           ./alac-vectors | diff -u zig/testing/vectors/alac.txt -
+          bash zig/testing/reference/alac_caf_vectors.sh .references/ffmpeg-install |
+            diff -u zig/testing/vectors/alac_caf.txt -
 
       # The committed T28a oracle must be what this build's Opus decoder
       # makes of every Ogg fixture's first Opus stream.
