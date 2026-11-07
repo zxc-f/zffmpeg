@@ -77,7 +77,10 @@ decoder](zig/codec/mp3dec.zig), bit for bit FFmpeg's mp3float, with MP3
 decoded by `zffmpeg` as the ffmpeg program decodes it (T29b), and Layers I
 and II, bit for bit FFmpeg's mp1float and mp2float (T29c), and the [MP2
 encoder](zig/codec/mp2enc.zig), packet for packet FFmpeg's mp2 and
-mp2fixed, with its raw muxer (T29d).
+mp2fixed, with its raw muxer (T29d); and so is the [ADTS
+demuxer](zig/format/aac.zig) with FFmpeg's AAC parser and tags, its
+[muxer](zig/format/adtsmux.zig) and the AudioSpecificConfig, without
+decoding, and WAV and FLAC read after leading ID3v2 tags (T30a).
 
 The goal is a native Zig multimedia library and tools, built incrementally from
 FFmpeg's functionality. Use idiomatic Zig APIs and explicit resource ownership.

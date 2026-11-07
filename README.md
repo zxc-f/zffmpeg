@@ -74,7 +74,11 @@ gapless trimming included: `zffmpeg` converts MP3, MP2 and MP1 into every
 PCM output and into FLAC as the ffmpeg program does. And `zffmpeg` writes
 MP2 since T29d: FFmpeg's mp2 and mp2fixed encoders with its raw mp2
 muxer, byte for byte the ffmpeg program's `-bitexact` output, with `-b:a`
-for the bit rate.
+for the bit rate. ADTS is read since T30a as FFmpeg's demuxer and AAC parser
+split it, its ID3v2, ID3v1 and APE tags included, and the library writes it
+as FFmpeg's muxer does from an AudioSpecificConfig, parsed as FFmpeg parses
+it; AAC decoding is T30b, so the tools refuse ADTS until then. WAV and FLAC
+open after leading ID3v2 tags, as in FFmpeg.
 [TODO.md](TODO.md) holds the completion
 evidence and the roadmap. Development is verified on Linux only. The compiler
 is **Zig 0.17.0**, enforced by the build.

@@ -62,8 +62,10 @@ ID3 tags, the gapless headers and FFmpeg's probe rounds; and T29b, the
 Layer III decoder bit for bit FFmpeg's mp3float, with MP3 decoded by
 zffmpeg as the ffmpeg program decodes it, and T29c, Layers I and II bit
 for bit FFmpeg's mp1float and mp2float, and T29d, FFmpeg's MP2 encoders
-packet for packet with its mp2 muxer, which completes T29. **Next: T30a
-(ADTS and AudioSpecificConfig).
+packet for packet with its mp2 muxer, which completes T29; and T30a,
+FFmpeg's ADTS demuxer and muxer and AudioSpecificConfig parsing, without
+decoding, with WAV and FLAC read after leading ID3v2 tags. **Next: T30b
+(the AAC-LC decoder).
 See [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
@@ -3557,10 +3559,50 @@ names, not as an empty framework.
 - [ ] **T30 — AAC.** Checked when T30a–T30d are. Reference:
   `libavcodec/aac/`, `aacsbr*.c`, `aacps*.c`, `mpeg4audio.c`,
   `libavformat/aacdec.c`, `adtsenc.c`; `tests/fate/aac.mak`.
-  - [ ] **T30a — ADTS and AudioSpecificConfig.** Needs T16. ADTS demux and
+  - [x] **T30a — ADTS and AudioSpecificConfig.** Needs T16. ADTS demux and
     mux, and configuration parsing shared with MP4 (T33a).
     Done when packets and parsed configurations equal the reference's, without
     decoding.
+
+    ```text
+    ID / parent: T30a / T30
+    State: verified (G5, local Linux x86-64 runs)
+    Supported behavior and explicit exclusions: FFmpeg's aac demuxer with
+      the AAC parser on libavformat's generic layer, ID3v2 tags before and
+      between frames, ID3v1 and APEv2 tags at the end, generic seeking;
+      the AudioSpecificConfig (avpriv_mpeg4audio_get_config2) and PCE
+      copy; the adts muxer. Before it (b4fa6d5), avformat_open_input's
+      leading ID3v2 tags for WAV and FLAC, the review row due before T30a.
+      Excluded: decoding (T30b), so zffprobe refuses ADTS and zffmpeg
+      reads and writes none (notes.md "ADTS without a decoder"); APE
+      attachment streams; the muxer's tag options; LATM.
+    Contract and source provenance: port.md's ADTS contract; aacdec.c,
+      apetag.c, adtsenc.c, adts_header.c, aac_parser.c, aac_ac3_parser.c,
+      parser.c, mpeg4audio.c, mpeg4audio_copy_pce.h.
+    Required fixtures: generate.py's 27 ADTS fixtures (every profile,
+      sampling index, channel configuration and block count, CRC, MPEG-2
+      ID, tags before, between and after frames, APE binary items, junk,
+      bad rates, short and claimed lengths, probe thresholds, refused
+      inputs); 684 configurations; 23 muxer cases; 28 tagged WAV, Wave64,
+      FLAC and AU inputs.
+    Comparison rule: every packet, tag and seek equal to the pinned
+      libavformat's (aac.txt, seek_aac.txt), configurations field for
+      field (mpeg4audio.txt), muxer output byte for byte (adtsmux.txt),
+      detection FFmpeg's; compare.py's ADTS and leading-ID3v2 sections.
+    Evidence: b4fa6d5 (leading ID3v2 tags), b45de6d (ADTS). demux.zig's
+      parser choice is one tagged ParserKind (T65a's first step; FLAC still
+      keeps its own layer). G3: the demuxer's fuzz entry (file or pipe, ID3v2
+      limits, a seek), allocation sweeps with a pipe of one-byte reads and
+      a byte seek, mutation smoke; the configuration and muxer fuzz entry
+      and mutation smoke; APE and parser unit tests; process cases for
+      zffprobe and zffmpeg. G5 at b45de6d, locally on Linux x86-64 (no CI
+      run link): zig fmt, the fixture check (27 ADTS among 502), zig build
+      test 526/526 (280 steps) in Debug, ReleaseSafe and ReleaseFast, the
+      cross builds, every vector generator, compare.py 7703/0/0 required
+      (ADTS fixtures 27 with 25 recorded refusals, leading ID3v2 tags 28
+      with 2) and 61/61 optional.
+    Remaining work or blocker / next action: none; T30b decodes.
+    ```
   - [ ] **T30b — AAC-LC decoder.** Needs T18c, T27c and T30a. Sections, scale
     factors, spectral Huffman decoding, M/S, intensity, PNS, TNS, windows and
     the IMDCT, with encoder delay handled.
