@@ -3274,11 +3274,7 @@ def aac_unset_rate(process):
 # fixture -> reason. zffprobe (file and pipe) and the hash driver's copy
 # must refuse with UnsupportedFormat while FFmpeg reports and copies the
 # stream.
-KNOWN_AAC_REFUSALS = {
-    "aac_fdk_hev2_44k": "HE-AACv2: the read-ahead's decoder refuses its parametric stereo until T30d, so the "
-                        "stream has no rate (notes.md \"AAC decoder scope\")",
-    "aac_fdk_hev2_32k_noise": "HE-AACv2, as aac_fdk_hev2_44k",
-}
+KNOWN_AAC_REFUSALS = {}
 
 
 def compare_aac(args, lines, failures):
@@ -3385,12 +3381,7 @@ AAC_APE_COVER = (("other refusal", "Error opening output files: Encoder not foun
                  "and Ogg can carry, and the reference build has no encoder for it; zffmpeg converts the audio "
                  "stream alone, which has no sample rate, and refuses it as it does into WAV, AU and raw PCM "
                  "(notes.md \"APE tags\")")
-AAC_PS = (("refused", 3, "UnsupportedFormat"),
-          "HE-AACv2: FFmpeg decodes its parametric stereo; the port refuses it until T30d, so the stream has no "
-          "rate and zffmpeg refuses it before any output (notes.md \"AAC decoder scope\")")
 KNOWN_AAC_DECODE_DIFFERENCES = {
-    ("aac_fdk_hev2_44k", None): AAC_PS,
-    ("aac_fdk_hev2_32k_noise", None): AAC_PS,
     ("aac_ape_binary", "-f aiff"): AAC_APE_COVER,
     ("aac_ape_binary", "-f flac"): AAC_APE_COVER,
     ("aac_ape_binary", "-f ogg"): AAC_APE_COVER,
@@ -3398,7 +3389,8 @@ KNOWN_AAC_DECODE_DIFFERENCES = {
 
 
 def compare_aac_decode(args, lines, failures):
-    """ADTS decoded (T30b, T30c): every ADTS fixture, HE-AAC included, converted by zffmpeg and by
+    """ADTS decoded (T30b to T30d): every ADTS fixture, HE-AAC and HE-AACv2
+    included, converted by zffmpeg and by
     the ffmpeg program with `-bitexact` into each output, byte for byte,
     each raw PCM output again through pipes and the WAV from a pipe into a
     file; a stream no packet of which decodes is refused by both (the
@@ -3407,10 +3399,10 @@ def compare_aac_decode(args, lines, failures):
     rows, same, total, understood, understood_notes, compared = decode_cells(
         args, paths, KNOWN_AAC_DECODE_DIFFERENCES, "KNOWN_AAC_DECODE_DIFFERENCES", "AAC decode", failures)
     total += unmatched_entries(KNOWN_AAC_DECODE_DIFFERENCES, compared, "KNOWN_AAC_DECODE_DIFFERENCES", failures)
-    record("AAC decoding (T30b, T30c)", same, total, understood=understood)
+    record("AAC decoding (T30b to T30d)", same, total, understood=understood)
     lines += [
         "",
-        "## AAC decoding (T30b, T30c)",
+        "## AAC decoding (T30b to T30d)",
         "",
         f"ADTS fixtures decoded by zffmpeg into WAV, AU, AIFF, FLAC, Ogg and raw PCM (and resampled, and "
         f"downmixed), into raw PCM from a pipe to stdout, and from a pipe into a WAV file, equal to the ffmpeg "

@@ -27,10 +27,9 @@
 //! and noise and sinusoid addition, and the 64-band QMF synthesis at twice
 //! the rate, operation for operation as the pinned decoder computes them.
 //!
-//! Parametric stereo (T30d) is not decoded: a mono stream that FFmpeg
-//! upmixes (`m4ac.ps == 1`) gets its left channel copied to the right, as
-//! FFmpeg's does without PS data, and PS data is refused
-//! (`UnsupportedFeature`; notes.md "AAC decoder scope"). USAC's SBR is not
+//! Parametric stereo (T30d) is `codec/aacps.zig`: a mono stream that FFmpeg
+//! upmixes (`m4ac.ps == 1`) gets its PS stereo image, or without PS data
+//! its left channel copied to the right, as FFmpeg's. USAC's SBR is not
 //! ported. The state is FFmpeg's `SpectralBandReplication`, allocated with
 //! the channel element; its unsigned (`AAC_SIGNE`) fields keep C's
 //! wrapping arithmetic where hostile input can reach it.
@@ -42,14 +41,11 @@ const tx = @import("tx.zig");
 const float_dsp = @import("float_dsp.zig");
 const tab = @import("sbr_tab.zig");
 const mpeg4audio = @import("mpeg4audio.zig");
+const aacps = @import("aacps.zig");
 const libm = @import("../core/libm.zig");
 const cconv = @import("../core/cconv.zig");
 
-pub const Error = error{
-    /// Parametric stereo data (T30d).
-    UnsupportedFeature,
-    OutOfMemory,
-};
+pub const Error = error{OutOfMemory};
 
 /// The element types, as `enum RawDataBlockType` numbers them.
 pub const elem_sce: u3 = 0;
@@ -144,8 +140,10 @@ pub const Sbr = struct {
     kx_and_m_pushed: bool = false,
     n_master: u32 = 0,
     data: [2]SbrData = .{ .{}, .{} },
-    /// `ps.common.start`: parametric stereo data was read (T30d).
-    ps_start: bool = false,
+    /// `ps`: the parametric stereo state, allocated with the first PS data
+    /// (it starts in the same state either way).
+    ps: ?*aacps.Ps = null,
+    gpa: std.mem.Allocator,
     /// N_Low and N_High.
     n: [2]u32 = @splat(0),
     n_q: u32 = 0,
@@ -190,7 +188,7 @@ pub const Sbr = struct {
         };
         errdefer mdct_ana.deinit();
         const s = try gpa.create(Sbr);
-        s.* = .{ .mdct = mdct, .mdct_ana = mdct_ana };
+        s.* = .{ .mdct = mdct, .mdct_ana = mdct_ana, .gpa = gpa };
         s.kx[0] = s.kx[1];
         s.id_aac = id_aac;
         s.turnoff();
@@ -200,6 +198,7 @@ pub const Sbr = struct {
     }
 
     pub fn destroy(s: *Sbr, gpa: std.mem.Allocator) void {
+        if (s.ps) |ps| gpa.destroy(ps);
         s.mdct.deinit();
         s.mdct_ana.deinit();
         gpa.destroy(s);
@@ -713,7 +712,6 @@ pub const Sbr = struct {
 
     /// read_sbr_extension.
     fn readExtension(s: *Sbr, r: *bits.BitReader, bs_extension_id: u32, num_bits_left: *i64, ps: i32) Error!void {
-        _ = s;
         if (bs_extension_id == extension_id_ps) {
             // "Parametric Stereo signaled to be not-present but was found
             // in the bitstream."
@@ -722,7 +720,9 @@ pub const Sbr = struct {
                 num_bits_left.* = 0;
                 return;
             }
-            return error.UnsupportedFeature; // PS (T30d)
+            if (s.ps == null) s.ps = try aacps.Ps.create(s.gpa);
+            num_bits_left.* -= s.ps.?.common.readData(r, num_bits_left.*);
+            return;
         }
         // "Reserved SBR extensions", or FFmpeg's padding.
         r.skipLong(num_bits_left.*);
@@ -1261,8 +1261,12 @@ pub const Sbr = struct {
             s.xGen(ch, &d.y[1 - d.ypos], &d.y[d.ypos], num_time_slots);
         }
         if (m4ac.ps == 1) {
-            // Without PS data (T30d), FFmpeg's copy.
-            s.x[1] = s.x[0];
+            if (s.ps != null and s.ps.?.common.start) {
+                s.ps.?.apply(&s.x[0], &s.x[1], s.kx[1] + s.m[1]);
+            } else {
+                // Without PS data, FFmpeg's copy.
+                s.x[1] = s.x[0];
+            }
             nch = 2;
         }
         s.qmfSynthesis(l, 0, num_time_slots, downsampled);
@@ -1530,7 +1534,7 @@ test "make_bands: widths that sum to the span, from FFmpeg's float steps" {
     try testing.expectEqual(10, one[0]);
 }
 
-test "a state starts in pure upsampling mode, and refuses parametric stereo data" {
+test "a state starts in pure upsampling mode; parametric stereo data allocates its state" {
     const gpa = testing.allocator;
     const s = try Sbr.create(gpa, elem_sce);
     defer s.destroy(gpa);
@@ -1538,10 +1542,16 @@ test "a state starts in pure upsampling mode, and refuses parametric stereo data
     try testing.expectEqual(32, s.kx[1]);
     try testing.expectEqual(0, s.kx[0]);
     try testing.expectEqual(SpectrumParameters.unset, s.spectrum_params);
-    var r = try bits.BitReader.init(&.{0xff});
+    // Signalled absent: skipped, nothing allocated.
+    var r = try bits.BitReader.init(&.{ 0xff, 0xff });
     var left: i64 = 6;
-    try testing.expectError(error.UnsupportedFeature, s.readExtension(&r, extension_id_ps, &left, -1));
-    // Signalled absent: skipped.
     try s.readExtension(&r, extension_id_ps, &left, 0);
     try testing.expectEqual(0, left);
+    try testing.expectEqual(null, s.ps);
+    // An all-ones header: iid_mode 7 is reserved, so the data fails and
+    // its bits are skipped.
+    left = 12;
+    try s.readExtension(&r, extension_id_ps, &left, -1);
+    try testing.expectEqual(0, left);
+    try testing.expect(!s.ps.?.common.start);
 }

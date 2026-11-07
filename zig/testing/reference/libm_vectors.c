@@ -47,6 +47,13 @@
 //                              FFmpeg's SBR decoder takes it of (T30c)
 //   G log2f <d> <count> <md5>  log2f of count floats drawn from float
 //                              distribution d
+//   K <function> <d> <count> <md5>
+//                              sinf, cosf or atanf of count floats drawn
+//                              from float distribution d, every quadrant
+//                              and magnitude (T30d)
+//   A atan2f <dy> <dx> <count> <md5>
+//                              atan2f of count pairs, y drawn from float
+//                              distribution dy and x from dx (T30d)
 //
 // Each MD5 covers the results as float32 (or float64 for D, C and I lines)
 // little-endian, in order (sinf before cosf). See zig/testing/reference/README.md for the build commands.
@@ -357,6 +364,33 @@ int main(void)
         snprintf(head, sizeof(head), "G log2f %d 20000", d);
         print(head, md5);
     }
+
+    /* T30d: sinf, cosf, atanf and atan2f, which FFmpeg's parametric
+     * stereo tables take. */
+    static float (*volatile const unary[3])(float) = { sinf, cosf, atanf };
+    static const char *const unary_names[3] = { "sinf", "cosf", "atanf" };
+    for (int f = 0; f < 3; f++)
+        for (int d = 0; d < 8; d++) {
+            xs_state = 0x9E3779B97F4A7C15ull + 1000003ull * (4000 + 10 * f + d);
+            av_md5_init(md5);
+            for (int i = 0; i < 20000; i++)
+                put(md5, unary[f](from_bits(sample_float(d))));
+            snprintf(head, sizeof(head), "K %s %d 20000", unary_names[f], d);
+            print(head, md5);
+        }
+    float (*volatile atan2f_fn)(float, float) = atan2f;
+    for (int dy = 0; dy < 8; dy++)
+        for (int dx = 0; dx < 8; dx++) {
+            xs_state = 0x9E3779B97F4A7C15ull + 1000003ull * (5000 + dy * 8 + dx);
+            av_md5_init(md5);
+            for (int i = 0; i < 5000; i++) {
+                float y = from_bits(sample_float(dy));
+                float x = from_bits(sample_float(dx));
+                put(md5, atan2f_fn(y, x));
+            }
+            snprintf(head, sizeof(head), "A atan2f %d %d 5000", dy, dx);
+            print(head, md5);
+        }
 
     av_freep(&md5);
     return 0;

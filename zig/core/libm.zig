@@ -10,8 +10,9 @@
 // its __exp2f_data and __sincosf_table.
 //! The reference platform's C library math where FFmpeg's C code calls it
 //! and Zig's own functions round differently (notes.md "Floating-point
-//! library"): single-precision `exp2f`, `sinf` and `cosf` here, `powf` in
-//! libm/powf.zig, and in libm/ the double functions FFmpeg's code paths
+//! library"): single-precision `exp2f`, `sinf` and `cosf` (every float)
+//! here, `powf`, `log2f`, `cbrtf`, `atanf` and `atan2f` in libm/, and there
+//! the double functions FFmpeg's code paths
 //! here call: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`,
 //! `exp2`, `log`, `pow`, `hypot`, `sinh`, `cosh`, `tanh`, `cbrt` and
 //! `ldexp`. Zig's `@exp2` and `@sin` follow musl's older code and differ
@@ -52,6 +53,8 @@ pub const cbrtf = @import("libm/cbrtf.zig").cbrtf;
 /// AAC decoder's four coupling bases, and by vectors/libm.txt (T30b).
 pub const powf = @import("libm/powf.zig").powf;
 pub const log2f = @import("libm/log2f.zig").log2f;
+pub const atanf = @import("libm/atanf.zig").atanf;
+pub const atan2f = @import("libm/atanf.zig").atan2f;
 /// Exact apart from one rounding (libm/ldexp.zig: std.math.ldexp
 /// mis-scales a zero); checked against glibc's in its tests.
 pub const ldexp = @import("libm/ldexp.zig").ldexp;
@@ -113,58 +116,124 @@ const cos2 = f64Bits(0x3fa55553e1068f19);
 const cos3 = f64Bits(0xbf56c087e89a359d);
 const cos4 = f64Bits(0x3ef99343027bf8c3);
 
-/// The upper bound of `cosf`'s domain here.
+/// The bound below which `sinf` and `cosf` need no argument reduction
+/// (the C's `pio4`), as float.
 pub const quarter_pi: f32 = std.math.pi / 4.0;
-/// The upper bound of `sinf`'s domain here.
-pub const half_pi: f32 = std.math.pi / 2.0;
 
-/// __sincosf_table[0]'s `hpi_inv` (2/pi scaled by 2^24, the build without
-/// TOINT_INTRINSICS) and `hpi`.
+/// __sincosf_table's `hpi_inv` (2/pi scaled by 2^24, the build without
+/// TOINT_INTRINSICS) and `hpi`, and reduce_large's pi/2^63.
 const hpi_inv = f64Bits(0x41645f306dc9c883);
 const hpi = f64Bits(0x3ff921fb54442d18);
+const pi63 = f64Bits(0x3c1921fb54442d18);
 
-/// glibc's sinf for 0 <= x < pi/2. Below pi/4 it needs no argument
-/// reduction (from 0.75 its reduction gives n = 0 and the same
-/// polynomial); above, reduce_fast gives quadrant 1 and sinf_poly
-/// evaluates the cosine polynomial of x - pi/2, computed in double (the
-/// sine windows of the AAC decoder, T30b).
-pub fn sinf(x: f32) f32 {
-    std.debug.assert(x >= 0 and x < half_pi);
-    const ux: u32 = @bitCast(x);
-    if ((ux >> 20) & 0x7ff <= 0x397) return x; // below 2^-12
-    const xd: f64 = x;
-    // reduce_fast's quadrant, in bits 24..31 of the scaled product, which
-    // lies below 2^24 on this domain.
-    const r_int: i32 = @trunc(xd * hpi_inv);
-    if ((r_int + 0x800000) >> 24 != 0) {
-        const y = xd - hpi;
-        const y2 = y * y;
-        const y4 = y2 * y2;
-        const c2 = @mulAdd(f64, y2, cos4, cos3);
-        const c1 = @mulAdd(f64, y2, cos1, 1.0);
-        const y6 = y4 * y2;
-        const c = @mulAdd(f64, y4, cos2, c1);
-        return @floatCast(@mulAdd(f64, y6, c2, c));
-    }
-    const x2 = xd * xd;
-    const s = @mulAdd(f64, x2, sin3, sin2);
-    const x3 = xd * x2;
-    const x5 = x3 * x2;
-    return @floatCast(@mulAdd(f64, s, x5, @mulAdd(f64, x3, sin1, xd)));
+/// `__inv_pio4`: 4/pi to 192 bits, 8 new bits an entry.
+const inv_pio4 = [24]u32{
+    0xa2,       0xa2f9,     0xa2f983,   0xa2f9836e, 0xf9836e4e, 0x836e4e44, 0x6e4e4415, 0x4e441529,
+    0x441529fc, 0x1529fc27, 0x29fc2757, 0xfc2757d1, 0x2757d1f5, 0x57d1f534, 0xd1f534dd, 0xf534ddc0,
+    0x34ddc0db, 0xddc0db62, 0xc0db6295, 0xdb629599, 0x6295993c, 0x95993c43, 0x993c4390, 0x3c439041,
+};
+
+fn abstop12(x: f32) u32 {
+    return (@as(u32, @bitCast(x)) >> 20) & 0x7ff;
 }
 
-/// glibc's cosf for 0 <= x < pi/4.
-pub fn cosf(x: f32) f32 {
-    std.debug.assert(x >= 0 and x < quarter_pi);
-    const ux: u32 = @bitCast(x);
-    if ((ux >> 20) & 0x7ff <= 0x397) return 1.0;
-    const xd: f64 = x;
-    const x2 = xd * xd;
-    const c = @mulAdd(f64, x2, cos4, cos3);
+/// reduce_fast: x modulo pi/2 in [-pi/4, pi/4], and its quadrant, for
+/// |x| < 120; the FMA build fuses `x - n * hpi`.
+fn reduceFast(x: f64, n: *i32) f64 {
+    const r = x * hpi_inv;
+    const ri: i32 = @trunc(r); // |r| < 2^31 for |x| < 120
+    n.* = (ri +% 0x800000) >> 24;
+    return @mulAdd(f64, -@as(f64, @floatFromInt(n.*)), hpi, x);
+}
+
+/// reduce_large: for |x| >= 120, from the float's bits (the sign
+/// ignored), with 4/pi to 192 bits.
+fn reduceLarge(xi_in: u32, np: *i32) f64 {
+    const arr = inv_pio4[(xi_in >> 26) & 15 ..];
+    const shift: u5 = @intCast((xi_in >> 23) & 7);
+    const xi = ((xi_in & 0xffffff) | 0x800000) << shift;
+    // The C's 32-bit product, then widened.
+    var res0: u64 = xi *% arr[0];
+    const res1: u64 = @as(u64, xi) * arr[4];
+    const res2: u64 = @as(u64, xi) * arr[8];
+    res0 = (res2 >> 32) | (res0 << 32);
+    res0 +%= res1;
+    const n = (res0 +% (@as(u64, 1) << 61)) >> 62;
+    res0 -%= n << 62;
+    np.* = @truncate(@as(i64, @bitCast(n)));
+    const x: f64 = @floatFromInt(@as(i64, @bitCast(res0)));
+    return x * pi63;
+}
+
+/// sinf_poly, x86's: the sine polynomial of `x` for an even quadrant `n`,
+/// the cosine one (negated for `neg`, `__sincosf_table[1]`) for an odd one,
+/// with the FMA build's fusions.
+fn sinfPoly(x: f64, x2: f64, neg: bool, n: i32) f32 {
+    if (n & 1 == 0) {
+        const x3 = x * x2;
+        const s1 = @mulAdd(f64, x2, sin3, sin2);
+        const x7 = x3 * x2;
+        const s = @mulAdd(f64, x3, sin1, x);
+        return @floatCast(@mulAdd(f64, x7, s1, s));
+    }
+    const sg: f64 = if (neg) -1.0 else 1.0;
     const x4 = x2 * x2;
-    const x6 = x2 * x4;
-    const low = @mulAdd(f64, x4, cos2, @mulAdd(f64, x2, cos1, 1.0));
-    return @floatCast(@mulAdd(f64, c, x6, low));
+    const c2 = @mulAdd(f64, x2, sg * cos4, sg * cos3);
+    const c1 = @mulAdd(f64, x2, sg * cos1, sg);
+    const x6 = x4 * x2;
+    const c = @mulAdd(f64, x4, sg * cos2, c1);
+    return @floatCast(@mulAdd(f64, x6, c2, c));
+}
+
+/// `p->sign`: the sine's sign in each quadrant.
+const quadrant_sign = [4]f64{ 1.0, -1.0, -1.0, 1.0 };
+
+/// glibc's sinf, its FMA build (`__sinf_fma`), for every float: the
+/// polynomial below pi/4, reduce_fast below 120, reduce_large above.
+pub fn sinf(y: f32) f32 {
+    var x: f64 = y;
+    var n: i32 = 0;
+    if (abstop12(y) < abstop12(quarter_pi)) {
+        const s = x * x;
+        // Tiny: y itself (the C forces an underflow, without effect here).
+        if (abstop12(y) < abstop12(0x1p-12)) return y;
+        return sinfPoly(x, s, false, 0);
+    } else if (abstop12(y) < abstop12(120.0)) {
+        x = reduceFast(x, &n);
+        const s = quadrant_sign[@intCast(n & 3)];
+        return sinfPoly(x * s, x * x, n & 2 != 0, n);
+    } else if (abstop12(y) < abstop12(std.math.inf(f32))) {
+        const xi: u32 = @bitCast(y);
+        const sign: i32 = @intCast(xi >> 31);
+        x = reduceLarge(xi, &n);
+        const q = n +% sign;
+        const s = quadrant_sign[@intCast(q & 3)];
+        return sinfPoly(x * s, x * x, q & 2 != 0, n);
+    }
+    return (y - y) / (y - y); // __math_invalidf
+}
+
+/// glibc's cosf, its FMA build (`__cosf_fma`), for every float.
+pub fn cosf(y: f32) f32 {
+    var x: f64 = y;
+    var n: i32 = 0;
+    if (abstop12(y) < abstop12(quarter_pi)) {
+        const x2 = x * x;
+        if (abstop12(y) < abstop12(0x1p-12)) return 1.0;
+        return sinfPoly(x, x2, false, 1);
+    } else if (abstop12(y) < abstop12(120.0)) {
+        x = reduceFast(x, &n);
+        const s = quadrant_sign[@intCast(n & 3)];
+        return sinfPoly(x * s, x * x, n & 2 != 0, n ^ 1);
+    } else if (abstop12(y) < abstop12(std.math.inf(f32))) {
+        const xi: u32 = @bitCast(y);
+        const sign: i32 = @intCast(xi >> 31);
+        x = reduceLarge(xi, &n);
+        const q = n +% sign;
+        const s = quadrant_sign[@intCast(q & 3)];
+        return sinfPoly(x * s, x * x, q & 2 != 0, n ^ 1);
+    }
+    return (y - y) / (y - y);
 }
 
 const testing = std.testing;
@@ -190,6 +259,7 @@ test {
     _ = @import("libm/cbrtf.zig");
     _ = @import("libm/powf.zig");
     _ = @import("libm/log2f.zig");
+    _ = @import("libm/atanf.zig");
 }
 
 test "exp2f, sinf and cosf return glibc's results (vectors/libm.txt)" {

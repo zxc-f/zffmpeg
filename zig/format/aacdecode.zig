@@ -377,7 +377,8 @@ fn decodeUnderFailures(gpa: std.mem.Allocator, input: SweepInput) !void {
 }
 
 test "an ADTS stream decoded frees everything under every allocation and remap failure" {
-    const cases = .{ .{ "aac_ffmpeg_short", true, hostile.Remaps.both }, .{ "aac_ffmpeg_5point1", false, hostile.Remaps.fail } };
+    // SBR and PS (T30c, T30d) allocate their states with their first data.
+    const cases = .{ .{ "aac_ffmpeg_short", true, hostile.Remaps.both }, .{ "aac_ffmpeg_5point1", false, hostile.Remaps.fail }, .{ "aac_fdk_hev2_44k", false, hostile.Remaps.fail } };
     inline for (cases) |case| {
         const input: SweepInput = .{ .bytes = fixtures.aac.bytes(case[0]), .seekable = case[1] };
         try hostile.checkAllocationFailuresWith(testing.allocator, case[2], input, decodeUnderFailures);
@@ -415,6 +416,7 @@ const fuzz_corpus: []const []const u8 = &.{
     hostile.fuzzSeed(fixtures.aac.bytes("aac_pce_mpeg2"), &.{ 1, 0 }),
     hostile.fuzzSeed(fixtures.aac.bytes("aac_fdk_he_22k_mono"), &.{ 1, 0 }),
     hostile.fuzzSeed(fixtures.aac.bytes("aac_fdk_he_48k_noise"), &.{ 0, 1 }),
+    hostile.fuzzSeed(fixtures.aac.bytes("aac_fdk_hev2_32k_noise"), &.{ 1, 0 }),
 };
 
 test "fuzz: an ADTS stream decoded from arbitrary input" {

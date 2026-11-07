@@ -252,6 +252,8 @@ angle CELT's spreading rotation can take, what `powf` returns on the AAC
 decoder's coupling gains and sampled pairs and `cbrtf` on every integer
 below 65536 (its pulse amplitudes) and sampled floats (T30b), what `log2f`
 returns on the ratios of SBR's subband indices and sampled floats (T30c),
+what `sinf`, `cosf`, `atanf` and `atan2f` return on sampled floats of
+every magnitude and special value (parametric stereo's tables, T30d),
 and of the fifteen double
 functions `core/libm.zig` ports over eight input distributions, inputs
 from 1e8 up on lines of their own (glibc 2.39 reduces sin, cos and tan's
@@ -757,14 +759,13 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   with `UnsupportedFormat` (notes.md "A stream none of whose packets
   decodes"). Packets and seeks are the Zig tests' (vectors/aac.txt,
   seek_aac.txt).
-- **AAC decoding (T30b, T30c).** Every ADTS fixture, HE-AAC included, decoded by zffmpeg and by the
+- **AAC decoding (T30b to T30d).** Every ADTS fixture, HE-AAC and HE-AACv2 included, decoded by zffmpeg and by the
   ffmpeg program with `-bitexact` into each output of the Ogg decoding
   section, byte for byte, through pipes too; a stream without a rate is
   refused by both, the program at the end ("Could not open encoder before
   EOF"), zffmpeg before any output. `aac_ape_binary`'s AIFF, FLAC and Ogg
   cells are recorded (`KNOWN_AAC_DECODE_DIFFERENCES`: the program maps the
-  APE cover art to a video stream and finds no encoder), and so are the
-  HE-AACv2 fixtures' cells and probes until T30d (`KNOWN_AAC_REFUSALS`).
+  APE cover art to a video stream and finds no encoder).
 - **MP2 output (T29d).** zffmpeg's MP2 (the `mp2` muxer, with `mp2` or
   `-c:a mp2fixed`) against the ffmpeg program's with `-bitexact`, for the
   FLAC output section's inputs and a decoded MP3, MP2 and Ogg Vorbis

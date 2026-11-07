@@ -139,7 +139,7 @@ fn isSignaling(v: f32) bool {
 }
 
 /// glibc's `x + y` where one of them is a NaN, as `vaddss` computes it.
-fn addNan(x: f32, y: f32) f32 {
+pub fn addNan(x: f32, y: f32) f32 {
     const ix: u32 = @bitCast(x);
     const iy: u32 = @bitCast(y);
     if (std.math.isNan(x)) return @bitCast(ix | 0x00400000);

@@ -215,6 +215,8 @@ test {
     _ = @import("codec/aacdec.zig");
     _ = @import("codec/aacsbr.zig");
     _ = @import("codec/sbr_tab.zig");
+    _ = @import("codec/aacps.zig");
+    _ = @import("codec/ps_tab.zig");
     _ = @import("format/adtsmux.zig");
     _ = @import("codec/mp3_tab.zig");
     _ = @import("codec/aac_tab.zig");

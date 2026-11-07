@@ -37,10 +37,11 @@
 //! IMDCT and window overlap, frame for frame as the pinned decoder computes
 //! them (vectors/aac_decode.txt). SSR streams decode with the general
 //! syntax, their gain control parsed and ignored, as FFmpeg decodes them.
-//! SBR (HE-AAC, T30c) runs through `codec/aacsbr.zig`, each element's state
-//! allocated on first use. Main prediction and LTP, the ER and low-delay
-//! object types, and parametric stereo (T30d) are refused with
-//! `UnsupportedFeature` (notes.md "AAC decoder scope").
+//! SBR (HE-AAC, T30c) runs through `codec/aacsbr.zig`, and parametric
+//! stereo (HE-AACv2, T30d) through `codec/aacps.zig`, each element's state
+//! allocated on first use. Main prediction and LTP and the ER and
+//! low-delay object types are refused with `UnsupportedFeature` (notes.md
+//! "AAC decoder scope").
 
 const std = @import("std");
 const bits = @import("bits.zig");
@@ -793,10 +794,7 @@ pub const Decoder = struct {
     /// The element's SBR state, allocated on first use.
     fn sbrOf(d: *Decoder, c: *ChannelElement) Error!*aacsbr.Sbr {
         if (c.sbr) |sbr| return sbr;
-        const sbr = aacsbr.Sbr.create(d.gpa, c.alloc_type) catch |err| return switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            error.UnsupportedFeature => unreachable, // creating reads no data
-        };
+        const sbr = try aacsbr.Sbr.create(d.gpa, c.alloc_type);
         c.sbr = sbr;
         return sbr;
     }
@@ -833,10 +831,7 @@ pub const Decoder = struct {
                     m4ac.sbr = 1;
                 }
                 const sbr = try d.sbrOf(che);
-                _ = sbr.decodeExtension(r, ext_type == 0xe, cnt, @intCast(@backingInt(elem_type)), &d.oc[1].m4ac) catch |err| return switch (err) {
-                    error.OutOfMemory => error.OutOfMemory,
-                    error.UnsupportedFeature => error.UnsupportedFeature,
-                };
+                _ = try sbr.decodeExtension(r, ext_type == 0xe, cnt, @intCast(@backingInt(elem_type)), &d.oc[1].m4ac);
                 return cnt;
             },
             // EXT_DYNAMIC_RANGE.
@@ -1879,7 +1874,7 @@ test "every ADTS fixture decodes as FFmpeg's aac decoder decodes it (vectors/aac
     var checked: usize = 0;
     inline for (fixtures.aac.all) |fixture| {
         // Main and LTP streams are refused (notes.md "AAC decoder
-        // scope"), from their first frame; PS (T30d) when its data comes.
+        // scope"), from their first frame.
         const other_profile = comptime for ([_][]const u8{ "aac_main_96k", "aac_ltp_7350_8ch" }) |n| {
             if (std.mem.eql(u8, n, fixture.name)) break true;
         } else false;
@@ -1889,11 +1884,6 @@ test "every ADTS fixture decodes as FFmpeg's aac decoder decodes it (vectors/aac
             defer d.deinit();
             const first = try adts.parseHeader(bytes[0..adts.header_size]);
             try testing.expectError(error.UnsupportedFeature, d.decode(bytes[0..first.frame_length]));
-            checked += 1;
-        } else if (comptime std.mem.startsWith(u8, fixture.name, "aac_fdk_hev2_")) {
-            var got: std.ArrayList(u8) = .empty;
-            defer got.deinit(gpa);
-            try testing.expectError(error.UnsupportedFeature, decodeVectorLines(gpa, fixture.name, fixtures.aac.bytes(fixture.name), &got));
             checked += 1;
         } else if (comptime fixture.expected == .accept) {
             const want = vectorBlock(fixture.name) orelse return error.MissingVector;
@@ -2073,6 +2063,9 @@ const fuzz_corpus: []const []const u8 = &.{
     hostile.fuzzSeed(fixtures.aac.bytes("aac_fdk_he_48k_mono"), &.{ 0, 4096, 2, 1 }),
     hostile.fuzzSeed(fixtures.aac.bytes("aac_fdk_he_32k_transients"), &.{ 1, 900, 0, 0 }),
     hostile.fuzzSeed(fixtures.aac.bytes("aac_fdk_he_5point1"), &.{ 0, 4096, 4, 6 }),
+    // Parametric stereo (T30d): 20 and 34 bands, IPD and OPD.
+    hostile.fuzzSeed(fixtures.aac.bytes("aac_fdk_hev2_44k"), &.{ 0, 4096, 2, 1 }),
+    hostile.fuzzSeed(fixtures.aac.bytes("aac_fdk_hev2_32k_noise"), &.{ 0, 4096, 0, 0 }),
 };
 
 test "fuzz: the AAC decoder on arbitrary streams, framed or in raw pieces" {
