@@ -80,7 +80,7 @@ pub const mdct_win: [8][mdct_buf_size]f32 = blk: {
 };
 
 /// `ff_mpa_enwindow`: half the synthesis window, in units of 2^-16.
-const enwindow = [257]i32{
+pub const enwindow = [257]i32{
     0,      -1,     -1,     -1,     -1,     -1,     -1,     -2,
     -2,     -2,     -2,     -3,     -3,     -4,     -4,     -5,
     -5,     -6,     -7,     -7,     -8,     -9,     -10,    -11,

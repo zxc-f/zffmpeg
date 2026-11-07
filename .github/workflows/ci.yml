@@ -263,6 +263,16 @@ jobs:
             -lm -pthread -o flacenc-vectors
           ./flacenc-vectors | diff -u zig/testing/vectors/flacenc.txt -
 
+      # The committed T29d oracle must be what this build's MP2 encoders
+      # make of the generated signals.
+      - name: Check the MP2 encoder vectors (T29d)
+        run: |
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/mp2enc_vectors.c \
+            .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a \
+            .references/ffmpeg-install/lib/libavutil.a \
+            -lm -pthread -o mp2enc-vectors
+          ./mp2enc-vectors | diff -u zig/testing/vectors/mp2enc.txt -
+
       # The committed T28a oracles must be what this build's Opus range
       # decoder and packet parser give.
       - name: Check the Opus range decoder and packet vectors (T28a)

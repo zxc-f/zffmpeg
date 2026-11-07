@@ -4,8 +4,9 @@
 // and same-file behavior; see port.md "zffmpeg command" for the differences.
 //! zffmpeg: converts or stream-copies one WAV, Wave64, AU, AIFF, CAF (input
 //! only), FLAC, Ogg (FLAC, Vorbis and Opus decoded as input, FLAC written),
-//! MP3 (Layer III decoded as input) or raw PCM stream (TODO.md T13b, T21b,
-//! T22b, T22c, T22d, T26a, T26c, T27b, T27d, T28, T29b).
+//! MPEG audio (every layer decoded as input, MP2 encoded as output) or raw
+//! PCM stream (TODO.md T13b, T21b, T22b, T22c, T22d, T26a, T26c, T27b, T27d,
+//! T28, T29b to T29d).
 //!
 //!     zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate> | -ar <rate>]
 //!             [-ch_layout <layout> | -ac <channels>] -i <input | -> [-c copy|<encoder>]
@@ -57,12 +58,13 @@ const status = @import("status.zig");
 const ExitStatus = status.ExitStatus;
 const printError = status.printError;
 
-const usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout <layout>] -i <input | -> [-c copy|<encoder>] [-ar <rate>] [-ac <channels> | -ch_layout <layout>] [-dither_method <method>] [-dither_scale <scale>] [FLAC encoder options] [-f <format>] <output | ->\n";
+const usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout <layout>] -i <input | -> [-c copy|<encoder>] [-b:a <bit rate>] [-ar <rate>] [-ac <channels> | -ch_layout <layout>] [-dither_method <method>] [-dither_scale <scale>] [FLAC encoder options] [-f <format>] <output | ->\n";
 const help = usage ++
     \\
     \\Converts one WAV, Wave64, AU, AIFF, CAF (input only), FLAC, Ogg (Vorbis,
-    \\Opus and FLAC input, FLAC output), MP3 (input only) or raw PCM stream
-    \\(standard input or output with -). The input container is
+    \\Opus and FLAC input, FLAC output), MPEG audio (MP3, MP2 and MP1 input,
+    \\MP2 output) or raw PCM stream (standard input or output with -). The
+    \\input container is
     \\detected from content, or for raw PCM from the name (.sb, .ub, .al, .ul,
     \\.sw), or forced with -f before -i.
     \\Before -i, -sample_rate (or -ar) and -ch_layout (or -ac) describe raw
@@ -82,6 +84,10 @@ const help = usage ++
     \\f_weighted, modified_e_weighted, improved_e_weighted, shibata,
     \\low_shibata, high_shibata, or FFmpeg's number) and -dither_scale (0 to
     \\2147483647, default 1) dither the conversion as FFmpeg does.
+    \\-c mp2 (the default for .mp2, .m2a and .mpa) encodes MPEG audio Layer II
+    \\as FFmpeg's mp2 encoder does, -c mp2fixed as its mp2fixed, from mono or
+    \\stereo at 32, 44.1, 48, 16, 22.05 or 24 kHz; -b:a sets the bit rate
+    \\(default 384k, 160k below 32 kHz).
     \\-c flac (the default for .flac, .ogg and .oga) encodes FLAC as FFmpeg
     \\does, into FLAC or Ogg, with its options: -compression_level (0 to 12,
     \\default 5), -lpc_type (none,
@@ -120,6 +126,8 @@ const Command = struct {
     format: ?[]const u8,
     /// The last `-c` value: `copy` or an encoder's name.
     codec: ?[]const u8,
+    /// The last `-b:a` (`-b`, `-ab`) value: the encoder's bit rate (T29d).
+    bit_rate: ?[]const u8,
     /// The FLAC encoder's options after `-i` (T26c).
     flac: av.flacenc.AvOptions,
     dither: av.dither.Options,
@@ -211,6 +219,7 @@ fn run(init: std.process.Init) ExitStatus {
     // is never looked up.
     var mode: av.convert.Mode = .transcode;
     var encoder: ?av.codecs.Codec = null;
+    var mp2: av.mp2enc.Options = .{};
     if (command.codec) |name| {
         if (std.mem.eql(u8, name, "copy")) {
             mode = .copy;
@@ -221,7 +230,15 @@ fn run(init: std.process.Init) ExitStatus {
                 return .usage;
             };
             encoder = found.codec;
+            // The MP2 encoders share the codec (T29d).
+            mp2.fixed = std.mem.eql(u8, found.name, "mp2fixed");
         }
+    }
+    if (command.bit_rate) |text| {
+        mp2.bit_rate = parseBitRate(text) orelse {
+            printError(io, "zffmpeg: {s}: invalid bit rate\n", .{text});
+            return .usage;
+        };
     }
     // The input's tags are carried, as FFmpeg's default -map_metadata does
     // (T21c, the project owner's choice).
@@ -232,6 +249,7 @@ fn run(init: std.process.Init) ExitStatus {
         .mode = mode,
         .codec = encoder,
         .flac = command.flac.toOptions(),
+        .mp2 = mp2,
         .dither = command.dither,
         .input = .{ .format = input_container, .raw = raw_params },
         // FFmpeg's input -ch_layout names the stream's layout, which its
@@ -264,6 +282,7 @@ fn parse(args: []const [:0]const u8) Parsed {
     var output_rate: ?[]const u8 = null;
     var format: ?[]const u8 = null;
     var codec: ?[]const u8 = null;
+    var bit_rate: ?[]const u8 = null;
     var flac: av.flacenc.AvOptions = .{};
     var dither_method: ?[]const u8 = null;
     var dither_scale: ?[]const u8 = null;
@@ -306,6 +325,7 @@ fn parse(args: []const [:0]const u8) Parsed {
             if (std.mem.eql(u8, arg, "-ac")) break :slot &output_channels;
             if (std.mem.eql(u8, arg, "-f")) break :slot &format;
             if (std.mem.eql(u8, arg, "-c") or std.mem.eql(u8, arg, "-c:a")) break :slot &codec;
+            if (isBitRateOption(arg)) break :slot &bit_rate;
             if (std.mem.eql(u8, arg, "-dither_method")) break :slot &dither_method;
             if (std.mem.eql(u8, arg, "-dither_scale")) break :slot &dither_scale;
             if (isFlacOption(arg)) {
@@ -345,6 +365,7 @@ fn parse(args: []const [:0]const u8) Parsed {
         .output_rate = output_rate,
         .format = format,
         .codec = codec,
+        .bit_rate = bit_rate,
         .flac = flac,
         .dither = dither,
         .overwrite = yes,
@@ -361,6 +382,23 @@ fn outputContainer(command: Command) error{ FormatRequired, UnknownFormat, Unkno
     return av.formats.muxerForFileName(command.output) orelse error.UnknownExtension;
 }
 
+/// FFmpeg's `-b:a` and its spellings `-b` and `-ab`.
+fn isBitRateOption(arg: []const u8) bool {
+    for ([_][]const u8{ "-b:a", "-b", "-ab" }) |name| {
+        if (std.mem.eql(u8, arg, name)) return true;
+    }
+    return false;
+}
+
+/// `-b:a` as FFmpeg's `b` option takes it: an `int64` from 0, in FFmpeg's
+/// number syntax (`128k`); null when it is not one.
+fn parseBitRate(text: []const u8) ?i64 {
+    const max: f64 = @floatFromInt(std.math.maxInt(i64));
+    const d = av.number.parseNumber(text, .int64, 0, max) catch return null;
+    // 2^63 itself is the double nearest INT64_MAX.
+    return if (d >= max) std.math.maxInt(i64) else @intFromFloat(d);
+}
+
 fn isFlacOption(arg: []const u8) bool {
     if (arg.len < 2 or arg[0] != '-') return false;
     inline for (av.flacenc.AvOptions.option_specs) |spec| {
@@ -375,7 +413,7 @@ fn isOutputOnly(arg: []const u8) bool {
     for ([_][]const u8{ "-c", "-c:a", "-dither_method", "-dither_scale" }) |name| {
         if (std.mem.eql(u8, arg, name)) return true;
     }
-    return false;
+    return isBitRateOption(arg);
 }
 
 fn isStdio(path: []const u8) bool {

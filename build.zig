@@ -575,7 +575,7 @@ const RawStdout = struct {
     nb_samples: u64,
 };
 
-const zffmpeg_usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout <layout>] -i <input | -> [-c copy|<encoder>] [-ar <rate>] [-ac <channels> | -ch_layout <layout>] [-dither_method <method>] [-dither_scale <scale>] [FLAC encoder options] [-f <format>] <output | ->\n";
+const zffmpeg_usage = "usage: zffmpeg [-y | -n] [-f <format>] [-sample_rate <rate>] [-ch_layout <layout>] -i <input | -> [-c copy|<encoder>] [-b:a <bit rate>] [-ar <rate>] [-ac <channels> | -ch_layout <layout>] [-dither_method <method>] [-dither_scale <scale>] [FLAC encoder options] [-f <format>] <output | ->\n";
 
 // The paired WAV and AU fixtures hold the same samples, so each is the exact
 // expected output of converting the other.
@@ -779,6 +779,16 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "MP1 from a pipe to raw PCM", .set = .mp3, .args = &.{ "-i", "-" }, .stdin_input = "mp1_layer1_44k", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stdout_raw = .{ .args = &.{ "-f", "s16le", "-ch_layout", "stereo", "-sample_rate", "44100" }, .nb_samples = 11520 }, .stderr = "" },
     .{ .name = "MP2 to WAV", .set = .mp3, .args = &.{"-i"}, .input = "mp2_layer2_mpeg2_joint", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt ", .stderr = "" },
     .{ .name = "MP3 whose frames mostly fail to decode", .set = .mp3, .args = &.{"-i"}, .input = "mp3_rate_change", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stdout = "", .stderr_contains = ": DecodeErrorRate\n" },
+    // T29d: MP2 encoded; compare.py checks the bytes against FFmpeg's. The
+    // default bit rate (384 kbit/s, an MPEG-1 header), and mp2fixed at an
+    // LSF rate from a pipe; the encoder's refusals come before any output.
+    .{ .name = "WAV to MP2 on standard output", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-f", "mp2", "-" }, .exit_code = 0, .stdout_contains = "\xff\xfd\xe0", .stderr = "" },
+    .{ .name = "raw PCM from a pipe to MP2 with mp2fixed at 64 kbit/s", .set = .raw, .args = &.{ "-f", "s16le", "-ar", "16000", "-ac", "1", "-i", "-" }, .stdin_input = "raw_s16le_mono_8k", .tail = &.{ "-c:a", "mp2fixed", "-b:a", "64k", "-f", "mp2", "-" }, .exit_code = 0, .stdout_contains = "\xff\xf5\x88\xc4", .stderr = "" },
+    .{ .name = "a rate the MP2 encoder refuses", .args = &.{"-i"}, .input = "mono_8k", .tail = &.{ "-f", "mp2", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedFormat\n" },
+    .{ .name = "channels the MP2 encoder refuses", .args = &.{"-i"}, .input = "extensible_5point1", .tail = &.{ "-f", "mp2", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedFormat\n" },
+    .{ .name = "a bit rate the MP2 encoder refuses", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-b:a", "100k", "-f", "mp2", "-" }, .exit_code = 1, .stdout = "", .stderr_contains = ": InvalidOption\n" },
+    .{ .name = "an invalid bit rate value", .args = &.{ "-i", "a.wav", "-b:a", "abc", "b.mp2" }, .exit_code = 1, .stderr = "zffmpeg: abc: invalid bit rate\n" },
+    .{ .name = "MP2 copy is unsupported", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-c", "copy", "-f", "mp2", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
     // A decoder that refuses the headers fails cleanly, before any output,
     // from a file (after the counting pass) and from a pipe.
     .{ .name = "Ogg Vorbis whose setup header the decoder refuses", .set = .ogg, .args = &.{"-i"}, .input = "ogg_vorbis_stereo", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stdout = "", .stderr_contains = ": InvalidVorbis\n" },

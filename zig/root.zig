@@ -64,6 +64,10 @@
 //! - `mp3dec`: FFmpeg's float MP3 decoder (mp3float), Layer III frames,
 //!   bit for bit (`codec/mp3dec.zig`, with `codec/mp3_tab.zig` and
 //!   `codec/mpadsp.zig`).
+//! - `mp2enc`: FFmpeg's MP2 encoders, mp2 and mp2fixed, packet for packet
+//!   (`codec/mp2enc.zig`).
+//! - `mp2mux`: FFmpeg's mp2 muxer with the encoder before it, a PCM writer
+//!   as the other containers' (`format/mp2mux.zig`).
 //! - `oggdecode`: an Ogg stream decoded as the ffmpeg program decodes it
 //!   (`format/oggdecode.zig`, with `format/decoded.zig`).
 //! - `mp3decode`: an MP3 stream decoded as the ffmpeg program decodes it
@@ -134,6 +138,8 @@ pub const mp3decode = @import("format/mp3decode.zig");
 pub const mp3 = @import("format/mp3.zig");
 pub const mpegaudio = @import("codec/mpegaudio.zig");
 pub const mp3dec = @import("codec/mp3dec.zig");
+pub const mp2enc = @import("codec/mp2enc.zig");
+pub const mp2mux = @import("format/mp2mux.zig");
 pub const id3v2 = @import("format/id3v2.zig");
 pub const id3v1 = @import("format/id3v1.zig");
 pub const framehash = @import("format/framehash.zig");
@@ -187,6 +193,8 @@ test {
     _ = @import("codec/mp3_tab.zig");
     _ = @import("codec/mpadsp.zig");
     _ = @import("codec/mp3dec.zig");
+    _ = @import("codec/mp2enc.zig");
+    _ = @import("format/mp2mux.zig");
     _ = @import("format/mp3.zig");
     _ = @import("format/demux.zig");
     _ = @import("format/oggmux.zig");

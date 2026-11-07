@@ -50,6 +50,9 @@ pub const Container = enum {
     opus,
     /// MPEG audio (T29a), read only; decoded since T29b and T29c.
     mp3,
+    /// FFmpeg's mp2 muxer (T29d): MP2 packets, written only (the mp3
+    /// demuxer reads them).
+    mp2,
     // Raw PCM (T22c), one format per codec FFmpeg has a raw format for, named
     // as the codec: every PCM codec but s64.
     u8,
@@ -68,7 +71,7 @@ pub const Container = enum {
     mulaw,
 
     /// The parser and writer family that reads and writes a container.
-    pub const Family = enum { wav, au, aiff, caf, flac, ogg, mp3, raw };
+    pub const Family = enum { wav, au, aiff, caf, flac, ogg, mp3, mp2, raw };
 
     pub fn family(container: Container) Family {
         return switch (container) {
@@ -79,6 +82,7 @@ pub const Container = enum {
             .flac => .flac,
             .ogg, .oga, .opus => .ogg,
             .mp3 => .mp3,
+            .mp2 => .mp2,
             // Checked below: exactly the raw formats, each named as its codec.
             else => .raw,
         };
@@ -87,7 +91,7 @@ pub const Container = enum {
     /// The codec of a raw PCM format, which shares its name; null otherwise.
     pub fn rawCodec(container: Container) ?pcm.Codec {
         return switch (container) {
-            .wav, .w64, .au, .aiff, .caf, .flac, .ogg, .oga, .opus, .mp3 => null,
+            .wav, .w64, .au, .aiff, .caf, .flac, .ogg, .oga, .opus, .mp3, .mp2 => null,
             // Compiles only if every other tag names a codec.
             inline else => |tag| @field(pcm.Codec, @tagName(tag)),
         };
@@ -243,6 +247,14 @@ pub const formats = [_]Format{
         .demuxer = .{ .probe = mp3.probeScore, .extensions = &.{ "mp2", "mp3", "m2a", "mpa" } },
         .muxer = null,
     },
+    .{
+        .container = .mp2,
+        .name = "mp2",
+        .long_name = "MP2 (MPEG audio layer 2)",
+        // FFmpeg's raw mp2 muxer (T29d), which carries MP2 only.
+        .demuxer = null,
+        .muxer = .{ .extensions = &.{ "mp2", "m2a", "mpa" }, .mime_type = "audio/mpeg", .audio_codec = .mp2, .carries = mp2Only },
+    },
     rawFormat(.u8, "PCM unsigned 8-bit", &.{"ub"}),
     rawFormat(.s8, "PCM signed 8-bit", &.{"sb"}),
     // FFmpeg gives `sw` to the native byte order's 16-bit format (`AV_NE`).
@@ -297,6 +309,10 @@ fn pcmOnly(comptime carries: fn (pcm.Codec) bool) *const fn (codecs.Codec) bool 
 
 fn flacOnly(codec: codecs.Codec) bool {
     return codec == .flac;
+}
+
+fn mp2Only(codec: codecs.Codec) bool {
+    return codec == .mp2;
 }
 
 /// The Ogg muxers' codecs (ogg_init): FLAC, Opus and Vorbis, of those the

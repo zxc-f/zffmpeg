@@ -255,12 +255,13 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/libm_vector
 ./libm-vectors | diff -u zig/testing/vectors/libm.txt -
 ```
 
-`mp3_decode_vectors.c` is `vorbis_vectors.c` for MP3 (T29b): every MP3
-fixture opened as the ffmpeg program opens it, its packets sent to FFmpeg's
-mp3float decoder, each frame's sample count and MD5 after libavcodec's
-discarding (the gapless trim); a stream the parser names MP1 or MP2 has no
-decoder in this build. The fixtures that decode to audio are generate.py's
-`mp3_l3_*` streams (the reference build has no MP3 encoder):
+`mp3_decode_vectors.c` is `vorbis_vectors.c` for MPEG audio (T29b, T29c):
+every MP3 fixture opened as the ffmpeg program opens it, its packets sent to
+the decoder for the codec the parser names (mp3float, mp2float or
+mp1float), each frame's sample count and MD5 after libavcodec's discarding
+(the gapless trim). The fixtures that decode to audio are generate.py's
+`mp3_l3_*`, `mp1_*` and `mp2_*` streams, which generate.py writes (the
+reference build has no MP3 or Layer I encoder):
 
 ```bash
 clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/mp3_decode_vectors.c .references/ffmpeg-install/lib/libavformat.a .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o mp3-decode-vectors
@@ -339,6 +340,20 @@ STREAMINFO the flush gives:
 ```bash
 clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/flacenc_vectors.c .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o flacenc-vectors
 ./flacenc-vectors | diff -u zig/testing/vectors/flacenc.txt -
+```
+
+The T29d MP2 encoder vectors come the same way: `mp2enc_vectors.c` opens
+FFmpeg's `mp2` and `mp2fixed` encoders on deterministic integer signals
+(tone, noise, low-passed noise, silence and full-scale extremes; the Zig
+test regenerates them from the printed parameters) at MPEG-1 and LSF rates,
+mono and stereo, at default and chosen bit rates, sends frames of 1152
+samples (the last one short, which libavcodec pads), and prints the bit
+rate after opening and each packet's timestamp, duration, size and MD5; a
+bit rate or sample rate the encoder refuses prints its error:
+
+```bash
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/mp2enc_vectors.c .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o mp2enc-vectors
+./mp2enc-vectors | diff -u zig/testing/vectors/mp2enc.txt -
 ```
 
 The FFmpeg-made FLAC fixtures (`flac_ffmpeg_*`) come from the reference's
@@ -463,8 +478,10 @@ demuxer, parser, decoder, encoder (for the five FFmpeg-made fixtures) and
 muxer, and the `framecrc`, `framemd5` and `streamhash` muxers T19b compares,
 the Ogg demuxer and the ogg, oga and opus muxers (T27a, T27b), the Vorbis
 and Opus decoders with FFmpeg's native encoders, which make their fixtures
-(T27d, T28), the mp3 demuxer with the mpegaudio parser (T29a), and mp3float,
-FFmpeg's float MP3 decoder and the ffmpeg program's default for MP3 (T29b).
+(T27d, T28), the mp3 demuxer with the mpegaudio parser (T29a), mp3float,
+FFmpeg's float MP3 decoder and the ffmpeg program's default for MP3 (T29b),
+mp1float and mp2float (T29c), and the mp2 and mp2fixed encoders with the
+mp2 muxer (T29d).
 There are no GPL, nonfree, external-library or
 hardware components, and autodetection is off. `--disable-x86asm` keeps the C
 code paths as the reference and avoids a NASM dependency; inline assembly
@@ -665,6 +682,16 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   rate must be refused by both, zffmpeg before any output. The recorded
   differences are `KNOWN_MP3_DECODE_DIFFERENCES` (notes.md "MP3
   decoding").
+- **MP2 output (T29d).** zffmpeg's MP2 (the `mp2` muxer, with `mp2` or
+  `-c:a mp2fixed`) against the ffmpeg program's with `-bitexact`, for the
+  FLAC output section's inputs and a decoded MP3, MP2 and Ogg Vorbis
+  stream, at the default and chosen bit rates (`-b:a`), resampled
+  (`-ar`) and downmixed (`-ac`): the same bytes as a file and on a pipe.
+  An output rate or channel count the encoder does not take, which the
+  program's filters convert to one it takes, is refused by zffmpeg with
+  `UnsupportedFormat` (status 3) and no output; a bit rate the encoder has
+  no index for fails both, zffmpeg with `InvalidOption` (status 1)
+  (notes.md "MP2 output scope").
 
 ## Results
 

@@ -69,6 +69,8 @@ const oggdecode = @import("oggdecode.zig");
 const decoded_input = @import("decoded.zig");
 const mp3 = @import("mp3.zig");
 const mp3decode = @import("mp3decode.zig");
+const mp2mux = @import("mp2mux.zig");
+const mp2enc = @import("../codec/mp2enc.zig");
 const flacenc = @import("../codec/flacenc.zig");
 const flac_codec = @import("../codec/flac.zig");
 const seek = @import("seek.zig");
@@ -109,6 +111,9 @@ pub const Request = struct {
     /// The FLAC encoder's options (T26c), for a FLAC output. Encoding a
     /// FLAC output needs `gpa`.
     flac: flacenc.Options = .{},
+    /// The MP2 encoder's options (T29d), for an MP2 output: the bit rate
+    /// (FFmpeg's `-b:a`) and the fixed-point quantizer (`-c:a mp2fixed`).
+    mp2: mp2enc.Options = .{},
     /// libswresample's dither for `transcode` (FFmpeg's `-dither_method` and
     /// `-dither_scale`, T23a), applied where FFmpeg's would: when the sample
     /// storage changes to a narrower integer one (FFmpeg's filter graph
@@ -262,6 +267,8 @@ pub const Conversion = struct {
     packet_frames: u32,
     /// The FLAC encoder's options, for a FLAC output (T26c).
     flac_options: flacenc.Options = .{},
+    /// The MP2 encoder's options, for an MP2 output (T29d).
+    mp2_options: mp2enc.Options = .{},
     /// An Ogg output's stream tags (T27b): the `encoder` tag the ffmpeg
     /// program sets under `-bitexact`; owned (`gpa`).
     stream_tags: metadata.Dictionary = .empty,
@@ -310,6 +317,8 @@ pub const Conversion = struct {
                 .init(request.gpa orelse return error.UnsupportedOperation, source.replay.source, sk, request.diagnostics)
             else
                 .init(request.gpa orelse return error.UnsupportedOperation, source.reader(), null, request.diagnostics) },
+            // Output only: detection never names it.
+            .mp2 => return error.UnsupportedOperation,
         };
         errdefer deinitParser(&input);
         // A header written before the samples needs their count. A decoded
@@ -317,7 +326,7 @@ pub const Conversion = struct {
         // only when that header cannot be rewritten at the end.
         const header_first = switch (request.output.family()) {
             .wav, .au, .aiff => true,
-            .raw, .flac, .ogg, .caf, .mp3 => false,
+            .raw, .flac, .ogg, .caf, .mp3, .mp2 => false,
         };
         switch (input) {
             .ogg => |*reader| reader.count_ahead = header_first and !request.output_seekable,
@@ -407,7 +416,9 @@ pub const Conversion = struct {
             .pcm => |codec| codec,
             .flac => flacStorage(summary.format.sample_format),
             // No encoder: refused by the operation check below.
-            .vorbis, .opus, .mp1, .mp2, .mp3 => return error.UnsupportedOperation,
+            // The MP2 encoders take s16 (T29d).
+            .mp2 => .s16le,
+            .vorbis, .opus, .mp1, .mp3 => return error.UnsupportedOperation,
         };
         // FFmpeg's set_channel_layout: an unspecified request takes the
         // default for its count.
@@ -458,6 +469,8 @@ pub const Conversion = struct {
                 error.InvalidOption => error.InvalidOption,
                 error.TagsTooLong => error.LimitExceeded,
             },
+            // FFmpeg's MP2 encoder before its raw muxer (T29d).
+            .mp2 => try mp2mux.Writer.check(summary.output_codec, summary.outputFormat(), request.mp2),
             .caf, .mp3 => unreachable, // no muxer: refused above as UnsupportedOperation
         }
         // For a decoded input, the largest frame its decoder gives: the
@@ -525,6 +538,7 @@ pub const Conversion = struct {
             .gpa = request.gpa,
             .packet_frames = packet_frames,
             .flac_options = request.flac,
+            .mp2_options = request.mp2,
             .stream_tags = stream_tags,
             .deferred_header = deferred_header,
         };
@@ -557,11 +571,11 @@ pub const Conversion = struct {
         try swr.Swr.check(summary.format, summary.outputFormat(), packet_frames, .{});
         switch (summary.output.family()) {
             .flac, .ogg => {},
-            .wav, .au, .aiff, .raw, .caf, .mp3 => return,
+            .wav, .au, .aiff, .raw, .caf, .mp3, .mp2 => return,
         }
         switch (summary.input.family()) {
             .wav, .au, .aiff, .caf, .raw => {},
-            .flac, .ogg, .mp3 => return,
+            .flac, .ogg, .mp3, .mp2 => return,
         }
         const count = summary.frame_count orelse return;
         const first = try swr.Swr.firstOutputFrames(summary.format.sample_rate, summary.output_rate, packet_frames, count, .{}) orelse return;
@@ -654,6 +668,10 @@ pub const Conversion = struct {
                 var writer = flacmux.Writer.begin(c.gpa.?, out, null, s.output_codec, s.outputFormat(), sourceBits(s, &c.input), first, .{ .encoder = c.flac_options, .tags = c.tags, .container = .{ .ogg = .{ .stream_tags = &c.stream_tags } } }) catch |err| return outputFailure(err);
                 defer writer.deinit();
                 try c.transfer(flacmux.Writer, &writer);
+            },
+            .mp2 => {
+                var writer = mp2mux.Writer.begin(out, s.output_codec, s.outputFormat(), c.mp2_options) catch |err| return outputFailure(err);
+                try c.transfer(mp2mux.Writer, &writer);
             },
             .caf, .mp3 => unreachable, // no muxer: `init` refused it
         }
@@ -997,6 +1015,7 @@ fn ffmpegPacketFrames(container: Container, codec: pcm.Codec, format: audio.Form
         .flac => unreachable, // Conversion.init takes STREAMINFO's block size
         .ogg => unreachable, // Conversion.init takes the decoder's frames
         .mp3 => unreachable, // Conversion.init takes the decoder's frames
+        .mp2 => unreachable, // no demuxer
     };
 }
 
@@ -1177,7 +1196,7 @@ fn rawOptions(limits: Limits) raw.WriteOptions {
 
 /// Every error a writer's `begin`, `writeData` or `finish` returns. A new
 /// one fails to compile in `outputFailure`'s switch until it is classified.
-const WriterError = wav.RewriteError || au.RewriteError || aiff.RewriteError || raw.WriteError || flacmux.WriteError;
+const WriterError = wav.RewriteError || au.RewriteError || aiff.RewriteError || raw.WriteError || flacmux.WriteError || mp2mux.WriteError;
 
 /// A writer's failure once output started: the output's, or FLAC's that
 /// only its first frame reveals (T26c: the encoder refusing the block size
@@ -1193,8 +1212,8 @@ fn outputFailure(err: WriterError) RunError {
         // As `init` reports it for FLAC's container.
         error.TagsTooLong => error.LimitExceeded,
         // `init` ran the header checks `begin` repeats, with the same
-        // arguments, and the FLAC encoder's option checks, which do not
-        // depend on the block size.
+        // arguments, and the FLAC and MP2 encoders' option checks, which do
+        // not depend on the samples.
         error.InvalidFormat, error.LimitExceeded, error.InvalidOption => unreachable,
         // A deferred header (`Request.output_seekable`) learns the sizes at
         // the end: more data than the container's sizes hold (AU's data
@@ -1279,7 +1298,7 @@ fn decodeOutput(container: Container, bytes: []const u8, storage: []i16, format:
             var parser: caf.Parser = .init(&reader, .{});
             return decodeWith(caf.Parser, &parser, storage);
         },
-        .flac, .ogg, .mp3 => unreachable, // not this test's outputs
+        .flac, .ogg, .mp3, .mp2 => unreachable, // not this test's outputs
     }
 }
 
@@ -1341,7 +1360,7 @@ fn rawOf(container: Container, bytes: []const u8, out: []u8, format: audio.Forma
         .aiff => _ = try aiff.decodeToRaw(&reader, &writer, .{}),
         .caf => _ = try caf.decodeToRaw(&reader, &writer, .{}),
         .raw => _ = try raw.decodeToRaw(&reader, &writer, container.rawCodec().?, paramsOf(format), bytes.len, .{}), // a raw container has a codec
-        .flac, .ogg, .mp3 => unreachable, // not this test's outputs
+        .flac, .ogg, .mp3, .mp2 => unreachable, // not this test's outputs
     }
     return writer.buffered();
 }
@@ -2332,6 +2351,48 @@ test "FLAC output: FFmpeg's block size, the samples back, STREAMINFO rewritten o
         defer gpa.free(decoded);
         try std.testing.expectEqualSlices(u8, input[wav.canonical_header_len..], decoded);
     }
+}
+
+test "MP2 output: the encoder's packets, the same on a seekable output, refusals before any output" {
+    const gpa = std.testing.allocator;
+    const input = try testWav(gpa, 5000, 44100);
+    defer gpa.free(input);
+    // The encoder's packets for the same samples, five frames, the last
+    // padded.
+    var e = try mp2enc.Encoder.init(44100, 2, .{ .bit_rate = 192000, .fixed = true });
+    var want: [5 * mp2enc.max_packet]u8 = undefined;
+    var want_len: usize = 0;
+    var start: usize = 0;
+    while (start < 5000) : (start += mp2enc.frame_samples) {
+        const n: usize = @min(5000 - start, mp2enc.frame_samples);
+        var samples: [2 * mp2enc.frame_samples]i16 = undefined;
+        for (0..2 * n) |i| samples[i] = std.mem.readInt(i16, input[wav.canonical_header_len + 4 * start + 2 * i ..][0..2], .little);
+        var packet: [mp2enc.max_packet]u8 = undefined;
+        const got = try e.encodeFrame(samples[0 .. 2 * n], &packet);
+        @memcpy(want[want_len..][0..got.len], got);
+        want_len += got.len;
+    }
+    var output: [5 * mp2enc.max_packet]u8 = undefined;
+    for ([_]bool{ true, false }) |seekable| {
+        var reader: std.Io.Reader = .fixed(input);
+        var source: detect.Input = undefined;
+        try source.open(&reader, .{});
+        var conversion = try Conversion.init(&source, .{ .output = .mp2, .mode = .transcode, .mp2 = .{ .bit_rate = 192000, .fixed = true }, .output_seekable = seekable }, .{});
+        defer conversion.deinit();
+        var out: std.Io.Writer = .fixed(&output);
+        try conversion.runTo(&out, if (seekable) .fixed(&out) else null);
+        try std.testing.expectEqual(5000, conversion.summary.frame_count);
+        try std.testing.expectEqualSlices(u8, want[0..want_len], out.buffered());
+    }
+
+    var out: std.Io.Writer = .fixed(&output);
+    var bad_rate: std.Io.Reader = .fixed(input);
+    try std.testing.expectError(error.InvalidOption, convert(&bad_rate, &out, .{ .output = .mp2, .mode = .transcode, .mp2 = .{ .bit_rate = 100000 } }, .{}));
+    var mono: std.Io.Reader = .fixed(fixtures.bytes("mono_8k"));
+    try std.testing.expectError(error.UnsupportedFormat, convert(&mono, &out, .{ .output = .mp2, .mode = .transcode }, .{}));
+    var copy: std.Io.Reader = .fixed(input);
+    try std.testing.expectError(error.UnsupportedOperation, convert(&copy, &out, .{ .output = .mp2, .mode = .copy }, .{}));
+    try std.testing.expectEqual(0, out.buffered().len);
 }
 
 test "FLAC to FLAC: the first decoded frame is the block size; encoder options apply" {

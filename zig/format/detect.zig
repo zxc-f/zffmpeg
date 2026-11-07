@@ -417,6 +417,9 @@ pub fn probeWith(reader: *std.Io.Reader, limits: Limits, options: Options) Error
         },
         .ogg => return probeOgg(reader, &input, options),
         .mp3 => return probeMp3(reader, &input, options),
+        // Output only (T29d): detection never names it, nor does a forced
+        // input format (`findDemuxer`).
+        .mp2 => return error.UnsupportedFormat,
     }
 }
 
@@ -814,7 +817,7 @@ fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
         // Ogg's and MP3's demuxers need an allocator, which this probe has
         // not.
         .ogg, .mp3 => try std.testing.expectError(error.UnsupportedFormat, got),
-        .raw => unreachable, // no content probe chooses raw PCM
+        .raw, .mp2 => unreachable, // no content probe chooses raw PCM or the output-only mp2 format
     } else try std.testing.expectError(error.UnknownFormat, got);
 }
 

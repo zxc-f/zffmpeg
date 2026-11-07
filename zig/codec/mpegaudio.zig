@@ -22,7 +22,7 @@ const std = @import("std");
 pub const mp3_mask: u32 = 0xFFFE0CCF;
 
 /// `ff_mpa_bitrate_tab`: kbit/s by [lsf][layer - 1][index].
-const bitrate_tab = [2][3][15]u16{
+pub const bitrate_tab = [2][3][15]u16{
     .{
         .{ 0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448 },
         .{ 0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384 },
@@ -36,7 +36,7 @@ const bitrate_tab = [2][3][15]u16{
 };
 
 /// `ff_mpa_freq_tab`.
-const freq_tab = [3]u32{ 44100, 48000, 32000 };
+pub const freq_tab = [3]u32{ 44100, 48000, 32000 };
 
 /// `ff_mpa_check_header`: the sync word and no reserved version, layer,
 /// bit rate or rate.

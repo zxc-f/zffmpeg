@@ -69,6 +69,7 @@ import generate  # noqa: E402
 # The statuses zffprobe and zffmpeg give each error (port.md "Diagnostics and
 # statuses"; zig/cli/status.zig): an error not listed is an I/O failure, 4.
 EXIT_STATUS = {
+    "InvalidOption": 1,
     "InvalidOgg": 2,
     "InvalidVorbis": 2,
     "InvalidOpus": 2,
@@ -2270,6 +2271,128 @@ def flac_pipe_problem(tpipe, zpipe):
     return None
 
 
+MP2_OUTPUT_OPTIONS = [[], ["-b:a", "64k"], ["-b:a", "128k"], ["-b:a", "256k"], ["-c:a", "mp2fixed"],
+                      ["-c:a", "mp2fixed", "-b:a", "192k"], ["-ar", "22050", "-b:a", "64k"], ["-ar", "16000"],
+                      ["-ac", "1", "-b:a", "96k"], ["-ar", "32000", "-ac", "2", "-b:a", "80k"], ["-b:a", "100k"]]
+MP2_RATES = (44100, 48000, 32000, 22050, 24000, 16000)
+# ff_mpa_bitrate_tab's Layer II rates in kbit/s, MPEG-1 and MPEG-2 (LSF).
+MP2_KBPS = {False: (32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384),
+            True: (8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160)}
+
+
+def mp2_expected_refusal(rate, channels, opts):
+    """The refusal zffmpeg makes where the ffmpeg program converts or fails,
+    as (program fails, status, error), or None: a bit rate the encoder has
+    no index for fails both ("bitrate %d is not allowed in mp2"); an output
+    rate or channel count the encoder does not take is refused by zffmpeg
+    (UnsupportedFormat) where the program's filters pick one it takes
+    (notes.md "MP2 output scope")."""
+    pairs = dict(zip(opts[0::2], opts[1::2]))
+    out_rate = int(pairs.get("-ar", rate))
+    out_channels = int(pairs.get("-ac", channels))
+    # The program's filters pick the encoder's nearest rate (8 kHz to 16,
+    # 96 kHz to 48), whose version decides the valid bit rates.
+    program_rate = min(MP2_RATES, key=lambda r: abs(r - out_rate))
+    kbps = int(pairs["-b:a"].rstrip("k")) if "-b:a" in pairs else None
+    bad_bit_rate = kbps is not None and kbps not in MP2_KBPS[program_rate < 32000]
+    # zffmpeg checks the format before the bit rate, as the encoder's init
+    # does; the program, having converted the format, still fails on it.
+    if out_rate not in MP2_RATES or out_channels > 2:
+        return (bad_bit_rate, 3, "UnsupportedFormat")
+    if bad_bit_rate:
+        return (True, 1, "InvalidOption")
+    return None
+
+
+def compare_mp2_output(args, lines, failures):
+    """zffmpeg's MP2 output (T29d) against the ffmpeg program's with
+    `-bitexact`: the same bytes as a file and on a pipe, decoded back by
+    FFmpeg and by zffmpeg to the same samples, for every input of
+    the FLAC output section and decoded MP3, MP2 and Ogg inputs, at each
+    bit rate and quantizer, resampled and downmixed; refusals as
+    `mp2_expected_refusal` records them, each with its status and error and
+    no output."""
+    rows = []
+    same = total = understood = 0
+    with tempfile.TemporaryDirectory() as work:
+        work = pathlib.Path(work)
+        inputs = {name: (path, None) for name, path in flac_output_inputs(work).items()}
+        for fixture in ("mp3/mp3_l3_long_stereo.mp3", "mp3/mp2_layer2_48k.mp3", "ogg/ogg_vorbis_ffmpeg_44k.ogg"):
+            inputs[pathlib.Path(fixture).stem] = (FIXTURES / fixture, None)
+        for name, (source, _) in inputs.items():
+            probe = run(args.ffprobe, "-v", "error", "-select_streams", "a:0", "-show_entries",
+                        "stream=sample_rate,channels", "-of", "default=nw=1:nk=1", source)
+            rate, channels = (int(x) for x in text(probe.stdout).split()[:2])
+            problems = []
+            for opts in MP2_OUTPUT_OPTIONS:
+                total += 1
+                theirs, ours = work / "theirs.mp2", work / "ours.mp2"
+                for path in (theirs, ours):
+                    path.unlink(missing_ok=True)
+                codec = [] if "-c:a" in opts else ["-c:a", "mp2"]
+                tp = run(args.ffmpeg, "-nostdin", "-v", "error", "-y", "-i", source, "-bitexact", *codec, *opts, theirs)
+                zp = run(args.zffmpeg, "-y", "-i", source, *opts, ours)
+                label = " ".join(opts) or "defaults"
+                refusal = mp2_expected_refusal(rate, channels, opts)
+                if refusal is not None:
+                    fails, code, error = refusal
+                    program_ok = (tp.returncode != 0 and b"is not allowed in mp2" in tp.stderr) if fails else tp.returncode == 0
+                    # A rejected encoder option is status 1 with the input
+                    # named, which tool_error (status 2 and up) leaves out.
+                    named = (text(zp.stderr) == f"zffmpeg: {source}: {error}" if code == 1
+                             else tool_error(zp, "zffmpeg", source) == error)
+                    if not program_ok or zp.returncode != code or not named or ours.exists():
+                        problems.append(f"{label}: FFmpeg exited {tp.returncode}, zffmpeg {zp.returncode} "
+                                        f"({first_line(text(zp.stderr)) or 'no error'}); recorded: zffmpeg refuses "
+                                        f"with {error} (status {code}) and writes nothing")
+                    else:
+                        same += 1
+                        understood += not fails
+                    continue
+                if tp.returncode != 0 or zp.returncode != 0:
+                    problems.append(f"{label}: FFmpeg {tp.returncode}, zffmpeg {zp.returncode} "
+                                    f"({first_line(text(zp.stderr))})")
+                    continue
+                if not ours.read_bytes() or theirs.read_bytes() != ours.read_bytes():
+                    problems.append(f"{label}: the files differ")
+                    continue
+                # FFmpeg's mp2float and the port's decoder read the output
+                # back to the same samples.
+                total += 1
+                tdec = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", ours, "-f", "f32le", "-")
+                zdec = run(args.zffmpeg, "-i", ours, "-f", "f32le", "-")
+                if tdec.returncode != 0 or tdec.stderr or zdec.returncode != 0 or not tdec.stdout \
+                        or tdec.stdout != zdec.stdout:
+                    problems.append(f"{label}: decoded, FFmpeg {tdec.returncode}, zffmpeg {zdec.returncode}, "
+                                    f"{len(tdec.stdout)} and {len(zdec.stdout)} bytes")
+                    continue
+                same += 1
+                total += 1
+                tpipe = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", source, "-bitexact", *codec, *opts,
+                            "-f", "mp2", "-")
+                zpipe = run(args.zffmpeg, "-i", source, *opts, "-f", "mp2", "-")
+                if tpipe.returncode != 0 or zpipe.returncode != 0 or not zpipe.stdout or tpipe.stdout != zpipe.stdout:
+                    problems.append(f"{label}: piped, FFmpeg {tpipe.returncode}, zffmpeg {zpipe.returncode}, "
+                                    f"{len(tpipe.stdout)} and {len(zpipe.stdout)} bytes")
+                    continue
+                same += 2
+            result = "pass" if not problems else "**FAIL**: " + "; ".join(problems)
+            rows.append(f"| `{name}` | {rate} Hz, {channels} ch | {result} |")
+            failures.extend(f"MP2 output {name}: {p}" for p in problems)
+    record("MP2 output (T29d)", same, total, understood=understood)
+    lines += [
+        "",
+        "## MP2 output (T29d)",
+        "",
+        f"zffmpeg's MP2 (mp2 and mp2fixed) equal to the ffmpeg program's with `-bitexact`, as a file and on a "
+        f"pipe, and decoded back by FFmpeg and zffmpeg to the same samples, or refused as recorded: {same}/{total}, {understood} of them refusals where the program converts "
+        f"the rate or the channels.",
+        "",
+        "| Input | Format | Result |",
+        "| --- | --- | --- |",
+    ] + rows
+
+
 def compare_flac_output(args, lines, failures):
     """zffmpeg's FLAC output (T26c) against the ffmpeg program's with
     `-bitexact`: the same bytes, as a file (STREAMINFO rewritten at the
@@ -3498,6 +3621,7 @@ def main():
     compare_mp3(args, lines, failures)
     compare_ogg_decode(args, lines, failures)
     compare_mp3_decode(args, lines, failures)
+    compare_mp2_output(args, lines, failures)
     compare_opus_vectors(args, lines, failures)
     compare_hashes(args, lines, failures)
     compare_fate(args, lines, failures)

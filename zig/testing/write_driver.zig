@@ -54,6 +54,11 @@ fn run(init: std.process.Init) Status {
     };
     if (args.len < 7) return usageError(io);
     const container = av.formats.findMuxer(args[1]) orelse return usageError(io);
+    // The PCM writers only: FLAC and MP2 encode, Ogg carries no PCM.
+    switch (container.family()) {
+        .wav, .au, .aiff, .raw => {},
+        .caf, .flac, .ogg, .mp3, .mp2 => return usageError(io),
+    }
     const codec = codecFromName(args[2]) orelse return usageError(io);
     const gpa = init.gpa;
     var tags: av.metadata.Dictionary = .empty;
@@ -162,8 +167,8 @@ fn write(
             try writer.writeData(encoded);
             try writer.finish();
         },
-        // CAF and Ogg have no muxer; FLAC is not a PCM writer.
-        .caf, .flac, .ogg, .mp3 => unreachable,
+        // `main` refused the others.
+        .caf, .flac, .ogg, .mp3, .mp2 => unreachable,
     }
 }
 

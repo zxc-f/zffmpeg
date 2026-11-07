@@ -169,8 +169,13 @@ pub const decoders = pcmImplementations() ++ [_]Implementation{
     .{ .name = "mp1float", .codec = .mp1 },
     .{ .name = "mp2float", .codec = .mp2 },
 };
-/// The PCM encoders, then FLAC's (T26c).
-pub const encoders = pcmImplementations() ++ [_]Implementation{.{ .name = "flac", .codec = .flac }};
+/// The PCM encoders, then FLAC's (T26c) and MP2's (T29d).
+pub const encoders = pcmImplementations() ++ [_]Implementation{
+    .{ .name = "flac", .codec = .flac },
+    // FFmpeg's MP2 encoders (T29d), in allcodecs.c's order.
+    .{ .name = "mp2", .codec = .mp2 },
+    .{ .name = "mp2fixed", .codec = .mp2 },
+};
 
 /// The decoder FFmpeg names `name`, if registered.
 pub fn findDecoder(name: []const u8) ?*const Implementation {
