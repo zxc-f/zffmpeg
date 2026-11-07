@@ -32,8 +32,8 @@ const examples = [_]Example{
 /// files' extension: wav (WAV and Wave64), au, aiff, raw (raw PCM), caf,
 /// flac, ogg, mp3 (MPEG audio, Layers I to III) and aac (ADTS); and adpcm,
 /// whose files are WAV (T31a), alac, whose files are CAF (T31b), and g72x,
-/// whose files are AU (T31c).
-const FixtureSet = enum { wav, au, aiff, raw, caf, flac, ogg, mp3, aac, adpcm, alac, g72x };
+/// whose files are AU (T31c); and ac3 (T32a).
+const FixtureSet = enum { wav, au, aiff, raw, caf, flac, ogg, mp3, aac, adpcm, alac, g72x, ac3 };
 
 /// A zffprobe process run with its expected exit code and output.
 const ProbeCase = struct {
@@ -393,7 +393,7 @@ const probe_cases = [_]ProbeCase{
     .{ .name = "malformed AU header", .set = .au, .fixture = "au_offset_too_small", .exit_code = 2, .stderr_contains = ": InvalidAu\n" },
     .{ .name = "a wrong AU magic is not detected", .set = .au, .fixture = "au_bad_magic", .exit_code = 3, .stderr_contains = ": UnknownFormat\n" },
     .{ .name = "a wrong AU magic, forced", .set = .au, .args = &.{ "-f", "au" }, .fixture = "au_bad_magic", .exit_code = 2, .stderr_contains = ": InvalidAu\n" },
-    .{ .name = "an unknown -f", .args = &.{ "-f", "ac3" }, .fixture = "mono_8k", .exit_code = 3, .stderr = "zffprobe: ac3: unsupported input format\n" },
+    .{ .name = "an unknown -f", .args = &.{ "-f", "dts" }, .fixture = "mono_8k", .exit_code = 3, .stderr = "zffprobe: dts: unsupported input format\n" },
     .{ .name = "unsupported AU encoding", .set = .au, .fixture = "au_encoding_unknown", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
     .{ .name = "unknown AU size", .set = .au, .fixture = "au_unknown_size", .exit_code = 3, .stderr_contains = ": UnsupportedStreamingSize\n" },
     .{ .name = "AU rate limit", .set = .au, .fixture = "au_rate_over_limit", .exit_code = 5, .stderr_contains = ": LimitExceeded\n" },
@@ -514,6 +514,16 @@ const probe_cases = [_]ProbeCase{
     .{ .name = "ALAC without a magic cookie", .set = .alac, .fixture = "alac_no_kuki", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
     // Forced, the resync finds a sync word in the samples, as FFmpeg's does.
     .{ .name = "ADTS forced on a WAV file", .args = &.{ "-f", "aac" }, .fixture = "mono_8k", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
+    // T32a: raw AC-3 opens as ffprobe opens it, the parser and the
+    // read-ahead's decoder giving the parameters, the duration from the
+    // bit rate in 1/90000.
+    .{ .name = "AC-3", .set = .ac3, .fixture = "ac3_ffmpeg_stereo_48k", .exit_code = 0, .stdout = "format=ac3\ncodec=ac3\nsample_fmt=fltp\nchannels=2\nchannel_layout=stereo\nsample_rate=48000\nnb_samples=10752\nduration_num=20160\nduration_den=90000\n", .stderr = "" },
+    .{ .name = "half-rate AC-3", .set = .ac3, .fixture = "ac3_half_rate", .exit_code = 0, .stdout_contains = "sample_rate=24000\n", .stderr = "" },
+    .{ .name = "AC-3 from a pipe has no duration", .set = .ac3, .args = &.{"-"}, .stdin_fixture = "ac3_ffmpeg_51side_44k", .exit_code = 0, .stdout_contains = "channel_layout=5.1(side)\nsample_rate=44100\nnb_samples=N/A\n", .stderr = "" },
+    .{ .name = "byte-swapped AC-3", .set = .ac3, .fixture = "ac3_byteswapped", .exit_code = 0, .stdout_contains = "codec=ac3\n", .stderr = "" },
+    .{ .name = "AC-3 of three frames is not detected", .set = .ac3, .fixture = "ac3_ffmpeg_quad", .exit_code = 3, .stderr_contains = ": UnknownFormat\n" },
+    .{ .name = "AC-3 of three frames forced", .set = .ac3, .args = &.{ "-f", "ac3" }, .fixture = "ac3_ffmpeg_quad", .exit_code = 0, .stdout_contains = "channel_layout=quad(side)\n", .stderr = "" },
+    .{ .name = "AC-3 forced on a WAV file", .args = &.{ "-f", "ac3" }, .fixture = "mono_8k", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
     .{ .name = "Ogg Vorbis", .set = .ogg, .fixture = "ogg_vorbis_ffmpeg_44k", .exit_code = 0, .stdout = "format=ogg\ncodec=vorbis\nsample_fmt=fltp\nchannels=2\nchannel_layout=stereo\nsample_rate=44100\nnb_samples=30000\nduration_num=30000\nduration_den=44100\n", .stderr = "" },
     .{ .name = "Ogg Vorbis whose setup header the decoder refuses", .set = .ogg, .fixture = "ogg_vorbis_stereo", .exit_code = 2, .stderr_contains = ": InvalidVorbis\n" },
     .{ .name = "Ogg FLAC", .set = .ogg, .fixture = "ogg_flac_stereo", .exit_code = 0, .stdout_contains = "codec=flac\nsample_fmt=s16\nchannels=2\nchannel_layout=stereo\n", .stderr = "" },
@@ -707,7 +717,7 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "a truncated pipe", .set = .au, .args = &.{ "-i", "-" }, .stdin_input = "au_truncated_data", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stderr = "zffmpeg: -: Truncated\n" },
     .{ .name = "unknown content", .args = &.{"-i"}, .input = "not_riff", .tail = &.{ "-f", "au", "-" }, .exit_code = 3, .stderr_contains = ": UnknownFormat\n" },
     .{ .name = "a malformed header, forced", .args = &.{ "-f", "wav", "-i" }, .input = "not_riff", .tail = &.{ "-f", "au", "-" }, .exit_code = 2, .stderr_contains = ": InvalidRiff\n" },
-    .{ .name = "an unknown input -f", .args = &.{ "-f", "ac3", "-i" }, .input = "mono_8k", .tail = &.{ "-f", "au", "-" }, .exit_code = 3, .stderr = "zffmpeg: ac3: unsupported input format\n" },
+    .{ .name = "an unknown input -f", .args = &.{ "-f", "dts", "-i" }, .input = "mono_8k", .tail = &.{ "-f", "au", "-" }, .exit_code = 3, .stderr = "zffmpeg: dts: unsupported input format\n" },
     .{ .name = "an unsupported input", .args = &.{"-i"}, .input = "rifx_big_endian", .tail = &.{ "-f", "au", "-" }, .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
     .{ .name = "an input limit", .args = &.{"-i"}, .input = "chunks_over_limit", .tail = &.{ "-f", "au", "-" }, .exit_code = 5, .stderr_contains = ": LimitExceeded\n" },
     .{ .name = "a missing input", .args = &.{ "-i", "no-such-file.wav", "-f", "wav", "-" }, .exit_code = 4, .stderr = "zffmpeg: no-such-file.wav: FileNotFound\n" },
@@ -876,6 +886,11 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "G.726 away from 8 kHz", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-c:a", "g726le", "-ac", "1", "-f", "au", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedFormat\n" },
     .{ .name = "a code size outside the option's range", .args = &.{ "-i", "a.wav", "-c:a", "g726le", "-code_size", "6", "b.au" }, .exit_code = 1, .stderr_contains = "invalid value for: -code_size" },
     .{ .name = "G.722 into WAV is unsupported", .args = &.{"-i"}, .input = "mono_8k", .tail = &.{ "-c:a", "g722", "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
+    .{ .name = "AC-3 to raw PCM", .set = .ac3, .args = &.{"-i"}, .input = "ac3_ffmpeg_stereo_48k", .tail = &.{ "-f", "f32le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stdout_raw = .{ .args = &.{ "-f", "f32le", "-ch_layout", "stereo", "-sample_rate", "48000" }, .nb_samples = 10752 }, .stderr = "" },
+    .{ .name = "AC-3 from a pipe to raw PCM", .set = .ac3, .args = &.{ "-i", "-" }, .stdin_input = "ac3_ffmpeg_mono_32k", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stdout_raw = .{ .args = &.{ "-f", "s16le", "-ch_layout", "mono", "-sample_rate", "32000" }, .nb_samples = 7680 }, .stderr = "" },
+    .{ .name = "AC-3 with junk after a frame", .set = .ac3, .args = &.{"-i"}, .input = "ac3_junk_between_long", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt ", .stderr = "" },
+    .{ .name = "AC-3 copy is unsupported", .set = .ac3, .args = &.{"-i"}, .input = "ac3_ffmpeg_stereo_48k", .tail = &.{ "-c", "copy", "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
+    .{ .name = "no AC-3 encoder", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-c:a", "ac3", "-f", "wav", "-" }, .exit_code = 1, .stdout = "", .stderr_contains = "unknown encoder: ac3" },
     // A decoder that refuses the headers fails cleanly, before any output,
     // from a file (after the counting pass) and from a pipe.
     .{ .name = "Ogg Vorbis whose setup header the decoder refuses", .set = .ogg, .args = &.{"-i"}, .input = "ogg_vorbis_stereo", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stdout = "", .stderr_contains = ": InvalidVorbis\n" },

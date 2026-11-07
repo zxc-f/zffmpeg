@@ -3737,6 +3737,82 @@ def compare_alac(args, lines, failures):
 
 
 
+# The cells the decoded AC-3 inputs differ in (T32a): the program's
+# timestamps, kept in the raw demuxer's 1/90000 time base, give a 44.1 kHz
+# stream's Ogg granules another rounding (notes.md "AC-3").
+KNOWN_AC3_DECODE_DIFFERENCES = {
+    (name, "-f ogg"): ("granules", "the same pages and samples but the granules: the program's timestamps, in the "
+                                   "raw demuxer's 1/90000 time base, round a 44.1 kHz frame's 1536 samples")
+    for name in ("ac3_ffmpeg_30back", "ac3_ffmpeg_51side_44k", "ac3_ffmpeg_coupling", "ac3_ffmpeg_lowrate")
+} | {
+    (name, "-f ogg"): ("granules", "the same pages and samples but the granules: a packet the decoder refuses "
+                                   "(junk) leaves a gap in the program's timestamps")
+    for name in ("ac3_junk_prefix", "ac3_junk_between_long")
+}
+
+
+def rescaled_count(duration_ts, rate, den):
+    """zffprobe's `nb_samples` for a duration in 1/den: av_rescale's
+    rounding to the nearest sample, N/A without one."""
+    if duration_ts in (None, "N/A") or rate in (None, "N/A"):
+        return "N/A"
+    return str((int(duration_ts) * int(rate) + den // 2) // den)
+
+def compare_ac3(args, lines, failures):
+    """Raw AC-3 (T32a): every fixture's zffprobe report against ffprobe's
+    (both failing to detect a stream too short for the probe), and its
+    decoding by zffmpeg into each output against the program's
+    (`decode_cells`)."""
+    rows = []
+    same = total = understood = 0
+    notes = set()
+    paths = sorted((FIXTURES / "ac3").glob("*.ac3"))
+    decoded = []
+    for path in paths:
+        total += 1
+        problems = []
+        code, fields, err = ffprobe(args.ffprobe, path)
+        zcode, zfields, zerr = zffprobe(args.zffprobe, path)
+        if code != 0:
+            # Content detection finds no format in both.
+            if zcode != 3 or not zerr.endswith(": UnknownFormat"):
+                problems.append(f"ffprobe fails ({first_line(err)}), zffprobe exited {zcode} ({zerr})")
+        else:
+            decoded.append((path, "ac3"))
+            want = {"format": fields.get("format_name"), "codec": fields.get("codec_name"),
+                    "sample_fmt": fields.get("sample_fmt"), "channels": fields.get("channels"),
+                    "channel_layout": fields.get("channel_layout"), "sample_rate": fields.get("sample_rate"),
+                    "nb_samples": rescaled_count(fields.get("duration_ts"), fields.get("sample_rate"), 90000),
+                    "duration_num": fields.get("duration_ts"),
+                    "duration_den": "90000" if fields.get("duration_ts") not in (None, "N/A") else "N/A"}
+            if zcode != 0 or zfields != want:
+                problems.append(f"zffprobe exited {zcode} with {zfields or zerr}, ffprobe's {want}")
+        if not problems:
+            same += 1
+        failures.extend(f"AC-3 probe {path.stem}: {p}" for p in problems)
+        rows.append(f"| `{path.stem}` | probe | {'pass' if not problems else '**FAIL**: ' + '; '.join(problems)} |")
+    decode_rows, dsame, dtotal, dunderstood, dnotes, compared = decode_cells(
+        args, decoded, KNOWN_AC3_DECODE_DIFFERENCES, "KNOWN_AC3_DECODE_DIFFERENCES", "AC-3 decode", failures)
+    dtotal += unmatched_entries(KNOWN_AC3_DECODE_DIFFERENCES, compared, "KNOWN_AC3_DECODE_DIFFERENCES", failures)
+    same, total, understood = same + dsame, total + dtotal, understood + dunderstood
+    notes |= dnotes
+    rows += [row.replace("| ac3 |", "| decode |") for row in decode_rows]
+    record("AC-3 (T32a)", same, total, understood=understood)
+    lines += [
+        "",
+        "## AC-3 (T32a)",
+        "",
+        f"AC-3 fixtures probed by zffprobe as ffprobe probes them (or detected by neither), and decoded by zffmpeg "
+        f"into WAV, AU, AIFF, FLAC, Ogg and raw PCM (and resampled, and downmixed), into raw PCM from a pipe to "
+        f"stdout, and from a pipe into a WAV file, equal to the ffmpeg program's with `-bitexact`: {same}/{total}, "
+        f"{understood} of them as understood differences:",
+        "",
+    ] + [f"- {note}" for note in sorted(notes)] + [
+        "",
+        "| Fixture | Cells | Result |",
+        "| --- | --- | --- |",
+    ] + rows
+
 # The G.722 and G.726 fixtures zffprobe and zffmpeg refuse where FFmpeg
 # reads them (T31c, notes.md "G.722 and G.726"): status, error, reason.
 KNOWN_G72X_REFUSALS = {
@@ -4270,6 +4346,10 @@ KNOWN_REGISTRY_DIFFERENCES = {
                         "the port has no Opus encoder"),
     ("codec", "aac"): (("D.A.L.", "DEA.L."), "FFmpeg's native AAC encoder makes the AAC fixtures (T30b); "
                        "the port has no AAC encoder (T32d)"),
+    ("codec", "ac3"): (("D.AIL.", "DEAIL."), "FFmpeg's AC-3 encoder makes the AC-3 fixtures (T32a); the port has no "
+                       "AC-3 encoder (T32c)"),
+    ("format", "ac3"): (("D.", "DE"), "FFmpeg's raw AC-3 muxer writes the AC-3 fixtures (T32a); the port writes no "
+                        "AC-3 before its encoder (T32c)"),
 }
 
 
@@ -4524,6 +4604,7 @@ def main():
     compare_alac(args, lines, failures)
     compare_caf_output(args, lines, failures)
     compare_g72x(args, lines, failures)
+    compare_ac3(args, lines, failures)
     compare_g72x_output(args, lines, failures)
     compare_mp2_output(args, lines, failures)
     compare_opus_vectors(args, lines, failures)

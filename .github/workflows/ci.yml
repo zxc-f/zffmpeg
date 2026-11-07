@@ -402,6 +402,17 @@ jobs:
           bash zig/testing/reference/g72x_au_vectors.sh .references/ffmpeg-install |
             diff -u zig/testing/vectors/g72x_au.txt -
 
+      # The committed T32a oracle must be what this build's AC-3 demuxer,
+      # parser and decoder make of every AC-3 fixture.
+      - name: Check the AC-3 vectors (T32a)
+        run: |
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/ac3_vectors.c \
+            .references/ffmpeg-install/lib/libavformat.a .references/ffmpeg-install/lib/libavcodec.a \
+            .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a \
+            -lm -pthread -o ac3-vectors
+          ./ac3-vectors $(sed -n 's/^ *\.name = "\(.*\)",$/zig\/testing\/fixtures\/ac3\/\1.ac3/p' zig/testing/fixtures/ac3/manifest.zon) |
+            diff -u zig/testing/vectors/ac3_decode.txt -
+
       # The committed T28a oracle must be what this build's Opus decoder
       # makes of every Ogg fixture's first Opus stream.
       - name: Check the Opus decoder vectors (T28a)

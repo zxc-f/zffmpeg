@@ -49,6 +49,7 @@ const flac = @import("flac.zig");
 const ogg = @import("ogg.zig");
 const mp3 = @import("mp3.zig");
 const aac = @import("aac.zig");
+const ac3 = @import("ac3.zig");
 const rational = @import("../core/rational.zig");
 const demux = @import("demux.zig");
 const seek = @import("seek.zig");
@@ -573,6 +574,7 @@ pub fn probeWith(reader: *std.Io.Reader, limits: Limits, options: Options) Error
         .ogg => return probeOgg(reader, &input, options),
         .mp3 => return probeMp3(reader, &input, options),
         .aac => return probeAac(reader, &input, options),
+        .ac3 => return probeAc3(reader, &input, options),
         // Output only (T29d): detection never names it, nor does a forced
         // input format (`findDemuxer`).
         .mp2, .adts => return error.UnsupportedFormat,
@@ -704,6 +706,38 @@ fn probeAac(reader: *std.Io.Reader, input: *Input, options: Options) Error!Probe
         .format = audio.Format.initLayout(params.sample_rate, layout, .fltp) catch return error.UnsupportedFormat,
         .frame_count = if (duration >= 0) @intCast(rational.rescale(duration, params.sample_rate, aac.time_base.den)) else null,
         .time_base_duration = if (duration >= 0) .{ .ts = duration, .den = @intCast(aac.time_base.den) } else null,
+    };
+}
+
+/// Raw AC-3 (T32a): the demuxer and libavformat's read-ahead, whose
+/// parser gives the rate, channels and layout and whose decoder sets planar
+/// float when it opens, as ffprobe opens the input, and the duration in the
+/// 1/90000 time base (estimated from the bit rate). A stream none of whose
+/// frames the parser checked has no rate: `UnsupportedFormat`, as ffprobe
+/// prints none.
+fn probeAc3(reader: *std.Io.Reader, input: *Input, options: Options) Error!Probed {
+    const gpa = options.gpa orelse if (options.tags) |t| t.gpa else return error.UnsupportedFormat;
+    const d = if (options.source.seeker) |sk| blk: {
+        sk.seekTo(0) catch return error.IoFailure;
+        break :blk try ac3.Demuxer.initSeekable(gpa, reader, sk);
+    } else try ac3.Demuxer.init(gpa, input.reader());
+    defer d.deinit();
+    var layer = demux.Layer(ac3.Demuxer).init(gpa, d);
+    defer layer.deinit();
+    try layer.findStreamInfo();
+    const params = try layer.codecParams(0);
+    if (params.sample_rate == 0 or params.channels == 0) return error.UnsupportedFormat;
+    const layout: audio.ChannelLayout = if (params.mask != 0)
+        .{ .native = params.mask }
+    else
+        .{ .unspecified = std.math.cast(u8, params.channels) orelse return error.UnsupportedFormat };
+    const duration = d.duration;
+    return .{
+        .container = .ac3,
+        .codec = .ac3,
+        .format = audio.Format.initLayout(params.sample_rate, layout, .fltp) catch return error.UnsupportedFormat,
+        .frame_count = if (duration >= 0) @intCast(rational.rescale(duration, params.sample_rate, ac3.time_base.den)) else null,
+        .time_base_duration = if (duration >= 0) .{ .ts = duration, .den = @intCast(ac3.time_base.den) } else null,
     };
 }
 
@@ -1016,7 +1050,7 @@ fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
         },
         // Ogg's and MP3's demuxers need an allocator, which this probe has
         // not.
-        .ogg, .mp3, .aac => try std.testing.expectError(error.UnsupportedFormat, got),
+        .ogg, .mp3, .aac, .ac3 => try std.testing.expectError(error.UnsupportedFormat, got),
         .raw, .mp2, .adts => unreachable, // no content probe chooses raw PCM or the output-only formats
     } else try std.testing.expectError(error.UnknownFormat, got);
 }

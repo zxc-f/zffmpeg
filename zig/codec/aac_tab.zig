@@ -769,7 +769,7 @@ pub const pow2sf_tab: [428]f32 = blk: {
 /// `ff_kbd_window_init` (kbd_window_init's float path): the Kaiser-Bessel
 /// derived window of `n` points, summed and scaled in double precision and
 /// stored as floats. `alpha` is the C function's float parameter.
-fn kbdWindow(comptime n: usize, comptime alpha: f32) [n]f32 {
+pub fn kbdWindow(comptime n: usize, comptime alpha: f32) [n]f32 {
     @setEvalBranchQuota(100 * n);
     var temp: [n / 2 + 1]f64 = undefined;
     const nd: f64 = n;

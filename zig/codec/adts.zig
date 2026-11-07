@@ -18,7 +18,7 @@
 //! FFmpeg, where HE-AAC makes the header's values unreliable.
 
 const std = @import("std");
-const parser = @import("parser.zig");
+const aac_ac3_parser = @import("aac_ac3_parser.zig");
 
 /// `AV_AAC_ADTS_HEADER_SIZE`.
 pub const header_size = 7;
@@ -91,23 +91,17 @@ pub const Context = struct {
 };
 
 /// `END_NOT_FOUND`, which the parser returns as its index on the flush.
-pub const end_not_found: i64 = -100;
+pub const end_not_found = aac_ac3_parser.end_not_found;
 
 /// FFmpeg's AAC parser (`ff_aac_ac3_parse` with `aac_sync`),
 /// `PARSER_FLAG_COMPLETE_FRAMES` off.
 pub const Parser = struct {
-    pc: parser.ParseContext = .{},
-    /// The bytes of the current frame still to come (an int, which can go
-    /// below 0 when a frame's header began in an earlier call).
-    remaining_size: i64 = 0,
-    /// The last 8 bytes seen, for the sync search.
-    state: u64 = 0,
-    need_next_header: bool = false,
+    splitter: aac_ac3_parser.Splitter(header_size, sync) = .{},
     /// The frames whose header parsed; an int.
     frame_number: i32 = 0,
 
     pub fn deinit(p: *Parser, gpa: std.mem.Allocator) void {
-        p.pc.deinit(gpa);
+        p.splitter.deinit(gpa);
         p.* = undefined;
     }
 
@@ -124,72 +118,27 @@ pub const Parser = struct {
 
     /// One call: `buf` (empty at the end) scanned for frame starts.
     pub fn parse(p: *Parser, gpa: std.mem.Allocator, ctx: *Context, buf: []const u8) std.mem.Allocator.Error!Result {
-        const buf_size: i64 = @intCast(buf.len);
-        var got_frame = false;
-        var i: ?i64 = null;
-        while (true) {
-            i = null;
-            if (p.remaining_size > buf_size) break;
-            if (p.remaining_size != 0 and !p.need_next_header) {
-                i = p.remaining_size;
-                p.remaining_size = 0;
-                break;
-            }
-            // A header first: from where the frame's known bytes end.
-            var at = p.remaining_size;
-            var len: u32 = 0;
-            while (at < buf_size) : (at += 1) {
-                // A negative start reads nothing here: FFmpeg's loop from a
-                // negative index would read before the buffer, which no
-                // caller reaches (`remaining_size` is negative only after a
-                // header found before the buffer, then consumed below).
-                if (at >= 0) p.state = (p.state << 8) +% buf[@intCast(at)];
-                len = sync(p.state);
-                if (len != 0) break;
-            }
-            if (len == 0) break;
-            got_frame = true;
-            p.state = 0;
-            const start = at - (header_size - 1);
-            p.remaining_size = len;
-            const held: i64 = @intCast(p.pc.index);
-            if (held + start <= 0) {
-                // The header starts the held bytes (or the buffer with
-                // nothing held): the frame continues past it.
-                p.remaining_size += start;
-                continue;
-            }
-            if (start < 0) p.remaining_size += start;
-            i = start;
-            break;
-        }
-        const frame = try p.pc.combine(gpa, i, buf) orelse {
-            p.remaining_size -= @min(p.remaining_size, buf_size);
-            return .{ .index = buf_size, .frame = null, .key = false };
-        };
-        const index = i orelse end_not_found;
-        // An empty output is no packet (parse_packet skips it).
-        if (frame.len == 0) return .{ .index = index, .frame = null, .key = false };
-        if (!got_frame) return .{ .index = index, .frame = frame, .key = false };
-        if (frame.len < header_size) return .{ .index = index, .frame = frame, .key = false };
-        const hdr = parseHeader(frame[0..header_size]) catch return .{ .index = index, .frame = frame, .key = false };
+        const step = try p.splitter.split(gpa, buf);
+        const frame = step.frame orelse return .{ .index = step.index, .frame = null, .key = false };
+        if (!step.got_frame or frame.len < header_size) return .{ .index = step.index, .frame = frame, .key = false };
+        const hdr = parseHeader(frame[0..header_size]) catch return .{ .index = step.index, .frame = frame, .key = false };
         if (ctx.profile == null) ctx.profile = hdr.object_type - 1;
         // The int frame count wraps after 2^31 frames as on the reference
         // build (notes.md "Follow the reference build"); at 2^32, where
         // FFmpeg divides by zero, the average is left as it is.
         p.frame_number +%= 1;
         if (p.frame_number != 0) ctx.bit_rate += @divTrunc(@as(i64, hdr.bit_rate) - ctx.bit_rate, p.frame_number);
-        return .{ .index = index, .frame = frame, .key = true };
+        return .{ .index = step.index, .frame = frame, .key = true };
     }
 };
 
-/// `aac_sync`: the header in the last 7 bytes of `state`, as a frame
-/// length, or 0.
-fn sync(state: u64) u32 {
+/// `aac_sync`: the header in the last 7 bytes of `state`; a new frame,
+/// with no next header needed.
+fn sync(state: u64) ?aac_ac3_parser.Sync {
     var bytes: [8]u8 = undefined;
     std.mem.writeInt(u64, &bytes, state, .big);
-    const hdr = parseHeader(bytes[8 - header_size ..][0..header_size]) catch return 0;
-    return hdr.frame_length;
+    const hdr = parseHeader(bytes[8 - header_size ..][0..header_size]) catch return null;
+    return .{ .frame_size = hdr.frame_length, .new_frame_start = true, .need_next_header = false };
 }
 
 const testing = std.testing;

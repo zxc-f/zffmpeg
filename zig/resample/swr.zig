@@ -34,6 +34,9 @@ pub const Error = resample.Error || rematrix.Error;
 pub const Options = struct {
     resampler: resample.Options = .{},
     dither: dither.Options = .{},
+    /// The mix levels (`clev`, `slev`, `lfe_mix_level`), which the
+    /// ffmpeg program's aresample takes from a decoder's downmix info.
+    remix: rematrix.Options = .{},
 };
 
 /// The engine of the internal format.
@@ -88,7 +91,7 @@ pub const Swr = struct {
         // Owned once the layouts differ.
         var remix: ?*rematrix.Remix = try gpa.create(rematrix.Remix);
         errdefer if (remix) |r| gpa.destroy(r);
-        const shape = try Shape.init(remix.?, in_format, out_format);
+        const shape = try Shape.init(remix.?, in_format, out_format, options.remix);
         if (!shape.mixes) {
             gpa.destroy(remix.?);
             remix = null;
@@ -131,7 +134,7 @@ pub const Swr = struct {
     pub fn check(in_format: audio.Format, out_format: audio.Format, frame_frames: u32, options: Options) Error!void {
         std.debug.assert(frame_frames > 0);
         var remix: rematrix.Remix = undefined;
-        const shape = try Shape.init(&remix, in_format, out_format);
+        const shape = try Shape.init(&remix, in_format, out_format, options.remix);
         // The counter runs `resample_init`'s checks without the filter.
         var counter = try resample.Counter.init(std.mem.Allocator.failing, shape.engine_channels, in_format.sample_rate, out_format.sample_rate, options.resampler);
         counter.deinit();
@@ -181,11 +184,11 @@ pub const Swr = struct {
         /// `aresample`'s ratio, `out_rate / in_rate` in double.
         ratio: f64,
 
-        fn init(remix: *rematrix.Remix, in_format: audio.Format, out_format: audio.Format) Error!Shape {
+        fn init(remix: *rematrix.Remix, in_format: audio.Format, out_format: audio.Format, mix: rematrix.Options) Error!Shape {
             const in_channels = in_format.channelCount();
             const out_channels = out_format.channelCount();
             const resampling = in_format.sample_rate != out_format.sample_rate;
-            const mixes = try remix.initFor(in_format, out_format.layout, out_format.sample_format, .{}, resampling);
+            const mixes = try remix.initFor(in_format, out_format.layout, out_format.sample_format, mix, resampling);
             const mixing = mixes and remix.mixing;
             const internal = if (mixes) remix.internal else dither.internalFormatResampling(in_format.sample_format, out_format.sample_format, mixing, resampling);
             // swr_init: RSC * out / in - RSC < out_rate / in_rate - 1, RSC 1,

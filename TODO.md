@@ -73,7 +73,9 @@ Microsoft ADPCM codecs packet for packet and sample for sample, decoded
 and encoded in WAV; and T31b, FFmpeg's ALAC codec read from CAF and written
 there with its CAF muxer, which also writes PCM; and T31c, FFmpeg's G.722
 and G.726 codecs packet for packet and sample for sample, read from AU and
-written there, which completes T31. **Next: T32a (the AC-3 decoder).
+written there, which completes T31; and T32a, FFmpeg's raw AC-3 demuxer,
+parser and float decoder sample for sample. **Next: T32b (the E-AC-3
+decoder).
 See [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
@@ -3910,8 +3912,47 @@ names, not as an empty framework.
 - [ ] **T32 — AC-3 and native lossy encoders.** Checked when T32a–T32d are.
   Reference: `libavcodec/ac3dec.c`, `eac3dec.c`, `ac3dsp.c`, `ac3enc*.c`,
   `aacenc*.c`, `libavformat/ac3dec.c`; `tests/fate/ac3.mak`.
-  - [ ] **T32a — AC-3 decoder.** Needs T16 and T27c.
+  - [x] **T32a — AC-3 decoder.** Needs T16 and T27c.
     Done when the required streams match the reference within tolerance.
+
+    ```text
+    ID / parent: T32a / T32
+    State: verified (G5, local Linux x86-64 runs)
+    Supported behavior and explicit exclusions: FFmpeg's raw ac3 demuxer
+      (probe, either byte order), its AC-3 parser and its float ac3
+      decoder with default options, bit-exact (no tolerance needed):
+      every channel mode, bit stream ids up to 10, coupling, rematrixing,
+      block switching, dynamic range, concealment; the read-ahead's
+      decoder; AVDownmixInfo as libswresample's mix levels. Excluded
+      (notes.md "AC-3"): E-AC-3 (T32b), AC-3 output (T32c), stream copy,
+      the decoder's options and own downmix.
+    Contract and source provenance: port.md "AC-3"; ac3dec.c,
+      ac3dec_float.c, ac3dec_data.c, ac3.c, ac3dsp.c, ac3tab.c,
+      ac3_parser.c, aac_ac3_parser.c, lfg.c, libavformat/ac3dec.c and
+      rawdec.c (derived).
+    Required fixtures: zig/testing/fixtures/ac3/ (24: 16 from the
+      reference build's encoder through ac3_fixtures.sh, 8 built from
+      them by generate.py: junk, byte-swapped, bsid 9 and 10, damage,
+      truncation).
+    Comparison rule: ac3_decode.txt (every packet and frame of every
+      fixture, mutated copies included) equals the pinned build's;
+      zffprobe ffprobe's; zffmpeg's decodes the program's byte for byte.
+    Evidence: the commit that checks this card. G3: fuzz entries for the
+      decoder and for raw AC-3 decoded (seeking or not), 2000-round
+      mutation smokes in ReleaseSafe, allocation and remap sweeps,
+      malformed-packet tests; process cases (zffprobe on files and pipes,
+      half rate, byte-swapped, undetected and forced; zffmpeg to raw PCM
+      from a file and a pipe, junk after a frame, copy refused, no
+      encoder). G5 locally on Linux x86-64 (no CI run link): zig fmt, the
+      fixture check, zig build test in Debug, ReleaseSafe and ReleaseFast,
+      the cross builds, every vector generator, compare.py (AC-3 288
+      cells, 6 recorded; the registry with FFmpeg's AC-3 encoder and
+      muxer recorded). Speed check (10 minutes of stereo 44.1 kHz, one
+      core, against the reference build): AC-3 at 448k to WAV 0.65x, at
+      96k with coupling 0.60x, to FLAC 1.11x (FLAC's encoder); file and
+      pipe input equal; the native build at 0.81x to 0.83x.
+    Remaining work or blocker / next action: none; T32b is next.
+    ```
   - [ ] **T32b — E-AC-3 decoder.** Needs T32a.
     Done when the required streams match within tolerance.
   - [ ] **T32c — AC-3 encoder.** Needs T32a.

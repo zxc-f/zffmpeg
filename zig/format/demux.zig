@@ -45,6 +45,8 @@ const rational = @import("../core/rational.zig");
 const seek = @import("seek.zig");
 const mpegaudio = @import("../codec/mpegaudio.zig");
 const adts = @import("../codec/adts.zig");
+const ac3 = @import("../codec/ac3.zig");
+const ac3dec = @import("../codec/ac3dec.zig");
 const id3v2 = @import("id3v2.zig");
 const aacdec = @import("../codec/aacdec.zig");
 
@@ -103,6 +105,10 @@ pub const ParserKind = enum {
     /// marks keyframes and fills the profile and bit rate
     /// (AVSTREAM_PARSE_FULL_RAW).
     aac,
+    /// AC-3 read raw (T32a): FFmpeg's AC-3 parser splits the bytes into
+    /// frames and fills the rate, channels, layout, frame durations and
+    /// bit rate (AVSTREAM_PARSE_FULL_RAW).
+    ac3,
 };
 
 /// The reference build's decoder for a stream, as try_decode_frame meets it.
@@ -121,6 +127,11 @@ pub const Decoder = enum {
     /// try_decode_frame runs it: the rate, channels and frame size are
     /// what it decodes (the channels even from frames it then refuses).
     aac,
+    /// FFmpeg's AC-3 decoder (T32a), which sets the sample format when it
+    /// opens and, with AV_CODEC_CAP_CHANNEL_CONF, decodes the first packet
+    /// (and more while a parameter is missing), writing the rate and
+    /// layout into the codec context the parser fills.
+    ac3,
 };
 
 /// What a decoder run in the read-ahead left in libavformat's codec
@@ -356,6 +367,8 @@ const StreamState = struct {
     codec: ?ParserContext = null,
     /// The AAC decoder try_decode_frame opened, and what it decoded.
     aac: ?*aacdec.Decoder = null,
+    /// The AC-3 decoder try_decode_frame opened.
+    ac3: ?*ac3dec.Decoder = null,
     decoded_params: DecodedParams = .{},
     /// The samples the next packet's skip-samples side data discards,
     /// and the request a seek leaves for it (`seek_discard`,
@@ -370,6 +383,7 @@ const RawParser = struct {
     parser: union(enum) {
         mpa: mpegaudio.Parser,
         aac: adts.Parser,
+        ac3: ac3.Parser,
     },
     cur_offset: i64,
     next_frame_offset: i64,
@@ -386,6 +400,7 @@ const RawParser = struct {
 const ParserContext = union(enum) {
     mpa: mpegaudio.Context,
     aac: adts.Context,
+    ac3: ac3.ParserContext,
 
     fn bitRate(c: ParserContext) i64 {
         return switch (c) {
@@ -465,6 +480,7 @@ pub fn Layer(comptime Source: type) type {
             if (s.codec) |codec| switch (codec) {
                 .mpa => |c| return .{ .mpa_codec = c.codec, .sample_rate = c.sample_rate, .channels = c.channels, .bit_rate = c.bit_rate },
                 .aac => |c| return .{ .mpa_codec = null, .profile = c.profile, .sample_rate = setup.sample_rate, .channels = setup.channels, .bit_rate = c.bit_rate },
+                .ac3 => |c| return .{ .mpa_codec = null, .sample_rate = c.sample_rate, .channels = c.channels, .mask = c.channel_layout, .bit_rate = c.bit_rate },
             };
             return .{ .mpa_codec = null, .sample_rate = setup.sample_rate, .channels = setup.channels, .bit_rate = setup.bit_rate };
         }
@@ -503,9 +519,9 @@ pub fn Layer(comptime Source: type) type {
                 // its end does (eof_reached), and the file opens; the next
                 // read goes on after the refused packet. Running out of
                 // memory, and an input that cannot be read, still fail.
-                const next_held = l.readFrameInternal() catch |err| switch (err) {
-                    error.OutOfMemory, error.IoFailure => |e| return e,
-                    else => break,
+                const next_held = l.readFrameInternal() catch |err| {
+                    if (err == error.OutOfMemory or err == error.IoFailure) return err;
+                    break;
                 };
                 var h = next_held orelse break;
                 l.packet_buffer.pushBack(l.gpa, h) catch |err| {
@@ -561,12 +577,13 @@ pub fn Layer(comptime Source: type) type {
                             s.found_decoder = -1;
                             s.no_channels = true;
                         },
-                        // Opened by tryDecodeAac.
-                        .aac => {},
+                        // Opened by tryDecodeAac and tryDecodeAc3.
+                        .aac, .ac3 => {},
                     }
                 }
                 if (setup.decoder == .flac and !s.decoded and setup.parser == .flac_headers and validFlacFrame(pkt.data)) s.decoded = true;
                 if (setup.decoder == .aac) try l.tryDecodeAac(s, setup, pkt.data);
+                if (setup.decoder == .ac3) try l.tryDecodeAc3(s, setup, pkt.data);
                 s.codec_info_nb_frames += 1;
             }
             // The decoders opened for the read-ahead close; what they set
@@ -698,12 +715,53 @@ pub fn Layer(comptime Source: type) type {
             }
         }
 
+        /// try_decode_frame for AC-3: the decoder opened with the codec
+        /// context's rate (the parser's so far), then run on the packet
+        /// while the parameters are incomplete or no frame has been read;
+        /// each frame it gives sets the context's rate and layout.
+        fn tryDecodeAc3(l: *Self, s: *StreamState, setup: Setup, data_in: []const u8) Error!void {
+            const ctx = if (s.codec) |*c| switch (c.*) {
+                .ac3 => |*a| a,
+                else => return,
+            } else return;
+            if (s.found_decoder == 0) {
+                const d = try l.gpa.create(ac3dec.Decoder);
+                d.* = ac3dec.Decoder.init(l.gpa, ctx.sample_rate) catch |err| {
+                    l.gpa.destroy(d);
+                    return err;
+                };
+                s.ac3 = d;
+                s.found_decoder = 1;
+                s.decoded = true;
+            }
+            const d = s.ac3 orelse return;
+            var data = data_in;
+            while (data.len > 0 and (!hasCodecParameters(setup, s.*) or s.codec_info_nb_frames == 0)) {
+                const got = d.decode(data) catch return;
+                if (got.frame) |f| {
+                    ctx.sample_rate = f.sample_rate;
+                    ctx.channels = f.channels;
+                    ctx.channel_layout = f.channel_layout;
+                    // A good frame's bit rate replaces the parser's average.
+                    if (!f.concealed) if (d.bit_rate) |rate| {
+                        ctx.bit_rate = rate;
+                    };
+                }
+                data = data[@min(got.consumed, data.len)..];
+            }
+        }
+
         fn closeDecoder(l: *Self, s: *StreamState) void {
             if (s.aac) |d| {
                 d.deinit();
                 l.gpa.destroy(d);
             }
             s.aac = null;
+            if (s.ac3) |d| {
+                d.deinit();
+                l.gpa.destroy(d);
+            }
+            s.ac3 = null;
         }
 
         /// `codecpar->seek_preroll`: the demuxer's, or the one a decoder
@@ -721,6 +779,16 @@ pub fn Layer(comptime Source: type) type {
                 if (s.found_decoder == 0) return false;
                 if (s.found_decoder < 0) return setup.sample_rate != 0 and setup.channels != 0;
                 return s.decoded_params.sample_rate != 0 and s.decoded_params.channels != 0;
+            }
+            if (setup.decoder == .ac3) {
+                // The decoder sets the sample format when it opens; the
+                // codec context holds the parser's and decoder's values.
+                if (s.found_decoder == 0) return false;
+                const ctx = if (s.codec) |c| switch (c) {
+                    .ac3 => |a| a,
+                    else => return false,
+                } else return false;
+                return ctx.sample_rate != 0 and ctx.channels != 0;
             }
             if (setup.frame_size_unknown) return false;
             if (setup.sample_rate == 0 and s.parser_rate == 0) return false;
@@ -796,7 +864,7 @@ pub fn Layer(comptime Source: type) type {
                         try l.parseFlac(&h, setup);
                         continue;
                     },
-                    .mpegaudio, .aac => {
+                    .mpegaudio, .aac, .ac3 => {
                         // The parser copies its frames out of the raw
                         // packet, which is freed here once parsed; on an
                         // error the errdefer above frees it, and only it.
@@ -826,6 +894,7 @@ pub fn Layer(comptime Source: type) type {
             if (l.src.setup(i).decoder == .aac and s.found_decoder > 0) return s.decoded_params.sample_rate;
             if (s.codec) |codec| switch (codec) {
                 .mpa => |c| return c.sample_rate,
+                .ac3 => |c| return c.sample_rate,
                 .aac => {},
             };
             const rate = l.src.setup(i).sample_rate;
@@ -856,6 +925,7 @@ pub fn Layer(comptime Source: type) type {
             const s = try l.state(stream);
             if (s.codec == null) s.codec = switch (setup.parser) {
                 .aac => .{ .aac = .{ .bit_rate = setup.bit_rate } },
+                .ac3 => .{ .ac3 = .{ .bit_rate = setup.bit_rate } },
                 else => .{ .mpa = .{ .sample_rate = setup.sample_rate, .channels = setup.channels, .bit_rate = setup.bit_rate } },
             };
             if (s.raw == null) {
@@ -864,6 +934,7 @@ pub fn Layer(comptime Source: type) type {
                 s.raw = .{
                     .parser = switch (setup.parser) {
                         .aac => .{ .aac = .{} },
+                        .ac3 => .{ .ac3 = .{} },
                         else => .{ .mpa = .{} },
                     },
                     .cur_offset = pos,
@@ -891,6 +962,14 @@ pub fn Layer(comptime Source: type) type {
                         const res = try aac.parse(l.gpa, &s.codec.?.aac, data);
                         index = res.index;
                         key = res.key;
+                        break :blk res.frame;
+                    },
+                    .ac3 => |*a| blk: {
+                        const res = try a.parse(l.gpa, &s.codec.?.ac3, data);
+                        index = res.index;
+                        // key_frame stays -1, the picture type I.
+                        key = true;
+                        duration = a.duration;
                         break :blk res.frame;
                     },
                 };
@@ -928,11 +1007,15 @@ pub fn Layer(comptime Source: type) type {
                     const n = @min(rest.len, tail_len);
                     @memcpy(h.tail[0..n], rest[0..n]);
                 }
-                if (s.codec.? == .mpa) {
-                    const ctx = s.codec.?.mpa;
-                    if (ctx.sample_rate > 0 and duration > 0) {
-                        h.duration = rational.rescaleQRnd(duration, .{ .num = 1, .den = @intCast(ctx.sample_rate) }, setup.time_base, .{ .mode = .down });
-                    }
+                // The parser's duration in the time base, at the codec
+                // context's rate.
+                const ctx_rate: u32 = switch (s.codec.?) {
+                    .mpa => |c| c.sample_rate,
+                    .ac3 => |c| c.sample_rate,
+                    .aac => 0,
+                };
+                if (ctx_rate > 0 and duration > 0) {
+                    h.duration = rational.rescaleQRnd(duration, .{ .num = 1, .den = @intCast(ctx_rate) }, setup.time_base, .{ .mode = .down });
                 }
                 try l.computePktFields(&h, setup);
                 try l.parse_queue.pushBack(l.gpa, h);

@@ -533,6 +533,17 @@ pub const g72x = struct {
     }
 };
 
+pub const ac3 = struct {
+    /// The raw AC-3 fixtures (T32a): whether the port opens and decodes
+    /// each; what FFmpeg makes of each is vectors/ac3_decode.txt.
+    pub const all: []const mp3.Fixture = @import("fixtures/ac3/manifest.zon");
+
+    /// The bytes of fixtures/ac3/<name>.ac3, embedded at compile time.
+    pub fn bytes(comptime name: []const u8) []const u8 {
+        return @embedFile("fixtures/ac3/" ++ name ++ ".ac3");
+    }
+};
+
 /// This file's own declarations: the WAV contract's `all` and `bytes`.
 const wav_contract = @This();
 
@@ -617,6 +628,7 @@ test "manifest names are unique and expectations are consistent" {
         expectConsistent(adpcm);
         expectConsistent(alac);
         expectConsistent(g72x);
+        expectConsistent(ac3);
     }
 }
 
@@ -633,6 +645,7 @@ test "every fixture file is present and matches its recorded SHA-256" {
     try expectHashes(adpcm);
     try expectHashes(alac);
     try expectHashes(g72x);
+    try expectHashes(ac3);
 }
 
 test "fixture names do not collide across contracts" {
@@ -694,6 +707,7 @@ test "fixture names do not collide across contracts" {
         expectDistinct(alac, aac);
         expectDistinct(alac, adpcm);
         for (.{ wav_contract, au, aiff, raw, caf, flac, ogg, mp3, aac, adpcm, alac }) |other| expectDistinct(g72x, other);
+        for (.{ wav_contract, au, aiff, raw, caf, flac, ogg, mp3, aac, adpcm, alac, g72x }) |other| expectDistinct(ac3, other);
     }
 }
 

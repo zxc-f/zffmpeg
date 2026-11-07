@@ -378,6 +378,20 @@ bash zig/testing/reference/g72x_au_vectors.sh .references/ffmpeg-install | diff 
 bash zig/testing/reference/g72x_fixtures.sh .references/ffmpeg-install
 ```
 
+`ac3_vectors.c` (T32a) opens every AC-3 fixture as the ffmpeg program
+opens an input and prints each packet the raw AC-3 demuxer and parser
+give and every frame the pinned decoder makes of it, then of a copy with
+bits flipped or cut short for a second decoder (concealment and errors);
+the Zig test renders the same lines from the port. `ac3_fixtures.sh`
+encodes the `ac3_ffmpeg_*` fixtures with the reference build's AC-3
+encoder from generate.py's inputs; their hashes are generate.py's:
+
+```bash
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/ac3_vectors.c .references/ffmpeg-install/lib/libavformat.a .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o ac3-vectors
+./ac3-vectors $(sed -n 's/^ *\.name = "\(.*\)",$/zig\/testing\/fixtures\/ac3\/\1.ac3/p' zig/testing/fixtures/ac3/manifest.zon) | diff -u zig/testing/vectors/ac3_decode.txt -
+bash zig/testing/reference/ac3_fixtures.sh .references/ffmpeg-install
+```
+
 `adpcm_wav_vectors.sh` (T31a) prints, for every ADPCM WAV fixture, the
 stream the pinned ffprobe reports (codec, sample format, channels, rate,
 `duration_ts`) and the count and SHA-256 of the samples the pinned ffmpeg
@@ -900,6 +914,12 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   `UnsupportedFormat` and no output. Recorded (`g72x_expected_refusal`):
   G.722 from more than one channel, which the program downmixes, and stream
   copy of G.722 and G.726, which FFmpeg's AU muxer copies.
+- **AC-3 (T32a).** Every AC-3 fixture's zffprobe report against
+  ffprobe's (both failing to detect a stream of two or three frames) and
+  its decoding by zffmpeg into each output of the Ogg decoding section
+  against the program's, through pipes too. Recorded
+  (`KNOWN_AC3_DECODE_DIFFERENCES`): six fixtures' Ogg granules, which
+  follow the program's timestamps in the raw demuxer's 1/90000 time base.
 - **MP2 output (T29d).** zffmpeg's MP2 (the `mp2` muxer, with `mp2` or
   `-c:a mp2fixed`) against the ffmpeg program's with `-bitexact`, for the
   FLAC output section's inputs and a decoded MP3, MP2 and Ogg Vorbis
