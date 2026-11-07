@@ -4354,7 +4354,7 @@ optimization, concurrency, fuzz duration and corpus breadth.
     packet, including headerless files, junk, missing timestamps, several
     frames per packet, repeated seeks and failure cleanup, and FLAC's
     damaged-frame and empty-packet timestamps follow the generic layer.
-  - [ ] **T65b — One PCM data path.** **Start with** T31a (ADPCM in WAV); T31b,
+  - [x] **T65b — One PCM data path.** **Start with** T31a (ADPCM in WAV); T31b,
     T31c and T37a follow. `readSamples`, `mapRead`, `readData`,
     `decodeToRaw`, the skip to the end and the writers' frame counting are
     repeated in wav, au, aiff, caf and raw. One reader that owns its validated
@@ -4367,6 +4367,33 @@ optimization, concurrency, fuzz duration and corpus breadth.
     Done when T21, T22 and T52a's gates pass, with tiny and zero-capacity
     buffers, fragmented input, truncated frames, unknown length, misaligned
     WAV seeks and read and write failure.
+
+    ```text
+    ID / parent: T65b / T65
+    State: verified (G5, local Linux x86-64 runs)
+    Supported behavior and explicit exclusions: format/pcmdata.zig's Data
+      reads WAV, Wave64, AU, AIFF, CAF and raw PCM sample data (readData,
+      readSamples, skipRest with frame counting, decodeToRaw's loop) and
+      writeS16 encodes for their writers; headers, limits, error
+      precedence and padding stay per format. The owner chose
+      OutputTooSmall for an output that cannot hold one frame while data
+      remains (notes.md "One PCM data path"). Excluded: the writers' frame
+      counting (their counters' widths differ), left per format.
+    Contract and source provenance: notes.md "One PCM data path"; the
+      parsers' doc comments; original code.
+    Required fixtures: the existing WAV, AU, AIFF, CAF and raw fixtures and
+      their gates (T21, T22, T52a).
+    Comparison rule: every existing vector, fixture and compare.py cell
+      unchanged; pcmdata's own tests.
+    Evidence: fefb08a. Tests for tiny and zero-capacity outputs, one-byte
+      reads at known and unknown length, a partial frame Truncated or
+      dropped after a misaligned seek, a frame wider than the scratch, a
+      read before the header and a failing reader; the WAV parser's
+      OutputTooSmall. G5 at fefb08a, locally on Linux x86-64 (no CI run
+      link): zig build test 557/557 in Debug, ReleaseSafe and ReleaseFast,
+      the cross builds, compare.py 8274/0/0 required and 61/61 optional.
+    Remaining work or blocker / next action: none; T31a adds ADPCM.
+    ```
   - [ ] **T65c — Typed Ogg and Vorbis state.** **Start with** T52b (flush,
     then discard) or T33a (Opus outside Ogg). Enums for Ogg's `header`,
     `got_start` and `curidx`, return values for the `sid` out-pointers, one
