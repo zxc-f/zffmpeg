@@ -63,9 +63,10 @@ Layer III decoder bit for bit FFmpeg's mp3float, with MP3 decoded by
 zffmpeg as the ffmpeg program decodes it, and T29c, Layers I and II bit
 for bit FFmpeg's mp1float and mp2float, and T29d, FFmpeg's MP2 encoders
 packet for packet with its mp2 muxer, which completes T29; and T30a,
-FFmpeg's ADTS demuxer and muxer and AudioSpecificConfig parsing, without
-decoding, with WAV and FLAC read after leading ID3v2 tags. **Next: T30b
-(the AAC-LC decoder).
+FFmpeg's ADTS demuxer and muxer and AudioSpecificConfig parsing, with
+WAV and FLAC read after leading ID3v2 tags; and T30b, FFmpeg's float AAC
+decoder for AAC-LC bit for bit, with ADTS decoded by zffmpeg and reported
+by zffprobe. **Next: T30c (SBR, HE-AAC v1).
 See [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
@@ -3603,10 +3604,63 @@ names, not as an empty framework.
       with 2) and 61/61 optional.
     Remaining work or blocker / next action: none; T30b decodes.
     ```
-  - [ ] **T30b — AAC-LC decoder.** Needs T18c, T27c and T30a. Sections, scale
+  - [x] **T30b — AAC-LC decoder.** Needs T18c, T27c and T30a. Sections, scale
     factors, spectral Huffman decoding, M/S, intensity, PNS, TNS, windows and
     the IMDCT, with encoder delay handled.
     Done when the required LC streams match the reference within tolerance.
+
+    ```text
+    ID / parent: T30b / T30
+    State: verified (G5, local Linux x86-64 runs)
+    Supported behavior and explicit exclusions: FFmpeg's float aac decoder
+      for ADTS (libavcodec/aac/): output configurations and channel
+      mapping (configurations 1 to 7, PCEs), SCE, CPE, LFE, CCE, DSE,
+      PCE and FIL elements (DRC, the faac skip), ICS info, sections,
+      scale factors, pulses, TNS, spectral codebooks, M/S and intensity
+      stereo, PNS, channel coupling, the IMDCT and KBD and sine windows;
+      SSR with its gain control ignored, as FFmpeg's. The generic
+      layer's read-ahead runs the decoder for the stream's parameters
+      (and so its timestamps); aacdecode decodes as the ffmpeg program
+      does; zffprobe reports ADTS, zffmpeg converts it to every output.
+      glibc's powf and cbrtf ported. Excluded: Main prediction and LTP
+      (refused; the pinned encoder makes neither), SBR and PS (T30c,
+      T30d), the ER and low-delay types, stream copy (T53); a stream none
+      of whose packets decodes is refused before any output (notes.md
+      "AAC decoder scope", "A stream none of whose packets decodes").
+    Contract and source provenance: port.md's ADTS contract, "Decoding"
+      and "Tools"; aacdec.c, aacdec_proc_template.c,
+      aacdec_dsp_template.c, aacdec_float.c, aacdec_float_coupling.h,
+      aacdec_tab.c, aactab.c, kbdwin.c, sinewin_tablegen.h,
+      cbrt_tablegen.h, lpc_functions.h, decode.c; glibc 2.44's powf
+      (FMA variant) and cbrtf (CORE-MATH).
+    Required fixtures: 11 aac_ffmpeg_* streams from the reference build's
+      encoder (aac_fixtures.sh: 8 to 96 kHz, mono to 7.1(wide), PNS,
+      intensity and M/S, transients, the fast coder, a short stream),
+      with generate.py's 27 ADTS fixtures as streams without a rate.
+    Comparison rule: every frame's samples bit for bit the pinned
+      decoder's (aac_decode.txt), every table value (aac_tab.txt), powf
+      and cbrtf glibc's (libm.txt); packets and seeks with the decoder in
+      the read-ahead (aac.txt, seek_aac.txt); zffprobe ffprobe's, the
+      copy's framecrc the program's; zffmpeg's output byte for byte the
+      ffmpeg program's with -bitexact in every output, through pipes too.
+    Evidence: 5d8463e. G3: the decoder's fuzz entry (framed or raw
+      pieces, opened with any rate and 0 to 8 channels), every seed
+      decoding frames, a mutation smoke (3000 rounds clean once, 48 kept);
+      aacdecode's allocation sweeps (seekable with remaps, a pipe with
+      remap failures), fuzz entry and mutation smoke; they found a double
+      free in Decoder.init's error path and an overflow in the FIL
+      count, both fixed. Process cases: zffprobe on ADTS and from a pipe,
+      streams without a rate; zffmpeg to WAV, from a pipe to raw PCM, a
+      Main stream refused, copy refused. G5 at 5d8463e, locally on Linux
+      x86-64 (no CI run link): zig fmt, the fixture check (38 ADTS among
+      513), zig build test 542/542 (288 steps) in Debug, ReleaseSafe and
+      ReleaseFast, the cross builds, every vector generator (aac_decode,
+      aac_tab and libm's powf and cbrtf lines new), compare.py 8170/0/0
+      required (ADTS fixtures 38 with 25 recorded refusals, AAC decoding
+      456 cells with 3 recorded differences) and 61/61 optional.
+    Remaining work or blocker / next action: none; Main and LTP need
+      fixtures from another encoder; T30c adds SBR.
+    ```
   - [ ] **T30c — SBR (HE-AAC v1).** Needs T30b.
     Done when the required SBR streams match within tolerance.
   - [ ] **T30d — PS (HE-AAC v2).** Needs T30c.

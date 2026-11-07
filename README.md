@@ -77,7 +77,9 @@ muxer, byte for byte the ffmpeg program's `-bitexact` output, with `-b:a`
 for the bit rate. ADTS is read since T30a as FFmpeg's demuxer and AAC parser
 split it, its ID3v2, ID3v1 and APE tags included, and the library writes it
 as FFmpeg's muxer does from an AudioSpecificConfig, parsed as FFmpeg parses
-it; AAC decoding is T30b, so the tools refuse ADTS until then. WAV and FLAC
+it. Since T30b FFmpeg's float AAC decoder decodes AAC-LC bit for bit:
+`zffprobe` reports ADTS as ffprobe does and `zffmpeg` converts it into
+every output as the ffmpeg program does (SBR and PS follow). WAV and FLAC
 open after leading ID3v2 tags, as in FFmpeg.
 [TODO.md](TODO.md) holds the completion
 evidence and the roadmap. Development is verified on Linux only. The compiler
