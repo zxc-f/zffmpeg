@@ -42,7 +42,7 @@ setup code. Do not copy a 0.16 cookbook.
 | Handoff of frames or packets | `Io.Queue(T).init(caller_buffer)`, `put` / `get` with a minimum count, `close` on every exit | Bounded. Batches, not one small packet (zig-io Q1). Close unblocks waiters with `error.Closed`. |
 | A timeout | `concurrent` of the work and `concurrent` of `io.sleep`, then `Select`; or `Io.Semaphore.waitTimeout` | Most file operations have no timeout. `Select.async` has `Group.async`'s weak start guarantee. |
 | A lock that must be cancelable | `Io.Mutex`, `Io.Condition`, `Io.Event`, `Io.RwLock`, `Io.Semaphore` | A `Thread.Mutex` does not observe cancellation. Lock-free atomics do not need `Io`. |
-| The pool cannot take the task | Handle `error.ConcurrencyUnavailable` | Fall back to the synchronous call, or fail. Do not spin. `-fsingle-threaded` hits this on every `concurrent`. |
+| The pool cannot take the task | Handle `error.ConcurrencyUnavailable` | Fail, or close queues and cancel/join any started tasks before switching the whole operation to its synchronous pipeline at a safe restart point. Calling a queue waiter inline can deadlock. `-fsingle-threaded` hits this on every `concurrent`. |
 | The backend | `init.io` from `std.process.Init` | `Io.Threaded`. Library code does not construct a second one. `Io.Evented` does not compile (zig-io). |
 | Evented / io_uring / zio / libxev | Nothing | References, not dependencies (notes.md). |
 
@@ -71,6 +71,9 @@ stacks before any frame buffer. There is no `cpu_count` field to assign.
 7. **Several tasks printing through one stdout writer.** Interleaved halves
    of a line, and a data race. Diagnostics use `io.lockStderr`. Probe output
    stays on the owner task. Tests still must not print to stdout.
+8. **A queue waiter called inline after `ConcurrencyUnavailable`.** The
+   consumer waits before its producer starts. Fail, or stop and join the
+   partially started pipeline before using the whole synchronous pipeline.
 
 ## Cancellation
 
@@ -81,11 +84,27 @@ task uncancellable. `cancel` blocks until the task returns. It is not a
 kill, and it is not threadsafe. The task that created the future is the one
 that awaits or cancels it.
 
-`defer future.cancel(io) catch {}` on the owner, then `try future.await(io)`,
-is what keeps `try` from skipping the second wait. Andrew's example 4 is the
-leak: the first `try await` returns, the second future is never awaited, and
-the implementation's closure is still allocated. `std.testing.io` allocates
-that closure from `std.testing.allocator`, so the leak fails the test.
+Register cleanup before the first fallible operation after spawning. Both
+`cancel` and `await` return the task's exact result type. For `void`, use
+`defer future.cancel(io)`; for `E!void`, use
+`defer future.cancel(io) catch {}`. For an `E!T` with no owned resources:
+
+```zig
+var future = io.async(compute, .{});
+defer {
+    if (future.cancel(io)) |_| {} else |_| {}
+}
+const value = try future.await(io);
+```
+
+For an owned result, cleanup frees only a result that has not been taken by
+the caller. `cancel` after `await` returns the same result, so freeing it
+again can double-free or invalidate a transferred value. Use the ownership
+example in [the analysis](references/analysis.md#result-ownership).
+
+Andrew's example 4 leaks when the first `try await` returns early and the
+second future is never awaited. `std.testing.io` allocates the closure from
+`std.testing.allocator`, so the leak fails the test.
 
 A file read surfaces cancel as `error.ReadFailed` with the cause in the
 adapter's `.err`. Propagate it. Do not retry. A CPU-bound decoder does not
@@ -100,11 +119,15 @@ closed pipe returns `error.BrokenPipe`. Do not install another handler.
 
 - The change is T59, or it is T53d and the queues are synchronous.
 - The synchronous version exists and is what one core runs. `concurrent`
-  failure falls back to it or fails the operation.
+  failure fails the operation, or stops and joins any started tasks before
+  switching the whole pipeline to that version at a safe restart point.
+  A queue waiter is never called inline as a per-task fallback.
 - Producer and consumer use `concurrent`. The queue holds batches and is
   closed on every exit path, including cancel.
 - Every `Future` and every `Group` is `await`ed or `cancel`ed by its owner.
-  `defer cancel` comes first. A non-`void` result is freed in that `defer`.
+  `defer cancel` comes first and handles the task's result type. Free an
+  owned result in that cleanup only if it has not already been taken;
+  after a successful `await`, its new owner handles cleanup.
 - A task's error is stored where the owner can see it. It is not the return
   value of a `Group` task.
 - `error.Canceled` is propagated. A read failure is the adapter's `.err`.
@@ -130,5 +153,6 @@ closed pipe returns `error.BrokenPipe`. Do not install another handler.
 - A discarded `Future`. The leak checker catches it in tests and the tool
   leaks it.
 - `threaded.cpu_count = 1`. That field does not exist. The one-worker
-  deadlock on 0.17.0 is `async_limit = .nothing` plus `async`, or
-  `-fsingle-threaded` plus `concurrent`.
+  inline deadlock on 0.17.0 is `async_limit = .nothing` plus `async`.
+  `-fsingle-threaded` makes `concurrent` return `ConcurrencyUnavailable`;
+  an inline queue-waiter fallback would reintroduce the deadlock.

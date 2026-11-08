@@ -65,9 +65,9 @@ Paths are relative to `.references/ffmpeg/`.
   `pthread_create`), joined by thread queues of 2 packets or 2 frames by
   default (`fftools/ffmpeg_sched.h:257,262`), with demuxers paused when they
   run more than `SCHEDULE_TOLERANCE` (100 ms, `ffmpeg_sched.c:45`) ahead.
-  Among the codecs zffmpeg ports, only the FLAC decoder declares frame
-  threads (`libavcodec/flacdec.c:829`); Vorbis, Opus, the MPEG audio
-  decoders, PCM and the FLAC encoder have none.
+  Among the codecs zffmpeg ports, the FLAC and ALAC decoders declare frame
+  threads (`libavcodec/flacdec.c:829`, `libavcodec/alac.c:629`); Vorbis,
+  Opus, the MPEG audio decoders, PCM and the FLAC encoder have none.
 
 ## Zig 0.17.0's std.Io
 
@@ -433,11 +433,12 @@ Each holds on both machines unless it says otherwise.
   handoff: the pipeline between components (on B, FFmpeg's 2–5× wall-time
   gain on the codec paths comes from decoding on one thread while another
   converts and writes; with no codec work, E2E's PCM paths, it gains little
-  or loses), frame or slice threading inside a codec (FFmpeg does it only
-  for FLAC decoding among the ported codecs), or independent outputs. Hand
-  frames over in batches, so the handoff stays small against the work. The
-  spawn, cancel, and queue contract is the `zig-async` skill: `Io.async` may
-  run inline, and `Group.async` may not run until `await` or `cancel`, so a
+  or loses), frame or slice threading inside a codec (FFmpeg declares frame
+  threading for FLAC and ALAC decoding among the ported codecs), or
+  independent outputs. Hand frames over in batches, so the handoff stays
+  small against the work. The spawn, cancel, and queue contract is the
+  `zig-async` skill: `Io.async` may run inline, and `Group.async` may not run
+  until `await` or `cancel`, so a
   producer and a consumer use `io.concurrent`. Measure with the real codec
   in Q1's place before keeping it.
 - Cancellation already reaches I/O through `std.Io`'s cancelation points;
