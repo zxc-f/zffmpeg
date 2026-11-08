@@ -4178,6 +4178,81 @@ configuration parsing is exercised without needing a full decoder.
     Done when packet timestamps, durations, sizes, flags and configurations
     equal the reference's (`-c copy -f framecrc`, `ffprobe -show_packets`) on
     audio-only and video fixtures.
+    Staged (notes.md "MP4 demuxing"): T33a1 the box layer and audio
+    tracks, T33a2 metadata and chapters, T33a3 video tracks. Each is done
+    under the rule above for its own fixtures.
+    - [x] **T33a1 — Boxes and audio tracks.** Needs T14a, T15, T16, T17b and
+      T30a.
+
+      ```text
+      ID / parent: T33a1 / T33a
+      State: verified (G5, local Linux x86-64 runs)
+      Supported behavior and explicit exclusions: FFmpeg's mov demuxer
+        (mov, mp4, m4a, 3gp, 3g2, mj2) for audio tracks: its probe and
+        extensions, `-f` by any of its names; boxes with nesting and size
+        limits (32- and 64-bit sizes, size 0 to the end, FFmpeg's
+        overreads); ftyp, moov, mvhd, trak, tkhd, mdia, mdhd, hdlr, minf,
+        dref, stbl; stsd's sound descriptions (QuickTime versions 0 to 2,
+        MP4) with the codec tag tables, wave, esds (the AAC decoder opened
+        from the AudioSpecificConfig), alac, dfLa, dOps, dac3, dec3, chan;
+        stts, ctts, stsc, stsz, stz2, stco, co64, stss, stps, sdtp and the
+        rap sample group; mov_build_index and mov_read_packet; the
+        streams' and format's timings and bit rates on libavformat's
+        generic layer, with the read-ahead's parsers and decoders; moov
+        before or after mdat on seekable input. Reported by zffprobe (the
+        first audio track and the format tags); packets by the hash
+        driver's copy framecrc. Excluded (notes.md "MP4 demuxing"): edit
+        lists that change the index (T33b), fragments (T33c), metadata
+        and chapters (T33a2), video tracks (T33a3), chnl, encryption,
+        cmov, references to other files, moov after mdat on a pipe,
+        zffmpeg conversion from MP4, seeking (T33b).
+      Needs (verified) / lands with / verified after: T14a, T15, T16, T17b,
+        T30a verified; the reference build's mov demuxer and mp4, mov and
+        ipod muxers with aac_adtstoasc landed with it.
+      Contract and source provenance: port.md "MP4 contract"; mov.c,
+        isom.c, mov_chan.c, mov_esds.c, demux.c and libavcodec/aac's
+        configuration code (derived).
+      Required fixtures / optional corpus: zig/testing/fixtures/mp4/ (83:
+        34 from the reference build's muxers by mov_fixtures.sh, 49
+        crafted by generate.py); vectors mov.txt, mov_pipe.txt (mov_vectors.c)
+        and aac_asc.txt (aac_asc_vectors.c, 60 cases); no optional corpus.
+      Ownership, state transitions and limits: the demuxer owns its
+        tracks, tables and index; Limits (4M index entries, 16M entries a
+        table, 1024 tracks, 64 MiB a box in memory) with LimitExceeded.
+      Comparison rule and intentional differences: every stream field,
+        packet and side data equals the pinned libavformat's from a file
+        and a pipe; zffprobe equals ffprobe; the hash driver's copy equals
+        `ffmpeg -c copy -f framecrc`; refusals recorded in compare.py
+        (KNOWN_MOV_PROBE_REFUSALS, KNOWN_MOV_COPY_DIFFERENCES,
+        MOV_COPY_NOTHING_TO_MAP) and notes.md.
+      Implementation files and test entry points: format/mov.zig,
+        format/demux.zig, codec/aacdec.zig (initExtradata), detect.probeMov,
+        registry, hash_driver.hashMov; the vectors tests, probe and convert
+        cases, compare.py's "MP4 fixtures" section.
+      Evidence: the commit that checks this card. G3: unit tests on crafted
+        box sizes, every prefix of four fixtures (seekable and pipe; found a
+        double free in readAlac, fixed), one-byte reads, limit refusals,
+        allocation and remap sweeps on nine fixtures, a fuzz entry with 13
+        seeds varying seekability and limits, a 2000-round mutation smoke in
+        ReleaseSafe (16 committed); process cases (zffprobe on MP4, M4A from
+        standard input, -f mp4 on MOV, an edit list, no moov, a cut table,
+        mdhd version 2; zffmpeg refusing MP4). G5 locally on Linux x86-64
+        (no CI run link): zig fmt, the fixture check, zig build test
+        658/658 (407 steps) in Debug, ReleaseSafe and ReleaseFast, the cross
+        builds, every vector generator (mov, mov_pipe, aac_asc among them),
+        compare.py 13034/0/0 required (MP4 fixtures 166 cells, 14 recorded
+        refusals; the registry with the mp4, mov and ipod muxers recorded)
+        and 66/66 optional. Speed check (a 10-minute AAC M4A, one core):
+        zffprobe 1.8 ms against ffprobe's 3.2 ms (0.56x); the hash driver's
+        copy 32 ms against the program's -c copy -f framecrc 265 ms (0.12x).
+      Remaining work or blocker / next action: none; T33a2 is next.
+      ```
+    - [ ] **T33a2 — Metadata and chapters.** Needs T33a1. udta, meta and
+      ilst tags, keys, chpl and chapter tracks.
+    - [ ] **T33a3 — Video tracks.** Needs T33a1. Visual sample entries
+      with avcC, hvcC, vpcC and av1C, ctts reordering and the generic
+      layer's video timestamps, on crafted fixtures (the reference build
+      has no video encoder).
   - [ ] **T33b — Edit lists and seeking.** Needs T33a and T52a. Edit lists with
     FFmpeg's semantics and seeking by sync samples.
     Done when edit-list fixtures and seeks match the reference.

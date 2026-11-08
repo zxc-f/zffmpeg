@@ -34,6 +34,12 @@ pub const Packet = struct {
         key: bool = false,
         /// Decoded only to prime a decoder; its output is dropped.
         discard: bool = false,
+        /// AV_PKT_FLAG_CORRUPT: the demuxer read fewer bytes than the
+        /// packet's size (T33a1).
+        corrupt: bool = false,
+        /// AV_PKT_FLAG_DISPOSABLE: no other frame depends on it (an `sdtp`
+        /// entry, T33a1).
+        disposable: bool = false,
     };
 
     /// A packet that owns a copy of its bytes.

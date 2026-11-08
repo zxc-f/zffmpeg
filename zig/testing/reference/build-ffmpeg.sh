@@ -36,7 +36,9 @@ build="$root/.references/ffmpeg-build"
 # muxer (T29d), the aac (ADTS) demuxer, the aac parser and the adts muxer
 # (T30a), FFmpeg's float AAC decoder and its native AAC encoder, which makes
 # the AAC fixtures (T30b), FFmpeg's IMA WAV and Microsoft ADPCM decoders and
-# encoders (T31a), and the audio filters T24-T25
+# encoders (T31a), the mov demuxer (MP4, MOV, M4A; T33a) and the mp4, mov
+# and ipod muxers with the aac_adtstoasc bitstream filter, which make the
+# MP4 fixtures, and the audio filters T24-T25
 # compare. The ffmpeg program
 # selects the few filters it always needs. No GPL, nonfree, external or
 # hardware components.
@@ -52,10 +54,11 @@ configure_args=(
     --disable-ffplay
     --disable-avdevice
     --enable-protocol=file,pipe
-    --enable-demuxer=wav,w64,au,aiff,caf,flac,ogg,mp3,aac,ac3,eac3,"$pcm_formats"
+    --enable-demuxer=wav,w64,au,aiff,caf,flac,ogg,mp3,aac,ac3,eac3,mov,"$pcm_formats"
     --enable-decoder="$pcm_codecs",flac,vorbis,opus,mp3float,mp1float,mp2float,aac,adpcm_ima_wav,adpcm_ms,alac,adpcm_g722,adpcm_g726le,ac3,eac3
     --enable-encoder="$pcm_codecs",flac,vorbis,opus,mp2,mp2fixed,aac,adpcm_ima_wav,adpcm_ms,alac,adpcm_g722,adpcm_g726le,ac3,eac3
-    --enable-muxer=wav,mp2,adts,w64,au,aiff,caf,flac,ogg,oga,opus,framecrc,framemd5,streamhash,ac3,eac3,"$pcm_formats"
+    --enable-muxer=wav,mp2,adts,w64,au,aiff,caf,flac,ogg,oga,opus,framecrc,framemd5,streamhash,ac3,eac3,mp4,mov,ipod,"$pcm_formats"
+    --enable-bsf=aac_adtstoasc
     --enable-parser=flac,mpegaudio,aac,ac3
     --enable-filter=aresample,volume,asetpts,amix,pan,channelmap,channelsplit,asplit
 )

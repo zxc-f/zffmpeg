@@ -69,6 +69,8 @@ fn run(init: std.process.Init) Status {
         if (mode == .copy) hashMp3(gpa, kind, bytes, out) else error.Mp3NotDecoded
     else if (head == .aac)
         if (mode == .copy) hashAac(gpa, kind, bytes, out) else error.AacNotDecoded
+    else if (head == .mov)
+        if (mode == .copy) hashMov(gpa, kind, bytes, out) else error.MovNotDecoded
     else if (kind != .streamhash)
         error.PcmNeedsStreamhash
     else
@@ -158,6 +160,87 @@ fn hashAac(gpa: std.mem.Allocator, kind: av.framehash.Kind, bytes: []const u8, o
             .duration = p.duration,
             .flags = .{ .key = p.flags & 1 != 0 },
         }, &.{});
+    }
+    try w.finish();
+}
+
+/// MP4 and QuickTime (T33a1), `ffmpeg -i <input> -c copy -f <muxer>`: the
+/// audio track the program maps by default (map_auto_audio: the most
+/// channels, a track that had packets in the read-ahead first, and the
+/// default disposition, the first of equals), with the default layout for
+/// its count when it has none, and the track's extradata; its packets as
+/// the program copies them: those before the first keyframe dropped
+/// (of_streamcopy), every timestamp shifted by the input's start time
+/// (the demuxer side's ts_offset), an audio packet's pts set to its dts,
+/// with their flags and their skip-samples and new-extradata side data.
+fn hashMov(gpa: std.mem.Allocator, kind: av.framehash.Kind, bytes: []const u8, out: *std.Io.Writer) !void {
+    var reader: std.Io.Reader = .fixed(bytes);
+    const d = try av.mov.Demuxer.initSeekable(gpa, &reader, .fixed(&reader), .{});
+    defer d.deinit();
+    var layer = av.demux.Layer(av.mov.Demuxer).init(gpa, d);
+    defer layer.deinit();
+    try layer.findStreamInfo();
+    var best: ?usize = null;
+    var best_score: i64 = 0;
+    for (0..d.streamCount()) |i| {
+        const info = try av.mov.streamInfo(d, &layer, i);
+        if (info.media != .audio) continue;
+        const had_packets = i < layer.states.items.len and layer.states.items[i].codec_info_nb_frames > 0;
+        const default: i64 = if (info.disposition & 1 != 0) 5000000 else 0;
+        const score: i64 = @as(i64, info.layout.channelCount()) + @as(i64, if (had_packets) 100000000 else 0) + default;
+        if (score > best_score) {
+            best_score = score;
+            best = i;
+        }
+    }
+    const index = best orelse return error.UnsupportedFormat;
+    const info = try av.mov.streamInfo(d, &layer, index);
+    const rate = std.math.cast(u32, info.sample_rate) orelse return error.UnsupportedFormat;
+    const tb: av.time.TimeBase = .{ .num = @intCast(info.time_base.num), .den = @intCast(info.time_base.den) };
+    var w: av.framehash.Writer = .init(kind, out, .{
+        .time_base = tb,
+        .codec = info.codec,
+        .sample_rate = rate,
+        .layout = switch (info.layout) {
+            .unspecified => |count| .default(count),
+            else => info.layout,
+        },
+        .extradata = if (info.extradata.len != 0) info.extradata else null,
+    });
+    try w.writeHeader();
+    const offset: i64 = if (layer.start_time == std.math.minInt(i64)) 0 else av.rational.rescaleQ(layer.start_time, .{ .num = 1, .den = 1000000 }, info.time_base);
+    var started = false;
+    while (try layer.next()) |p| {
+        if (p.stream != index) continue;
+        if (!started and p.flags & av.demux.key_flag == 0) continue;
+        started = true;
+        var skip: [10]u8 = @splat(0);
+        var side: [2]av.framehash.SideData = undefined;
+        var n: usize = 0;
+        if (p.new_extradata) |e| {
+            side[n] = .{ .name = "New Extradata", .data = e };
+            n += 1;
+        }
+        if (p.skip) |sk| {
+            std.mem.writeInt(u32, skip[0..4], sk[0], .little);
+            std.mem.writeInt(u32, skip[4..8], sk[1], .little);
+            side[n] = .{ .name = "Skip Samples", .data = &skip };
+            n += 1;
+        }
+        const dts: ?i64 = if (p.dts) |t| t - offset else null;
+        try w.writePacketSide(.{
+            .data = p.data,
+            .time_base = tb,
+            .pts = if (dts) |t| t else if (p.pts) |t| t - offset else null,
+            .dts = dts,
+            .duration = p.duration,
+            .flags = .{
+                .key = p.flags & av.demux.key_flag != 0,
+                .corrupt = p.flags & av.demux.corrupt_flag != 0,
+                .discard = p.flags & av.demux.discard_flag != 0,
+                .disposable = p.flags & 0x10 != 0,
+            },
+        }, side[0..n]);
     }
     try w.finish();
 }

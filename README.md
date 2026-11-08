@@ -15,9 +15,9 @@ tags as FFmpeg does. Codec and format registries name everything as FFmpeg
 does. The `zffprobe` tool detects WAV, Wave64, AU, AIFF or CAF from the content
 with FFmpeg's scored probes, and raw PCM from `-f` or a raw file extension,
 validates the file and reports its stream and tags. Both are checked against
-129 WAV, 40 AU, 57 AIFF, 25 raw PCM and 58 CAF fixtures (659 in all with
+129 WAV, 40 AU, 57 AIFF, 25 raw PCM and 58 CAF fixtures (742 in all with
 today's 57 FLAC, 37 Ogg, 71 MPEG audio, 46 ADTS, 41 ADPCM, 33 ALAC, 23
-G.72x, 24 AC-3 and 18 E-AC-3 ones) and against a pinned FFmpeg
+G.72x, 24 AC-3, 18 E-AC-3 and 83 MP4 ones) and against a pinned FFmpeg
 build in CI (Linux). The `zffmpeg` tool converts and stream-copies
 between WAV, Wave64, AU, AIFF and raw PCM, and from CAF, carrying tags as FFmpeg does, through the
 library's synchronous pipeline (T13), which runs on packets, frames and
@@ -98,7 +98,9 @@ AHT and dependent frames. Since T32c FFmpeg's AC-3 encoder writes raw AC-3
 (`-c:a ac3`, with its options), byte for byte the ffmpeg program's output,
 and since T32d its AAC encoder writes ADTS (`-c:a aac` with its nmr,
 twoloop and fast coders and their options), byte for byte the ffmpeg
-program's `-bitexact` output.
+program's `-bitexact` output. Since T33a1 FFmpeg's mov demuxer reads MP4
+and QuickTime audio tracks: `zffprobe` reports them as ffprobe does, and
+their packets equal FFmpeg's (zffmpeg does not convert from MP4 yet).
 [TODO.md](TODO.md) holds the completion
 evidence and the roadmap. Development is verified on Linux only. The compiler
 is **Zig 0.17.0**, enforced by the build.

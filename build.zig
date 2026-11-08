@@ -33,7 +33,7 @@ const examples = [_]Example{
 /// flac, ogg, mp3 (MPEG audio, Layers I to III) and aac (ADTS); and adpcm,
 /// whose files are WAV (T31a), alac, whose files are CAF (T31b), and g72x,
 /// whose files are AU (T31c); and ac3 (T32a) and eac3 (T32b).
-const FixtureSet = enum { wav, au, aiff, raw, caf, flac, ogg, mp3, aac, adpcm, alac, g72x, ac3, eac3 };
+const FixtureSet = enum { wav, au, aiff, raw, caf, flac, ogg, mp3, aac, adpcm, alac, g72x, ac3, eac3, mp4 };
 
 /// A zffprobe process run with its expected exit code and output.
 const ProbeCase = struct {
@@ -525,6 +525,14 @@ const probe_cases = [_]ProbeCase{
     .{ .name = "AC-3 of three frames forced", .set = .ac3, .args = &.{ "-f", "ac3" }, .fixture = "ac3_ffmpeg_quad", .exit_code = 0, .stdout_contains = "channel_layout=quad(side)\n", .stderr = "" },
     .{ .name = "AC-3 forced on a WAV file", .args = &.{ "-f", "ac3" }, .fixture = "mono_8k", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
     // T32b: raw E-AC-3, and an AC-3 stream the parser renames E-AC-3.
+    // T33a1: MP4 and QuickTime, the first audio track and the format's tags.
+    .{ .name = "MP4 AAC", .set = .mp4, .fixture = "mov_aac_stereo.mp4", .exit_code = 0, .stdout = "format=mov,mp4,m4a,3gp,3g2,mj2\ncodec=aac\nsample_fmt=fltp\nchannels=2\nchannel_layout=stereo\nsample_rate=48000\nnb_samples=6784\nduration_num=6784\nduration_den=48000\ntag:major_brand=isom\ntag:minor_version=512\ntag:compatible_brands=isomiso2mp41\n", .stderr = "" },
+    .{ .name = "M4A with faststart from standard input", .set = .mp4, .args = &.{"-"}, .stdin_fixture = "mov_aac_faststart.m4a", .exit_code = 0, .stdout_contains = "codec=aac\nsample_fmt=fltp\nchannels=2\nchannel_layout=stereo\nsample_rate=44100\nnb_samples=5434\n", .stderr = "" },
+    .{ .name = "MOV PCM with -f mp4", .set = .mp4, .args = &.{ "-f", "mp4" }, .fixture = "mov_pcm_s16le_mov.mov", .exit_code = 0, .stdout_contains = "codec=pcm_s16le\nsample_fmt=s16\n", .stderr = "" },
+    .{ .name = "an MP4 edit list is not ported", .set = .mp4, .fixture = "mov_aac_editlist.mp4", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
+    .{ .name = "MP4 without moov", .set = .mp4, .fixture = "mov_no_moov.mp4", .exit_code = 2, .stderr_contains = ": InvalidMov\n" },
+    .{ .name = "MP4 cut inside a table", .set = .mp4, .fixture = "mov_cut_in_stbl.mp4", .exit_code = 2, .stderr_contains = ": Truncated\n" },
+    .{ .name = "MP4 mdhd version 2", .set = .mp4, .fixture = "mov_mdhd_v2.mp4", .exit_code = 3, .stderr_contains = ": PatchWelcome\n" },
     .{ .name = "E-AC-3", .set = .eac3, .fixture = "eac3_ffmpeg_stereo_48k", .exit_code = 0, .stdout = "format=eac3\ncodec=eac3\nsample_fmt=fltp\nchannels=2\nchannel_layout=stereo\nsample_rate=48000\nnb_samples=10752\nduration_num=20160\nduration_den=90000\n", .stderr = "" },
     .{ .name = "E-AC-3 from a pipe", .set = .eac3, .args = &.{"-"}, .stdin_fixture = "eac3_ffmpeg_51side_44k", .exit_code = 0, .stdout_contains = "codec=eac3\nsample_fmt=fltp\nchannels=6\nchannel_layout=5.1(side)\nsample_rate=44100\nnb_samples=N/A\n", .stderr = "" },
     // The first packet fails after setting the layout: the read-ahead
@@ -923,6 +931,7 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "E-AC-3 substream 1: its packet dropped", .set = .eac3, .args = &.{"-i"}, .input = "eac3_substream", .tail = &.{ "-f", "f32le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stdout_raw = .{ .args = &.{ "-f", "f32le", "-ch_layout", "stereo", "-sample_rate", "48000" }, .nb_samples = 7680 }, .stderr = "" },
     .{ .name = "E-AC-3 dependent frame alone: ignored", .set = .eac3, .args = &.{"-i"}, .input = "eac3_dependent_alone", .tail = &.{ "-f", "f32le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stdout_raw = .{ .args = &.{ "-f", "f32le", "-ch_layout", "stereo", "-sample_rate", "48000" }, .nb_samples = 9216 }, .stderr = "" },
     .{ .name = "E-AC-3 downmixed to stereo", .set = .eac3, .args = &.{"-i"}, .input = "eac3_ffmpeg_ltrt", .tail = &.{ "-ac", "2", "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt ", .stderr = "" },
+    .{ .name = "MP4 conversion is not ported", .set = .mp4, .args = &.{"-i"}, .input = "mov_aac_stereo.mp4", .tail = &.{ "-f", "wav", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedOperation\n" },
     .{ .name = "no E-AC-3 encoder", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-c:a", "eac3", "-f", "wav", "-" }, .exit_code = 1, .stdout = "", .stderr_contains = "unknown encoder: eac3" },
     // A decoder that refuses the headers fails cleanly, before any output,
     // from a file (after the counting pass) and from a pipe.
@@ -1220,6 +1229,8 @@ fn otherInputStdOut(b: *std.Build, zffmpeg: *std.Build.Step.Compile, case: Conve
 }
 
 fn fixturePath(b: *std.Build, set: FixtureSet, name: []const u8) std.Build.LazyPath {
+    // MP4 fixtures (T33a1) have several extensions: the name carries its own.
+    if (set == .mp4) return b.path(b.fmt("zig/testing/fixtures/mp4/{s}", .{name}));
     const extension = switch (set) {
         .adpcm => "wav",
         .alac => "caf",

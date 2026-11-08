@@ -400,6 +400,10 @@ pub const Conversion = struct {
                 .init(request.gpa orelse return error.UnsupportedOperation, source.reader(), null, request.diagnostics) },
             // Output only: detection never names them.
             .mp2, .adts => return error.UnsupportedOperation,
+            // MP4 is read without decoding (T33a1): conversion waits for a
+            // subtask that gives the decoders a container's packets
+            // (notes.md "MP4 demuxing").
+            .mov => return error.UnsupportedOperation,
             // Decoded (T30b), read as the MP3 input is.
             .aac => .{ .aac = if (try rewound(source)) |sk|
                 .init(request.gpa orelse return error.UnsupportedOperation, source.replay.source, sk, request.diagnostics)
@@ -417,7 +421,7 @@ pub const Conversion = struct {
         // only when that header cannot be rewritten at the end.
         const header_first = switch (request.output.family()) {
             .wav, .au, .aiff => true,
-            .raw, .flac, .ogg, .caf, .mp3, .mp2, .aac, .adts, .ac3 => false,
+            .raw, .flac, .ogg, .caf, .mp3, .mp2, .aac, .adts, .ac3, .mov => false,
         };
         switch (input) {
             .ogg => |*reader| reader.count_ahead = header_first and !request.output_seekable,
@@ -628,7 +632,7 @@ pub const Conversion = struct {
                 error.UnsupportedFormat => error.UnsupportedFormat,
                 error.InvalidOption => error.InvalidOption,
             },
-            .mp3, .aac => unreachable, // no muxer: refused above as UnsupportedOperation
+            .mp3, .aac, .mov => unreachable, // no muxer: refused above as UnsupportedOperation
             // FFmpeg's AAC encoder before its adts muxer (T32d).
             .adts => aacadts.Writer.check(request.gpa.?, summary.output_codec, summary.outputFormat(), request.aac) catch |err| return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
@@ -753,11 +757,11 @@ pub const Conversion = struct {
         try swr.Swr.check(summary.format, summary.outputFormat(), packet_frames, .{});
         switch (summary.output.family()) {
             .flac, .ogg => {},
-            .wav, .au, .aiff, .raw, .caf, .mp3, .mp2, .aac, .adts, .ac3 => return,
+            .wav, .au, .aiff, .raw, .caf, .mp3, .mp2, .aac, .adts, .ac3, .mov => return,
         }
         switch (summary.input.family()) {
             .wav, .au, .aiff, .caf, .raw => {},
-            .flac, .ogg, .mp3, .mp2, .aac, .adts, .ac3 => return,
+            .flac, .ogg, .mp3, .mp2, .aac, .adts, .ac3, .mov => return,
         }
         // ADPCM in WAV is a decoded input (T31a).
         if (summary.input_stream != .pcm) return;
@@ -923,7 +927,7 @@ pub const Conversion = struct {
                 defer writer.deinit();
                 try c.transfer(aacadts.Writer, &writer);
             },
-            .mp3, .aac => unreachable, // no muxer: `init` refused it
+            .mp3, .aac, .mov => unreachable, // no muxer: `init` refused it
         }
         // Every frame was read: an unknown count is now known, and a FLAC
         // stream's decoded count replaces STREAMINFO's (equal unless raw
@@ -1271,6 +1275,7 @@ fn ffmpegPacketFrames(container: Container, codec: pcm.Codec, format: audio.Form
         .mp3 => unreachable, // Conversion.init takes the decoder's frames
         .mp2, .adts => unreachable, // no demuxer
         .aac, .ac3 => unreachable, // Conversion.init takes the decoder's frames
+        .mov => unreachable, // Conversion.init refuses it
     };
 }
 
@@ -1586,7 +1591,7 @@ fn decodeOutput(container: Container, bytes: []const u8, storage: []i16, format:
             var parser: caf.Parser = .init(&reader, .{});
             return decodeWith(caf.Parser, &parser, storage);
         },
-        .flac, .ogg, .mp3, .mp2, .aac, .adts, .ac3 => unreachable, // not this test's outputs
+        .flac, .ogg, .mp3, .mp2, .aac, .adts, .ac3, .mov => unreachable, // not this test's outputs
     }
 }
 
@@ -1648,7 +1653,7 @@ fn rawOf(container: Container, bytes: []const u8, out: []u8, format: audio.Forma
         .aiff => _ = try aiff.decodeToRaw(&reader, &writer, .{}),
         .caf => _ = try caf.decodeToRaw(&reader, &writer, .{}),
         .raw => _ = try raw.decodeToRaw(&reader, &writer, container.rawCodec().?, paramsOf(format), bytes.len, .{}), // a raw container has a codec
-        .flac, .ogg, .mp3, .mp2, .aac, .adts, .ac3 => unreachable, // not this test's outputs
+        .flac, .ogg, .mp3, .mp2, .aac, .adts, .ac3, .mov => unreachable, // not this test's outputs
     }
     return writer.buffered();
 }

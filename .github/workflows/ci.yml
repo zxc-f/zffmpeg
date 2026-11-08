@@ -433,6 +433,18 @@ jobs:
             .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o aacpsy-vectors
           ./aacpsy-vectors | diff -u zig/testing/vectors/aacpsy.txt -
 
+      # The committed T33a1 oracles must be what this build's libavformat
+      # makes of every MP4 fixture, from a file and a pipe, and what its AAC
+      # decoder makes of their AudioSpecificConfigs.
+      - name: Check the MP4 demuxer and AAC configuration vectors (T33a1)
+        run: |
+          libs=".references/ffmpeg-install/lib/libavformat.a .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a"
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/mov_vectors.c $libs -lm -pthread -o mov-vectors
+          LC_ALL=C ./mov-vectors zig/testing/fixtures/mp4/*.{mp4,m4a,mov,3gp,3g2} | diff -u zig/testing/vectors/mov.txt -
+          LC_ALL=C ./mov-vectors -pipe zig/testing/fixtures/mp4/*.{mp4,m4a,mov,3gp,3g2} | diff -u zig/testing/vectors/mov_pipe.txt -
+          clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/aac_asc_vectors.c $libs -lm -pthread -o aac-asc-vectors
+          LC_ALL=C ./aac-asc-vectors zig/testing/fixtures/aac zig/testing/fixtures/mp4/mov_aac_*.* zig/testing/fixtures/mp4/mov_two_tracks.mp4 | diff -u zig/testing/vectors/aac_asc.txt -
+
       # The committed T32d oracle must be what this build's AAC encoder
       # makes of its cases, and the PCE table what its printer prints.
       - name: Check the AAC encoder vectors and PCE table (T32d)

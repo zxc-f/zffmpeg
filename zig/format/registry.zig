@@ -34,6 +34,7 @@ const ogg = @import("ogg.zig");
 const mp3 = @import("mp3.zig");
 const aac = @import("aac.zig");
 const ac3 = @import("ac3.zig");
+const mov = @import("mov.zig");
 
 pub const Container = enum {
     wav,
@@ -65,6 +66,9 @@ pub const Container = enum {
     /// and `eac3` demuxers.
     ac3,
     eac3,
+    /// QuickTime and MP4 (T33a1), read without decoding: FFmpeg's `mov`
+    /// demuxer (mov, mp4, m4a, 3gp, 3g2, mj2).
+    mov,
     // Raw PCM (T22c), one format per codec FFmpeg has a raw format for, named
     // as the codec: every PCM codec but s64.
     u8,
@@ -83,7 +87,7 @@ pub const Container = enum {
     mulaw,
 
     /// The parser and writer family that reads and writes a container.
-    pub const Family = enum { wav, au, aiff, caf, flac, ogg, mp3, mp2, aac, adts, ac3, raw };
+    pub const Family = enum { wav, au, aiff, caf, flac, ogg, mp3, mp2, aac, adts, ac3, mov, raw };
 
     pub fn family(container: Container) Family {
         return switch (container) {
@@ -98,6 +102,7 @@ pub const Container = enum {
             .aac => .aac,
             .adts => .adts,
             .ac3, .eac3 => .ac3,
+            .mov => .mov,
             // Checked below: exactly the raw formats, each named as its codec.
             else => .raw,
         };
@@ -114,7 +119,7 @@ pub const Container = enum {
     /// The codec of a raw PCM format, which shares its name; null otherwise.
     pub fn rawCodec(container: Container) ?pcm.Codec {
         return switch (container) {
-            .wav, .w64, .au, .aiff, .caf, .flac, .ogg, .oga, .opus, .mp3, .mp2, .aac, .adts, .ac3, .eac3 => null,
+            .wav, .w64, .au, .aiff, .caf, .flac, .ogg, .oga, .opus, .mp3, .mp2, .aac, .adts, .ac3, .eac3, .mov => null,
             // Compiles only if every other tag names a codec.
             inline else => |tag| @field(pcm.Codec, @tagName(tag)),
         };
@@ -312,6 +317,15 @@ pub const formats = [_]Format{
         .demuxer = .{ .probe = ac3.probeScoreEac3, .extensions = &.{ "eac3", "ec3" } },
         .muxer = null,
     },
+    .{
+        .container = .mov,
+        .name = "mov,mp4,m4a,3gp,3g2,mj2",
+        .long_name = "QuickTime / MOV",
+        // FFmpeg's mov demuxer (T33a1); its mp4, mov and ipod muxers are
+        // T34a's.
+        .demuxer = .{ .probe = mov.probeScore, .extensions = &.{ "mov", "mp4", "m4a", "3gp", "3g2", "mj2", "psp", "m4v", "m4b", "ism", "ismv", "isma", "f4v", "avif", "heic", "heif" } },
+        .muxer = null,
+    },
     rawFormat(.u8, "PCM unsigned 8-bit", &.{"ub"}),
     rawFormat(.s8, "PCM signed 8-bit", &.{"sb"}),
     // FFmpeg gives `sw` to the native byte order's 16-bit format (`AV_NE`).
@@ -421,9 +435,17 @@ fn oggCodecs(codec: codecs.Codec) bool {
 }
 
 /// The container FFmpeg names `name`, if it has a demuxer (an input `-f`).
+/// av_find_input_format: a demuxer any of whose comma-separated names is
+/// `name` (av_match_name), so `mp4` finds `mov,mp4,m4a,3gp,3g2,mj2`.
 pub fn findDemuxer(name: []const u8) ?Container {
-    const format = find(name) orelse return null;
-    return if (format.demuxer != null) format.container else null;
+    for (&formats) |*format| {
+        if (format.demuxer == null) continue;
+        var names = std.mem.splitScalar(u8, format.name, ',');
+        while (names.next()) |one| {
+            if (std.mem.eql(u8, one, name)) return format.container;
+        }
+    }
+    return null;
 }
 
 /// The container FFmpeg names `name`, if it has a muxer (an output `-f`).
@@ -458,7 +480,9 @@ comptime {
     if (formats.len != tags.len) @compileError("every container needs exactly one format entry");
     for (formats, tags, 0..) |format, tag, i| {
         if (@backingInt(format.container) != i) @compileError("formats must follow Container's order: " ++ format.name);
-        if (!std.mem.eql(u8, format.name, tag)) @compileError("a format name differs from its container's tag: " ++ format.name);
+        // A demuxer may answer to several names (mov's), the first its tag.
+        const first = if (std.mem.findScalar(u8, format.name, ',')) |comma| format.name[0..comma] else format.name;
+        if (!std.mem.eql(u8, first, tag)) @compileError("a format name differs from its container's tag: " ++ format.name);
         if (format.demuxer == null and format.muxer == null) @compileError("a format needs a demuxer or a muxer: " ++ format.name);
         if ((format.container.family() == .raw) != (format.container.rawCodec() != null)) {
             @compileError("raw formats are exactly the containers named as a codec: " ++ format.name);

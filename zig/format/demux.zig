@@ -49,6 +49,7 @@ const ac3 = @import("../codec/ac3.zig");
 const ac3dec = @import("../codec/ac3dec.zig");
 const id3v2 = @import("id3v2.zig");
 const aacdec = @import("../codec/aacdec.zig");
+const mp3dec = @import("../codec/mp3dec.zig");
 
 pub const nopts: i64 = std.math.minInt(i64);
 /// libavformat's base for timestamps counted before the first is known.
@@ -67,6 +68,13 @@ const max_ts_probe = 50;
 pub const Setup = struct {
     /// False for a stream whose codec is unknown (`AV_CODEC_ID_NONE`).
     known: bool,
+    /// The stream's media type: audio, or data (a data stream needs no
+    /// codec parameters, its packets are keyframes, and its timings count
+    /// as a text stream's).
+    media: Media = .audio,
+    /// The codec's descriptor has `AV_CODEC_PROP_INTRA_ONLY`: every packet
+    /// is a keyframe.
+    intra_only: bool = true,
     time_base: rational.Rational,
     sample_rate: u32,
     channels: u8,
@@ -90,7 +98,17 @@ pub const Setup = struct {
     /// `codecpar->initial_padding` and `seek_preroll`, in samples.
     initial_padding: u32 = 0,
     seek_preroll: u32 = 0,
+    /// `codecpar->frame_size`, which bounds the discard window's packet
+    /// duration from below.
+    frame_size: u32 = 0,
+    /// `codecpar->extradata`, which the AAC decoder opens with.
+    extradata: []const u8 = &.{},
+    /// The MPEG audio codec the stream starts as, which the parser may
+    /// change (MP3 when null).
+    mpa_codec: ?mpegaudio.Codec = null,
 };
+
+pub const Media = enum { audio, data };
 
 /// A stream's parser, as its demuxer asks for one.
 pub const ParserKind = enum {
@@ -109,6 +127,15 @@ pub const ParserKind = enum {
     /// frames and fills the rate, channels, layout, frame durations and
     /// bit rate (AVSTREAM_PARSE_FULL_RAW).
     ac3,
+    /// AC-3 and E-AC-3 in MP4 (T33a1): the same parser on packets with
+    /// timestamps, which it passes to its frames (AVSTREAM_PARSE_FULL).
+    ac3_full,
+    /// MPEG audio in QuickTime files (T33a1), AVSTREAM_PARSE_FULL.
+    mpegaudio_full,
+
+    fn full(k: ParserKind) bool {
+        return k == .ac3_full or k == .mpegaudio_full;
+    }
 };
 
 /// The reference build's decoder for a stream, as try_decode_frame meets it.
@@ -132,6 +159,11 @@ pub const Decoder = enum {
     /// (and more while a parameter is missing), writing the rate and
     /// layout into the codec context the parser fills.
     ac3,
+    /// FFmpeg's float MPEG audio decoders (T33a1): the sample format at
+    /// open; each frame decoded sets the layout from its header, the bit
+    /// rate when none is known, and its frame size, then its rate once it
+    /// decodes.
+    mpegaudio,
 };
 
 /// What a decoder run in the read-ahead left in libavformat's codec
@@ -143,6 +175,8 @@ pub const DecodedParams = struct {
     mask: u64 = 0,
     frame_size: u32 = 0,
     seek_preroll: u32 = 0,
+    /// `avctx->profile`, null for unknown.
+    profile: ?i32 = null,
 };
 
 pub const WindowError = error{ IoFailure, OutOfMemory };
@@ -281,6 +315,11 @@ pub const Packet = struct {
 };
 
 pub const key_flag: u32 = 1;
+pub const corrupt_flag: u32 = 2;
+pub const discard_flag: u32 = 4;
+
+/// The timestamps and position `av_parser_parse2` is given with a packet.
+const RawPosition = struct { pts: i64, dts: i64, pos: i64 };
 
 /// A packet held by the layer, its bytes owned.
 const Held = struct {
@@ -369,6 +408,10 @@ const StreamState = struct {
     aac: ?*aacdec.Decoder = null,
     /// The AC-3 decoder try_decode_frame opened.
     ac3: ?*ac3dec.Decoder = null,
+    /// The MPEG audio decoder try_decode_frame opened, and the codec
+    /// context fields it set.
+    mpa: ?*mp3dec.Decoder = null,
+    mpa_params: MpaParams = .{},
     decoded_params: DecodedParams = .{},
     /// The samples the next packet's skip-samples side data discards,
     /// and the request a seek leaves for it (`seek_discard`,
@@ -378,7 +421,18 @@ const StreamState = struct {
     seek_to_start: bool = false,
 };
 
-/// A full-raw parser with `av_parser_parse2`'s byte offsets.
+/// What the MPEG audio decoder left in the codec context.
+pub const MpaParams = struct {
+    /// The channels of the last frame's header (the layout set from it).
+    channels: u32 = 0,
+    frame_size: u32 = 0,
+    /// The rate of the last frame that decoded.
+    sample_rate: u32 = 0,
+    /// The first header's bit rate, when the context had none.
+    bit_rate: i64 = 0,
+};
+
+/// A parser with `av_parser_parse2`'s byte offsets and timestamps.
 const RawParser = struct {
     parser: union(enum) {
         mpa: mpegaudio.Parser,
@@ -388,6 +442,38 @@ const RawParser = struct {
     cur_offset: i64,
     next_frame_offset: i64,
     frame_offset: i64 = 0,
+    /// The packets the parser was given (`AV_PARSER_PTS_NB` of them):
+    /// where each starts and ends in the parser's byte count, and its
+    /// timestamps and position.
+    cur_frame_start_index: u2 = 0,
+    cur_frame_offset: [4]i64 = @splat(0),
+    cur_frame_end: [4]i64 = @splat(0),
+    cur_frame_pts: [4]i64 = @splat(0),
+    cur_frame_dts: [4]i64 = @splat(0),
+    cur_frame_pos: [4]i64 = @splat(0),
+    fetch_timestamp: bool = true,
+    /// The current frame's timestamps and position (`ff_fetch_timestamp`).
+    pts: i64 = 0,
+    dts: i64 = 0,
+    pos: i64 = 0,
+
+    /// ff_fetch_timestamp without an offset, fuzziness or removal.
+    fn fetchTimestamp(p: *RawParser) void {
+        p.dts = nopts;
+        p.pts = nopts;
+        p.pos = -1;
+        for (0..4) |i| {
+            if (p.cur_offset >= p.cur_frame_offset[i] and
+                (p.frame_offset < p.cur_frame_offset[i] or (p.frame_offset == 0 and p.next_frame_offset == 0)) and
+                p.cur_frame_end[i] != 0)
+            {
+                p.dts = p.cur_frame_dts[i];
+                p.pts = p.cur_frame_pts[i];
+                p.pos = p.cur_frame_pos[i];
+                if (p.cur_offset < p.cur_frame_end[i]) break;
+            }
+        }
+    }
 
     fn deinit(p: *RawParser, gpa: std.mem.Allocator) void {
         switch (p.parser) {
@@ -407,6 +493,27 @@ const ParserContext = union(enum) {
             inline else => |ctx| ctx.bit_rate,
         };
     }
+};
+
+/// The codec context fields the read-ahead's parser and decoders set
+/// (`Layer.contextParams`); null fields are the demuxer's.
+pub const ContextParams = struct {
+    /// avcodec_open2 succeeded on the stream.
+    decoder_opened: bool,
+    sample_rate: ?u32 = null,
+    channels: ?u32 = null,
+    /// A native layout's mask.
+    mask: ?u64 = null,
+    /// The decoder left the layout unspecified (`channels` of them).
+    unspecified: bool = false,
+    frame_size: ?u32 = null,
+    bit_rate: ?i64 = null,
+    /// `avctx->profile`, null for unknown.
+    profile: ?i32 = null,
+    seek_preroll: ?u32 = null,
+    mpa_codec: ?mpegaudio.Codec = null,
+    eac3: bool = false,
+    service_type: ?u8 = null,
 };
 
 /// A stream's codec parameters as libavformat's codec context has them:
@@ -501,6 +608,7 @@ pub fn Layer(comptime Source: type) type {
         /// avformat_find_stream_info's read-ahead.
         pub fn findStreamInfo(l: *Self) Error!void {
             var read_size: u64 = 0;
+            var eof_reached = false;
             while (true) {
                 var all = true;
                 for (0..l.src.streamCount()) |i| {
@@ -510,7 +618,7 @@ pub fn Layer(comptime Source: type) type {
                         all = false;
                         break;
                     }
-                    if (s.first_dts == nopts and s.codec_info_nb_frames < max_ts_probe) {
+                    if (s.first_dts == nopts and s.codec_info_nb_frames < max_ts_probe and setup.media == .audio) {
                         all = false;
                         break;
                     }
@@ -523,9 +631,13 @@ pub fn Layer(comptime Source: type) type {
                 // memory, and an input that cannot be read, still fail.
                 const next_held = l.readFrameInternal() catch |err| {
                     if (err == error.OutOfMemory or err == error.IoFailure) return err;
+                    eof_reached = true;
                     break;
                 };
-                var h = next_held orelse break;
+                var h = next_held orelse {
+                    eof_reached = true;
+                    break;
+                };
                 l.packet_buffer.pushBack(l.gpa, h) catch |err| {
                     h.deinit(l.gpa);
                     return err;
@@ -579,15 +691,24 @@ pub fn Layer(comptime Source: type) type {
                             s.found_decoder = -1;
                             s.no_channels = true;
                         },
-                        // Opened by tryDecodeAac and tryDecodeAc3.
-                        .aac, .ac3 => {},
+                        // Opened by tryDecodeAac, tryDecodeAc3 and tryDecodeMpa.
+                        .aac, .ac3, .mpegaudio => {},
                     }
                 }
                 if (setup.decoder == .flac and !s.decoded and setup.parser == .flac_headers and validFlacFrame(pkt.data)) s.decoded = true;
                 if (setup.decoder == .aac) try l.tryDecodeAac(s, setup, pkt.data);
                 if (setup.decoder == .ac3) try l.tryDecodeAc3(s, setup, pkt.data);
+                if (setup.decoder == .mpegaudio) try l.tryDecodeMpa(s, setup, pkt.data, &pkt.tail);
                 s.codec_info_nb_frames += 1;
             }
+            // At the end, a stream still without its parameters whose
+            // decoder never opened gets it opened (and nothing decoded).
+            if (eof_reached) for (0..l.src.streamCount()) |i| {
+                const s = try l.state(i);
+                const setup = l.src.setup(i);
+                if (hasCodecParameters(setup, s.*) or s.found_decoder != 0) continue;
+                try l.openDecoder(s, setup);
+            };
             // The decoders opened for the read-ahead close; what they set
             // stays.
             for (l.states.items) |*s| l.closeDecoder(s);
@@ -619,26 +740,40 @@ pub fn Layer(comptime Source: type) type {
             l.updateStreamTimings(file_size);
         }
 
-        /// update_stream_timings over audio streams (none of them text).
+        /// update_stream_timings: audio streams, and data streams as text.
         fn updateStreamTimings(l: *Self, file_size: i64) void {
-            var start_time: i64 = std.math.maxInt(i64);
-            var end_time: i64 = std.math.minInt(i64);
-            var duration: i64 = std.math.minInt(i64);
+            const max = std.math.maxInt(i64);
+            const min = std.math.minInt(i64);
+            var start_time: i64 = max;
+            var end_time: i64 = min;
+            var duration: i64 = min;
+            var start_time_text: i64 = max;
+            var end_time_text: i64 = min;
+            var duration_text: i64 = min;
             for (0..l.src.streamCount()) |i| {
-                const tb = l.src.setup(i).time_base;
+                const setup = l.src.setup(i);
+                const tb = setup.time_base;
+                const is_text = setup.media == .data;
                 const st_start = l.src.startTime(i).*;
                 const st_duration = l.src.durationOf(i).*;
                 if (st_start != nopts and tb.den != 0) {
                     const start1 = rational.rescaleQ(st_start, tb, time_base_q);
-                    start_time = @min(start_time, start1);
+                    if (is_text) start_time_text = @min(start_time_text, start1) else start_time = @min(start_time, start1);
                     var end1 = rational.rescaleQRnd(st_duration, tb, time_base_q, .{ .mode = .near_inf, .pass_minmax = true });
-                    if (end1 != nopts and (if (end1 > 0) start1 <= std.math.maxInt(i64) - end1 else start1 >= std.math.minInt(i64) - end1)) {
+                    if (end1 != nopts and (if (end1 > 0) start1 <= max - end1 else start1 >= min - end1)) {
                         end1 += start1;
-                        end_time = @max(end_time, end1);
+                        if (is_text) end_time_text = @max(end_time_text, end1) else end_time = @max(end_time, end1);
                     }
                 }
-                if (st_duration != nopts) duration = @max(duration, rational.rescaleQ(st_duration, tb, time_base_q));
+                if (st_duration != nopts) {
+                    const duration1 = rational.rescaleQ(st_duration, tb, time_base_q);
+                    if (is_text) duration_text = @max(duration_text, duration1) else duration = @max(duration, duration1);
+                }
             }
+            const second: u64 = 1_000_000;
+            if (start_time == max or (start_time > start_time_text and @as(u64, @bitCast(start_time)) -% @as(u64, @bitCast(start_time_text)) < second)) start_time = start_time_text;
+            if (end_time == min or (end_time < end_time_text and @as(u64, @bitCast(end_time_text)) -% @as(u64, @bitCast(end_time)) < second)) end_time = end_time_text;
+            if (duration == min or (duration < duration_text and @as(u64, @bitCast(duration_text)) -% @as(u64, @bitCast(duration)) < second)) duration = duration_text;
             if (start_time != std.math.maxInt(i64)) {
                 l.start_time = start_time;
                 if (end_time != std.math.minInt(i64) and end_time >= start_time) {
@@ -692,15 +827,22 @@ pub fn Layer(comptime Source: type) type {
         fn tryDecodeAac(l: *Self, s: *StreamState, setup: Setup, data_in: []const u8) Error!void {
             if (s.found_decoder == 0) {
                 const d = try l.gpa.create(aacdec.Decoder);
-                d.* = aacdec.Decoder.init(l.gpa, setup.sample_rate, setup.channels) catch |err| {
+                d.* = aacdec.Decoder.initExtradata(l.gpa, setup.extradata, setup.sample_rate, setup.channels) catch |err| {
                     l.gpa.destroy(d);
                     if (err == error.OutOfMemory) return error.OutOfMemory;
                     s.found_decoder = -1;
                     return;
                 };
+                // avcodec_parameters_to_context: the container's frame
+                // size and pre-roll; the decoder's sample rate stays the
+                // container's until a frame sets it.
+                if (setup.extradata.len > 0) {
+                    d.frame_size = setup.frame_size;
+                    d.seek_preroll = @max(d.seek_preroll, setup.seek_preroll);
+                }
                 s.aac = d;
                 s.found_decoder = 1;
-                s.decoded_params = .{ .channels = d.channels, .mask = d.mask, .seek_preroll = d.seek_preroll };
+                s.decoded_params = .{ .channels = d.channels, .mask = d.mask, .seek_preroll = d.seek_preroll, .sample_rate = if (setup.extradata.len > 0) d.sample_rate else 0, .frame_size = if (setup.extradata.len > 0) d.frame_size else 0, .profile = d.profile };
             }
             const d = s.aac orelse return;
             var data = data_in;
@@ -711,7 +853,7 @@ pub fn Layer(comptime Source: type) type {
                     s.decoded_params.mask = d.mask;
                     return;
                 };
-                s.decoded_params = .{ .sample_rate = d.sample_rate, .channels = d.channels, .mask = d.mask, .frame_size = d.frame_size, .seek_preroll = d.seek_preroll };
+                s.decoded_params = .{ .sample_rate = d.sample_rate, .channels = d.channels, .mask = d.mask, .frame_size = d.frame_size, .seek_preroll = d.seek_preroll, .profile = d.profile };
                 if (got.consumed == 0) return;
                 data = data[@min(got.consumed, data.len)..];
             }
@@ -761,6 +903,118 @@ pub fn Layer(comptime Source: type) type {
             }
         }
 
+        /// avcodec_open2 alone, as find_stream_info calls it at the end of
+        /// the input for a stream that had no packet.
+        fn openDecoder(l: *Self, s: *StreamState, setup: Setup) Error!void {
+            switch (setup.decoder) {
+                .none => {},
+                .flac => s.found_decoder = 1,
+                .format_at_open => {
+                    s.found_decoder = 1;
+                    s.decoded = true;
+                },
+                .refuses => {
+                    s.found_decoder = -1;
+                    s.no_channels = true;
+                },
+                .aac => try l.tryDecodeAac(s, setup, &.{}),
+                .ac3 => {
+                    const d = try l.gpa.create(ac3dec.Decoder);
+                    d.* = ac3dec.Decoder.init(l.gpa, setup.sample_rate) catch |err| {
+                        l.gpa.destroy(d);
+                        return err;
+                    };
+                    s.ac3 = d;
+                    s.found_decoder = 1;
+                    s.decoded = true;
+                },
+                .mpegaudio => try l.tryDecodeMpa(s, setup, &.{}, &.{}),
+            }
+        }
+
+        /// try_decode_frame with FFmpeg's float MPEG audio decoder: opened
+        /// on the first packet (the sample format set), then one frame
+        /// decoded a packet while the parameters are incomplete or no frame
+        /// has been read; its header sets the layout, the bit rate when the
+        /// context has none and the frame size, a frame that decodes the
+        /// rate.
+        fn tryDecodeMpa(l: *Self, s: *StreamState, setup: Setup, data: []const u8, tail: []const u8) Error!void {
+            if (s.found_decoder == 0) {
+                const d = try l.gpa.create(mp3dec.Decoder);
+                d.* = .init;
+                s.mpa = d;
+                s.found_decoder = 1;
+                s.decoded = true;
+            }
+            const d = s.mpa orelse return;
+            if (hasCodecParameters(setup, s.*) and s.codec_info_nb_frames != 0) return;
+            var skipped: usize = 0;
+            while (skipped < data.len and data[skipped] == 0) skipped += 1;
+            const buf = data[skipped..];
+            if (buf.len < 4) return;
+            const header = std.mem.readInt(u32, buf[0..4], .big);
+            if (header >> 8 == 0x544147) return; // an ID3v1 tag
+            const hdr = mpegaudio.decodeHeader(header) orelse return;
+            if (hdr.freeFormat()) return;
+            s.mpa_params.channels = hdr.nb_channels;
+            const context_rate = if (s.codec) |c| c.bitRate() else setup.bit_rate;
+            if (context_rate == 0 and s.mpa_params.bit_rate == 0) s.mpa_params.bit_rate = hdr.bit_rate;
+            if (hdr.frame_size == 0) return; // "incomplete frame"
+            s.mpa_params.frame_size = switch (hdr.layer) {
+                1 => 384,
+                2 => 1152,
+                else => if (hdr.lsf) 576 else 1152,
+            };
+            const got = d.decodeFrame(data, tail) catch return;
+            if (got.frame != null) s.mpa_params.sample_rate = hdr.sample_rate;
+        }
+
+        /// What the parser and the decoders the read-ahead ran left in the
+        /// codec context (`avcodec_parameters_from_context`), field by
+        /// field; null where they changed nothing.
+        pub fn contextParams(l: *Self, i: usize) Error!ContextParams {
+            const s = try l.state(i);
+            var c: ContextParams = .{ .decoder_opened = s.found_decoder > 0 };
+            if (s.codec) |codec| switch (codec) {
+                .mpa => |m| {
+                    c.mpa_codec = m.codec;
+                    c.sample_rate = m.sample_rate;
+                    c.channels = m.channels;
+                    c.bit_rate = m.bit_rate;
+                },
+                .ac3 => |a| {
+                    if (a.sample_rate != 0) c.sample_rate = a.sample_rate;
+                    if (a.channel_layout != 0) c.mask = a.channel_layout;
+                    c.bit_rate = a.bit_rate;
+                    c.eac3 = a.eac3;
+                    c.service_type = a.audio_service_type;
+                },
+                .aac => |a| {
+                    c.bit_rate = a.bit_rate;
+                    if (a.profile) |p| c.profile = p;
+                },
+            };
+            const setup = l.src.setup(i);
+            if (setup.decoder == .aac and s.found_decoder > 0) {
+                const p = s.decoded_params;
+                if (p.sample_rate != 0) c.sample_rate = p.sample_rate;
+                c.channels = p.channels;
+                c.mask = p.mask;
+                c.unspecified = p.mask == 0;
+                if (p.frame_size != 0) c.frame_size = p.frame_size;
+                c.seek_preroll = p.seek_preroll;
+                c.profile = p.profile;
+            }
+            if (setup.decoder == .mpegaudio and s.found_decoder > 0) {
+                const p = s.mpa_params;
+                if (p.channels != 0) c.mask = if (p.channels == 1) 0x4 else 0x3;
+                if (p.frame_size != 0) c.frame_size = p.frame_size;
+                if (p.sample_rate != 0) c.sample_rate = p.sample_rate;
+                if (p.bit_rate != 0) c.bit_rate = p.bit_rate;
+            }
+            return c;
+        }
+
         fn closeDecoder(l: *Self, s: *StreamState) void {
             if (s.aac) |d| {
                 d.deinit();
@@ -772,6 +1026,8 @@ pub fn Layer(comptime Source: type) type {
                 l.gpa.destroy(d);
             }
             s.ac3 = null;
+            if (s.mpa) |d| l.gpa.destroy(d);
+            s.mpa = null;
         }
 
         /// `codecpar->seek_preroll`: the demuxer's, or the one a decoder
@@ -783,7 +1039,23 @@ pub fn Layer(comptime Source: type) type {
 
         /// has_codec_parameters for an audio stream.
         fn hasCodecParameters(setup: Setup, s: StreamState) bool {
+            // A data stream needs nothing.
+            if (setup.media == .data) return true;
             if (!setup.known) return false;
+            if (setup.decoder == .mpegaudio) {
+                // The frame size is determinable: a decoded header gives it.
+                if (s.mpa_params.frame_size == 0) return false;
+                if (s.found_decoder == 0) return false;
+                const rate = if (s.mpa_params.sample_rate != 0) s.mpa_params.sample_rate else if (s.codec) |c| switch (c) {
+                    .mpa => |m| m.sample_rate,
+                    else => setup.sample_rate,
+                } else setup.sample_rate;
+                const channels = if (s.mpa_params.channels != 0) s.mpa_params.channels else if (s.codec) |c| switch (c) {
+                    .mpa => |m| m.channels,
+                    else => setup.channels,
+                } else setup.channels;
+                return rate != 0 and channels != 0;
+            }
             if (setup.decoder == .aac) {
                 // The sample format is unknown until the decoder opens.
                 if (s.found_decoder == 0) return false;
@@ -874,11 +1146,11 @@ pub fn Layer(comptime Source: type) type {
                         try l.parseFlac(&h, setup);
                         continue;
                     },
-                    .mpegaudio, .aac, .ac3 => {
+                    .mpegaudio, .aac, .ac3, .ac3_full, .mpegaudio_full => {
                         // The parser copies its frames out of the raw
                         // packet, which is freed here once parsed; on an
                         // error the errdefer above frees it, and only it.
-                        try l.parseRaw(h.stream, h.data, h.pos, h.flags, setup);
+                        try l.parseRaw(h.stream, h.data, .{ .pts = h.pts, .dts = h.dts, .pos = h.pos }, h.flags, setup);
                         h.deinit(l.gpa);
                         continue;
                     },
@@ -917,7 +1189,7 @@ pub fn Layer(comptime Source: type) type {
             for (0..l.states.items.len) |i| {
                 const s = &l.states.items[i];
                 if (s.raw == null) continue;
-                try l.parseRaw(i, &.{}, -1, 0, l.src.setup(i));
+                try l.parseRaw(i, &.{}, .{ .pts = nopts, .dts = nopts, .pos = -1 }, 0, l.src.setup(i));
                 if (s.raw) |*p| p.deinit(l.gpa);
                 s.raw = null;
             }
@@ -931,31 +1203,47 @@ pub fn Layer(comptime Source: type) type {
         /// in the time base; the AAC parser gives none), timestamps from
         /// compute_pkt_fields; the codec context follows the frames.
         /// `data` empty flushes.
-        fn parseRaw(l: *Self, stream: usize, data_in: []const u8, pos: i64, raw_flags: u32, setup: Setup) Error!void {
+        fn parseRaw(l: *Self, stream: usize, data_in: []const u8, at: RawPosition, raw_flags: u32, setup: Setup) Error!void {
             const s = try l.state(stream);
-            if (s.codec == null) s.codec = switch (setup.parser) {
-                .aac => .{ .aac = .{ .bit_rate = setup.bit_rate } },
-                .ac3 => .{ .ac3 = .{ .bit_rate = setup.bit_rate } },
-                else => .{ .mpa = .{ .sample_rate = setup.sample_rate, .channels = setup.channels, .bit_rate = setup.bit_rate } },
-            };
+            const is_ac3 = setup.parser == .ac3 or setup.parser == .ac3_full;
+            if (s.codec == null) s.codec = if (setup.parser == .aac)
+                .{ .aac = .{ .bit_rate = setup.bit_rate } }
+            else if (is_ac3)
+                .{ .ac3 = .{ .bit_rate = setup.bit_rate, .sample_rate = if (setup.parser == .ac3_full) setup.sample_rate else 0, .channels = if (setup.parser == .ac3_full) setup.channels else 0 } }
+            else
+                .{ .mpa = .{ .codec = setup.mpa_codec orelse .mp3, .sample_rate = setup.sample_rate, .channels = setup.channels, .bit_rate = setup.bit_rate } };
             if (s.raw == null) {
                 if (data_in.len == 0) return;
                 // PARSER_FLAG_FETCHED_OFFSET: the first packet's position.
                 s.raw = .{
-                    .parser = switch (setup.parser) {
-                        .aac => .{ .aac = .{} },
-                        .ac3 => .{ .ac3 = .{} },
-                        else => .{ .mpa = .{} },
-                    },
-                    .cur_offset = pos,
-                    .next_frame_offset = pos,
+                    .parser = if (setup.parser == .aac) .{ .aac = .{} } else if (is_ac3) .{ .ac3 = .{} } else .{ .mpa = .{} },
+                    .cur_offset = at.pos,
+                    .next_frame_offset = at.pos,
                 };
             }
             const flushing = data_in.len == 0;
             var data = data_in;
             var got_output = flushing;
+            var call_at = at;
             while (data.len > 0 or (flushing and got_output)) {
                 const p = &s.raw.?;
+                // av_parser_parse2: a packet descriptor for new bytes, then
+                // the timestamps of the frame that starts here.
+                if (data.len > 0 and p.cur_offset + @as(i64, @intCast(data.len)) != p.cur_frame_end[p.cur_frame_start_index]) {
+                    p.cur_frame_start_index +%= 1;
+                    const i = p.cur_frame_start_index;
+                    p.cur_frame_offset[i] = p.cur_offset;
+                    p.cur_frame_end[i] = p.cur_offset + @as(i64, @intCast(data.len));
+                    p.cur_frame_pts[i] = call_at.pts;
+                    p.cur_frame_dts[i] = call_at.dts;
+                    p.cur_frame_pos[i] = call_at.pos;
+                }
+                if (p.fetch_timestamp) {
+                    p.fetch_timestamp = false;
+                    p.fetchTimestamp();
+                }
+                // parse_packet: later calls on the same packet pass none.
+                call_at = .{ .pts = nopts, .dts = nopts, .pos = -1 };
                 // av_parser_parse2: the parser's index, which the AAC
                 // parser may give negative (bytes it reads again).
                 var index: i64 = undefined;
@@ -983,6 +1271,9 @@ pub fn Layer(comptime Source: type) type {
                         break :blk res.frame;
                     },
                 };
+                // The MPEG audio parser leaves key_frame -1 and the picture
+                // type I too.
+                if (p.parser == .mpa and setup.parser.full()) key = true;
                 const consumed: usize = @intCast(@max(index, 0));
                 data = data[consumed..];
                 got_output = frame_or_null != null;
@@ -992,17 +1283,22 @@ pub fn Layer(comptime Source: type) type {
                 };
                 p.frame_offset = p.next_frame_offset;
                 p.next_frame_offset = p.cur_offset + index;
+                p.fetch_timestamp = true;
                 p.cur_offset += @intCast(consumed);
+                const full = setup.parser.full();
                 var h: Held = .{
                     .stream = stream,
                     .data = try l.gpa.dupe(u8, frame),
-                    .pts = nopts,
-                    .dts = nopts,
+                    .pts = if (full) p.pts else nopts,
+                    .dts = if (full) p.dts else nopts,
                     .duration = 0,
                     // A parser keyframe, or (key_frame -1 without a
-                    // picture type) the raw packet's flag.
-                    .flags = if (key or raw_flags & key_flag != 0) key_flag else 0,
-                    .pos = p.frame_offset,
+                    // picture type) the raw packet's flag; the packet's
+                    // discard and corrupt flags pass.
+                    .flags = (if (key or raw_flags & key_flag != 0) key_flag else 0) | (raw_flags & (discard_flag | corrupt_flag)),
+                    // AVSTREAM_PARSE_FULL_RAW positions frames by bytes;
+                    // FULL gives the packet's position.
+                    .pos = if (full) p.pos else p.frame_offset,
                     .skip = null,
                     .new_extradata = null,
                     .new_metadata = null,
@@ -1048,7 +1344,7 @@ pub fn Layer(comptime Source: type) type {
                 // ts_to_samples; codecpar->frame_size is 0 without a
                 // decoder.
                 const sample = rational.rescale(pts, setup.time_base.num * @as(i64, rate), setup.time_base.den);
-                const duration = @max(0, rational.rescale(h.duration, setup.time_base.num * @as(i64, rate), setup.time_base.den));
+                const duration = @max(@as(i64, setup.frame_size), rational.rescale(h.duration, setup.time_base.num * @as(i64, rate), setup.time_base.den));
                 const end_sample = sample +% duration;
                 if (duration > 0 and end_sample >= setup.first_discard_sample and sample < setup.last_discard_sample)
                     discard_padding = @truncate(@min(end_sample -% setup.first_discard_sample, duration));
@@ -1184,8 +1480,7 @@ pub fn Layer(comptime Source: type) type {
             // The pts buffer of no delay: dts, else the pts.
             if (pkt.pts != nopts and pkt.dts == nopts) pkt.dts = pkt.pts;
             if (pkt.dts > s.cur_dts) s.cur_dts = pkt.dts;
-            // Every supported audio codec is intra-only.
-            if (setup.known) pkt.flags |= key_flag;
+            if (setup.media == .data or (setup.known and setup.intra_only)) pkt.flags |= key_flag;
         }
 
         /// update_initial_timestamps: the first real timestamp makes the

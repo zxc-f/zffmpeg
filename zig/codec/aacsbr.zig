@@ -143,6 +143,9 @@ pub const Sbr = struct {
     /// `ps`: the parametric stereo state, allocated with the first PS data
     /// (it starts in the same state either way).
     ps: ?*aacps.Ps = null,
+    /// Set when an extension's PS data is read, where read_sbr_extension
+    /// sets `avctx->profile` to HE-AACv2; the host clears and reads it.
+    ps_read: bool = false,
     gpa: std.mem.Allocator,
     /// N_Low and N_High.
     n: [2]u32 = @splat(0),
@@ -722,6 +725,7 @@ pub const Sbr = struct {
             }
             if (s.ps == null) s.ps = try aacps.Ps.create(s.gpa);
             num_bits_left.* -= s.ps.?.common.readData(r, num_bits_left.*);
+            s.ps_read = true;
             return;
         }
         // "Reserved SBR extensions", or FFmpeg's padding.

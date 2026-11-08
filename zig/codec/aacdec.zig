@@ -10,6 +10,8 @@
 // decode_mid_side_stereo, ff_aac_decode_ics, decode_cpe,
 // decode_drc_channel_exclusions, decode_dynamic_range, decode_fill,
 // decode_extension_payload, spectral_to_sample, parse_adts_frame_header,
+// decode_audio_specific_config, decode_ga_specific_config,
+// decode_eld_specific_config (T33a1),
 // decode_frame_ga, aac_decode_frame_int, aac_decode_frame),
 // aacdec_proc_template.c (lcg_random, decode_spectrum_and_dequant),
 // aacdec_dsp_template.c (dequant_scalefactors, apply_mid_side_stereo,
@@ -63,8 +65,16 @@ pub const Error = error{
     AdtsSync,
     AdtsSampleRate,
     AdtsFrameSize,
-    /// FFmpeg's AVERROR_PATCHWELCOME: an element id remapped past 15.
+    /// FFmpeg's AVERROR_PATCHWELCOME: an element id remapped past 15, or
+    /// an AudioSpecificConfig's error resilience flags, epConfig or Low
+    /// Delay SBR.
     PatchWelcome,
+    /// FFmpeg's AVERROR(ENOSYS): an AudioSpecificConfig of an object type
+    /// the decoder has no syntax for ("Audio object type %d").
+    NoSys,
+    /// FFmpeg's AVERROR(EINVAL) from avcodec_open2's own checks: a
+    /// negative sample rate (as an int) or more than FF_SANE_NB_CHANNELS.
+    InvalidArgument,
     /// A tool or object type the port does not decode (AVERROR_PATCHWELCOME
     /// in FFmpeg for some; others it decodes: notes.md "AAC decoder scope").
     UnsupportedFeature,
@@ -296,6 +306,11 @@ const ChannelElement = struct {
     coup: ChannelCoupling = .{},
 };
 
+/// `AV_PROFILE_AAC_HE` and `AV_PROFILE_AAC_HE_V2`, which SBR data in a
+/// frame sets.
+const profile_aac_he = 4;
+const profile_aac_he_v2 = 28;
+
 /// `cce_scale`: 2^(1/8), 2^(1/4), sqrt(2) and 2, as floats.
 const cce_scale = [4]f32{ 1.09050773266525765921, 1.18920711500272106672, std.math.sqrt2, 2 };
 
@@ -322,7 +337,11 @@ pub const Decoder = struct {
     mdct128: tx.Mdct,
     buf_mdct: [1024]f32 = @splat(0),
     temp: [128]f32 = @splat(0),
-    /// `avctx->ch_layout`, `sample_rate`, `frame_size` and `profile`.
+    /// `avctx->ch_layout`, `sample_rate`, `frame_size` and `profile`
+    /// (null for AV_PROFILE_UNKNOWN). The decoder sets `frame_size` and
+    /// `profile` only from frames: after `init` or `initExtradata` they
+    /// are 0 and null, where avcodec_open2 leaves the container's
+    /// (`avcodec_parameters_to_context`), which a caller copies in.
     channels: u32 = 0,
     mask: u64 = 0,
     sample_rate: u32 = 0,
@@ -332,29 +351,20 @@ pub const Decoder = struct {
     planes: std.ArrayList([2048]f32) = .empty,
     plane_slices: [max_channels][]const f32 = undefined,
     /// `avctx->seek_preroll`: the samples to decode after a seek before
-    /// the output is reliable.
+    /// the output is reliable. A container's larger value is kept
+    /// (FFMAX): a caller with one takes the maximum after the open.
     seek_preroll: u32 = 0,
     /// A faac fill element asked libavcodec to skip 1024 samples.
     skip_samples: u32 = 0,
 
-    /// ff_aac_decode_init without extradata (ADTS): the container's rate
-    /// and channel count, 0 when it gives none.
+    /// avcodec_open2 with FFmpeg's aac decoder and no extradata (ADTS):
+    /// ff_aac_decode_init with the container's rate and channel count, 0
+    /// when it gives none.
     pub fn init(gpa: std.mem.Allocator, sample_rate: u32, channels: u32) Error!Decoder {
+        try openChecks(sample_rate, channels);
         if (sample_rate > 96000) return error.InvalidData;
-        var mdct1024 = tx.Mdct.init(gpa, 1024, true, @floatCast(1.0 / 1024.0 / 32768.0)) catch |err| return switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            else => unreachable, // 1024 is a supported length
-        };
-        errdefer mdct1024.deinit();
-        var mdct128 = tx.Mdct.init(gpa, 128, true, @floatCast(1.0 / 128.0 / 32768.0)) catch |err| return switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            else => unreachable, // 128 is a supported length
-        };
-        errdefer mdct128.deinit();
-        // `avctx->sample_rate` starts as the container's.
-        var d: Decoder = .{ .gpa = gpa, .mdct1024 = mdct1024, .mdct128 = mdct128, .sample_rate = sample_rate };
-        // The transforms have their own cleanup above.
-        errdefer d.deinitElements();
+        var d = try create(gpa, sample_rate);
+        errdefer d.deinit();
         const m4ac = &d.oc[1].m4ac;
         m4ac.sample_rate = @intCast(sample_rate);
         m4ac.sampling_index = sampleRateIdx(sample_rate);
@@ -374,6 +384,158 @@ pub const Decoder = struct {
         d.seek_preroll = seekPreroll(&d.oc[1].m4ac);
         if (d.channels > max_channels) return error.InvalidData;
         return d;
+    }
+
+    /// avcodec_open2 with FFmpeg's aac decoder and the container's
+    /// `extradata` (an AudioSpecificConfig, as MP4's `esds` carries it),
+    /// rate and channel count: ff_aac_decode_init's
+    /// decode_audio_specific_config path, the output configured from the
+    /// configuration and `sample_rate` left as the container's until a
+    /// frame sets it. Empty extradata is `init`'s path. A configuration
+    /// FFmpeg refuses fails as avcodec_open2 does: `InvalidData`, `Failed`
+    /// (a PCE cut short), `PatchWelcome`, `NoSys` or `InvalidArgument`;
+    /// USAC, which FFmpeg decodes, is `UnsupportedFeature` (not ported).
+    pub fn initExtradata(gpa: std.mem.Allocator, extradata: []const u8, sample_rate: u32, channels: u32) Error!Decoder {
+        if (extradata.len == 0) return init(gpa, sample_rate, channels);
+        try openChecks(sample_rate, channels);
+        if (sample_rate > 96000) return error.InvalidData;
+        var d = try create(gpa, sample_rate);
+        errdefer d.deinit();
+        d.oc[1].m4ac.sample_rate = @intCast(sample_rate);
+        try d.decodeAudioSpecificConfig(extradata);
+        d.seek_preroll = seekPreroll(&d.oc[1].m4ac);
+        if (d.channels > max_channels) return error.InvalidData;
+        return d;
+    }
+
+    /// avcodec_open2's checks before the decoder's init, of the values a
+    /// container gives: the rate an int (negative past maxInt(i32)) and
+    /// at most FF_SANE_NB_CHANNELS channels. A rate of 0 passes, as the
+    /// decoder has AV_CODEC_CAP_CHANNEL_CONF.
+    fn openChecks(sample_rate: u32, channels: u32) Error!void {
+        if (sample_rate > std.math.maxInt(i32)) return error.InvalidArgument;
+        if (channels > 512) return error.InvalidArgument;
+    }
+
+    /// The decoder's state before ff_aac_decode_init's configuration: its
+    /// transforms (init_dsp's, those the port uses) and `avctx->sample_rate`,
+    /// which starts as the container's.
+    fn create(gpa: std.mem.Allocator, sample_rate: u32) Error!Decoder {
+        var mdct1024 = tx.Mdct.init(gpa, 1024, true, @floatCast(1.0 / 1024.0 / 32768.0)) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => unreachable, // 1024 is a supported length
+        };
+        errdefer mdct1024.deinit();
+        const mdct128 = tx.Mdct.init(gpa, 128, true, @floatCast(1.0 / 128.0 / 32768.0)) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => unreachable, // 128 is a supported length
+        };
+        return .{ .gpa = gpa, .mdct1024 = mdct1024, .mdct128 = mdct128, .sample_rate = sample_rate };
+    }
+
+    // ---- The AudioSpecificConfig ----
+
+    /// decode_audio_specific_config and decode_audio_specific_config_gb
+    /// on extradata, with the sync extension searched for: the
+    /// configuration's common part (`ff_mpeg4audio_get_config_gb`), then
+    /// its object type's specific config, which configures the output.
+    fn decodeAudioSpecificConfig(d: *Decoder, extradata: []const u8) Error!void {
+        // `bit_size > INT_MAX`, and init_get_bits' own limit.
+        var r = bits.BitReader.init(extradata) catch return error.InvalidData;
+        // The common part is read from a copy; the reader moves past it.
+        var gbc = r;
+        const parsed = mpeg4audio.parseBits(&gbc, true) catch return error.InvalidData;
+        const m4ac = parsed.config;
+        // "invalid sampling rate index"; the escape (15) is refused too.
+        if (m4ac.sampling_index > 12) return error.InvalidData;
+        // "invalid low delay sampling rate index".
+        if (m4ac.object_type == mpeg4audio.aot.er_aac_ld and (m4ac.sampling_index < 3 or m4ac.sampling_index > 7)) return error.InvalidData;
+        r.skip(parsed.specific_config_bit);
+        d.oc[1].m4ac = m4ac;
+        // A channel configuration below 15, as get_config_gb checks.
+        const chan_config: u32 = @intCast(m4ac.chan_config);
+        switch (m4ac.object_type) {
+            mpeg4audio.aot.aac_main,
+            mpeg4audio.aot.aac_lc,
+            mpeg4audio.aot.aac_ssr,
+            mpeg4audio.aot.aac_ltp,
+            mpeg4audio.aot.er_aac_lc,
+            mpeg4audio.aot.er_aac_ld,
+            => try d.decodeGaSpecificConfig(&r, 0, chan_config),
+            mpeg4audio.aot.er_aac_eld => try d.decodeEldSpecificConfig(&r, chan_config),
+            // ff_aac_usac_config_decode: USAC is not ported.
+            mpeg4audio.aot.usac => return error.UnsupportedFeature,
+            else => return error.NoSys, // "Audio object type %s%d"
+        }
+    }
+
+    /// decode_ga_specific_config: the frame length, the core coder delay,
+    /// the channel layout (a PCE for configuration 0) and the error
+    /// resilience fields FFmpeg refuses.
+    fn decodeGaSpecificConfig(d: *Decoder, r: *bits.BitReader, get_bit_alignment: usize, chan_config: u32) Error!void {
+        const m4ac = &d.oc[1].m4ac;
+        m4ac.frame_length_short = r.bit();
+        if (r.bit() != 0) r.skip(14); // dependsOnCoreCoder, coreCoderDelay
+        const extension_flag = r.bit();
+        if (m4ac.object_type == mpeg4audio.aot.aac_scalable or m4ac.object_type == mpeg4audio.aot.er_aac_scalable) r.skip(3); // layerNr
+        var map: [max_elem_id * 4]Tag = undefined;
+        var tags: usize = 0;
+        if (chan_config == 0) {
+            r.skip(4); // element_instance_tag
+            tags = try decodePce(r, &map, get_bit_alignment);
+        } else {
+            tags = try defaultChannelConfig(&map, chan_config);
+        }
+        if (countChannels(map[0..tags]) > 1) {
+            m4ac.ps = 0;
+        } else if (m4ac.sbr == 1 and m4ac.ps == -1) {
+            m4ac.ps = 1;
+        }
+        try d.outputConfigure(map[0..tags], .global_hdr, false);
+        if (extension_flag != 0) {
+            switch (m4ac.object_type) {
+                mpeg4audio.aot.er_bsac => r.skip(5 + 11), // numOfSubFrame, layer_length
+                mpeg4audio.aot.er_aac_lc,
+                mpeg4audio.aot.er_aac_ltp,
+                mpeg4audio.aot.er_aac_scalable,
+                mpeg4audio.aot.er_aac_ld,
+                => if (r.bits(3) != 0) return error.PatchWelcome, // "AAC data resilience (flags %x)"
+                else => {},
+            }
+            r.skip(1); // extensionFlag3
+        }
+        switch (m4ac.object_type) {
+            mpeg4audio.aot.er_aac_lc,
+            mpeg4audio.aot.er_aac_ltp,
+            mpeg4audio.aot.er_aac_scalable,
+            mpeg4audio.aot.er_aac_ld,
+            => if (r.bits(2) != 0) return error.PatchWelcome, // "epConfig %d"
+            else => {},
+        }
+    }
+
+    /// decode_eld_specific_config: no SBR or PS, the frame length, the
+    /// ELD extensions skipped, the default layout of `chan_config`.
+    fn decodeEldSpecificConfig(d: *Decoder, r: *bits.BitReader, chan_config: u32) Error!void {
+        const m4ac = &d.oc[1].m4ac;
+        m4ac.ps = 0;
+        m4ac.sbr = 0;
+        m4ac.frame_length_short = r.bit();
+        if (r.bits(3) != 0) return error.PatchWelcome; // "AAC data resilience (flags %x)"
+        if (r.bit() != 0) return error.PatchWelcome; // "Low Delay SBR"
+        // Up to ELDEXT_TERM: each pass reads at least 8 bits, and zeros
+        // past the end end it.
+        while (r.bits(4) != 0) {
+            var len: i64 = r.bits(4);
+            if (len == 15) len += r.bits(8);
+            if (len == 15 + 255) len += r.bits(16);
+            if (r.left() < len * 8 + 4) return error.InvalidData;
+            r.skipLong(8 * len);
+        }
+        var map: [max_elem_id * 4]Tag = undefined;
+        const tags = try defaultChannelConfig(&map, chan_config);
+        try d.outputConfigure(map[0..tags], .global_hdr, false);
+        if (r.bits(2) != 0) return error.PatchWelcome; // "epConfig %d"
     }
 
     pub fn deinit(d: *Decoder) void {
@@ -582,7 +744,7 @@ pub const Decoder = struct {
         if (packet.len >= std.math.maxInt(i32) / 8) return error.InvalidData;
         var r = bits.BitReader.init(packet) catch return error.InvalidData;
         switch (d.oc[1].m4ac.object_type) {
-            mpeg4audio.aot.er_aac_lc, 19, mpeg4audio.aot.er_aac_ld, mpeg4audio.aot.er_aac_eld => return error.UnsupportedFeature,
+            mpeg4audio.aot.er_aac_lc, mpeg4audio.aot.er_aac_ltp, mpeg4audio.aot.er_aac_ld, mpeg4audio.aot.er_aac_eld => return error.UnsupportedFeature,
             else => {},
         }
         const samples = try d.decodeFrameInt(&r);
@@ -618,6 +780,10 @@ pub const Decoder = struct {
             mpeg4audio.aot.aac_main, mpeg4audio.aot.aac_ltp => return error.UnsupportedFeature,
             else => {},
         }
+        // A configuration's 960-sample frames (frameLengthFlag): FFmpeg
+        // decodes them with its 960 and 120 transforms, windows and band
+        // tables; not ported.
+        if (d.oc[1].m4ac.frame_length_short != 0) return error.UnsupportedFeature;
         return d.decodeFrameGa(r);
     }
 
@@ -823,15 +989,19 @@ pub const Decoder = struct {
                     // parametric stereo.
                     m4ac.sbr = 1;
                     m4ac.ps = 1;
+                    d.profile = profile_aac_he_v2;
                     const tags = d.oc[1].layout_map_tags;
                     var map: [max_elem_id * 4]Tag = undefined;
                     @memcpy(map[0..tags], d.oc[1].layout_map[0..tags]);
                     try d.outputConfigure(map[0..tags], d.oc[1].status, true);
                 } else {
                     m4ac.sbr = 1;
+                    d.profile = profile_aac_he;
                 }
                 const sbr = try d.sbrOf(che);
+                sbr.ps_read = false;
                 _ = try sbr.decodeExtension(r, ext_type == 0xe, cnt, @intCast(@backingInt(elem_type)), &d.oc[1].m4ac);
+                if (sbr.ps_read) d.profile = profile_aac_he_v2;
                 return cnt;
             },
             // EXT_DYNAMIC_RANGE.
@@ -902,13 +1072,31 @@ fn nextCase(c: i32) i32 {
     };
 }
 
-/// seek_preroll: the frame before (and, with SBR, one more), for the
-/// object types this decoder takes.
+/// seek_preroll: the frame before (and, with SBR, one more; ELD's low
+/// delay filterbank three more), twice the samples when SBR doubles the
+/// rate.
 fn seekPreroll(m4ac: *const mpeg4audio.Config) u32 {
-    const frame: u32 = if (m4ac.frame_length_short != 0) 960 else 1024;
-    const frames: u32 = 1 + @as(u32, @intFromBool(m4ac.sbr == 1));
+    var frame: u32 = if (m4ac.frame_length_short != 0) 960 else 1024;
+    var frames: u32 = 1 + @as(u32, @intFromBool(m4ac.sbr == 1));
     const upsampled: u5 = @intFromBool(m4ac.sbr == 1 and m4ac.ext_sample_rate > m4ac.sample_rate);
+    if (m4ac.object_type == mpeg4audio.aot.usac) {
+        frame = if (m4ac.frame_length_short != 0) 768 else 1024;
+    } else if (m4ac.object_type == mpeg4audio.aot.er_aac_ld or m4ac.object_type == mpeg4audio.aot.er_aac_eld) {
+        frame >>= 1;
+    }
+    if (m4ac.object_type == mpeg4audio.aot.er_aac_eld) frames += 2;
     return (frame * frames) << upsampled;
+}
+
+/// count_channels: the channels a layout outputs (a CPE two, coupling
+/// elements none).
+fn countChannels(map: []const Tag) u32 {
+    var sum: u32 = 0;
+    for (map) |e| {
+        if (e[2] == Position.off or e[2] == Position.cc) continue;
+        sum += if (e[0] == @backingInt(ElemType.cpe)) 2 else 1;
+    }
+    return sum;
 }
 
 /// ff_aac_sample_rate_idx.
@@ -1898,6 +2086,358 @@ test "every ADTS fixture decodes as FFmpeg's aac decoder decodes it (vectors/aac
         }
     }
     try testing.expectEqual(44, checked);
+}
+
+// The extradata path (vectors/aac_asc.txt) --------------------------------
+
+const asc_vectors = @embedFile("../testing/vectors/aac_asc.txt");
+
+/// aac_asc_vectors.c's spelling of an open or decode failure.
+fn ascResult(err: Error) ?[]const u8 {
+    return switch (err) {
+        error.InvalidData => "INVALIDDATA",
+        error.Failed => "-1",
+        error.AdtsSync => "-16977930",
+        error.AdtsSampleRate => "-50531338",
+        error.AdtsFrameSize => "-67308554",
+        error.PatchWelcome => "-1163346256",
+        error.NoSys => "-38",
+        error.InvalidArgument => "-22",
+        error.UnsupportedFeature, error.OutOfMemory => null,
+    };
+}
+
+/// The `C` line's codec context before the open: the values
+/// avcodec_parameters_to_context copies from the container.
+const Container = struct {
+    sample_rate: u32,
+    channels: u32,
+    frame_size: u32,
+    profile: ?i32,
+    seek_preroll: u32,
+
+    fn parse(line: []const u8) !Container {
+        var f = std.mem.tokenizeScalar(u8, line, ' ');
+        _ = f.next();
+        const sample_rate = try std.fmt.parseInt(u32, f.next() orelse return error.BadVector, 10);
+        const channels = try std.fmt.parseInt(u32, f.next() orelse return error.BadVector, 10);
+        const frame_size = try std.fmt.parseInt(u32, f.next() orelse return error.BadVector, 10);
+        const profile = try std.fmt.parseInt(i32, f.next() orelse return error.BadVector, 10);
+        const seek_preroll = try std.fmt.parseInt(u32, f.next() orelse return error.BadVector, 10);
+        return .{ .sample_rate = sample_rate, .channels = channels, .frame_size = frame_size, .profile = if (profile == -99) null else profile, .seek_preroll = seek_preroll };
+    }
+
+    /// Opens the decoder as the oracle does, the container's frame size,
+    /// profile and pre-roll copied in as avcodec_parameters_to_context
+    /// leaves them.
+    fn open(c: Container, gpa: std.mem.Allocator, extradata: []const u8) Error!Decoder {
+        var d = try Decoder.initExtradata(gpa, extradata, c.sample_rate, c.channels);
+        d.frame_size = c.frame_size;
+        d.profile = c.profile;
+        d.seek_preroll = @max(d.seek_preroll, c.seek_preroll);
+        return d;
+    }
+};
+
+fn printState(gpa: std.mem.Allocator, d: *const Decoder, out: *std.ArrayList(u8)) !void {
+    try out.print(gpa, "S {d} {d} {d} {d} {d} {d}\n", .{ d.sample_rate, d.channels, d.mask, d.profile orelse -99, d.frame_size, d.seek_preroll });
+}
+
+/// aac_asc_vectors.c's lines for one packet: avcodec_send_packet's result
+/// (the first decode's failure), each frame, a later failure, the state.
+fn decodeAscPacket(gpa: std.mem.Allocator, d: *Decoder, packet: []const u8, out: *std.ArrayList(u8)) !void {
+    var data = packet;
+    var sent = false;
+    while (data.len != 0) {
+        const got = d.decode(data) catch |err| {
+            const code = ascResult(err) orelse return err;
+            if (!sent) {
+                try out.print(gpa, "P {d} {s}\n", .{ packet.len, code });
+                sent = true;
+            } else try out.print(gpa, "E {s}\n", .{code});
+            break;
+        };
+        data = data[@min(got.consumed, data.len)..];
+        const frame = got.frame orelse continue;
+        if (!sent) {
+            try out.print(gpa, "P {d} 0\n", .{packet.len});
+            sent = true;
+        }
+        var md5: std.crypto.hash.Md5 = .init(.{});
+        for (frame.planes) |plane| {
+            for (plane) |v| {
+                var le: [4]u8 = undefined;
+                std.mem.writeInt(u32, &le, @bitCast(v), .little);
+                md5.update(&le);
+            }
+        }
+        var digest: [16]u8 = undefined;
+        md5.final(&digest);
+        try out.print(gpa, "D {d} {d} {d} {x}\n", .{ frame.samples, frame.sample_rate, frame.planes.len, &digest });
+    }
+    if (!sent) try out.print(gpa, "P {d} 0\n", .{packet.len});
+    try printState(gpa, d, out);
+}
+
+/// A vector line's hex bytes (`-` for none), in `buf`.
+fn hexLine(gpa: std.mem.Allocator, line: []const u8, buf: *std.ArrayList(u8)) ![]const u8 {
+    const hex = line[2..];
+    buf.clearRetainingCapacity();
+    if (std.mem.eql(u8, hex, "-")) return buf.items;
+    try buf.resize(gpa, hex.len / 2);
+    return std.fmt.hexToBytes(buf.items, hex);
+}
+
+/// One case's lines from its inputs (the F, X, C and K lines of `block`),
+/// as aac_asc_vectors.c prints them.
+fn renderAscCase(gpa: std.mem.Allocator, block: []const u8, out: *std.ArrayList(u8)) !void {
+    var extradata: std.ArrayList(u8) = .empty;
+    defer extradata.deinit(gpa);
+    var packet: std.ArrayList(u8) = .empty;
+    defer packet.deinit(gpa);
+    var decoder: ?Decoder = null;
+    defer if (decoder) |*d| d.deinit();
+    var lines = std.mem.splitScalar(u8, block, '\n');
+    while (lines.next()) |line| {
+        if (line.len < 2) continue;
+        switch (line[0]) {
+            'F' => try out.print(gpa, "{s}\n", .{line}),
+            'X' => {
+                try out.print(gpa, "{s}\n", .{line});
+                _ = try hexLine(gpa, line, &extradata);
+            },
+            'C' => {
+                try out.print(gpa, "{s}\n", .{line});
+                const c = try Container.parse(line);
+                const d = c.open(gpa, extradata.items) catch |err| {
+                    try out.print(gpa, "O {s}\n", .{ascResult(err) orelse return err});
+                    continue;
+                };
+                decoder = d;
+                try out.appendSlice(gpa, "O ok\n");
+                try printState(gpa, &decoder.?, out);
+            },
+            'K' => {
+                try out.print(gpa, "{s}\n", .{line});
+                const bytes = try hexLine(gpa, line, &packet);
+                // A K line follows an open that succeeded.
+                const d = if (decoder) |*d| d else return error.BadVector;
+                try decodeAscPacket(gpa, d, bytes, out);
+            },
+            // The oracle's results, which the case renders.
+            else => {},
+        }
+    }
+}
+
+test "extradata and raw packets decode as FFmpeg's aac decoder decodes them (vectors/aac_asc.txt)" {
+    const gpa = testing.allocator;
+    var got: std.ArrayList(u8) = .empty;
+    defer got.deinit(gpa);
+    var cases: usize = 0;
+    var frames: usize = 0;
+    var start: usize = 0;
+    while (start < asc_vectors.len) {
+        const end = if (std.mem.findPos(u8, asc_vectors, start, "\nF ")) |at| at + 1 else asc_vectors.len;
+        const block = asc_vectors[start..end];
+        start = end;
+        got.clearRetainingCapacity();
+        try renderAscCase(gpa, block, &got);
+        testing.expectEqualStrings(block, got.items) catch |err| {
+            std.debug.print("aac_asc case {s}\n", .{block[0 .. std.mem.findScalar(u8, block, '\n') orelse block.len]});
+            return err;
+        };
+        cases += 1;
+        frames += std.mem.count(u8, block, "\nD ");
+    }
+    try testing.expect(cases >= 55);
+    try testing.expect(frames >= 80);
+}
+
+test "a configuration of 960-sample frames opens as FFmpeg's, and its frames are refused" {
+    const gpa = testing.allocator;
+    // AAC-LC 44100 stereo, frameLengthFlag 1.
+    var d = try Decoder.initExtradata(gpa, &.{ 0x12, 0x14 }, 44100, 2);
+    defer d.deinit();
+    try testing.expectEqual(2, d.channels);
+    try testing.expectEqual(960, d.seek_preroll);
+    // A silent CPE: FFmpeg decodes it into 960 samples; not ported.
+    try testing.expectError(error.UnsupportedFeature, d.decode(&.{ 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0e }));
+    // The refusal comes after the frame's profile is set, before its
+    // elements.
+    try testing.expectEqual(1, d.profile.?);
+}
+
+test "a USAC configuration is refused, which FFmpeg decodes" {
+    // AOT 31 escaped to 42, 48000 Hz, stereo.
+    try testing.expectError(error.UnsupportedFeature, Decoder.initExtradata(testing.allocator, &.{ 0xf9, 0x46, 0x40, 0x00 }, 48000, 2));
+}
+
+/// An allocation-failure sweep's stream: a vector case's extradata,
+/// container and packets.
+const AscStream = struct {
+    extradata: []const u8,
+    container: Container,
+    packets: []const []const u8,
+};
+
+fn ascUnderFailures(gpa: std.mem.Allocator, s: *const AscStream) anyerror!void {
+    var d = s.container.open(gpa, s.extradata) catch |err| return if (err == error.OutOfMemory) err else {};
+    defer d.deinit();
+    for (s.packets) |p| {
+        var data = p;
+        while (data.len != 0) {
+            const got = d.decode(data) catch |err| {
+                if (err == error.OutOfMemory) return err;
+                break;
+            };
+            data = data[@min(got.consumed, data.len)..];
+        }
+    }
+}
+
+/// A vector case's inputs, the bytes owned by `arena`.
+fn ascStream(arena: std.mem.Allocator, name: []const u8, max_packets: usize) !AscStream {
+    const at = std.mem.find(u8, asc_vectors, name) orelse return error.MissingVector;
+    const end = std.mem.findPos(u8, asc_vectors, at, "\nF ") orelse asc_vectors.len;
+    var lines = std.mem.splitScalar(u8, asc_vectors[at..end], '\n');
+    var s: AscStream = .{ .extradata = &.{}, .container = undefined, .packets = &.{} };
+    var packets: std.ArrayList([]const u8) = .empty;
+    while (lines.next()) |line| {
+        if (line.len < 2) continue;
+        switch (line[0]) {
+            'X' => {
+                var buf: std.ArrayList(u8) = .empty;
+                s.extradata = try arena.dupe(u8, try hexLine(arena, line, &buf));
+            },
+            'C' => s.container = try Container.parse(line),
+            'K' => if (packets.items.len < max_packets) {
+                var buf: std.ArrayList(u8) = .empty;
+                try packets.append(arena, try arena.dupe(u8, try hexLine(arena, line, &buf)));
+            },
+            else => {},
+        }
+    }
+    s.packets = packets.items;
+    return s;
+}
+
+test "the extradata path frees everything under every allocation and remap failure" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // A PCE, explicit SBR (its state allocated by a frame), the implicit
+    // PS reconfiguration of HE-AAC mono, and a refused configuration.
+    for ([_][]const u8{ "F asc:pce_5point1\n", "F asc:he_aot5_stereo\n", "F asc:implicit_he_mono\n", "F asc:pce_too_many\n" }) |name| {
+        const s = try ascStream(arena, name, 3);
+        try hostile.checkAllocationFailuresWith(testing.allocator, .fail, &s, ascUnderFailures);
+    }
+}
+
+/// The extradata fuzz entry's input: the extradata (at most 512 bytes),
+/// the container's rate and channel count, then up to 16 packets of at
+/// most 2048 bytes, each after an end flag.
+fn ascFuzzRun(smith: *std.testing.Smith) !u32 {
+    const gpa = testing.allocator;
+    var extradata: [512 + hostile.max_growth]u8 = undefined;
+    const len = smith.slice(&extradata);
+    const rate = smith.valueRangeAtMost(u32, 0, 200000);
+    const channels = smith.valueRangeAtMost(u32, 0, 600);
+    var d = Decoder.initExtradata(gpa, extradata[0..len], rate, channels) catch |err| return if (err == error.OutOfMemory) err else 0;
+    defer d.deinit();
+    try testing.expect(d.channels <= max_channels);
+    var frames: u32 = 0;
+    var packet: [2048]u8 = undefined;
+    for (0..16) |_| {
+        if (smith.eos()) break;
+        var data = packet[0..smith.slice(&packet)];
+        while (data.len != 0) {
+            const got = d.decode(data) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => break,
+            };
+            try testing.expect(got.consumed > 0);
+            data = data[@min(got.consumed, data.len)..];
+            const f = got.frame orelse continue;
+            try testing.expect(f.samples == 1024 or f.samples == 2048);
+            try testing.expect(f.planes.len > 0 and f.planes.len <= max_channels);
+            for (f.planes) |plane| for (plane[0..f.samples]) |v| std.mem.doNotOptimizeAway(v);
+            frames += 1;
+        }
+    }
+    return frames;
+}
+
+fn ascFuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
+    _ = context;
+    _ = try ascFuzzRun(smith);
+}
+
+/// A seed of `ascFuzzOne` from a vector case: its extradata, container
+/// and first packets.
+fn ascFuzzSeed(gpa: std.mem.Allocator, s: AscStream) ![]u8 {
+    var seed: hostile.Seed = .{};
+    errdefer seed.deinit(gpa);
+    try seed.slice(gpa, s.extradata);
+    try seed.value(gpa, s.container.sample_rate);
+    try seed.value(gpa, s.container.channels);
+    for (s.packets) |p| {
+        try seed.eos(gpa, false);
+        try seed.slice(gpa, p);
+    }
+    try seed.eos(gpa, true);
+    return seed.toOwnedSlice(gpa);
+}
+
+/// The vector cases the extradata fuzz entry starts from: each kind of
+/// configuration, with packets where the case has them.
+const asc_fuzz_cases = [_][]const u8{
+    "F asc:lc_stereo_44k\n",    "F asc:lc_mono_cpe\n",      "F asc:he_aot5_stereo\n",
+    "F asc:hev2_aot29_mono\n",  "F asc:he_sync_ext_mono\n", "F asc:sbr_off\n",
+    "F asc:implicit_he_mono\n", "F asc:pce_5point1\n",      "F asc:he_5point1\n",
+    "F asc:pce_height\n",       "F asc:eld_ext_payload\n",  "F asc:ld_stereo\n",
+    "F asc:depends_on_core\n",  "F mov_aac_51_mov:0\n",     "F mov_aac_mono_mov:0\n",
+};
+
+fn ascFuzzCorpus(gpa: std.mem.Allocator, arena: std.mem.Allocator) ![][]u8 {
+    const seeds = try arena.alloc([]u8, asc_fuzz_cases.len);
+    for (asc_fuzz_cases, seeds) |name, *seed| {
+        const s = try ascStream(arena, name, 4);
+        const owned = try ascFuzzSeed(gpa, s);
+        seed.* = try arena.dupe(u8, owned);
+        gpa.free(owned);
+    }
+    return seeds;
+}
+
+test "fuzz: the AAC decoder on arbitrary extradata and raw packets" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const seeds = try ascFuzzCorpus(testing.allocator, arena_state.allocator());
+    try std.testing.fuzz({}, ascFuzzOne, .{ .corpus = seeds });
+}
+
+test "every seed of the extradata fuzz entry opens the decoder, and those with packets decode frames" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const seeds = try ascFuzzCorpus(testing.allocator, arena);
+    for (seeds, asc_fuzz_cases) |seed, name| {
+        const s = try ascStream(arena, name, 4);
+        var smith: std.testing.Smith = .{ .in = seed };
+        const frames = try ascFuzzRun(&smith);
+        if (s.packets.len > 0) try testing.expect(frames > 0);
+        // The configuration alone opens a decoder.
+        var d = try s.container.open(testing.allocator, s.extradata);
+        d.deinit();
+    }
+}
+
+test "mutation smoke: the AAC decoder on mutated extradata" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const seeds = try ascFuzzCorpus(testing.allocator, arena_state.allocator());
+    try hostile.mutationSmoke({}, ascFuzzOne, seeds, 64, 0x61736321);
 }
 
 /// apply_dependent_coupling (before the IMDCT) and

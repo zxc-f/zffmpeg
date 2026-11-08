@@ -50,6 +50,7 @@ const ogg = @import("ogg.zig");
 const mp3 = @import("mp3.zig");
 const aac = @import("aac.zig");
 const ac3 = @import("ac3.zig");
+const mov = @import("mov.zig");
 const rational = @import("../core/rational.zig");
 const demux = @import("demux.zig");
 const seek = @import("seek.zig");
@@ -64,7 +65,7 @@ pub const Container = registry.Container;
 /// The WAV, AU, AIFF, raw PCM, CAF and FLAC contract errors, which share
 /// their common names, `UnknownFormat` for a stream no demuxer recognizes,
 /// and `UnusedOption`.
-pub const Error = wav.Error || au.Error || aiff.Error || raw.Error || caf.Error || flac.Error || ogg.Error || mp3.Error || aac.Error || error{
+pub const Error = wav.Error || au.Error || aiff.Error || raw.Error || caf.Error || flac.Error || ogg.Error || mp3.Error || aac.Error || mov.Error || error{
     /// No demuxer's probe scored the stream, as FFmpeg's "Invalid data found
     /// when processing input"; force a format to parse it anyway.
     UnknownFormat,
@@ -575,6 +576,7 @@ pub fn probeWith(reader: *std.Io.Reader, limits: Limits, options: Options) Error
         .mp3 => return probeMp3(reader, &input, options),
         .aac => return probeAac(reader, &input, options),
         .ac3 => return probeAc3(reader, &input, options),
+        .mov => return probeMov(reader, &input, options),
         // Output only (T29d): detection never names it, nor does a forced
         // input format (`findDemuxer`).
         .mp2, .adts => return error.UnsupportedFormat,
@@ -741,6 +743,55 @@ fn probeAc3(reader: *std.Io.Reader, input: *Input, options: Options) Error!Probe
         .frame_count = if (duration >= 0) @intCast(rational.rescale(duration, params.sample_rate, ac3.time_base.den)) else null,
         .time_base_duration = if (duration >= 0) .{ .ts = duration, .den = @intCast(ac3.time_base.den) } else null,
     };
+}
+
+/// MP4 and QuickTime (T33a1): the demuxer and libavformat's read-ahead,
+/// as ffprobe opens the input; the first audio track, as `-select_streams
+/// a:0` reports it, with the sample format its decoder gives. A codec the
+/// port has no decoder for is `UnsupportedFormat`. The format's tags are
+/// the input's (`ftyp`, `mvhd`).
+fn probeMov(reader: *std.Io.Reader, input: *Input, options: Options) Error!Probed {
+    const gpa = options.gpa orelse if (options.tags) |t| t.gpa else return error.UnsupportedFormat;
+    const d = if (options.source.seeker) |sk| blk: {
+        sk.seekTo(0) catch return error.IoFailure;
+        break :blk try mov.Demuxer.initSeekable(gpa, reader, sk, .{});
+    } else try mov.Demuxer.init(gpa, input.reader(), .{});
+    defer d.deinit();
+    var layer = demux.Layer(mov.Demuxer).init(gpa, d);
+    defer layer.deinit();
+    try layer.findStreamInfo();
+    for (0..d.streamCount()) |i| {
+        const info = try mov.streamInfo(d, &layer, i);
+        if (info.media != .audio) continue;
+        const codec = codecs.find(info.codec) orelse return error.UnsupportedFormat;
+        const rate = std.math.cast(u32, info.sample_rate) orelse return error.UnsupportedFormat;
+        if (rate == 0 or info.time_base.num != 1) return error.UnsupportedFormat;
+        // The decoders' sample formats, as ffprobe reports them once
+        // avformat_find_stream_info opened them.
+        const sample_format: audio.SampleFormat = switch (codec) {
+            .pcm => |p| p.storage(),
+            .flac => if (info.extradata.len >= flac_codec.streaminfo_size and
+                flac_codec.StreamInfo.parse(info.extradata[0..flac_codec.streaminfo_size]).bps > 16) .s32 else .s16,
+            .alac => blk: {
+                const config = alac.Config.parse(info.extradata, info.layout.channelCount()) catch return error.UnsupportedFormat;
+                break :blk if (config.sample_size == 16) .s16p else .s32p;
+            },
+            else => .fltp,
+        };
+        if (options.tags) |t| {
+            std.debug.assert(t.dictionary.count() == 0);
+            std.mem.swap(metadata.Dictionary, t.dictionary, &d.tags);
+        }
+        const den = std.math.cast(u32, info.time_base.den) orelse return error.UnsupportedFormat;
+        return .{
+            .container = .mov,
+            .codec = codec,
+            .format = audio.Format.initLayout(rate, info.layout, sample_format) catch return error.UnsupportedFormat,
+            .frame_count = if (info.duration >= 0) @intCast(rational.rescale(info.duration, rate, den)) else null,
+            .time_base_duration = if (info.duration >= 0) .{ .ts = info.duration, .den = den } else null,
+        };
+    }
+    return error.UnsupportedFormat;
 }
 
 /// The bits per sample of an Ogg FLAC stream's STREAMINFO.
@@ -1050,9 +1101,9 @@ fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
             else
                 try expectSameResult(flacProbe(&after), got, .flac);
         },
-        // Ogg's and MP3's demuxers need an allocator, which this probe has
-        // not.
-        .ogg, .mp3, .aac, .ac3 => try std.testing.expectError(error.UnsupportedFormat, got),
+        // Ogg's, MP3's and MP4's demuxers need an allocator, which this
+        // probe has not.
+        .ogg, .mp3, .aac, .ac3, .mov => try std.testing.expectError(error.UnsupportedFormat, got),
         .raw, .mp2, .adts => unreachable, // no content probe chooses raw PCM or the output-only formats
     } else try std.testing.expectError(error.UnknownFormat, got);
 }

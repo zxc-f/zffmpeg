@@ -5570,6 +5570,556 @@ def adts_probe_score(buf):
     return 0
 
 
+# MP4, MOV, M4A and 3GP fixtures (TODO.md T33a1): files the reference
+# build's mp4, mov and ipod muxers make (mov_fixtures.sh), and boxes crafted
+# here around their sample entries. What FFmpeg makes of each is
+# mov_vectors.c's (vectors/mov.txt); the manifest records whether the port
+# opens each one.
+
+MOV_DIR = HERE / "mp4"
+MOV_MANIFEST = MOV_DIR / "manifest.zon"
+MOV_README = MOV_DIR / "README.md"
+
+# Each entry: the file's extension, its inputs (a generate.py signal as
+# channels, the input's channel layout, rate, sample count, seed and signal
+# kind as AAC_FFMPEG's, or a committed fixture's path under fixtures/), the
+# ffmpeg options after the inputs (codec, muxer and its flags), and the
+# file's SHA-256. Every command adds the bit-exact flags and drops the
+# inputs' metadata.
+MOV_FFMPEG = {
+    "mov_aac_stereo": ("mp4", [(2, "stereo", 48000, 5760, 201, "smooth")],
+                       "-c:a aac -b:a 64k -use_editlist 0",
+        "08f377457dfc75be2b1ef604ffd503fba93f02dbbcb52781c7e169a2956aa268"),
+    "mov_aac_faststart": ("m4a", [(2, "stereo", 44100, 4410, 202, "tones")],
+                          "-c:a aac -b:a 96k -use_editlist 0 -movflags +faststart -f ipod",
+        "7b73cb18c6199a217760df5150d17ebed8b6a20253e0876198a29a3674f0b42c"),
+    "mov_aac_editlist": ("mp4", [(2, "stereo", 48000, 3000, 203, "smooth")], "-c:a aac -b:a 64k",
+        "35cc34848cbe0e6f2fd7cceb726345e8fd3d4fe065f9753239287178e263f094"),
+    "mov_aac_mono_mov": ("mov", [(1, "mono", 22050, 3000, 204, "tones")],
+                         "-c:a aac -b:a 32k -use_editlist 0",
+        "8abd4c22332217dd5e7741df1071f8561e9041d6c780e17903620cc2eee4d424"),
+    "mov_aac_51_mov": ("mov", [(6, "5.1(side)", 48000, 2048, 205, "smooth")],
+                       "-c:a aac -b:a 192k -use_editlist 0",
+        "21a75c52c24d5793ba548927f616246730e3049021ae127c2d6ee202da301591"),
+    "mov_alac_stereo": ("m4a", [(2, "stereo", 44100, 5000, 206, "smooth")], "-c:a alac -use_editlist 0 -f ipod",
+                        
+        "13348af6090485585adc832144c717881cf0c1b6d226152b298417f1d31acdef"),
+    "mov_alac_editlist": ("mp4", [(2, "stereo", 44100, 5000, 207, "tones")], "-c:a alac",
+        "ada5b29834a9e2ca998a9496845e0d5e906c908e165cec9e44b7ddbc182ed63c"),
+    "mov_alac_quad_mov": ("mov", [(4, "quad", 48000, 3000, 208, "smooth")], "-c:a alac -use_editlist 0",
+        "8e59e529dcd36873c8717f7bf1de08d6e5cffa160c2ad966e68543f554b2a927"),
+    "mov_flac_stereo": ("mp4", [(2, "stereo", 48000, 5000, 209, "smooth")], "-c:a flac -use_editlist 0",
+        "9a188812aa321f87a72339bc3256226464fe96afd84eb30723eae0e511a49f10"),
+    "mov_flac_editlist": ("mp4", [(1, "mono", 16000, 3000, 210, "tones")], "-c:a flac",
+        "a70980fb27cbe960fb3d27d777b3c0d04cddaff802dfb12c67ba5546e9448ea8"),
+    "mov_opus_stereo": ("mp4", [(2, "stereo", 48000, 4800, 211, "tones")],
+                        "-c:a opus -strict -2 -b:a 64k -use_editlist 0",
+        "62af0dc68a46d89e5e26d5bc0b8aee529bca06795c6099b93eb266871061accb"),
+    "mov_mp2_mp4": ("mp4", [(2, "stereo", 48000, 4608, 212, "tones")], "-c:a mp2 -b:a 128k -use_editlist 0",
+        "d131830d56a337ea0aff8db40811126a816f0bd54440ea661833ef146b8506c6"),
+    "mov_mp2_mov": ("mov", [(1, "mono", 32000, 4608, 213, "smooth")], "-c:a mp2 -b:a 64k -use_editlist 0",
+        "4b29727d5637a0993d526ca22a73b7915cd0ba8fa2e957c3d34e3919469ad4d3"),
+    "mov_mp3_copy_mp4": ("mp4", ["mp3/mp3_six_frames.mp3"], "-c copy -use_editlist 0",
+        "79cc04580e277881f3a0dc5c84baeadbdace006ffca539827756af7d03575e35"),
+    "mov_mp3_copy_mov": ("mov", ["mp3/mp3_six_frames.mp3"], "-c copy -use_editlist 0",
+        "abffc7a949da135bf0f2fc1a6c715bcef26b0f4a0f04d1d9cc487c9a603e22a8"),
+    "mov_ac3_51": ("mp4", [(6, "5.1(side)", 48000, 4608, 214, "smooth")], "-c:a ac3 -b:a 384k -use_editlist 0",
+                   
+        "664636bdc3074794750633876ac0d702d6e061e34372019ebb8f8feb8ec408ea"),
+    "mov_ac3_stereo_mov": ("mov", [(2, "stereo", 44100, 4608, 215, "tones")], "-c:a ac3 -b:a 192k -use_editlist 0",
+                           
+        "f5126e52014fc6c7a07baa456eca16b1833215bcdf02597ef2be1c02a3465c48"),
+    "mov_eac3_51": ("mp4", [(6, "5.1(side)", 48000, 4608, 216, "smooth")], "-c:a eac3 -b:a 256k -use_editlist 0",
+                    
+        "b8f26733a5a560fb4cec4c0b24d2b02c4fcc19460fb07ac3a2a00a2878f96a3c"),
+    "mov_pcm_s16le_mov": ("mov", [(2, "stereo", 48000, 1500, 217, "smooth")], "-c:a pcm_s16le -use_editlist 0",
+                          
+        "6aeb0d8930e61fcd5074bde9ade4b2355fc05c6f5e19928785a577afd02509e7"),
+    "mov_pcm_s16be_mov": ("mov", [(1, "mono", 8000, 2500, 218, "tones")], "-c:a pcm_s16be -use_editlist 0",
+        "be8b88c76a0e275c56fd87dd49ef7add47264a2096ff0dc619214bf38d70e641"),
+    "mov_pcm_s24be_mov": ("mov", [(2, "stereo", 44100, 1000, 219, "smooth")], "-c:a pcm_s24be -use_editlist 0",
+                          
+        "81fe0bdeb18471e901d6514e43d3707b5ced4647e5c131d067eb2241429b5cdc"),
+    "mov_pcm_s24le_mov": ("mov", [(1, "mono", 48000, 1000, 220, "tones")], "-c:a pcm_s24le -use_editlist 0",
+        "57856e18c3626b77961d3c18b123a1b680ab4421bc298ce23912d5133c115496"),
+    "mov_pcm_s32be_mov": ("mov", [(1, "mono", 32000, 700, 221, "smooth")], "-c:a pcm_s32be -use_editlist 0",
+        "4d9e9f125234bfbefb1e760dd9cbd33e4b2c460918382dff339f71556cf50586"),
+    "mov_pcm_f32be_mov": ("mov", [(2, "stereo", 22050, 600, 222, "tones")], "-c:a pcm_f32be -use_editlist 0",
+        "2b5996e0aa113f69b1723e1a24ac3862f9be910a46ab41675ae0349f862c702e"),
+    "mov_pcm_f32le_51_mov": ("mov", [(6, "5.1(side)", 44100, 300, 223, "smooth")],
+                             "-c:a pcm_f32le -use_editlist 0",
+        "957de3b99b9f708d07d0fe0852d83f2d3a34d93bc401b3a5dce8bf2d070c6d38"),
+    "mov_pcm_f64be_mov": ("mov", [(1, "mono", 16000, 400, 224, "tones")], "-c:a pcm_f64be -use_editlist 0",
+        "2d161d09837e22d206eefc3493085d099d386b3cbc5d31ac2795913d711da5a6"),
+    "mov_pcm_u8_mov": ("mov", [(1, "mono", 11025, 3000, 225, "smooth")], "-c:a pcm_u8 -use_editlist 0",
+        "8b88c7763cb5dce11db01ccaab42ae51799009f89fe1d8c52f691eca00b5d754"),
+    "mov_pcm_s8_mov": ("mov", [(2, "stereo", 8000, 1500, 226, "tones")], "-c:a pcm_s8 -use_editlist 0",
+        "14bcfc5d79db9407695c202df44de9fb1f4d19f7457363df8a005ede19408aca"),
+    "mov_pcm_alaw_mov": ("mov", [(1, "mono", 8000, 3000, 227, "tones")], "-c:a pcm_alaw -use_editlist 0",
+        "c3ed7d6b520da6784a97706e4728e388c6981a905ece83892bc82e97bf518470"),
+    "mov_pcm_mulaw_mov": ("mov", [(2, "stereo", 8000, 1500, 228, "smooth")], "-c:a pcm_mulaw -use_editlist 0",
+                          
+        "0df54c58a096de4c1f4c6260ea425ca3febacf98580645db30e5469ccb39b8c0"),
+    "mov_pcm_editlist_mov": ("mov", [(2, "stereo", 44100, 2205, 229, "smooth")], "-c:a pcm_s16be",
+        "c55bcceeecdc8d431a5fff7a3760aeebe11dcccadb8997f6b72c0369213962ca"),
+    "mov_pcm_faststart_mov": ("mov", [(1, "mono", 48000, 2000, 230, "tones")],
+                              "-c:a pcm_s16le -use_editlist 0 -movflags +faststart",
+        "b7e17407315907000778725bca0b0aa475467dabdd56b2d8f6ccfcbabe82f2a9"),
+    "mov_two_tracks": ("mp4", [(2, "stereo", 48000, 4800, 231, "smooth"), (1, "mono", 44100, 4410, 232, "tones")],
+                       "-map 0 -map 1 -c:a:0 aac -b:a:0 64k -c:a:1 alac -use_editlist 0",
+        "e548de796ac9106d6e2a640adf2f5747718b67261a861f78a7003d880ee1e106"),
+    "mov_two_tracks_mov": ("mov", [(1, "mono", 8000, 1600, 233, "tones"), (2, "stereo", 16000, 1600, 234, "smooth")],
+                           "-map 0 -map 1 -c:a pcm_s16le -use_editlist 0",
+        "aec486afe99637336a69ad22255f412f6c9d13a0179057ea1b087307657fe39c"),
+}
+
+
+def mov_ffmpeg_signal(name, index):
+    """The s16 samples, interleaved, of input `index` of MOV_FFMPEG's `name`."""
+    channels, _, rate, count, seed, kind = MOV_FFMPEG[name][1][index]
+    return signal_input(channels, rate, count, seed, kind)
+
+
+@dataclasses.dataclass
+class MovFixture:
+    name: str
+    group: str
+    rule: str
+    data: bytes
+    ext: str = "mp4"
+    # FFmpeg opens it and the port does ("accept"), or the port refuses it
+    # with this error.
+    reject: str = None
+    made_by: str = "generate.py"
+
+
+def mov_box(kind, body, size=None):
+    """A box: its 32-bit size (the real one unless given), type and body."""
+    return struct.pack(">I", 8 + len(body) if size is None else size) + kind + body
+
+
+def mov_full(kind, version, flags, body, size=None):
+    return mov_box(kind, bytes([version]) + flags.to_bytes(3, "big") + body, size)
+
+
+def mov_find(data, path, start=0, end=None):
+    """The (offset, size) of the box at `path` (types) in an MP4 file, or
+    None; sample descriptions and sound sample entries are entered past
+    their fixed fields."""
+    end = len(data) if end is None else end
+    o = start
+    while o + 8 <= end:
+        size, kind = struct.unpack(">I4s", data[o:o + 8])
+        if size < 8:
+            return None
+        if kind == path[0]:
+            if len(path) == 1:
+                return o, size
+            skip = {b"stsd": 16, b"mp4a": 36}.get(kind, 8)
+            return mov_find(data, path[1:], o + skip, o + size)
+        o += size
+    return None
+
+
+def mov_samples(data, track=0):
+    """The sample description and the samples (bytes) of an FFmpeg-made
+    MP4's track: one chunk per stco entry, stsc and stsz as written."""
+    o = 0
+    traks = []
+    moov_at, moov_size = mov_find(data, [b"moov"])
+    o = moov_at + 8
+    while o < moov_at + moov_size:
+        size, kind = struct.unpack(">I4s", data[o:o + 8])
+        if kind == b"trak":
+            traks.append((o, size))
+        o += size
+    t_at, t_size = traks[track]
+    stbl = mov_find(data, [b"mdia", b"minf", b"stbl"], t_at + 8, t_at + t_size)
+    def table(kind):
+        at, size = mov_find(data, [kind], stbl[0] + 8, stbl[0] + stbl[1])
+        return data[at + 12:at + size]
+    stsd = table(b"stsd")
+    entry = stsd[4:4 + struct.unpack(">I", stsd[4:8])[0]]
+    stsz = table(b"stsz")
+    const, count = struct.unpack(">II", stsz[:8])
+    sizes = [const] * count if const else list(struct.unpack(f">{count}I", stsz[8:8 + 4 * count]))
+    stco = table(b"stco")
+    offsets = struct.unpack(f">{struct.unpack('>I', stco[:4])[0]}I", stco[4:])
+    stsc = table(b"stsc")
+    runs = [struct.unpack(">III", stsc[4 + 12 * i:16 + 12 * i]) for i in range(struct.unpack(">I", stsc[:4])[0])]
+    stts = table(b"stts")
+    durations = []
+    for i in range(struct.unpack(">I", stts[:4])[0]):
+        n, delta = struct.unpack(">II", stts[4 + 8 * i:12 + 8 * i])
+        durations += [delta] * n
+    samples = []
+    k = 0
+    for c, off in enumerate(offsets):
+        per = [r[1] for r in runs if r[0] <= c + 1][-1]
+        for _ in range(per):
+            samples.append(data[off:off + sizes[k]])
+            off += sizes[k]
+            k += 1
+    mdhd_at, _ = mov_find(data, [b"mdia", b"mdhd"], t_at + 8, t_at + t_size)
+    time_scale = struct.unpack(">I", data[mdhd_at + 20:mdhd_at + 24])[0]
+    return entry, samples, durations, time_scale
+
+
+def mov_sound_entry(fmt, channels=1, bits=16, rate=8000, version=0, cid=0, v1=None, v2=None, extra=b"", size=None):
+    """A QuickTime sound sample description: version 0, 1 (with
+    samples_per_frame and bytes_per_frame) or 2 (a double rate, a 32-bit
+    count, the lpcm flags)."""
+    body = bytes(6) + struct.pack(">H", 1) + struct.pack(">HH", version, 0) + bytes(4)
+    body += struct.pack(">HHhH", channels if version != 2 else 3, bits if version != 2 else 16, cid, 0)
+    body += struct.pack(">I", (rate if version != 2 else 1) << 16 & 0xFFFFFFFF)
+    if version == 1:
+        body += struct.pack(">IIII", *v1)
+    elif version == 2:
+        flags, bytes_per_frame, frames = v2
+        body += struct.pack(">IdIIIIII", 72, float(rate), channels, 0x7F000000, bits, flags, bytes_per_frame, frames)
+    return mov_box(fmt, body + extra, size)
+
+
+def mov_track(entries, samples, durations, time_scale, track_id=1, chunks=None, handler=b"soun", hdlr_name=b"SoundHandler\0",
+              stsc=None, stsz=None, co64=False, extra_stbl=b"", stsd_count=None, mdhd=None, tkhd=None, edts=b"",
+              stts=None, mdhd_duration=None, lang=0x55c4, minf_extra=b""):
+    """A trak and the bytes of its chunks (placed by mov_movie). `chunks`
+    gives the samples per chunk (one chunk of all by default); `stsc`,
+    `stsz` and `stts` replace the tables written from them."""
+    chunks = chunks or [len(samples)]
+    def build(offsets):
+        if stts is None:
+            runs = []
+            for dur in durations:
+                if runs and runs[-1][1] == dur:
+                    runs[-1][0] += 1
+                else:
+                    runs.append([1, dur])
+            stts_box = mov_full(b"stts", 0, 0, struct.pack(">I", len(runs)) + b"".join(struct.pack(">II", *r) for r in runs))
+        else:
+            stts_box = stts
+        if stsc is None:
+            runs = []
+            for c, n in enumerate(chunks):
+                if not runs or runs[-1][1] != n:
+                    runs.append((c + 1, n, 1))
+            stsc_box = mov_full(b"stsc", 0, 0, struct.pack(">I", len(runs)) + b"".join(struct.pack(">III", *r) for r in runs))
+        else:
+            stsc_box = stsc
+        if stsz is None:
+            stsz_box = mov_full(b"stsz", 0, 0, struct.pack(">II", 0, len(samples)) + b"".join(struct.pack(">I", len(x)) for x in samples))
+        else:
+            stsz_box = stsz
+        if co64:
+            stco_box = mov_full(b"co64", 0, 0, struct.pack(">I", len(offsets)) + b"".join(struct.pack(">Q", o) for o in offsets))
+        else:
+            stco_box = mov_full(b"stco", 0, 0, struct.pack(">I", len(offsets)) + b"".join(struct.pack(">I", o) for o in offsets))
+        stsd_box = mov_full(b"stsd", 0, 0, struct.pack(">I", len(entries) if stsd_count is None else stsd_count) + b"".join(entries))
+        stbl = mov_box(b"stbl", stsd_box + stts_box + stsc_box + stsz_box + stco_box + extra_stbl)
+        dref = mov_box(b"dinf", mov_full(b"dref", 0, 0, struct.pack(">I", 1) + mov_full(b"url ", 0, 1, b"")))
+        smhd = mov_full(b"smhd", 0, 0, bytes(4))
+        minf = mov_box(b"minf", smhd + dref + minf_extra + stbl)
+        hdlr = mov_full(b"hdlr", 0, 0, bytes(4) + handler + bytes(12) + hdlr_name)
+        total = sum(durations) if mdhd_duration is None else mdhd_duration
+        mdhd_box = mdhd if mdhd is not None else mov_full(b"mdhd", 0, 0, struct.pack(">IIIIHH", 0, 0, time_scale, total, lang, 0))
+        tkhd_box = tkhd if tkhd is not None else mov_full(b"tkhd", 0, 3, struct.pack(">IIIII", 0, 0, track_id, 0, 0) + bytes(8) +
+                                                       bytes(8) + struct.pack(">9I", 0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000) + bytes(8))
+        return mov_box(b"trak", tkhd_box + edts + mov_box(b"mdia", mdhd_box + hdlr + minf))
+    data = []
+    k = 0
+    for n in chunks:
+        data.append(b"".join(samples[k:k + n]))
+        k += n
+    return build, data
+
+
+def mov_movie(tracks, brand=b"isom", faststart=True, time_scale=1000, mvhd=None, before=b"", after=b"", moov_extra=b"",
+              mdat_size=None, wide_mdat=False):
+    """ftyp, then moov and mdat (in that order with `faststart`), the
+    tracks' chunks interleaved one chunk of each in turn."""
+    ftyp = mov_box(b"ftyp", brand + struct.pack(">I", 512) + brand + b"mp41")
+    mvhd_box = mvhd if mvhd is not None else mov_full(b"mvhd", 0, 0, struct.pack(">IIII", 0, 0, time_scale, 0) + struct.pack(">IH", 0x10000, 0x100) +
+                                                    bytes(10) + struct.pack(">9I", 0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000) + bytes(24) +
+                                                    struct.pack(">I", len(tracks) + 1))
+    order = []
+    longest = max((len(t[1]) for t in tracks), default=0)
+    for c in range(longest):
+        for i, t in enumerate(tracks):
+            if c < len(t[1]):
+                order.append((i, c))
+    def moov_for(offsets):
+        return mov_box(b"moov", mvhd_box + b"".join(t[0](offsets[i]) for i, t in enumerate(tracks)) + moov_extra)
+    zero = [[0] * len(t[1]) for t in tracks]
+    moov_len = len(moov_for(zero))
+    payload = b"".join(tracks[i][1][c] for i, c in order)
+    head = len(before) + len(ftyp) + (moov_len if faststart else 0)
+    mdat_head = 16 if mdat_size == "64" else 8
+    if wide_mdat:
+        head += 8
+    offsets = [[0] * len(t[1]) for t in tracks]
+    pos = head + mdat_head
+    for i, c in order:
+        offsets[i][c] = pos
+        pos += len(tracks[i][1][c])
+    if mdat_size == "64":
+        mdat = struct.pack(">I", 1) + b"mdat" + struct.pack(">Q", 16 + len(payload)) + payload
+    elif mdat_size == "zero":
+        mdat = struct.pack(">I", 0) + b"mdat" + payload
+    else:
+        mdat = mov_box(b"mdat", payload)
+    if wide_mdat:
+        mdat = mov_box(b"wide", b"") + mdat
+    moov = moov_for(offsets)
+    return before + ftyp + (moov + mdat if faststart else mdat + moov) + after
+
+
+def mov_pcm_track(channels=1, rate=8000, count=600, seed=301, chunk=200, fmt=b"twos", width=2, **kw):
+    """A PCM track in QuickTime's old form, every sample one tick, of
+    `width` bytes a channel (16-bit samples padded or cut to it)."""
+    data = b"".join(struct.pack(">h", v)[:width].ljust(width, b"\x00")
+                    for v in signal_input(channels, rate, count, seed, "smooth"))
+    frame = width * channels
+    samples = [data[i:i + frame] for i in range(0, len(data), frame)]
+    chunks = [chunk] * (count // chunk) + ([count % chunk] if count % chunk else [])
+    entry = kw.pop("entry", None) or mov_sound_entry(fmt, channels, 16, rate)
+    return mov_track([entry], samples, [1] * count, rate, chunks=chunks, **kw)
+
+
+def mov_ulaw_track(sizes, rate=8000, seed=302, **kw):
+    """A mu-law track whose samples are runs of bytes of the given sizes,
+    each lasting its size in ticks: the per-sample index."""
+    rng = AdpcmLcg(seed)
+    samples = [adpcm_bytes(rng, n) for n in sizes]
+    return mov_track([mov_sound_entry(b"ulaw", 1, 8, rate)], samples, [max(n, 1) for n in sizes], rate, **kw)
+
+
+def mov_longer_asc(entry):
+    """An mp4a description whose AudioSpecificConfig has a zero byte more:
+    other extradata, the same configuration. The descriptor lengths
+    (written in four bytes, as FFmpeg writes them) and box sizes grow."""
+    e = bytearray(entry)
+    at = e.index(b"\x05\x80\x80\x80")
+    n = e[at + 4]
+    e[at + 4] = n + 1
+    e[at + 5 + n:at + 5 + n] = b"\x00"
+    for tag in (b"\x04\x80\x80\x80", b"\x03\x80\x80\x80"):
+        i = e.index(tag)
+        e[i + 4] += 1
+    esds = e.index(b"esds") - 4
+    e[esds:esds + 4] = struct.pack(">I", struct.unpack(">I", e[esds:esds + 4])[0] + 1)
+    e[0:4] = struct.pack(">I", len(e))
+    return bytes(e)
+
+
+def build_mov_crafted(fx):
+    def ok(name, rule, data, ext="mp4"):
+        fx.append(MovFixture(name, "crafted", rule, data, ext))
+
+    def bad(name, rule, data, error, ext="mp4"):
+        fx.append(MovFixture(name, "crafted", rule, data, ext, reject=error))
+
+    aac_path = MOV_DIR / "mov_aac_stereo.mp4"
+    if not aac_path.exists():
+        return
+    aac_entry, aac_samples, aac_durations, aac_rate = mov_samples(aac_path.read_bytes())
+    aac_samples, aac_durations = aac_samples[:5], aac_durations[:5]
+
+    def aac(**kw):
+        return mov_track([aac_entry], aac_samples, aac_durations, aac_rate, **kw)
+
+    ok("mov_crafted_pcm", "A QuickTime 16-bit PCM track of 600 samples in chunks of 200, every sample one tick: "
+       "packets of up to 1024 samples per chunk.", mov_movie([mov_pcm_track()], brand=b"qt  "), "mov")
+    ok("mov_crafted_pcm_chunks", "PCM chunks of 1500, 700 and 300 samples: a chunk split into packets of 1024.",
+       mov_movie([mov_pcm_track(count=2500, chunk=1500, stsc=None)], brand=b"qt  "), "mov")
+    ok("mov_box64", "The moov after mdat, both with 64-bit sizes (size 1 and a largesize).",
+       mov_movie([aac()], faststart=False, mdat_size="64"))
+    ok("mov_size0_last", "The last box, mdat, with size 0: it runs to the end of the file.",
+       mov_movie([aac()], mdat_size="zero"))
+    ok("mov_wide_mdat", "A wide box before the mdat.", mov_movie([aac()], faststart=False, wide_mdat=True))
+    ok("mov_co64", "64-bit chunk offsets (co64).", mov_movie([aac(co64=True, chunks=[2, 2, 1])]))
+    sizes = [3, 7, 15, 1, 9, 12, 4, 15, 2, 8]
+    for bits in (4, 8, 16):
+        packed = b""
+        if bits == 4:
+            vals = sizes + [0] * (len(sizes) % 2)
+            packed = bytes((vals[i] << 4) | vals[i + 1] for i in range(0, len(vals), 2))
+        else:
+            packed = b"".join(n.to_bytes(bits // 8, "big") for n in sizes)
+        stz2 = mov_full(b"stz2", 0, 0, bytes(3) + bytes([bits]) + struct.pack(">I", len(sizes)) + packed)
+        ok(f"mov_stz2_{bits}", f"Compact sample sizes of {bits} bits (stz2) for ten mu-law samples.",
+           mov_movie([mov_ulaw_track(sizes, stsz=stz2, chunks=[4, 3, 3])], brand=b"qt  "), "mov")
+    ok("mov_stsz_constant", "A constant sample size in stsz (no table) for eight samples of 6 bytes.",
+       mov_movie([mov_ulaw_track([6] * 8, stsz=mov_full(b"stsz", 0, 0, struct.pack(">II", 6, 8)), chunks=[3, 3, 2])],
+                 brand=b"qt  "), "mov")
+    stsc_runs = mov_full(b"stsc", 0, 0, struct.pack(">I", 3) + struct.pack(">III", 1, 2, 1) + struct.pack(">III", 2, 1, 1) +
+                         struct.pack(">III", 3, 3, 1))
+    ok("mov_stsc_runs", "Three sample-to-chunk runs (2, 1, then 3 samples a chunk) over four chunks.",
+       mov_movie([mov_ulaw_track([5, 6, 7, 8, 9, 10, 11, 12, 13], stsc=stsc_runs, chunks=[2, 1, 3, 3])], brand=b"qt  "), "mov")
+    stsc_bad = mov_full(b"stsc", 0, 0, struct.pack(">I", 4) + struct.pack(">III", 1, 2, 1) + struct.pack(">III", 1, 3, 1) +
+                        struct.pack(">III", 3, 0, 0) + struct.pack(">III", 2, 2, 5))
+    ok("mov_stsc_repaired", "Invalid sample-to-chunk entries (a repeated first chunk, a zero count and id, chunks "
+       "out of order), which FFmpeg repairs from the next valid one.",
+       mov_movie([mov_ulaw_track([4] * 12, stsc=stsc_bad, chunks=[2, 3, 3, 4])], brand=b"qt  "), "mov")
+    stsc_past = mov_full(b"stsc", 0, 0, struct.pack(">I", 2) + struct.pack(">III", 1, 2, 1) + struct.pack(">III", 9, 2, 1))
+    bad("mov_stsc_past_chunks", "A sample-to-chunk entry starting past the last chunk: a broken track.",
+        mov_movie([mov_ulaw_track([4] * 6, stsc=stsc_past, chunks=[2, 2, 2])], brand=b"qt  "), "InvalidMov", "mov")
+    ok("mov_stss", "An AAC track whose sync sample table marks samples 1 and 4: AAC packets keep the index's flags.",
+       mov_movie([aac(extra_stbl=mov_full(b"stss", 0, 0, struct.pack(">III", 2, 1, 4)))]))
+    ok("mov_stps", "An AAC track with an empty stss and a partial sync table (stps) marking sample 3.",
+       mov_movie([aac(extra_stbl=mov_full(b"stss", 0, 0, struct.pack(">I", 0)) + mov_full(b"stps", 0, 0, struct.pack(">II", 1, 3)))]))
+    ok("mov_sdtp", "Sample dependency flags: two samples nobody depends on, marked disposable.",
+       mov_movie([aac(extra_stbl=mov_full(b"sdtp", 0, 0, bytes([0, 8, 0, 8, 4])))]))
+    ok("mov_ctts", "Composition offsets on audio (ctts): pts after dts, one negative offset.",
+       mov_movie([aac(extra_stbl=mov_full(b"ctts", 0, 0, struct.pack(">I", 3) + struct.pack(">Ii", 2, 512) +
+                                          struct.pack(">Ii", 1, -100) + struct.pack(">Ii", 2, 0)))]))
+    ok("mov_rap_group", "A rap sample group marking samples 2 and 3 of an AAC track whose stss marks none.",
+       mov_movie([aac(extra_stbl=mov_full(b"stss", 0, 0, struct.pack(">II", 1, 5)) +
+                      mov_full(b"sbgp", 0, 0, b"rap " + struct.pack(">I", 3) + struct.pack(">II", 1, 0) +
+                               struct.pack(">II", 2, 1) + struct.pack(">II", 2, 0)))]))
+    ima = mov_sound_entry(b"ima4", 1, 16, 8000, version=1, cid=-2 & 0xFFFF if False else 0, v1=(64, 34, 34, 2))
+    rng = AdpcmLcg(303)
+    ima_samples = [adpcm_bytes(rng, 34) for _ in range(40)]
+    ok("mov_qt_v1_ima4", "A version 1 sound description of IMA ADPCM (64 samples a 34-byte frame), 40 frames in "
+       "chunks of 16: packets of 16 frames, a codec without a decoder in the reference build.",
+       mov_movie([mov_track([ima], ima_samples, [1] * 40 * 64, 8000, stsz=mov_full(b"stsz", 0, 0, struct.pack(">II", 1, 2560)),
+                            stts=mov_full(b"stts", 0, 0, struct.pack(">III", 1, 2560, 1)), chunks=[16, 16, 8],
+                            stsc=mov_full(b"stsc", 0, 0, struct.pack(">I", 2) + struct.pack(">III", 1, 1024, 1) +
+                                          struct.pack(">III", 3, 512, 1)))], brand=b"qt  "), "mov")
+    lpcm = mov_sound_entry(b"lpcm", 2, 24, 44100, version=2, v2=(4 | 8, 6, 1))
+    ok("mov_qt_v2_lpcm", "A version 2 sound description of lpcm (24-bit signed little-endian by its flags, a "
+       "rate as a double).",
+       mov_movie([mov_pcm_track(channels=2, rate=44100, count=300, chunk=150, width=3, entry=lpcm)], brand=b"qt  "), "mov")
+    lpcm_float = mov_sound_entry(b"lpcm", 1, 32, 48000, version=2, v2=(1 | 2, 4, 1))
+    ok("mov_qt_v2_float", "A version 2 lpcm description of big-endian 32-bit floats.",
+       mov_movie([mov_pcm_track(rate=48000, count=200, chunk=200, width=4, entry=lpcm_float)], brand=b"qt  "), "mov")
+    bad_rate = mov_sound_entry(b"lpcm", 1, 32, 48000, version=2, v2=(1 | 2, 4, 1))
+    bad_rate = bad_rate[:40] + struct.pack(">d", -1.0) + bad_rate[48:]
+    bad("mov_qt_v2_bad_rate", "A version 2 description whose double rate is negative: \"Invalid sample rate\".",
+        mov_movie([mov_pcm_track(rate=48000, count=200, chunk=200, width=4, entry=bad_rate)], brand=b"qt  "), "InvalidMov", "mov")
+    ok("mov_twos_8bit", "A twos entry of 8 bits: FFmpeg reads it as signed 8-bit PCM.",
+       mov_movie([mov_pcm_track(width=1, entry=mov_sound_entry(b"twos", 1, 8, 8000))], brand=b"qt  "), "mov")
+    ok("mov_unknown_entry", "A sound track whose sample entry is an unknown format: codec none, no decoder.",
+       mov_movie([mov_pcm_track(entry=mov_sound_entry(b"zzzz", 1, 16, 8000))], brand=b"qt  "), "mov")
+    data_entry = mov_box(b"zzzz", bytes(6) + struct.pack(">H", 1) + bytes(8))
+    data_track = mov_track([data_entry], [b"\1\2\3\4"] * 5, [100] * 5, 1000, track_id=2, handler=b"meta",
+                           hdlr_name=b"DataHandler\0")
+    ok("mov_data_track", "An audio track and a data track (an unknown handler and entry): the data stream's "
+       "packets are keyframes, its timings a text stream's.", mov_movie([aac(), data_track]))
+    gpmd = mov_track([mov_box(b"gpmd", bytes(6) + struct.pack(">H", 1))], [b"GPMD"] * 3, [0] * 3, 1000, track_id=2,
+                     handler=b"meta", hdlr_name=b"\0")
+    ok("mov_data_zero_durations", "A gpmd data track whose samples all last 0: discarded, as FFmpeg does.",
+       mov_movie([aac(), gpmd]))
+    video_entry = mov_box(b"avc1", bytes(6) + struct.pack(">H", 1) + bytes(70))
+    video = mov_track([video_entry], [b"\0" * 10] * 3, [512] * 3, 12800, track_id=2, handler=b"vide", hdlr_name=b"VideoHandler\0")
+    bad("mov_video_track", "An AAC track and a video track: video is not demuxed yet (T33a3).",
+        mov_movie([aac(), video]), "UnsupportedFormat")
+    nest = mov_full(b"stss", 0, 0, struct.pack(">I", 0))
+    for _ in range(12):
+        nest = mov_box(b"edts", nest)
+    bad("mov_deep_nesting", "Boxes nested twelve deep in a track: \"Atoms too deeply nested\".",
+        mov_movie([aac(edts=nest)]), "InvalidMov")
+    ok("mov_empty_moov", "A moov holding only mvhd: no streams.", mov_movie([]))
+    bad("mov_no_moov", "An ftyp and an mdat, no moov: \"moov atom not found\".",
+        mov_box(b"ftyp", b"isom" + struct.pack(">I", 512) + b"isom") + mov_box(b"mdat", bytes(64)), "InvalidMov")
+    ok("mov_junk_box", "A junk box before the moov and an unknown box after the mdat.",
+       mov_movie([aac()], moov_extra=mov_box(b"xyzw", bytes(10)), after=mov_box(b"junk", bytes(20))))
+    base = mov_movie([aac()])
+    ok("mov_3gp", "The AAC file with a 3gp4 major brand.", mov_movie([aac()], brand=b"3gp4"), "3gp")
+    ok("mov_3g2", "The AAC file with a 3g2a major brand.", mov_movie([aac()], brand=b"3g2a"), "3g2")
+    moov_at, moov_size = mov_find(base, [b"moov"])
+    cut = moov_at + int(moov_size * 0.3)
+    ok("mov_cut_in_moov", "The file cut 30% into its moov: a track with nothing read.", base[:cut])
+    cut = moov_at + int(moov_size * 0.9)
+    bad("mov_cut_in_stbl", "The file cut 90% into its moov, inside a sample table: AVERROR_EOF.", base[:cut], "Truncated")
+    ok("mov_cut_in_mdat", "The file cut inside its mdat: the last packet short, then the end.", base[:-150])
+    bad("mov_cut_in_mdat_after", "A moov after the mdat, the file cut inside the moov: no moov.",
+        mov_movie([aac()], faststart=False)[:-60], "InvalidMov")
+    big_stts = mov_full(b"stts", 0, 0, struct.pack(">I", 1000000) + struct.pack(">II", 5, 1024))
+    bad("mov_stts_count_huge", "An stts declaring a million entries in a box of one: FFmpeg reads on into the next "
+        "boxes until the file ends (AVERROR_EOF).", mov_movie([aac(stts=big_stts)]), "Truncated")
+    huge = bytearray(mov_movie([aac(chunks=[2, 3])]))
+    stco_at = bytes(huge).index(b"stco")
+    huge[stco_at + 8:stco_at + 12] = struct.pack(">I", 1000000)
+    ok("mov_stco_count_huge", "An stco declaring a million offsets in a box of two: clamped to the box.", bytes(huge))
+    ok("mov_stsz_count_huge", "A constant stsz of 100 million samples: FFmpeg's index allocation fails and the "
+       "track has no packets.", mov_movie([aac(stsz=mov_full(b"stsz", 0, 0, struct.pack(">II", 200, 100000000)))]))
+    ok("mov_elst_identity", "An edit list of one edit from media time 0 covering every sample: the index stays.",
+       mov_movie([aac(edts=mov_box(b"edts", mov_full(b"elst", 0, 0, struct.pack(">IIiI", 1, 120, 0, 0x10000))))],
+                 time_scale=1000))
+    bad("mov_elst_empty_edit", "An edit list starting with an empty edit, which shifts the start (T33b).",
+        mov_movie([aac(edts=mov_box(b"edts", mov_full(b"elst", 0, 0, struct.pack(">IIiIIiI", 2, 50, -1, 0x10000, 120, 0, 0x10000))))]),
+        "UnsupportedFormat")
+    bad("mov_mdhd_v2", "An mdhd of version 2: AVERROR_PATCHWELCOME.",
+        mov_movie([aac(mdhd=mov_full(b"mdhd", 2, 0, struct.pack(">IIIIHH", 0, 0, 48000, 0, 0, 0)))]), "PatchWelcome")
+    ok("mov_mdhd_times", "Creation times in mvhd and mdhd and a packed ISO language code.",
+       mov_movie([aac(mdhd=mov_full(b"mdhd", 0, 0, struct.pack(">IIIIHH", 3600000000, 0, 48000, 5120, 0x15C7, 0)))],
+                 mvhd=mov_full(b"mvhd", 0, 0, struct.pack(">IIII", 3700000000, 0, 1000, 0) + struct.pack(">IH", 0x10000, 0x100) +
+                               bytes(10) + bytes(36) + bytes(28))))
+    chan = mov_full(b"chan", 0, 0, struct.pack(">III", 0, 0, 2) + struct.pack(">II", 2, 0) + bytes(12) +
+                    struct.pack(">II", 1, 0) + bytes(12))
+    ok("mov_chan_descriptions", "A chan box describing a stereo track's channels as right then left: a custom order.",
+       mov_movie([mov_pcm_track(channels=2, entry=mov_sound_entry(b"twos", 2, 16, 8000, extra=chan))], brand=b"qt  "), "mov")
+    ok("mov_hoov", "The movie header in a hoov box, which FFmpeg reads as moov.",
+       mov_movie([aac()]).replace(b"moov", b"hoov", 1))
+    bad("mov_dref_alias", "A data reference that is an alias record of 151 bytes, which FFmpeg reads as a "
+        "path to another file.", mov_movie([aac(minf_extra=b"")]).replace(
+            mov_full(b"dref", 0, 0, struct.pack(">I", 1) + mov_full(b"url ", 0, 1, b"")),
+            mov_full(b"dref", 0, 0, struct.pack(">I", 1) + mov_full(b"alis", 0, 0, bytes(143)))), "UnsupportedFormat")
+    bad("mov_sdtp_short", "An sdtp box of 3 bytes: AVERROR(ERANGE).",
+        mov_movie([aac(extra_stbl=mov_box(b"sdtp", bytes(3)))]), "OutOfRange")
+    two_entries = [aac_entry, mov_longer_asc(aac_entry)]
+    ok("mov_two_stsd", "Two descriptions of the same format, chunks alternating between them: new extradata "
+       "side data at each change.", mov_movie([mov_track(two_entries, aac_samples, aac_durations, aac_rate, chunks=[2, 2, 1],
+                                                          stsc=mov_full(b"stsc", 0, 0, struct.pack(">I", 3) + struct.pack(">III", 1, 2, 1) +
+                                                                        struct.pack(">III", 2, 2, 2) + struct.pack(">III", 3, 1, 1)))]))
+
+
+def build_mov_fixtures():
+    fx = []
+    for name, (ext, inputs, options, _) in MOV_FFMPEG.items():
+        path = MOV_DIR / f"{name}.{ext}"
+        described = ", ".join(i if isinstance(i, str) else f"{i[3]} {i[5]} samples of {i[0]} channels ({i[1]}) at "
+                              f"{i[2]} Hz" for i in inputs)
+        reject = "UnsupportedFormat" if name in MOV_REFUSED else None
+        rule = f"FFmpeg's muxer from {described}, `{options}`." + (f" {MOV_REFUSED[name]}" if reject else "")
+        fx.append(MovFixture(name, "ffmpeg", rule, path.read_bytes() if path.exists() else b"", ext, reject,
+                             made_by="ffmpeg"))
+    build_mov_crafted(fx)
+    return fx
+
+
+# FFmpeg-made fixtures the port refuses, and why.
+MOV_REFUSED = {
+    "mov_aac_editlist": "Its edit list starts the media at 1024 (the encoder delay): the port does not apply edit "
+                        "lists yet (T33b).",
+}
+
+
+def render_mov_manifest(fixtures):
+    lines = ["// Generated by zig/testing/fixtures/generate.py from its MP4 fixtures; do not edit.",
+             "// Each entry names mp4/<name>.<ext>; see mp4/README.md. Streams, tags and packets are",
+             "// FFmpeg's, in zig/testing/vectors/mov.txt.",
+             ".{"]
+    for f in fixtures:
+        lines.append("    .{")
+        lines.append(f'        .name = "{f.name}",')
+        lines.append(f'        .ext = "{f.ext}",')
+        lines.append(f'        .sha256 = "{hashlib.sha256(f.data).hexdigest()}",')
+        lines.append(f'        .expected = {".accept" if f.reject is None else ".{ .reject = ." + f.reject + " }"},')
+        lines.append("    },")
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
+def render_mov_table(fixtures):
+    rows = [TABLE_BEGIN.rstrip("\n"), "| Fixture | Group | The port opens it | Rule |", "| --- | --- | --- | --- |"]
+    for f in fixtures:
+        rows.append(f"| `{f.name}.{f.ext}` | {f.group} | {'yes' if f.reject is None else '`' + f.reject + '`'} | "
+                    f"{f.rule} |")
+    rows.append(TABLE_END.rstrip("\n"))
+    return "\n".join(rows) + "\n"
+
+
 def render_mp3_manifest(fixtures):
     lines = ["// Generated by zig/testing/fixtures/generate.py from its MP3 fixtures; do not edit.",
              "// Each entry names mp3/<name>.mp3; see mp3/README.md. Streams, tags and packets are",
@@ -5586,7 +6136,8 @@ def render_mp3_manifest(fixtures):
 
 
 def outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures, flac_fixtures, ogg_fixtures,
-            mp3_fixtures, aac_fixtures, adpcm_fixtures, alac_fixtures, g72x_fixtures, ac3_fixtures, eac3_fixtures):
+            mp3_fixtures, aac_fixtures, adpcm_fixtures, alac_fixtures, g72x_fixtures, ac3_fixtures, eac3_fixtures,
+            mov_fixtures):
     files = {WAV_DIR / f"{f.name}.wav": f.data for f in fixtures}
     files[MANIFEST] = render_manifest(
         fixtures, "// Each entry names wav/<name>.wav; see README.md for the rules and decisions.")
@@ -5651,6 +6202,9 @@ def outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures, fl
         "Streams, tags and packets are", "Packets and decoded samples are").replace(
         "vectors/mp3.txt", "vectors/eac3_decode.txt").encode()
     files[EAC3_README] = render_readme(EAC3_README, render_ogg_table(eac3_fixtures))
+    files.update({MOV_DIR / f"{f.name}.{f.ext}": f.data for f in mov_fixtures if f.made_by != "ffmpeg"})
+    files[MOV_MANIFEST] = render_mov_manifest(mov_fixtures).encode()
+    files[MOV_README] = render_readme(MOV_README, render_mov_table(mov_fixtures))
     return files
 
 
@@ -5709,6 +6263,12 @@ def check_ffmpeg_made(flac_fixtures):
             problems.append(f"missing FFmpeg-made fixture: {path.relative_to(HERE)}")
         elif digest is None or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
             problems.append(f"FFmpeg-made fixture differs from its recorded hash: {path.relative_to(HERE)}")
+    for name, (ext, *_, digest) in MOV_FFMPEG.items():
+        path = MOV_DIR / f"{name}.{ext}"
+        if not path.exists():
+            problems.append(f"missing FFmpeg-made fixture: {path.relative_to(HERE)}")
+        elif digest is None or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            problems.append(f"FFmpeg-made fixture differs from its recorded hash: {path.relative_to(HERE)}")
     return problems
 
 
@@ -5729,6 +6289,8 @@ def main():
                         help="write the s16le input of FFmpeg-made AC-3 fixture NAME to stdout and stop")
     parser.add_argument("--g72x-input", metavar="NAME",
                         help="write the s16le input of FFmpeg-made G.722 or G.726 fixture NAME to stdout and stop")
+    parser.add_argument("--mov-input", metavar=("NAME", "INDEX"), nargs=2,
+                        help="write the s16le input INDEX of FFmpeg-made MP4 fixture NAME to stdout and stop")
     parser.add_argument("--alac-input", metavar="NAME",
                         help="write the s16le or s32le input of FFmpeg-made ALAC fixture NAME to stdout and stop")
     args = parser.parse_args()
@@ -5753,6 +6315,10 @@ def main():
     if args.g72x_input:
         sys.stdout.buffer.write(b"".join(struct.pack("<h", v) for v in g72x_ffmpeg_input(args.g72x_input)))
         return 0
+    if args.mov_input:
+        samples = mov_ffmpeg_signal(args.mov_input[0], int(args.mov_input[1]))
+        sys.stdout.buffer.write(b"".join(struct.pack("<h", v) for v in samples))
+        return 0
     if args.alac_input:
         bits = ALAC_FFMPEG[args.alac_input][5]
         fmt = "<h" if bits == 16 else "<I"
@@ -5773,9 +6339,10 @@ def main():
     g72x_fixtures = build_g72x_fixtures()
     ac3_fixtures = build_ac3_fixtures()
     eac3_fixtures = build_eac3_fixtures()
+    mov_fixtures = build_mov_fixtures()
     expected = outputs(fixtures, au_fixtures, aiff_fixtures, raw_fixtures, caf_fixtures, flac_fixtures, ogg_fixtures,
                        mp3_fixtures, aac_fixtures, adpcm_fixtures, alac_fixtures, g72x_fixtures, ac3_fixtures,
-                       eac3_fixtures)
+                       eac3_fixtures, mov_fixtures)
     stale = [path for path, content in expected.items() if not path.exists() or path.read_bytes() != content]
     ffmpeg_made = ({FLAC_DIR / f"{f.name}.flac" for f in flac_fixtures if f.made_by == "ffmpeg"}
                    | {OGG_DIR / f"{name}.ogg" for name in OGG_FFMPEG}
@@ -5784,18 +6351,21 @@ def main():
                    | {ALAC_DIR / f"{name}.caf" for name in ALAC_FFMPEG}
                    | {G72X_DIR / f"{name}.au" for name in G72X_FFMPEG}
                    | {AC3_DIR / f"{name}.ac3" for name in AC3_FFMPEG}
-                   | {EAC3_DIR / f"{name}.eac3" for name in EAC3_FFMPEG})
+                   | {EAC3_DIR / f"{name}.eac3" for name in EAC3_FFMPEG}
+                   | {MOV_DIR / f"{name}.{ext}" for name, (ext, *_) in MOV_FFMPEG.items()})
     extra = sorted((set(WAV_DIR.glob("*.wav")) | set(AU_DIR.glob("*.au")) | set(AIFF_DIR.glob("*.aiff"))
              | set(RAW_DIR.glob("*.raw")) | set(CAF_DIR.glob("*.caf")) | set(FLAC_DIR.glob("*.flac"))
              | set(OGG_DIR.glob("*.ogg")) | set(MP3_DIR.glob("*.mp3")) | set(AAC_DIR.glob("*.aac"))
              | set(ADPCM_DIR.glob("*.wav")) | set(ALAC_DIR.glob("*.caf")) | set(G72X_DIR.glob("*.au"))
-             | set(AC3_DIR.glob("*.ac3")) | set(EAC3_DIR.glob("*.eac3")))
+             | set(AC3_DIR.glob("*.ac3")) | set(EAC3_DIR.glob("*.eac3"))
+             | {p for p in MOV_DIR.glob("*.*") if p.suffix in (".mp4", ".m4a", ".mov", ".3gp", ".3g2", ".mj2")})
                    - set(expected) - ffmpeg_made)
     problems = check_ffmpeg_made(flac_fixtures)
     counts = (f"{len(fixtures)} WAV, {len(au_fixtures)} AU, {len(aiff_fixtures)} AIFF, {len(raw_fixtures)} raw PCM, "
               f"{len(caf_fixtures)} CAF, {len(flac_fixtures)} FLAC, {len(ogg_fixtures)} Ogg, {len(mp3_fixtures)} MP3"
               f", {len(aac_fixtures)} ADTS, {len(adpcm_fixtures)} ADPCM, {len(alac_fixtures)} ALAC, "
-              f"{len(g72x_fixtures)} G.72x, {len(ac3_fixtures)} AC-3 and {len(eac3_fixtures)} E-AC-3 fixtures")
+              f"{len(g72x_fixtures)} G.72x, {len(ac3_fixtures)} AC-3, {len(eac3_fixtures)} E-AC-3 and "
+              f"{len(mov_fixtures)} MP4 fixtures")
 
     if args.check:
         for path in stale:
@@ -5817,6 +6387,7 @@ def main():
     G72X_DIR.mkdir(exist_ok=True)
     AC3_DIR.mkdir(exist_ok=True)
     EAC3_DIR.mkdir(exist_ok=True)
+    MOV_DIR.mkdir(exist_ok=True)
     AU_DIR.mkdir(exist_ok=True)
     AIFF_DIR.mkdir(exist_ok=True)
     RAW_DIR.mkdir(exist_ok=True)

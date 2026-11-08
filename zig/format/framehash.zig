@@ -157,7 +157,8 @@ pub const Writer = struct {
         }
         try w.out.print("0x{x:0>8}", .{adler32(p.data)});
         // AV_PKT_FLAG_KEY is 1 and AV_PKT_FLAG_DISCARD 4.
-        const flags: u32 = @as(u32, @intFromBool(p.flags.key)) | @as(u32, @intFromBool(p.flags.discard)) << 2;
+        const flags: u32 = @as(u32, @intFromBool(p.flags.key)) | @as(u32, @intFromBool(p.flags.corrupt)) << 1 |
+            @as(u32, @intFromBool(p.flags.discard)) << 2 | @as(u32, @intFromBool(p.flags.disposable)) << 4;
         if (flags != 1) try w.out.print(", F=0x{X}", .{flags});
         if (side.len > 0) {
             try w.out.print(", S={d}", .{side.len});

@@ -555,6 +555,36 @@ pub const eac3 = struct {
     }
 };
 
+pub const mov = struct {
+    const Mov = @This();
+
+    /// What the port makes of a fixture: it opens it, or refuses it with
+    /// one of the demuxer's errors; what FFmpeg makes of each is
+    /// vectors/mov.txt (T33a1).
+    pub const Expected = union(enum) {
+        accept,
+        reject: enum { InvalidMov, Truncated, PatchWelcome, UnsupportedFormat, UnsupportedStreamingSize, LimitExceeded, OutOfRange },
+    };
+
+    pub const Fixture = struct {
+        /// The file is fixtures/mp4/<name>.<ext>.
+        name: []const u8,
+        ext: []const u8,
+        sha256: []const u8,
+        expected: Mov.Expected,
+    };
+
+    pub const all: []const Mov.Fixture = @import("fixtures/mp4/manifest.zon");
+
+    /// The bytes of fixtures/mp4/<name>.<ext>, embedded at compile time.
+    pub fn bytes(comptime name: []const u8) []const u8 {
+        inline for (Mov.all) |f| {
+            if (comptime std.mem.eql(u8, f.name, name)) return @embedFile("fixtures/mp4/" ++ name ++ "." ++ f.ext);
+        }
+        @compileError("no MP4 fixture " ++ name);
+    }
+};
+
 /// This file's own declarations: the WAV contract's `all` and `bytes`.
 const wav_contract = @This();
 
@@ -659,11 +689,12 @@ test "every fixture file is present and matches its recorded SHA-256" {
     try expectHashes(g72x);
     try expectHashes(ac3);
     try expectHashes(eac3);
+    try expectHashes(mov);
 }
 
 test "fixture names do not collide across contracts" {
     comptime {
-        @setEvalBranchQuota(400_000);
+        @setEvalBranchQuota(1_000_000);
         expectDistinct(au, wav_contract);
         expectDistinct(aiff, wav_contract);
         expectDistinct(aiff, au);
@@ -722,6 +753,7 @@ test "fixture names do not collide across contracts" {
         for (.{ wav_contract, au, aiff, raw, caf, flac, ogg, mp3, aac, adpcm, alac }) |other| expectDistinct(g72x, other);
         for (.{ wav_contract, au, aiff, raw, caf, flac, ogg, mp3, aac, adpcm, alac, g72x }) |other| expectDistinct(ac3, other);
         for (.{ wav_contract, au, aiff, raw, caf, flac, ogg, mp3, aac, adpcm, alac, g72x, ac3 }) |other| expectDistinct(eac3, other);
+        for (.{ wav_contract, au, aiff, raw, caf, flac, ogg, mp3, aac, adpcm, alac, g72x, ac3, eac3 }) |other| expectDistinct(mov, other);
     }
 }
 

@@ -96,6 +96,11 @@ EXIT_STATUS = {
     "UnsupportedStreamingSize": 3,
     "UnknownFormat": 3,
     "LimitExceeded": 5,
+    "InvalidSamples": 2,
+    "FrameTooLarge": 5,
+    "InvalidMov": 2,
+    "OutOfRange": 2,
+    "PatchWelcome": 3,
 }
 LAYOUT = {1: "mono", 2: "stereo"}
 
@@ -510,7 +515,9 @@ def refusal_name(code, stderr, tool, path):
 # AVERROR_UNKNOWN); a missing file, memory or an encoder the reference build
 # lacks fail otherwise, and are never a refusal both tools share.
 FFMPEG_INPUT_REFUSALS = tuple(f"Error opening input files: {reason}" for reason in (
-    "Invalid data found when processing input", "End of file", "Unknown error occurred"))
+    "Invalid data found when processing input", "End of file", "Unknown error occurred",
+    # The mov demuxer's AVERROR_PATCHWELCOME and AVERROR(ERANGE) (T33a1).
+    "Not yet implemented in FFmpeg, patches welcome", "Numerical result out of range"))
 
 
 def ffmpeg_refuses_input(process):
@@ -4093,6 +4100,129 @@ def rescaled_count(duration_ts, rate, den):
         return "N/A"
     return str((int(duration_ts) * int(rate) + den // 2) // den)
 
+# MP4 fixtures (T33a1) that ffprobe reads and zffprobe refuses, with the
+# error zffprobe names and why (notes.md "MP4 demuxing").
+KNOWN_MOV_PROBE_REFUSALS = {
+    "mov_aac_editlist": ("UnsupportedFormat", "an edit list that changes the index (T33b)"),
+    "mov_elst_empty_edit": ("UnsupportedFormat", "an edit list that changes the index (T33b)"),
+    "mov_video_track": ("UnsupportedFormat", "a video track (T33a3)"),
+    "mov_dref_alias": ("UnsupportedFormat", "a data reference to another file, whose track FFmpeg reports "
+                                            "without a codec"),
+    "mov_qt_v1_ima4": ("UnsupportedFormat", "adpcm_ima_qt, a codec the port has no decoder for"),
+    "mov_unknown_entry": ("UnsupportedFormat", "an unknown sample entry: no codec"),
+    "mov_cut_in_moov": ("UnsupportedFormat", "no audio stream: ffprobe reports the format alone"),
+    "mov_empty_moov": ("UnsupportedFormat", "no audio stream: ffprobe reports the format alone"),
+}
+# The program's stream copy that the hash driver refuses (T33a1).
+KNOWN_MOV_COPY_DIFFERENCES = {
+    "mov_aac_editlist": (("refused", "UnsupportedFormat"), "an edit list that changes the index (T33b)"),
+    "mov_elst_empty_edit": (("refused", "UnsupportedFormat"), "an edit list that changes the index (T33b)"),
+    "mov_video_track": (("refused", "UnsupportedFormat"), "a video track (T33a3)"),
+}
+# MP4 fixtures the program opens but cannot copy (nothing to map: no audio
+# stream, or a track without a codec), which the hash driver refuses with
+# UnsupportedFormat, as zffprobe does (T33a1).
+MOV_COPY_NOTHING_TO_MAP = {"mov_cut_in_moov", "mov_empty_moov", "mov_dref_alias"}
+# FFmpeg's error for an input it cannot open, by its message, and the
+# error and status zffprobe names for it.
+MOV_OPEN_ERRORS = {
+    "Invalid data found when processing input": ("InvalidMov", 2),
+    "End of file": ("Truncated", 2),
+    "Not yet implemented in FFmpeg, patches welcome": ("PatchWelcome", 3),
+    "Numerical result out of range": ("OutOfRange", 2),
+}
+
+
+def compare_mov(args, lines, failures):
+    """MP4 and QuickTime (T33a1): every fixture's zffprobe report (the first
+    audio stream, as ffprobe's `-select_streams a:0`, and the format tags)
+    against ffprobe's, the inputs FFmpeg cannot open refused with the error
+    `MOV_OPEN_ERRORS` maps its message to, and `KNOWN_MOV_PROBE_REFUSALS`
+    asserted; and the hash driver's stream copy against `ffmpeg -c copy -f
+    framecrc` (`check_framecrc_copy`, with `KNOWN_MOV_COPY_DIFFERENCES`)."""
+    rows = []
+    same = total = understood = 0
+    paths = sorted(p for p in (FIXTURES / "mp4").iterdir() if p.suffix in (".mp4", ".m4a", ".mov", ".3gp", ".3g2"))
+    seen_refusals = set()
+    for path in paths:
+        name = path.stem
+        total += 2
+        problems = []
+        theirs = run(args.ffprobe, "-v", "error", "-select_streams", "a:0", "-show_entries",
+                     "stream=codec_name,sample_fmt,channels,channel_layout,sample_rate,time_base,duration_ts"
+                     ":format=format_name", "-of", "default=noprint_wrappers=1", path)
+        fields = key_values(text(theirs.stdout))
+        zcode, zfields, zerr = zffprobe(args.zffprobe, path)
+        zp = run(args.zffprobe, path)
+        if name in KNOWN_MOV_PROBE_REFUSALS:
+            seen_refusals.add(name)
+            error, why = KNOWN_MOV_PROBE_REFUSALS[name]
+            if theirs.returncode != 0 or tool_error(zp, "zffprobe", path) != error:
+                problems.append(f"recorded: ffprobe reads it and zffprobe refuses with {error} ({why}); ffprobe "
+                                f"exited {theirs.returncode}, zffprobe {zcode} ({zerr or 'no error'})")
+            else:
+                understood += 1
+        elif theirs.returncode != 0:
+            message = text(theirs.stderr).splitlines()[-1:] or [""]
+            expected = next((v for k, v in MOV_OPEN_ERRORS.items() if message[0].endswith(k)), None)
+            if expected is None:
+                problems.append(f"ffprobe fails with an unlisted error: {message[0]}")
+            elif zcode != expected[1] or tool_error(zp, "zffprobe", path) != expected[0]:
+                problems.append(f"ffprobe fails ({message[0]}); zffprobe must refuse with {expected[0]} (status "
+                                f"{expected[1]}), and exited {zcode} ({zerr or 'no error'})")
+        else:
+            den = int(fields["time_base"].split("/")[1]) if "/" in fields.get("time_base", "") else 1
+            want = {"format": fields.get("format_name"), "codec": fields.get("codec_name"),
+                    "sample_fmt": fields.get("sample_fmt"), "channels": fields.get("channels"),
+                    "channel_layout": fields.get("channel_layout"), "sample_rate": fields.get("sample_rate"),
+                    "nb_samples": rescaled_count(fields.get("duration_ts"), fields.get("sample_rate"), den),
+                    "duration_num": fields.get("duration_ts"),
+                    "duration_den": str(den) if fields.get("duration_ts") not in (None, "N/A") else "N/A"}
+            if zcode != 0 or zfields != want:
+                problems.append(f"zffprobe exited {zcode} with {zfields or zerr}, ffprobe's {want}")
+            else:
+                ours_tags, their_tags = zffprobe_tags(args.zffprobe, path), ffprobe_tags(args.ffprobe, path)
+                if ours_tags != their_tags:
+                    problems.append(f"tags: zffprobe's {tags_text(ours_tags)}, ffprobe's {tags_text(their_tags)}")
+        if not problems:
+            same += 1
+        known = KNOWN_MOV_COPY_DIFFERENCES.get(name)
+        if name in MOV_COPY_NOTHING_TO_MAP:
+            ref = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", path, "-c", "copy", "-fflags", "+bitexact",
+                      "-f", "framecrc", "-")
+            mine = run(args.hasher, "framecrc", "copy", path)
+            last = text(ref.stderr).splitlines()[-1:]
+            copy_problems = [] if ref.returncode != 0 and last == ["Error opening output files: Invalid argument"] \
+                and tool_error(mine, "hash-driver", path) == "UnsupportedFormat" else [
+                f"recorded: the program has nothing to map and the hash driver refuses with UnsupportedFormat; "
+                f"ffmpeg exited {ref.returncode} ({last}), the hash driver {mine.returncode}"]
+            understood += not copy_problems
+        else:
+            copy_problems = check_framecrc_copy(args, path, known, zp)
+        if not copy_problems:
+            same += 1
+            understood += known is not None and name not in MOV_COPY_NOTHING_TO_MAP
+        problems += copy_problems
+        failures.extend(f"MP4 {name}: {p}" for p in problems)
+        rows.append(f"| `{path.name}` | {'pass' if not problems else '**FAIL**: ' + '; '.join(problems)} |")
+    for name in sorted(set(KNOWN_MOV_PROBE_REFUSALS) - seen_refusals):
+        total += 1
+        failures.append(f"KNOWN_MOV_PROBE_REFUSALS lists {name}, which is not a fixture")
+    record("MP4 fixtures (T33a1)", same, total, understood=understood)
+    lines += [
+        "",
+        "## MP4 fixtures (T33a1)",
+        "",
+        f"MP4, M4A, MOV, 3GP and 3G2 fixtures probed by zffprobe as ffprobe probes their first audio stream and "
+        f"format tags, or refused with the error FFmpeg's names, and stream-copied by the hash driver into "
+        f"framecrc as the ffmpeg program copies them: {same}/{total}, {understood} of them recorded refusals "
+        f"(edit lists, T33b; video, T33a3; codecs and references the port does not read).",
+        "",
+        "| Fixture | Result |",
+        "| --- | --- |",
+    ] + rows
+
+
 def compare_ac3(args, lines, failures):
     """Raw AC-3 (T32a): every fixture's zffprobe report against ffprobe's
     (both failing to detect a stream too short for the probe), and its
@@ -4724,6 +4854,12 @@ KNOWN_REGISTRY_DIFFERENCES = {
                         "has no E-AC-3 encoder"),
     ("format", "eac3"): (("D.", "DE"), "FFmpeg's raw E-AC-3 muxer writes the E-AC-3 fixtures (T32b); the port "
                          "writes no E-AC-3"),
+    ("format only in FFmpeg", "mp4"): ((None, None), "FFmpeg's mp4 muxer writes the MP4 fixtures (T33a1); the port "
+                                       "writes no MP4 until T34a"),
+    ("format only in FFmpeg", "mov"): ((None, None), "FFmpeg's mov muxer writes the MOV fixtures (T33a1); the port "
+                                       "writes no MOV until T34a"),
+    ("format only in FFmpeg", "ipod"): ((None, None), "FFmpeg's ipod muxer writes the M4A fixtures (T33a1); the port "
+                                        "writes no M4A until T34a"),
 }
 
 
@@ -4979,6 +5115,7 @@ def main():
     compare_caf_output(args, lines, failures)
     compare_g72x(args, lines, failures)
     compare_ac3(args, lines, failures)
+    compare_mov(args, lines, failures)
     compare_g72x_output(args, lines, failures)
     compare_mp2_output(args, lines, failures)
     compare_ac3_output(args, lines, failures)

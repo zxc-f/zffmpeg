@@ -411,6 +411,25 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/ac3enc_vect
 ./ac3enc-vectors | diff -u zig/testing/vectors/ac3enc.txt -
 ```
 
+`mov_vectors.c` (T33a1) prints what the pinned libavformat makes of each
+MP4 fixture, opened as the ffmpeg program opens it (`mp3_vectors.c`'s
+lines, with each stream's codec tag, bits, frame size, block align,
+profile, frame count, seek preroll and extradata, its channel layout, and
+the demuxer's name), from the file or, with `-pipe`, from a pipe;
+`mov_fixtures.sh` makes the FFmpeg-made fixtures from generate.py's
+inputs (their hashes are generate.py's). `aac_asc_vectors.c` (T33a1)
+opens the AAC decoder with AudioSpecificConfigs and decodes raw packets.
+The Zig tests render the same lines from the port:
+
+```bash
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/mov_vectors.c .references/ffmpeg-install/lib/libavformat.a .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o mov-vectors
+LC_ALL=C ./mov-vectors zig/testing/fixtures/mp4/*.{mp4,m4a,mov,3gp,3g2} | diff -u zig/testing/vectors/mov.txt -
+LC_ALL=C ./mov-vectors -pipe zig/testing/fixtures/mp4/*.{mp4,m4a,mov,3gp,3g2} | diff -u zig/testing/vectors/mov_pipe.txt -
+bash zig/testing/reference/mov_fixtures.sh .references/ffmpeg-install
+clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/aac_asc_vectors.c .references/ffmpeg-install/lib/libavformat.a .references/ffmpeg-install/lib/libavcodec.a .references/ffmpeg-install/lib/libswresample.a .references/ffmpeg-install/lib/libavutil.a -lm -pthread -o aac-asc-vectors
+LC_ALL=C ./aac-asc-vectors zig/testing/fixtures/aac zig/testing/fixtures/mp4/mov_aac_*.* zig/testing/fixtures/mp4/mov_two_tracks.mp4 | diff -u zig/testing/vectors/aac_asc.txt -
+```
+
 `aacpsy_vectors.c` (T32d) drives the pinned AAC encoder's psychoacoustic
 model (`ff_psy_init` and `ff_aac_psy_model` from the static libavcodec,
 with aacenc.c's band tables) through 26 cases of element maps, rates, bit
@@ -662,11 +681,16 @@ with the install prefix and:
 ```text
 --cc=clang --disable-everything --disable-autodetect --disable-doc
 --disable-network --disable-x86asm --disable-ffplay --disable-avdevice
---enable-protocol=file,pipe --enable-demuxer=wav,w64,au,aiff,caf,flac,ogg,mp3,$pcm_formats
---enable-decoder=$pcm_codecs,flac,vorbis,opus,mp3float
---enable-encoder=$pcm_codecs,flac,vorbis,opus
---enable-muxer=wav,w64,au,aiff,flac,ogg,oga,opus,framecrc,framemd5,streamhash,$pcm_formats
---enable-parser=flac,mpegaudio
+--enable-protocol=file,pipe
+--enable-demuxer=wav,w64,au,aiff,caf,flac,ogg,mp3,aac,ac3,eac3,mov,$pcm_formats
+--enable-decoder=$pcm_codecs,flac,vorbis,opus,mp3float,mp1float,mp2float,aac,
+  adpcm_ima_wav,adpcm_ms,alac,adpcm_g722,adpcm_g726le,ac3,eac3
+--enable-encoder=$pcm_codecs,flac,vorbis,opus,mp2,mp2fixed,aac,adpcm_ima_wav,
+  adpcm_ms,alac,adpcm_g722,adpcm_g726le,ac3,eac3
+--enable-muxer=wav,mp2,adts,w64,au,aiff,caf,flac,ogg,oga,opus,framecrc,framemd5,
+  streamhash,ac3,eac3,mp4,mov,ipod,$pcm_formats
+--enable-bsf=aac_adtstoasc
+--enable-parser=flac,mpegaudio,aac,ac3
 --enable-filter=aresample,volume,asetpts,amix,pan,channelmap,channelsplit,asplit
 
 pcm_codecs=pcm_u8,pcm_s8,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,
@@ -701,7 +725,12 @@ FFmpeg's float MP3 decoder and the ffmpeg program's default for MP3 (T29b),
 mp1float and mp2float (T29c), the mp2 and mp2fixed encoders with the
 mp2 muxer (T29d), the aac demuxer with the aac parser and the adts muxer
 (T30a), and FFmpeg's float AAC decoder with the native AAC encoder, which
-makes its fixtures (T30b).
+makes its fixtures (T30b), the IMA WAV and Microsoft ADPCM decoders and
+encoders (T31a), ALAC's and the CAF muxer (T31b), G.722's and G.726's
+(T31c), the ac3 and eac3 demuxers with the ac3 parser and the AC-3 and
+E-AC-3 decoders (T32a, T32b), the AC-3 encoder and the ac3 and eac3 muxers
+(T32b, T32c), and the mov demuxer with the mp4, mov and ipod muxers and the
+aac_adtstoasc bitstream filter, which make the MP4 fixtures (T33a1).
 There are no GPL, nonfree, external-library or
 hardware components, and autodetection is off. `--disable-x86asm` keeps the C
 code paths as the reference and avoids a NASM dependency; inline assembly
@@ -988,6 +1017,15 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   is present, FATE's five E-AC-3 samples (`FATE_EAC3`: spectral
   extension, AHT, 5.1 and 7.1 with dependent frames), probed and decoded
   to s16le.
+- **MP4 fixtures (T33a1).** Every MP4, M4A, MOV, 3GP and 3G2 fixture
+  probed by zffprobe as ffprobe probes its first audio stream
+  (`-select_streams a:0`) and format tags, or refused with the error
+  FFmpeg's message maps to (`MOV_OPEN_ERRORS`), and copied by the hash
+  driver into framecrc as `ffmpeg -c copy -f framecrc` copies it.
+  `KNOWN_MOV_PROBE_REFUSALS`, `KNOWN_MOV_COPY_DIFFERENCES` and
+  `MOV_COPY_NOTHING_TO_MAP` record and assert the refusals: edit lists
+  (T33b), a video track (T33a3), codecs and references the port does not
+  read, files without an audio track.
 - **AC-3 output (T32c).** zffmpeg's AC-3 (the `ac3` muxer, with every
   option of the encoder) against the ffmpeg program's with `-bitexact`,
   for the FLAC output section's inputs, decoded AC-3, E-AC-3, MP3 and
