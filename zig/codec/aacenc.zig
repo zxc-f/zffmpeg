@@ -7,21 +7,22 @@
 // the terms of the GNU Lesser General Public License as published by the
 // Free Software Foundation; either version 2.1 of the License, or (at your
 // option) any later version.
-//! FFmpeg's AAC-LC encoder (`aac`, TODO.md T32d1) with the `twoloop` and
-//! `fast` coders: window decisions and the psychoacoustic model
-//! (aacpsy.zig), the sine/KBD-windowed MDCT, clip avoidance, the coders'
-//! scalefactor searches (aaccoder.zig), TNS (aacenc_tns.zig), PNS, mid/side
-//! and intensity stereo, the section, scalefactor and spectral data, and the
-//! rate control loop over lambda, packet for packet. Planar float samples
-//! in frames of 1024 per channel, in FFmpeg's layout order; one frame of
-//! delay, so a stream ends with flush packets. The default coder, `nmr`, is
-//! T32d2's and refused here.
+//! FFmpeg's AAC-LC encoder (`aac`, TODO.md T32d1 and T32d2) with its three
+//! coders, `nmr` (the default, aaccoder_nmr.zig), `twoloop` and `fast`:
+//! window decisions and the psychoacoustic model (aacpsy.zig), the
+//! sine/KBD-windowed MDCT, clip avoidance, the coders' scalefactor searches
+//! (aaccoder.zig), TNS (aacenc_tns.zig), PNS, mid/side and intensity
+//! stereo, the section, scalefactor and spectral data, and the rate control
+//! loop over lambda, packet for packet. Planar float samples in frames of
+//! 1024 per channel, in FFmpeg's layout order; one frame of delay, so a
+//! stream ends with flush packets.
 
 const std = @import("std");
 const aac_tab = @import("aac_tab.zig");
 const enc_tab = @import("aacenc_tab.zig");
 const aacpsy = @import("aacpsy.zig");
 const coder = @import("aaccoder.zig");
+const nmr_coder = @import("aaccoder_nmr.zig");
 const tns_mod = @import("aacenc_tns.zig");
 const tx = @import("tx.zig");
 const float_dsp = @import("float_dsp.zig");
@@ -218,7 +219,7 @@ pub const Error = error{
     /// A sample rate not in the MPEG-4 table, or a layout FFmpeg's encoder
     /// has no configuration for ("Unsupported channel layout", EINVAL).
     UnsupportedFormat,
-    /// A profile the encoder does not take, or the `nmr` coder (T32d2).
+    /// A profile the encoder does not take.
     InvalidOption,
     OutOfMemory,
 };
@@ -325,6 +326,8 @@ pub const Encoder = struct {
     scoefs: [1024]f32 = @splat(0),
     cost_cache_generation: u16 = 0,
     cost_cache: [256][128]CostCacheEntry = @splat(@splat(.{})),
+    /// The `nmr` coder's state (owned), null for the other coders.
+    nmr: ?*nmr_coder.State = null,
     esc_pow43: [1 << 13]f32,
     lpc_buffer: tns_mod.LpcBuffer = .{},
     /// planar_samples: per AAC channel, the overlap, the current block
@@ -369,7 +372,6 @@ pub const Encoder = struct {
             } else return error.UnsupportedFormat; // "Unsupported channel layout"
             chcfg = 0;
         }
-        if (options.coder == .nmr) return error.InvalidOption; // T32d2
         var opt = options;
         // Profile.
         var profile = if (opt.profile == profile_unknown) profile_aac_low else opt.profile;
@@ -407,12 +409,34 @@ pub const Encoder = struct {
         if (opt.cutoff > 0) {
             bandwidth = opt.cutoff;
         } else {
-            var frame_br: i32 = if (opt.qscale)
-                cconv.cvttsd2si32(@as(f32, @floatFromInt(bit_rate)) / 2.0 * (lambda / 120.0) * 1.5)
-            else
-                @intCast(@divTrunc(bit_rate, channels));
-            if (opt.pns != 0 or opt.intensity_stereo != 0) frame_br = cconv.cvttsd2si32(@as(f32, @floatFromInt(frame_br)) * 1.15);
-            bandwidth = @max(3000, cutoffFromBitrate(frame_br, 1, @intCast(sample_rate)));
+            var frame_br: i32 = undefined;
+            if (opt.qscale) {
+                if (opt.coder == .nmr) {
+                    // The expected per-channel rate of the quality ladder.
+                    const gq: f32 = @floatFromInt(opt.global_quality);
+                    const q: f32 = if (opt.global_quality > 0) gq / 118.0 else 1.0;
+                    frame_br = cconv.cvttsd2si32(66000.0 * libm.powf(q, 0.29));
+                } else {
+                    frame_br = cconv.cvttsd2si32(@as(f32, @floatFromInt(bit_rate)) / 2.0 * (lambda / 120.0) * 1.5);
+                }
+            } else {
+                frame_br = @intCast(@divTrunc(bit_rate, channels));
+            }
+            if (opt.coder == .nmr and frame_br >= 24000) {
+                // The NMR coder's bandwidth table, interpolated.
+                const rates = [_]i32{ 24000, 32000, 48000, 64000, 96000, 192000 };
+                const bws = [_]i32{ 14000, 14000, 15000, 16000, 19500, 22000 };
+                var i: usize = 0;
+                while (i < rates.len - 2 and frame_br > rates[i + 1]) i += 1;
+                const span: i64 = bws[i + 1] - bws[i];
+                // C converts the int64 quotient to int.
+                const add: i32 = @truncate(@divTrunc(span * (frame_br - rates[i]), rates[i + 1] - rates[i]));
+                bandwidth = bws[i] + add;
+                bandwidth = @min(@min(bandwidth, 22000), @as(i32, @intCast(sample_rate / 2)));
+            } else {
+                if (opt.pns != 0 or opt.intensity_stereo != 0) frame_br = cconv.cvttsd2si32(@as(f32, @floatFromInt(frame_br)) * 1.15);
+                bandwidth = @max(3000, cutoffFromBitrate(frame_br, 1, @intCast(sample_rate)));
+            }
             bandwidth = @min(@max(bandwidth, 8000), @as(i32, @intCast(sample_rate / 2)));
         }
 
@@ -421,6 +445,9 @@ pub const Encoder = struct {
         const cpe = try gpa.alloc(Cpe, chan_map[0]);
         errdefer gpa.free(cpe);
         for (cpe) |*c| c.* = .{};
+        const nmr_state: ?*nmr_coder.State = if (opt.coder == .nmr) try gpa.create(nmr_coder.State) else null;
+        errdefer if (nmr_state) |n| gpa.destroy(n);
+        if (nmr_state) |n| n.* = .{};
         var grouping: [max_channels]u8 = undefined;
         for (0..chan_map[0]) |i| grouping[i] = @intFromBool(chan_map[i + 1] == ElementType.cpe);
         var psy = aacpsy.Psy.init(gpa, .{
@@ -430,7 +457,8 @@ pub const Encoder = struct {
             .qscale = opt.qscale,
             .global_quality = opt.global_quality,
             .cutoff = bandwidth,
-            .unbounded_pe = false,
+            // The quality-target modes of the NMR coder own the rate.
+            .unbounded_pe = (opt.qscale or opt.rc == 1) and opt.coder == .nmr,
             .band_sizes = .{ enc_tab.swb_size_1024[sr_index], enc_tab.swb_size_128[sr_index] },
             .groups = grouping[0..chan_map[0]],
         }) catch |err| return switch (err) {
@@ -468,6 +496,7 @@ pub const Encoder = struct {
             .mdct128 = mdct128,
             .lambda = lambda,
             .esc_pow43 = undefined,
+            .nmr = nmr_state,
         };
         // ff_aac_coder_init_tables.
         for (&e.esc_pow43, 0..) |*p, c| {
@@ -482,6 +511,7 @@ pub const Encoder = struct {
         e.mdct1024.deinit();
         e.mdct128.deinit();
         e.psy.deinit();
+        if (e.nmr) |n| e.gpa.destroy(n);
         e.gpa.free(e.cpe);
         e.gpa.destroy(e);
     }
@@ -728,6 +758,11 @@ pub const Encoder = struct {
                     }
                     wi[ch].clipping[w] = max;
                 }
+                // The NMR coder keeps levels exact: float decoders do not
+                // clip.
+                if (e.opt.coder == .nmr) {
+                    for (0..ics.num_windows) |w| wi[ch].clipping[w] = 0;
+                }
                 for (0..ics.num_windows) |w| {
                     if (wi[ch].clipping[w] > clip_avoidance_factor) {
                         ics.window_clipping[w] = 1;
@@ -801,34 +836,74 @@ pub const Encoder = struct {
                     }
                 }
                 const use_tns = e.opt.tns != 0;
-                for (0..chans) |ch| {
-                    e.cur_channel = start_ch + ch;
-                    if (e.opt.pns != 0) coder.markPns(e, &cpe.ch[ch]);
-                    switch (e.opt.coder) {
-                        .twoloop => coder.searchForQuantizersTwoloop(e, &cpe.ch[ch], e.lambda),
-                        .fast => coder.searchForQuantizersFast(e, &cpe.ch[ch], e.lambda),
-                        .nmr => unreachable, // refused by init
-                    }
-                }
-                for (0..chans) |ch| {
-                    const sce = &cpe.ch[ch];
-                    e.cur_channel = start_ch + ch;
-                    if (use_tns) {
+                // The NMR coder controls its own rate and never quantizes
+                // again, so TNS runs before it.
+                const nmr = e.opt.coder == .nmr;
+                if (nmr and use_tns) {
+                    for (0..chans) |ch| {
+                        const sce = &cpe.ch[ch];
+                        e.cur_channel = start_ch + ch;
+                        // Mono: PNS marked first, so TNS's band range sees
+                        // it.
+                        if (chans == 1 and e.opt.pns != 0) coder.markPns(e, sce);
                         tns_mod.searchForTns(e, sce);
                         tns_mod.applyTns(sce);
                         if (sce.tns.present) tns_mode = true;
                     }
-                    if (e.opt.pns != 0) coder.searchForPns(e, sce);
+                }
+                // The NMR coder's stereo PNS: only where both channels'
+                // L/R bands are noise-like.
+                if (chans == 2 and cpe.common_window and nmr and e.opt.pns != 0) {
+                    e.cur_channel = start_ch;
+                    coder.markPns(e, &cpe.ch[0]);
+                    e.cur_channel = start_ch + 1;
+                    coder.markPns(e, &cpe.ch[1]);
+                    for (&cpe.ch[0].can_pns, &cpe.ch[1].can_pns) |*p0, *p1| {
+                        if (p0.* == 0 or p1.* == 0) {
+                            p0.* = 0;
+                            p1.* = 0;
+                        }
+                    }
+                }
+                // The NMR coder decides I/S and M/S before quantizing.
+                if (chans == 2 and cpe.common_window and nmr and (e.opt.mid_side != 0 or e.opt.intensity_stereo != 0)) {
+                    e.cur_channel = start_ch;
+                    nmr_coder.decideStereo(e, cpe);
+                }
+                // It pools a CPE's bit budget.
+                if (e.nmr) |n| n.pair = chans == 2;
+                for (0..chans) |ch| {
+                    e.cur_channel = start_ch + ch;
+                    if (e.opt.pns != 0 and !nmr) coder.markPns(e, &cpe.ch[ch]);
+                    switch (e.opt.coder) {
+                        .twoloop => coder.searchForQuantizersTwoloop(e, &cpe.ch[ch], e.lambda),
+                        .fast => coder.searchForQuantizersFast(e, &cpe.ch[ch], e.lambda),
+                        .nmr => nmr_coder.searchForQuantizers(e, &cpe.ch[ch], e.lambda, frame_num),
+                    }
+                }
+                // TNS (other coders) and PNS (decided in NMR's trellis).
+                if (!nmr) {
+                    for (0..chans) |ch| {
+                        const sce = &cpe.ch[ch];
+                        e.cur_channel = start_ch + ch;
+                        if (use_tns) {
+                            tns_mod.searchForTns(e, sce);
+                            tns_mod.applyTns(sce);
+                            if (sce.tns.present) tns_mode = true;
+                        }
+                        if (e.opt.pns != 0) coder.searchForPns(e, sce);
+                    }
                 }
                 e.cur_channel = start_ch;
                 if (e.opt.intensity_stereo != 0) {
-                    if (chans == 2) {
+                    // NMR: decided before the search.
+                    if (chans == 2 and !nmr) {
                         coder.searchForIs(e, cpe);
                         applyIntensityStereo(cpe);
                     }
                     if (cpe.is_mode != 0) is_mode = true;
                 }
-                if (e.opt.mid_side != 0 and chans == 2) {
+                if (e.opt.mid_side != 0 and chans == 2 and !nmr) {
                     if (e.opt.mid_side == -1) {
                         coder.searchForMs(e, cpe);
                     } else if (cpe.common_window) {
@@ -867,6 +942,10 @@ pub const Encoder = struct {
                 continue;
             }
             frame_bits = @intCast(w.count());
+            // The NMR coder controls its own rate (with a nonzero
+            // bit_rate_tolerance, libavcodec's default): only a hard
+            // overflow goes through the lambda loop.
+            if (e.opt.coder == .nmr and frame_bits < max_frame) break;
             // Between the nominal bit rate and psy's reservoir target,
             // drifting towards the nominal rate.
             var rate_bits: i32 = @intCast(@divTrunc(e.bit_rate * 1024, e.sample_rate));
@@ -907,6 +986,21 @@ pub const Encoder = struct {
         w.bits(3, ElementType.end);
         w.flush();
         e.last_frame_pb_count = @intCast(w.count());
+        // The NMR coder's accounting: the bits the frame took beyond what
+        // its trellis counted.
+        if (e.nmr) |n| {
+            var counted: i32 = 0;
+            for (n.counted[0..e.channels]) |c| counted += c;
+            if (counted > 0) {
+                const side = @as(f32, @floatFromInt(e.last_frame_pb_count)) - @as(f32, @floatFromInt(counted));
+                if (n.side_inited) {
+                    n.side_ema += 0.125 * (side - n.side_ema);
+                } else {
+                    n.side_ema = side;
+                    n.side_inited = true;
+                }
+            }
+        }
         return w.written();
     }
 
@@ -1146,10 +1240,19 @@ fn encodeScaleFactors(w: *bits.BitWriter, sce: *const Sce) void {
 const testing = std.testing;
 const signals = @import("../testing/signals.zig");
 
-/// aacenc_vectors.c's float sample.
+/// aacenc_vectors.c's float sample; "corr" keeps its first channel's
+/// sample of the instant in `state[7]` (no other signal of a case uses it).
 fn vectorSample(rng: *signals.Rng, signal: []const u8, gain: f32, specials: bool, c: usize, i: usize, state: *[8]i32) f32 {
     const bursts = std.mem.eql(u8, signal, "bursts");
-    const v = signals.sample(rng, if (bursts) "noise" else signal, c, i, state, 16);
+    const v = if (std.mem.eql(u8, signal, "corr")) blk: {
+        const own = signals.sample(rng, "noise", c, i, state, 16);
+        if (c == 0) state[7] = own;
+        break :blk if (c == 0) own else @divTrunc(state[7] * 3 + @divTrunc(own, 4), 4);
+    } else if (std.mem.eql(u8, signal, "onsets")) blk: {
+        const own = signals.sample(rng, "noise", c, i, state, 16);
+        if ((i / 700) % 32 != 5) return @as(f32, @floatFromInt(own)) * (gain / 32768.0 / 128.0);
+        break :blk own;
+    } else signals.sample(rng, if (bursts) "noise" else signal, c, i, state, 16);
     if (bursts and (i / 700) % 4 != 0) return @as(f32, @floatFromInt(v)) * (gain / 32768.0 / 128.0);
     if (specials) {
         if (i % 397 == 11) return std.math.nan(f32);
@@ -1189,6 +1292,10 @@ fn vectorOptions(text: []const u8) !Options {
             o.tns = try std.fmt.parseInt(i32, value, 10);
         } else if (std.mem.eql(u8, key, "aac_pce")) {
             o.pce = try std.fmt.parseInt(i32, value, 10);
+        } else if (std.mem.eql(u8, key, "aac_rc")) {
+            o.rc = try std.fmt.parseInt(i32, value, 10);
+        } else if (std.mem.eql(u8, key, "aac_nmr_speed")) {
+            o.nmr_speed = try std.fmt.parseInt(i32, value, 10);
         } else if (std.mem.eql(u8, key, "aac_allow_71wide")) {
             o.allow_71wide = try std.fmt.parseInt(i32, value, 10) != 0;
         } else return error.UnknownOption;
@@ -1289,9 +1396,9 @@ const fuzz_profiles = [_]i32{ profile_unknown, profile_aac_low, profile_mpeg2_aa
 /// The fuzz entry's input: raw f32 samples (any bits: NaN, infinities,
 /// huge values), then the rate's index, the layout's index, the bit rate,
 /// the coder, the quality (negative: none), the cutoff, mid/side,
-/// intensity stereo, PNS, TNS, the PCE option, 7.1(wide) and the
-/// profile's index. Every packet must fit the encoder's capacity; the
-/// stream ends with the flush.
+/// intensity stereo, PNS, TNS, the PCE option, 7.1(wide), the profile's
+/// index, the NMR coder's rate control and its speed. Every packet must
+/// fit the encoder's capacity; the stream ends with the flush.
 fn fuzzRun(smith: *std.testing.Smith) !u32 {
     var input: [2 * frame_samples * 8 * 4 + hostile.max_growth]u8 = undefined;
     const len = smith.slice(&input);
@@ -1299,7 +1406,11 @@ fn fuzzRun(smith: *std.testing.Smith) !u32 {
     const layout = fuzz_layouts[smith.valueRangeAtMost(u8, 0, fuzz_layouts.len - 1)];
     var options: Options = .{
         .bit_rate = @bitCast(smith.value(u64)),
-        .coder = if (smith.valueRangeAtMost(u8, 0, 1) == 0) .twoloop else .fast,
+        .coder = switch (smith.valueRangeAtMost(u8, 0, 2)) {
+            0 => .twoloop,
+            1 => .fast,
+            else => .nmr,
+        },
     };
     if (options.bit_rate < 0) options.bit_rate = 0;
     const quality = smith.value(i32);
@@ -1315,6 +1426,8 @@ fn fuzzRun(smith: *std.testing.Smith) !u32 {
     options.pce = smith.valueRangeAtMost(i32, -1, 1);
     options.allow_71wide = smith.valueRangeAtMost(u8, 0, 1) != 0;
     options.profile = fuzz_profiles[smith.valueRangeAtMost(u8, 0, fuzz_profiles.len - 1)];
+    options.rc = smith.valueRangeAtMost(i32, 0, 1);
+    options.nmr_speed = smith.valueRangeAtMost(i32, 0, 4);
     const e = Encoder.init(testing.allocator, rate, layout, options) catch |err| switch (err) {
         error.InvalidOption => return 0, // the profile
         error.UnsupportedFormat => unreachable, // the rates and layouts above
@@ -1384,14 +1497,21 @@ const none: u64 = @bitCast(@as(i64, -1));
 const fuzz_corpus: []const []const u8 = &.{
     // The values: the rate's index, the layout's index, the bit rate, the
     // coder, the quality, the cutoff, mid/side, intensity stereo, PNS,
-    // TNS, the PCE option, 7.1(wide), the profile's index.
-    hostile.fuzzSeed(&seed_samples, &.{ 4, 1, 0, 0, none, 0, none, 1, 1, 1, 0, 0, 0 }),
-    hostile.fuzzSeed(&seed_samples, &.{ 3, 1, 128000, 1, none, 0, 1, 0, 0, 0, 0, 0, 1 }),
-    hostile.fuzzSeed(&seed_samples, &.{ 7, 0, 32000, 0, 236, 9000, none, 1, 1, 1, 1, 0, 2 }),
-    hostile.fuzzSeed(&seed_samples, &.{ 3, 5, 0, 1, none, 0, none, 1, 1, 1, 0, 0, 0 }),
-    hostile.fuzzSeed(&seed_samples, &.{ 3, normal_layouts.len + 26, 0, 0, none, 0, none, 1, 1, 1, 0, 0, 0 }),
-    hostile.fuzzSeed(&(@as([4 * frame_samples * 2]u8, @splat(0x7f)) ++ @as([4 * frame_samples * 2]u8, @splat(0xff))), &.{ 0, 1, 640000, 0, none, 0, 1, 1, 1, 1, 0, 0, 0 }),
-    hostile.fuzzSeed("", &.{ 11, 1, 0, 1, none, 0, none, 1, 1, 1, 0, 0, 0 }),
+    // TNS, the PCE option, 7.1(wide), the profile's index, the NMR
+    // coder's rate control and speed.
+    hostile.fuzzSeed(&seed_samples, &.{ 4, 1, 0, 0, none, 0, none, 1, 1, 1, 0, 0, 0, 0, 0 }),
+    hostile.fuzzSeed(&seed_samples, &.{ 3, 1, 128000, 1, none, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0 }),
+    hostile.fuzzSeed(&seed_samples, &.{ 7, 0, 32000, 0, 236, 9000, none, 1, 1, 1, 1, 0, 2, 0, 0 }),
+    hostile.fuzzSeed(&seed_samples, &.{ 3, 5, 0, 1, none, 0, none, 1, 1, 1, 0, 0, 0, 0, 0 }),
+    hostile.fuzzSeed(&seed_samples, &.{ 3, normal_layouts.len + 26, 0, 0, none, 0, none, 1, 1, 1, 0, 0, 0, 0, 0 }),
+    hostile.fuzzSeed(&(@as([4 * frame_samples * 2]u8, @splat(0x7f)) ++ @as([4 * frame_samples * 2]u8, @splat(0xff))), &.{ 0, 1, 640000, 0, none, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0 }),
+    hostile.fuzzSeed("", &.{ 11, 1, 0, 1, none, 0, none, 1, 1, 1, 0, 0, 0, 0, 0 }),
+    // The NMR coder: CBR, -q:a, ABR at its fastest, a PCE layout.
+    hostile.fuzzSeed(&seed_samples, &.{ 4, 1, 0, 2, none, 0, none, 1, 1, 1, 0, 0, 0, 0, 0 }),
+    hostile.fuzzSeed(&seed_samples, &.{ 3, 0, 32000, 2, 118, 0, none, 1, 1, 1, 0, 0, 0, 0, 2 }),
+    hostile.fuzzSeed(&seed_samples, &.{ 4, 1, 64000, 2, none, 0, none, 1, 1, 1, 0, 0, 0, 1, 4 }),
+    hostile.fuzzSeed(&seed_samples, &.{ 3, normal_layouts.len + 26, 0, 2, none, 0, none, 1, 1, 1, 0, 0, 0, 0, 1 }),
+    hostile.fuzzSeed(&(@as([4 * frame_samples * 2]u8, @splat(0x7f)) ++ @as([4 * frame_samples * 2]u8, @splat(0xff))), &.{ 0, 1, 1, 2, none, 0, 1, 1, 1, 1, 0, 0, 0, 1, 3 }),
 };
 
 test "fuzz: the AAC encoder on arbitrary samples, layouts and options" {
@@ -1409,8 +1529,10 @@ test "mutation smoke: the AAC encoder on mutated seeds" {
     try hostile.mutationSmoke({}, fuzzOne, fuzz_corpus, 16, 0x61616365);
 }
 
-fn encodeUnderFailures(gpa: std.mem.Allocator, layout: u64) !void {
-    const e = try Encoder.init(gpa, 48000, layout, .{ .coder = .twoloop });
+const FailureCase = struct { layout: u64, coder: Coder };
+
+fn encodeUnderFailures(gpa: std.mem.Allocator, case: FailureCase) !void {
+    const e = try Encoder.init(gpa, 48000, case.layout, .{ .coder = case.coder });
     defer e.deinit();
     var plane: [frame_samples]f32 = @splat(0.25);
     var views: [8][]const f32 = @splat(&plane);
@@ -1422,7 +1544,9 @@ fn encodeUnderFailures(gpa: std.mem.Allocator, layout: u64) !void {
 }
 
 test "the AAC encoder frees everything under every allocation and remap failure" {
-    try hostile.checkAllocationFailuresWith(testing.allocator, hostile.Remaps.both, @as(u64, 0x3), encodeUnderFailures);
-    // A PCE layout.
-    try hostile.checkAllocationFailuresWith(testing.allocator, hostile.Remaps.both, @as(u64, 0x60f), encodeUnderFailures);
+    for ([_]Coder{ .twoloop, .nmr }) |c| {
+        try hostile.checkAllocationFailuresWith(testing.allocator, hostile.Remaps.both, FailureCase{ .layout = 0x3, .coder = c }, encodeUnderFailures);
+        // A PCE layout.
+        try hostile.checkAllocationFailuresWith(testing.allocator, hostile.Remaps.both, FailureCase{ .layout = 0x60f, .coder = c }, encodeUnderFailures);
+    }
 }

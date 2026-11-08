@@ -429,8 +429,11 @@ clang -O1 -I.references/ffmpeg-install/include zig/testing/reference/aacpsy_vect
 ./aacpsy-vectors | diff -u zig/testing/vectors/aacpsy.txt -
 ```
 
-`aacenc_vectors.c` (T32d1) prints what the pinned AAC encoder makes of 44
-cases through the public API: the twoloop and fast coders over every
+`aacenc_vectors.c` (T32d) prints what the pinned AAC encoder makes of 110
+cases through the public API: the nmr coder (66 cases: CBR, ABR with
+`aac_rc`, constant quality, `aac_nmr_speed` 0 to 4, long streams for its
+servos, correlated stereo and isolated onsets, the "corr" and "onsets"
+signals) and the twoloop and fast coders over every
 channel configuration and PCE layouts (with and without the height
 extension, `aac_pce` forced, 7.1(wide) both ways), the stereo tools and
 TNS off and forced, cutoffs, MPEG-2 LC, constant quality, rates from 8 to
@@ -995,8 +998,9 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   `UnsupportedFormat` (status 3) and no output (`ac3_expected_refusal`); a
   bit allocation that fails on the samples (5.1 at 32 kbit/s) fails both,
   zffmpeg with `InvalidOption` naming its output, which it removes.
-- **AAC output (T32d1).** zffmpeg's AAC (the `adts` muxer, with the
-  twoloop and fast coders and the encoder's options, `-q:a` included)
+- **AAC output (T32d).** zffmpeg's AAC (the `adts` muxer, with the
+  nmr, twoloop and fast coders and the encoder's options, `-q:a`,
+  `-aac_rc` and `-aac_nmr_speed` included)
   against the ffmpeg program's with `-bitexact`, for the FLAC output
   section's inputs, decoded ADTS (5.1 and 7.1(wide)), E-AC-3 (5.1(side),
   a PCE), AC-3, MP3 and Ogg Vorbis, 7.1 and stereo WAVs, a layout without
@@ -1005,8 +1009,7 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   and on a pipe, each decoded back by FFmpeg and zffmpeg to the same
   samples. `aac_expected_refusal` records the refusals, each with its
   status and error and no output: an input rate the encoder does not
-  take, which the program converts, and the default nmr coder (T32d2),
-  which it runs, are refused by zffmpeg; a forced rate it does not take,
+  take, which the program converts, is refused by zffmpeg; a forced rate it does not take,
   a layout without a configuration and one ADTS cannot carry fail both.
   A NaN sample fails both, zffmpeg with `InvalidSamples` naming its
   output, which it removes.

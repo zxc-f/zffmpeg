@@ -12,7 +12,8 @@
 //! FFmpeg's AAC temporal noise shaping encoder (TODO.md T32d): the filter
 //! search on the perceptually weighted spectrum, accepted by its measured
 //! prediction gain (long blocks: two filters over the band regions; short
-//! blocks: one filter pooled per window group), the filter applied to the
+//! blocks: one filter pooled per window group, its bar run-scoped under the
+//! `nmr` coder), the filter applied to the
 //! coefficients, and its bitstream.
 
 const std = @import("std");
@@ -309,8 +310,12 @@ fn searchShortPooled(e: *Encoder, sce: *Sce) void {
             }
             gmin = fmin(gmin, orig_e / fmax(filt_e, 1e-9));
         }
-        // Without the NMR coder's short-run state the bar is the base one.
-        if (gmin < tns_pg_c1_short) ok = false;
+        // The accept bar, run-scoped under the NMR coder: a hard entry
+        // and an easy hold inside short runs; otherwise the base bar.
+        const in_run = if (e.nmr) |n| n.prev_was_short else false;
+        const prev_on = if (e.nmr) |n| n.tns8_prev[e.cur_channel & 15] != 0 else false;
+        const bar_k: f32 = if (!in_run) 1.0 else if (prev_on) 0.5 else 1.8;
+        if (gmin < tns_pg_c1_short * bar_k) ok = false;
         if (ok) {
             for (0..gl) |w2| {
                 const w = wh + w2;
@@ -327,6 +332,7 @@ fn searchShortPooled(e: *Encoder, sce: *Sce) void {
         }
     }
     tns.present = count != 0;
+    if (e.nmr) |n| n.tns8_prev[e.cur_channel & 15] = @intFromBool(count != 0);
 }
 
 /// ff_aac_search_for_tns.

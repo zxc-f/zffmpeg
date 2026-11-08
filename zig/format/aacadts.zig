@@ -225,7 +225,9 @@ test "the writer groups samples into frames, flushes and checks the request" {
     // in a PCE.
     try testing.expectError(error.UnsupportedFormat, Writer.check(testing.allocator, .f32le, try audio.Format.init(48000, 8, .flt), options));
     try Writer.check(testing.allocator, .f32le, try audio.Format.init(48000, 8, .flt), .{ .coder = .twoloop, .pce = 1 });
-    try testing.expectError(error.InvalidOption, Writer.check(testing.allocator, .f32le, format, .{}));
+    // The default coder, nmr.
+    try Writer.check(testing.allocator, .f32le, format, .{});
+    try testing.expectError(error.InvalidOption, Writer.check(testing.allocator, .f32le, format, .{ .profile = 2 }));
 }
 
 test "the writer refuses NaN samples and reports a failing output" {

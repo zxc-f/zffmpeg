@@ -834,13 +834,13 @@ const convert_cases = [_]ConvertCase{
     .{ .name = "MP1 from a pipe to raw PCM", .set = .mp3, .args = &.{ "-i", "-" }, .stdin_input = "mp1_layer1_44k", .tail = &.{ "-f", "s16le", "-" }, .exit_code = 0, .stdout_as_other_input = true, .stdout_raw = .{ .args = &.{ "-f", "s16le", "-ch_layout", "stereo", "-sample_rate", "44100" }, .nb_samples = 11520 }, .stderr = "" },
     .{ .name = "MP2 to WAV", .set = .mp3, .args = &.{"-i"}, .input = "mp2_layer2_mpeg2_joint", .tail = &.{ "-f", "wav", "-" }, .exit_code = 0, .stdout_contains = "WAVEfmt ", .stderr = "" },
     .{ .name = "MP3 whose frames mostly fail to decode", .set = .mp3, .args = &.{"-i"}, .input = "mp3_rate_change", .tail = &.{ "-f", "wav", "-" }, .exit_code = 2, .stdout = "", .stderr_contains = ": DecodeErrorRate\n" },
-    // T32d1: FFmpeg's AAC encoder with the twoloop and fast coders into
-    // ADTS; compare.py checks the bytes against FFmpeg's. The default coder,
-    // nmr, is T32d2's (notes.md "AAC encoding").
+    // T32d1 and T32d2: FFmpeg's AAC encoder with its nmr (the default),
+    // twoloop and fast coders into ADTS; compare.py checks the bytes
+    // against FFmpeg's.
     .{ .name = "WAV to ADTS on standard output", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-aac_coder", "twoloop", "-f", "adts", "-" }, .exit_code = 0, .stdout_contains = "\xff\xf1", .stderr = "" },
     .{ .name = "WAV to ADTS with the fast coder and its options", .args = &.{"-i"}, .input = "extensible_5point1", .tail = &.{ "-c:a", "aac", "-aac_coder", "fast", "-b:a", "96k", "-aac_tns", "0", "-aac_pns", "0", "-cutoff", "3000", "-f", "adts", "-" }, .exit_code = 0, .stdout_contains = "\xff\xf1", .stderr = "" },
     .{ .name = "WAV to ADTS at a quality with a PCE", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-aac_coder", "twoloop", "-q:a", "2", "-aac_pce", "1", "-f", "adts", "-" }, .exit_code = 0, .stdout_contains = "\xff\xf1", .stderr = "" },
-    .{ .name = "the AAC encoder's default coder is not ported", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-f", "adts", "-" }, .exit_code = 1, .stdout = "", .stderr_contains = ": InvalidOption\n" },
+    .{ .name = "WAV to ADTS with the AAC encoder's default coder", .args = &.{"-i"}, .input = "stereo_44k1", .tail = &.{ "-f", "adts", "-" }, .exit_code = 0, .stdout_contains = "\xff\xf1", .stderr = "" },
     .{ .name = "a layout the AAC encoder refuses", .args = &.{"-i"}, .input = "extensible_mask_high", .tail = &.{ "-aac_coder", "twoloop", "-f", "adts", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedFormat\n" },
     .{ .name = "a configuration ADTS cannot carry", .args = &.{"-i"}, .input = "extensible_7point1_s24", .tail = &.{ "-aac_coder", "twoloop", "-f", "adts", "-" }, .exit_code = 3, .stdout = "", .stderr_contains = ": UnsupportedFormat\n" },
     .{ .name = "7.1 into ADTS with a PCE", .args = &.{"-i"}, .input = "extensible_7point1_s24", .tail = &.{ "-aac_coder", "twoloop", "-aac_pce", "1", "-f", "adts", "-" }, .exit_code = 0, .stdout_contains = "\xff\xf1", .stderr = "" },

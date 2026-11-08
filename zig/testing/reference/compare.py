@@ -2543,7 +2543,11 @@ AAC_OUTPUT_OPTIONS = [TWOLOOP, FAST, TWOLOOP + ["-b:a", "64k"], TWOLOOP + ["-b:a
                       TWOLOOP + ["-aac_pns", "0", "-aac_ms", "1"], TWOLOOP + ["-q:a", "2"], FAST + ["-q:a", "1.5"],
                       TWOLOOP + ["-cutoff", "8000"], TWOLOOP + ["-aac_pce", "1"],
                       FAST + ["-aac_allow_71wide", "1"], TWOLOOP + ["-ar", "22050"], TWOLOOP + ["-ac", "1"],
-                      FAST + ["-ac", "2", "-ar", "8000"], TWOLOOP + ["-ar", "44000"], [], ["-aac_coder", "nmr"]]
+                      FAST + ["-ac", "2", "-ar", "8000"], TWOLOOP + ["-ar", "44000"], [], ["-aac_coder", "nmr"],
+                      ["-b:a", "64k"], ["-b:a", "256k", "-aac_nmr_speed", "4"], ["-q:a", "2"], ["-q:a", "0.5"],
+                      ["-aac_rc", "1"], ["-aac_rc", "1", "-b:a", "96k", "-aac_tns", "0"],
+                      ["-aac_ms", "0", "-aac_is", "0", "-aac_pns", "0"], ["-aac_ms", "1"], ["-cutoff", "8000"],
+                      ["-aac_pce", "1"], ["-ac", "1", "-ar", "22050"]]
 # ff_mpeg4audio_sample_rates, the rates the encoder declares.
 AAC_RATES = (96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350)
 # The layouts the encoder codes with channel configurations 11, 12 and 14,
@@ -2559,10 +2563,9 @@ def aac_expected_refusal(rate, layout, opts, nan):
     fails both when the encoder opens, one ADTS cannot carry when the
     muxer writes its header, a forced rate the encoder does not take when
     it opens; an input rate it does not take is refused by zffmpeg
-    (UnsupportedFormat) where the program's filters pick one it takes; the
-    default coder, nmr, is T32d2's (InvalidOption). With a NaN sample in
-    the input, or a configuration ADTS cannot carry, the program fails
-    after the refusal's point."""
+    (UnsupportedFormat) where the program's filters pick one it takes. With
+    a NaN sample in the input, or a configuration ADTS cannot carry, the
+    program fails after the refusal's point."""
     pairs = dict(zip(opts[0::2], opts[1::2]))
     out_layout = {"1": "mono", "2": "stereo"}.get(pairs.get("-ac"), layout)
     if "USR" in out_layout:
@@ -2572,10 +2575,6 @@ def aac_expected_refusal(rate, layout, opts, nan):
     if "-ar" not in pairs and rate not in AAC_RATES:
         return (nan, 3, "UnsupportedFormat")
     adts_refused = out_layout in AAC_ADTS_REFUSED_LAYOUTS and pairs.get("-aac_pce") != "1"
-    if pairs.get("-aac_coder", "nmr") == "nmr":
-        # zffmpeg's encoder refuses the coder before its muxer sees the
-        # configuration.
-        return (nan or adts_refused, 1, "InvalidOption")
     if adts_refused:
         return (True, 3, "UnsupportedFormat")
     return None
@@ -2615,11 +2614,11 @@ def aac_output_inputs(work):
 
 
 def compare_aac_output(args, lines, failures):
-    """zffmpeg's AAC output (T32d1) into ADTS against the ffmpeg program's
-    with `-bitexact`: the same bytes as a file and on a pipe, decoded back
-    by FFmpeg and by zffmpeg to the same samples, for `aac_output_inputs`
-    with the twoloop and fast coders and their options, resampled and
-    remixed; refusals as `aac_expected_refusal` records them, each with its
+    """zffmpeg's AAC output (T32d1, T32d2) into ADTS against the ffmpeg
+    program's with `-bitexact`: the same bytes as a file and on a pipe,
+    decoded back by FFmpeg and by zffmpeg to the same samples, for
+    `aac_output_inputs` with the nmr, twoloop and fast coders and their
+    options, resampled and remixed; refusals as `aac_expected_refusal` records them, each with its
     status and error and no output. Where the encoder refuses a NaN sample,
     both fail and zffmpeg names its output and removes it."""
     rows = []
@@ -2703,15 +2702,14 @@ def compare_aac_output(args, lines, failures):
             result = "pass" if not problems else "**FAIL**: " + "; ".join(problems)
             rows.append(f"| `{name}` | {rate} Hz, {layout} | {result} |")
             failures.extend(f"AAC output {name}: {p}" for p in problems)
-    record("AAC output (T32d1)", same, total, understood=understood)
+    record("AAC output (T32d)", same, total, understood=understood)
     lines += [
         "",
-        "## AAC output (T32d1)",
+        "## AAC output (T32d)",
         "",
-        f"zffmpeg's AAC (the twoloop and fast coders) in ADTS equal to the ffmpeg program's with `-bitexact`, as a "
-        f"file and on a pipe, and decoded back by FFmpeg and zffmpeg to the same samples, or refused or failed as "
-        f"recorded: {same}/{total}, {understood} of them refusals where the program converts the rate or encodes "
-        f"with the nmr coder (T32d2).",
+        f"zffmpeg's AAC (the nmr, twoloop and fast coders) in ADTS equal to the ffmpeg program's with `-bitexact`, "
+        f"as a file and on a pipe, and decoded back by FFmpeg and zffmpeg to the same samples, or refused or failed "
+        f"as recorded: {same}/{total}, {understood} of them refusals where the program converts the rate.",
         "",
         "| Input | Format | Result |",
         "| --- | --- | --- |",

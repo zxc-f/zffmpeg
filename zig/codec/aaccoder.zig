@@ -15,7 +15,7 @@
 //! codes the section data, the `twoloop` and `fast` scalefactor searches,
 //! perceptual noise substitution (marking and search), mid/side and
 //! intensity stereo searches, and the scalefactors of PNS and I/S bands.
-//! FFmpeg's `nmr` coder is T32d2's.
+//! FFmpeg's `nmr` coder, which shares these helpers, is aaccoder_nmr.zig.
 
 const std = @import("std");
 const aacenc = @import("aacenc.zig");
@@ -187,7 +187,7 @@ fn findFormFactor(group_len: usize, swb_size: usize, thresh: f32, scaled: []cons
 }
 
 /// coef2minsf: av_clip_uint8(log2f(coef) * 4 - 69 + SCALE_ONE_POS - SCALE_DIV_512).
-fn coef2minsf(coef: f32) u8 {
+pub fn coef2minsf(coef: f32) u8 {
     const v = libm.log2f(coef) * 4 - 69 + scale_one_pos - scale_div_512;
     const i = cconv.cvttsd2si32(v);
     return @intCast(std.math.clamp(i, 0, 255));
@@ -394,7 +394,7 @@ fn quantizeBandCostBits(e: *Encoder, in: []const f32, scaled: ?[]const f32, size
 
 /// quantize_band_cost_cached: the cost memoized by scalefactor, window
 /// and band for the cache's generation.
-fn quantizeBandCostCached(e: *Encoder, w: usize, g: usize, in: []const f32, scaled: []const f32, size: usize, scale_idx: i32, cb: u8, lambda: f32, uplim: f32, bits_out: ?*i32, energy: ?*f32, rtz: bool) f32 {
+pub fn quantizeBandCostCached(e: *Encoder, w: usize, g: usize, in: []const f32, scaled: []const f32, size: usize, scale_idx: i32, cb: u8, lambda: f32, uplim: f32, bits_out: ?*i32, energy: ?*f32, rtz: bool) f32 {
     const entry = &e.cost_cache[@intCast(scale_idx)][w * 16 + g];
     if (entry.generation != e.cost_cache_generation or entry.cb != cb or entry.rtz != rtz) {
         entry.rd = quantizeBandCost(e, in, scaled, size, scale_idx, cb, lambda, uplim, &entry.bits, &entry.energy);

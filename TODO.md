@@ -76,9 +76,11 @@ and G.726 codecs packet for packet and sample for sample, read from AU and
 written there, which completes T31; and T32a, FFmpeg's raw AC-3 demuxer,
 parser and float decoder sample for sample, and T32b, its E-AC-3
 decoder sample for sample with the raw eac3 demuxer, and T32c, its float
-AC-3 encoder packet for packet with the raw ac3 muxer, and T32d1, its AAC
-encoder's twoloop and fast coders packet for packet into ADTS. **Next:
-T32d2 (the AAC encoder's default nmr coder).
+AC-3 encoder packet for packet with the raw ac3 muxer, and T32d, its AAC
+encoder packet for packet into ADTS with the twoloop and fast coders
+(T32d1) and the default nmr coder (T32d2), which completes T32. **Next:
+T33a (the MP4/MOV demuxer's boxes, sample tables and codec
+configuration).
 See [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
@@ -3912,7 +3914,7 @@ names, not as an empty framework.
     Remaining work or blocker / next action: none; T32a is next.
     ```
 
-- [ ] **T32 — AC-3 and native lossy encoders.** Checked when T32a–T32d are.
+- [x] **T32 — AC-3 and native lossy encoders.** Checked when T32a–T32d are.
   Reference: `libavcodec/ac3dec.c`, `eac3dec.c`, `ac3dsp.c`, `ac3enc*.c`,
   `aacenc*.c`, `libavformat/ac3dec.c`; `tests/fate/ac3.mak`.
   - [x] **T32a — AC-3 decoder.** Needs T16 and T27c.
@@ -4051,7 +4053,7 @@ names, not as an empty framework.
       native build at 0.84x.
     Remaining work or blocker / next action: none; T32d is next.
     ```
-  - [ ] **T32d — AAC-LC encoder.** Needs T30b. Checked when T32d1 and
+  - [x] **T32d — AAC-LC encoder.** Needs T30b. Checked when T32d1 and
     T32d2 are: the encoder's three coders are staged (the project owner's
     choice, 2026-11-07; notes.md "AAC encoding").
     Done under the same rule as T32c.
@@ -4110,10 +4112,55 @@ names, not as an empty framework.
         rate loop, FFmpeg's own hot spots.
       Remaining work or blocker / next action: none; T32d2 is next.
       ```
-    - [ ] **T32d2 — The nmr coder.** Needs T32d1. FFmpeg's default
+    - [x] **T32d2 — The nmr coder.** Needs T32d1. FFmpeg's default
       `nmr` coder (`aaccoder_nmr.h`, with `aac_rc` and `aac_nmr_speed`),
       replacing T32d1's refusal of it and its recorded cells.
       Done under the same rule as T32c.
+
+      ```text
+      ID / parent: T32d2 / T32d
+      State: verified (G5, local Linux x86-64 runs)
+      Supported behavior and explicit exclusions: FFmpeg's default nmr
+        coder, packet for packet and byte for byte the program's -bitexact
+        output: the per-band noise-to-mask candidate curves and the
+        scalefactor trellis, the pooled CPE budget, the CBR reservoir
+        servo with its transient bursts and caps, ABR (-aac_rc 1) with its
+        set point, constant quality (-q:a), -aac_nmr_speed 0 to 4, the
+        stereo decision (L/R, M/S, intensity) and stereo PNS before
+        quantization, zeroing and PNS hysteresis, the TNS-first order and
+        nmr's bandwidth ladder. Excluded (notes.md "AAC encoding"): FFmpeg's
+        -bt 0 path (bit_rate_tolerance fixed at libavcodec's default; no
+        -bt in zffmpeg).
+      Contract and source provenance: port.md "ADTS contract" (Encoding);
+        aaccoder_nmr.h, aacencdsp.c's trellis step and aacenc.c's nmr
+        paths (derived) in aaccoder_nmr.zig, aacenc.zig and
+        aacenc_tns.zig.
+      Required fixtures: aacenc.txt (110 cases, 66 nmr ones, from
+        aacenc_vectors.c with its "corr" and "onsets" signals); compare.py's
+        AAC output inputs with 11 more nmr option sets.
+      Comparison rule: as T32d1.
+      Evidence: the commit that checks this card. Clang coverage of
+        FFmpeg's nmr code under the vectors reaches everything but dead
+        code (the bisection branch of nmr_solve, called with one
+        iteration; solves of an empty slot), a PNS cost branch that needs
+        5.7 thr < energy <= 8 thr with the previous state set, and paths
+        too rare for short vectors (the ABR set-point stepper after
+        hundreds of frames, a pass-1 band without candidates, the commit's
+        codebook fixup, PNS before the CBR servo starts, a short first
+        frame under -q:a, the qscale overflow retry). G3: the fuzz entry
+        over the three coders with aac_rc and aac_nmr_speed (five nmr
+        seeds), a 2000-round mutation smoke in ReleaseSafe, the
+        allocation and remap sweep with nmr, a trellis-step test against
+        brute force; the default-coder process case now encodes. G5
+        locally on Linux x86-64 (no CI run link): zig fmt, the fixture
+        check, zig build test 639/639 (399 steps) in Debug, ReleaseSafe and ReleaseFast,
+        the cross builds, every vector generator, compare.py 12866/0/0
+        required (AAC output 1488 cells, 25 recorded refusals) and
+        66/66 optional. Speed check (10 minutes of stereo 44.1 kHz,
+        one core): WAV to AAC with nmr 1.19x the reference build from a
+        file and from a pipe; the native build at 0.90x.
+      Remaining work or blocker / next action: none; T33a is next.
+      ```
 
 ## Milestone 7: containers
 

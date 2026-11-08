@@ -11,8 +11,12 @@
 // alac_vectors.c's 16-bit signals divided by 32768 (exact in a float),
 // times the case's gain; "bursts" is the noise signal at 1/128 except
 // every fourth stretch of 700 samples (transients for block switching);
-// NaN and infinities sit at fixed places when the case asks for them. The
-// lines:
+// "corr" is the noise signal on the first channel and, on the others, three
+// quarters of the first channel's sample plus a sixteenth of their own
+// noise (correlated stereo, for intensity stereo); "onsets" is the noise
+// signal at 1/128 except one stretch of 700 samples in 32 (isolated
+// transients); NaN and infinities sit at fixed places when the case asks
+// for them. The lines:
 //
 //   C <name> <layout mask> <rate> <bit_rate> <samples> <signal> <gain> <specials> <options>
 //                                a case; options are `name=value` pairs
@@ -93,10 +97,25 @@ static int sample(const char *signal_in, int c, int i, int *state)
     return v;
 }
 
+// "corr"'s first-channel sample of the current instant.
+static int corr_first;
+
 // The float sample: the 16-bit one scaled, or a special value.
 static float fsample(const struct Case *t, int c, int i, int *state)
 {
-    const int v = sample(t->signal, c, i, state);
+    int v;
+    if (!strcmp(t->signal, "corr")) {
+        const int own = sample("noise", c, i, state);
+        if (c == 0)
+            corr_first = own;
+        v = c == 0 ? own : (corr_first * 3 + own / 4) / 4;
+    } else if (!strcmp(t->signal, "onsets")) {
+        v = sample("noise", c, i, state);
+        if ((i / 700) % 32 != 5)
+            return (float)v * ((float)t->gain / 32768.0f / 128.0f);
+    } else {
+        v = sample(t->signal, c, i, state);
+    }
     if (!strcmp(t->signal, "bursts") && (i / 700) % 4 != 0)
         return (float)v * ((float)t->gain / 32768.0f / 128.0f);
     if (t->specials) {
@@ -248,6 +267,73 @@ int main(void)
         { "pce_height", FL | FR | FC | LFE | SL | SR | TFL | TFR, 48000, 0, 2500, "tone", 1, 0, "aac_coder=twoloop" },
         { "pce_61side_fast", FL | FR | FC | LFE | BC | SL | SR, 44100, 0, 3000, "smooth", 1, 0, "aac_coder=fast" },
         { "bad_layout", FL | BC, 44100, 0, 1024, "tone", 1, 0, "aac_coder=twoloop" },
+        // The default coder, nmr (T32d2).
+        { "nmr_default_stereo", FL | FR, 44100, 0, 8000, "smooth", 1, 0, "-" },
+        { "nmr_mono_44k", FC, 44100, 0, 6000, "smooth", 1, 0, "aac_coder=nmr" },
+        { "nmr_mono_tone", FC, 48000, 64000, 6000, "tone", 1, 0, "aac_coder=nmr" },
+        { "nmr_stereo_48k", FL | FR, 48000, 128000, 8000, "noise", 1, 0, "aac_coder=nmr" },
+        { "nmr_stereo_tone", FL | FR, 44100, 0, 8000, "tone", 1, 0, "aac_coder=nmr" },
+        { "nmr_stereo_32k", FL | FR, 32000, 96000, 8000, "smooth", 1, 0, "aac_coder=nmr" },
+        { "nmr_surround", FL | FR | FC, 48000, 0, 5000, "tone", 1, 0, "aac_coder=nmr" },
+        { "nmr_51", FL | FR | FC | LFE | BL | BR, 48000, 0, 5000, "smooth", 1, 0, "aac_coder=nmr" },
+        { "nmr_51_noise", FL | FR | FC | LFE | BL | BR, 44100, 0, 4000, "noise", 1, 0, "aac_coder=nmr" },
+        { "nmr_pce_51side", FL | FR | FC | LFE | SL | SR, 48000, 0, 4000, "corr", 1, 0, "aac_coder=nmr" },
+        { "nmr_pce_71wide", FL | FR | FC | LFE | BL | BR | FLC | FRC, 48000, 0, 3000, "noise", 1, 0, "aac_coder=nmr" },
+        { "nmr_bursts", FL | FR, 44100, 128000, 20000, "bursts", 1, 0, "aac_coder=nmr" },
+        { "nmr_bursts_mono", FC, 48000, 64000, 20000, "bursts", 1, 0, "aac_coder=nmr" },
+        { "nmr_bursts_low", FL | FR, 32000, 48000, 20000, "bursts", 1, 0, "aac_coder=nmr" },
+        { "nmr_corr", FL | FR, 44100, 128000, 8000, "corr", 1, 0, "aac_coder=nmr" },
+        { "nmr_corr_low", FL | FR, 44100, 48000, 12000, "corr", 1, 0, "aac_coder=nmr" },
+        { "nmr_corr_no_is", FL | FR, 44100, 48000, 8000, "corr", 1, 0, "aac_coder=nmr:aac_is=0" },
+        { "nmr_silence", FL | FR, 44100, 0, 4000, "silence", 1, 0, "aac_coder=nmr" },
+        { "nmr_silence_mono", FC, 48000, 0, 3000, "silence", 1, 0, "aac_coder=nmr" },
+        { "nmr_extremes", FL | FR, 44100, 0, 4000, "extremes", 1, 0, "aac_coder=nmr" },
+        { "nmr_hot", FL | FR, 44100, 0, 4000, "noise", 4, 0, "aac_coder=nmr" },
+        { "nmr_specials", FL | FR, 44100, 0, 4000, "smooth", 1, 1, "aac_coder=nmr" },
+        { "nmr_low_32k", FL | FR, 44100, 32000, 12000, "noise", 1, 0, "aac_coder=nmr" },
+        { "nmr_low_mono", FC, 22050, 16000, 8000, "smooth", 1, 0, "aac_coder=nmr" },
+        { "nmr_high_320k", FL | FR, 48000, 320000, 6000, "noise", 1, 0, "aac_coder=nmr" },
+        { "nmr_max_rate", FL | FR, 44100, 600000, 4000, "noise", 2, 0, "aac_coder=nmr" },
+        { "nmr_8k", FC, 8000, 16000, 4000, "tone", 1, 0, "aac_coder=nmr" },
+        { "nmr_96k", FL | FR, 96000, 0, 8000, "smooth", 1, 0, "aac_coder=nmr" },
+        { "nmr_qscale", FL | FR, 44100, 0, 8000, "smooth", 1, 0, "aac_coder=nmr:flags=+qscale+bitexact:global_quality=118" },
+        { "nmr_qscale_hi", FL | FR, 48000, 0, 8000, "noise", 1, 0, "aac_coder=nmr:flags=+qscale+bitexact:global_quality=590" },
+        { "nmr_qscale_lo", FL | FR, 44100, 0, 12000, "bursts", 1, 0, "aac_coder=nmr:flags=+qscale+bitexact:global_quality=30" },
+        { "nmr_qscale_mono", FC, 32000, 0, 8000, "tone", 1, 0, "aac_coder=nmr:flags=+qscale+bitexact:global_quality=236" },
+        { "nmr_qscale_corr", FL | FR, 44100, 0, 8000, "corr", 1, 0, "aac_coder=nmr:flags=+qscale+bitexact:global_quality=60" },
+        { "nmr_qscale_hot", FL | FR, 44100, 0, 6000, "noise", 4, 0, "aac_coder=nmr:flags=+qscale+bitexact:global_quality=2000" },
+        { "nmr_abr", FL | FR, 44100, 128000, 12000, "smooth", 1, 0, "aac_coder=nmr:aac_rc=1" },
+        { "nmr_abr_bursts", FL | FR, 48000, 96000, 20000, "bursts", 1, 0, "aac_coder=nmr:aac_rc=1" },
+        { "nmr_abr_mono", FC, 44100, 48000, 12000, "noise", 1, 0, "aac_coder=nmr:aac_rc=1" },
+        { "nmr_cbr", FL | FR, 44100, 96000, 8000, "noise", 1, 0, "aac_coder=nmr:aac_rc=0" },
+        { "nmr_speed0", FL | FR, 44100, 128000, 6000, "smooth", 1, 0, "aac_coder=nmr:aac_nmr_speed=0" },
+        { "nmr_speed2", FL | FR, 44100, 128000, 6000, "smooth", 1, 0, "aac_coder=nmr:aac_nmr_speed=2" },
+        { "nmr_speed4", FL | FR, 44100, 128000, 6000, "noise", 1, 0, "aac_coder=nmr:aac_nmr_speed=4" },
+        { "nmr_cutoff", FL | FR, 44100, 0, 6000, "noise", 1, 0, "aac_coder=nmr:cutoff=12000" },
+        { "nmr_no_ms", FL | FR, 44100, 128000, 6000, "smooth", 1, 0, "aac_coder=nmr:aac_ms=0" },
+        { "nmr_forced_ms", FL | FR, 44100, 128000, 6000, "smooth", 1, 0, "aac_coder=nmr:aac_ms=1" },
+        { "nmr_no_ms_is", FL | FR, 44100, 64000, 6000, "corr", 1, 0, "aac_coder=nmr:aac_ms=0:aac_is=0" },
+        { "nmr_no_pns", FL | FR, 44100, 64000, 8000, "noise", 1, 0, "aac_coder=nmr:aac_pns=0" },
+        { "nmr_no_tns", FL | FR, 48000, 128000, 12000, "bursts", 1, 0, "aac_coder=nmr:aac_tns=0" },
+        { "nmr_no_tns_mono", FC, 44100, 48000, 8000, "noise", 1, 0, "aac_coder=nmr:aac_tns=0" },
+        { "nmr_mpeg2", FL | FR, 44100, 0, 6000, "noise", 1, 0, "aac_coder=nmr:profile=128" },
+        { "nmr_pce_forced", FL | FR, 44100, 0, 4000, "tone", 1, 0, "aac_coder=nmr:aac_pce=1" },
+        { "nmr_long", FL | FR, 44100, 128000, 200000, "smooth", 1, 0, "aac_coder=nmr" },
+        { "nmr_long_bursts", FL | FR, 48000, 96000, 200000, "bursts", 1, 0, "aac_coder=nmr" },
+        { "nmr_long_abr", FL | FR, 44100, 96000, 300000, "noise", 1, 0, "aac_coder=nmr:aac_rc=1" },
+        { "nmr_long_qscale", FC, 44100, 0, 150000, "bursts", 1, 0, "aac_coder=nmr:flags=+qscale+bitexact:global_quality=118" },
+        { "nmr_onsets", FL | FR, 44100, 128000, 60000, "onsets", 1, 0, "aac_coder=nmr" },
+        { "nmr_onsets_mono", FC, 48000, 64000, 60000, "onsets", 1, 0, "aac_coder=nmr" },
+        { "nmr_onsets_qscale", FL | FR, 44100, 0, 60000, "onsets", 1, 0, "aac_coder=nmr:flags=+qscale+bitexact:global_quality=118" },
+        { "nmr_onsets_abr", FL | FR, 48000, 128000, 60000, "onsets", 1, 0, "aac_coder=nmr:aac_rc=1" },
+        { "nmr_onsets_51", FL | FR | FC | LFE | BL | BR, 48000, 0, 40000, "onsets", 1, 0, "aac_coder=nmr" },
+        { "nmr_cutoff_low", FL | FR, 44100, 0, 8000, "smooth", 1, 0, "aac_coder=nmr:cutoff=500" },
+        { "nmr_very_low", FL | FR, 44100, 20000, 12000, "noise", 1, 0, "aac_coder=nmr" },
+        { "nmr_very_low_mono", FC, 48000, 12000, 12000, "smooth", 1, 0, "aac_coder=nmr" },
+        { "nmr_very_low_corr", FL | FR, 32000, 24000, 12000, "corr", 1, 0, "aac_coder=nmr" },
+        { "nmr_short", FL | FR, 44100, 0, 100, "tone", 1, 0, "aac_coder=nmr" },
+        { "nmr_frame", FC, 44100, 0, 1024, "tone", 1, 0, "aac_coder=nmr" },
+        { "nmr_empty", FL | FR, 44100, 0, 0, "tone", 1, 0, "aac_coder=nmr" },
     };
     av_log_set_level(AV_LOG_QUIET);
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)

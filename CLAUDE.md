@@ -43,7 +43,7 @@ written there with its CAF muxer, which also writes PCM (T31b), and its
 G.722 and G.726 codecs, read from AU and written there (T31c), and its raw
 AC-3 demuxer, parser and float decoder (T32a), and its E-AC-3 decoder and
 raw eac3 demuxer (T32b), and its AC-3 encoder and raw ac3 muxer (T32c), and
-its AAC encoder with the twoloop and fast coders, into ADTS (T32d1). The `av`
+its AAC encoder with its nmr, twoloop and fast coders, into ADTS (T32d). The `av`
 module (rooted at `zig/root.zig`) exports `pcm` (the PCM encodings,
 kernels and decoder/encoder stages), `audio`, `channel_layout` (FFmpeg's
 channel layouts), `time`, `samples` (decoded sample storage
@@ -75,8 +75,8 @@ G.722 and G.726 in AU decoded and encoded, T31c), `ac3`, `ac3dec` and
 `ac3demux` (AC-3 headers and FFmpeg's AC-3 parser, its float decoder, its
 raw demuxer, T32a; E-AC-3 decoded and its raw demuxer, T32b), `ac3enc` and
 `ac3mux` (FFmpeg's float AC-3 encoder and its raw ac3 muxer, T32c), `aacpsy`,
-`aacenc` and `aacadts` (FFmpeg's AAC psy model, its AAC encoder with the twoloop
-and fast coders, and the encoder before its adts muxer, T32d1), `mp3` (FFmpeg's MPEG
+`aacenc` and `aacadts` (FFmpeg's AAC psy model, its AAC encoder with the nmr,
+twoloop and fast coders, and the encoder before its adts muxer, T32d), `mp3` (FFmpeg's MPEG
 audio demuxer), `mpegaudio` (frame headers and the mpegaudio parser), `id3v2` and
 `id3v1` (ID3 tags), `demux` (libavformat's generic layer:
 timestamps, the stream-info read-ahead, timings and seeking),
@@ -123,8 +123,10 @@ T30b (the AAC-LC decoder), T30c (SBR) and T30d (parametric stereo),
 completing T30, and T31a (IMA WAV and Microsoft ADPCM, decoded and
 encoded in WAV), T31b (ALAC in CAF and the CAF muxer) and T31c (G.722
 and G.726 in AU), completing T31, and T32a (raw AC-3 decoded), T32b
-(raw E-AC-3 decoded), T32c (the AC-3 encoder) and T32d1 (the AAC-LC
-encoder's twoloop and fast coders); T32d2 (its default nmr coder) is next,
+(raw E-AC-3 decoded), T32c (the AC-3 encoder) and T32d (the AAC-LC
+encoder, T32d1 its twoloop and fast coders and T32d2 its default nmr
+coder), completing T32; T33a (the MP4/MOV demuxer's boxes, sample tables
+and codec configuration) is next,
 and TODO.md lays out the roadmap through T65.
  When the state changes, update the current-state statements in
 README.md, port.md ("Status and scope"), the TODO.md introduction and this file

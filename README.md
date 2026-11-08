@@ -96,9 +96,9 @@ read with FFmpeg's demuxer and parser and decoded sample for sample with
 its float decoder, and since T32b raw E-AC-3 too, with spectral extension,
 AHT and dependent frames. Since T32c FFmpeg's AC-3 encoder writes raw AC-3
 (`-c:a ac3`, with its options), byte for byte the ffmpeg program's output,
-and since T32d1 its AAC encoder writes ADTS (`-c:a aac` with `-aac_coder
-twoloop` or `fast` and its options; the default nmr coder is T32d2's),
-byte for byte the ffmpeg program's `-bitexact` output.
+and since T32d its AAC encoder writes ADTS (`-c:a aac` with its nmr,
+twoloop and fast coders and their options), byte for byte the ffmpeg
+program's `-bitexact` output.
 [TODO.md](TODO.md) holds the completion
 evidence and the roadmap. Development is verified on Linux only. The compiler
 is **Zig 0.17.0**, enforced by the build.

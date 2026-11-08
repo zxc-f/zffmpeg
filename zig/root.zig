@@ -273,6 +273,7 @@ test {
     _ = @import("codec/aacpsy.zig");
     _ = @import("codec/aacenc.zig");
     _ = @import("codec/aaccoder.zig");
+    _ = @import("codec/aaccoder_nmr.zig");
     _ = @import("codec/aacenc_tns.zig");
     _ = @import("codec/ac3_bitalloc.zig");
     _ = @import("core/lfg.zig");
