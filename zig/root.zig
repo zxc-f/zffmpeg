@@ -180,8 +180,11 @@ pub const cafalac = @import("format/cafalac.zig");
 pub const aug72x = @import("format/aug72x.zig");
 pub const ac3demux = @import("format/ac3.zig");
 pub const cafmux = @import("format/cafmux.zig");
-/// FFmpeg's mov demuxer (MP4, MOV, M4A, 3GP) for audio tracks (T33a1).
+/// FFmpeg's mov demuxer (MP4, MOV, M4A, 3GP) for audio tracks (T33a1), with
+/// metadata and chapters (T33a2).
 pub const mov = @import("format/mov.zig");
+/// A format's chapters as libavformat keeps them (T33a2).
+pub const chapters = @import("format/chapters.zig");
 pub const id3v2 = @import("format/id3v2.zig");
 pub const id3v1 = @import("format/id3v1.zig");
 pub const framehash = @import("format/framehash.zig");
@@ -263,6 +266,7 @@ test {
     _ = @import("format/aug72x.zig");
     _ = @import("format/ac3.zig");
     _ = @import("format/mov.zig");
+    _ = @import("format/chapters.zig");
     _ = @import("format/ac3decode.zig");
     _ = @import("format/cafmux.zig");
     _ = @import("format/pcmdata.zig");

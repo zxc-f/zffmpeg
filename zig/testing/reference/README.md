@@ -417,7 +417,8 @@ lines, with each stream's codec tag, bits, frame size, block align,
 profile, frame count, seek preroll and extradata, its channel layout, and
 the demuxer's name), from the file or, with `-pipe`, from a pipe;
 `mov_fixtures.sh` makes the FFmpeg-made fixtures from generate.py's
-inputs (their hashes are generate.py's). `aac_asc_vectors.c` (T33a1)
+inputs (their hashes are generate.py's), without metadata unless a
+fixture's options carry their own `-map_metadata` (T33a2's tagged ones). `aac_asc_vectors.c` (T33a1)
 opens the AAC decoder with AudioSpecificConfigs and decodes raw packets.
 The Zig tests render the same lines from the port:
 
@@ -1017,7 +1018,7 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   is present, FATE's five E-AC-3 samples (`FATE_EAC3`: spectral
   extension, AHT, 5.1 and 7.1 with dependent frames), probed and decoded
   to s16le.
-- **MP4 fixtures (T33a1).** Every MP4, M4A, MOV, 3GP and 3G2 fixture
+- **MP4 fixtures (T33a1, T33a2).** Every MP4, M4A, MOV, 3GP and 3G2 fixture
   probed by zffprobe as ffprobe probes its first audio stream
   (`-select_streams a:0`) and format tags, or refused with the error
   FFmpeg's message maps to (`MOV_OPEN_ERRORS`), and copied by the hash
@@ -1025,7 +1026,7 @@ fails the run. No optional external corpus is used, so nothing is skipped.
   `KNOWN_MOV_PROBE_REFUSALS`, `KNOWN_MOV_COPY_DIFFERENCES` and
   `MOV_COPY_NOTHING_TO_MAP` record and assert the refusals: edit lists
   (T33b), a video track (T33a3), codecs and references the port does not
-  read, files without an audio track.
+  read, files without an audio track, attached pictures (T33a2).
 - **AC-3 output (T32c).** zffmpeg's AC-3 (the `ac3` muxer, with every
   option of the encoder) against the ffmpeg program's with `-bitexact`,
   for the FLAC output section's inputs, decoded AC-3, E-AC-3, MP3 and

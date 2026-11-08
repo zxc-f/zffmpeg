@@ -11,7 +11,8 @@
 # Each input is generate.py's (`--mov-input NAME INDEX`, s16le in the channel
 # layout generate.py records) or a committed fixture (a stream copy); each
 # command adds the options generate.py records, with bit-exact flags and no
-# metadata. The files are committed and checked against the hashes
+# metadata from the inputs unless the options map it (`-map_metadata`,
+# T33a2). The files are committed and checked against the hashes
 # generate.py records, as the other FFmpeg-made fixtures are. After changing
 # one, record the printed hashes in generate.py's MOV_FFMPEG table and rerun
 # generate.py.
@@ -61,9 +62,11 @@ while read -r line; do
             ;;
         esac
     done
+    drop=(-map_metadata -1)
+    case " $options " in *" -map_metadata "*) drop=() ;; esac
     # shellcheck disable=SC2086 # the options are words
     "$prefix/bin/ffmpeg" -nostdin -hide_banner -loglevel error -y "${args[@]}" \
-        -map_metadata -1 -fflags +bitexact -flags:a +bitexact \
+        "${drop[@]}" -fflags +bitexact -flags:a +bitexact \
         $options "$out/$name.$ext"
     printf '%s %s\n' "$name" "$(sha256sum "$out/$name.$ext" | cut -d' ' -f1)"
 done

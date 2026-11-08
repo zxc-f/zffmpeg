@@ -398,12 +398,7 @@ pub const Demuxer = struct {
     /// ff_replaygain_export from the format's tags: they replace LAME's
     /// values when they have a gain.
     fn exportReplayGain(d: *Demuxer) Error!void {
-        const tg = parseGain(d.tags.get("REPLAYGAIN_TRACK_GAIN"), std.math.minInt(i32));
-        const tp = parseGain(d.tags.get("REPLAYGAIN_TRACK_PEAK"), 0);
-        const ag = parseGain(d.tags.get("REPLAYGAIN_ALBUM_GAIN"), std.math.minInt(i32));
-        const ap = parseGain(d.tags.get("REPLAYGAIN_ALBUM_PEAK"), 0);
-        if (tg == std.math.minInt(i32) and ag == std.math.minInt(i32)) return;
-        d.info.replaygain = .{ .track_gain = tg, .track_peak = @bitCast(tp), .album_gain = ag, .album_peak = @bitCast(ap) };
+        if (replayGainFromTags(&d.tags)) |rg| d.info.replaygain = rg;
     }
 
     pub fn streamCount(d: *const Demuxer) usize {
@@ -543,13 +538,13 @@ fn findItunesSmpb(tags: *const metadata.Dictionary) ?[]const u8 {
     return tags.get("iTunSMPB");
 }
 
-const SmpbCounts = struct { priming: i64, remainder: i64, samples: i64 };
+pub const SmpbCounts = struct { priming: i64, remainder: i64, samples: i64 };
 
 /// ff_itunes_parse_smpb: four fields as `%16x` reads them (white space,
 /// then within 16 characters a sign, `0x` and hexadecimal digits); a field
 /// cut short at 16 characters (a hexadecimal digit after it), or a count
 /// past `SMPB_MAX_SAMPLES`, is invalid.
-fn parseSmpb(value: []const u8) ?SmpbCounts {
+pub fn parseSmpb(value: []const u8) ?SmpbCounts {
     var fields: [4]u64 = undefined;
     var at: usize = 0;
     for (&fields) |*f| {
@@ -580,6 +575,17 @@ fn parseSmpb(value: []const u8) ?SmpbCounts {
     const max: u64 = 1 << 40; // SMPB_MAX_SAMPLES, demux_utils.c
     if (fields[1] > max or fields[2] > max or fields[3] > max) return null;
     return .{ .priming = @intCast(fields[1]), .remainder = @intCast(fields[2]), .samples = @intCast(fields[3]) };
+}
+
+/// ff_replaygain_export's values from a format's tags (replaygain.c,
+/// also the mov demuxer's, T33a2): none without a track or album gain.
+pub fn replayGainFromTags(tags: *const metadata.Dictionary) ?ReplayGain {
+    const tg = parseGain(tags.get("REPLAYGAIN_TRACK_GAIN"), std.math.minInt(i32));
+    const tp = parseGain(tags.get("REPLAYGAIN_TRACK_PEAK"), 0);
+    const ag = parseGain(tags.get("REPLAYGAIN_ALBUM_GAIN"), std.math.minInt(i32));
+    const ap = parseGain(tags.get("REPLAYGAIN_ALBUM_PEAK"), 0);
+    if (tg == std.math.minInt(i32) and ag == std.math.minInt(i32)) return null;
+    return .{ .track_gain = tg, .track_peak = @bitCast(tp), .album_gain = ag, .album_peak = @bitCast(ap) };
 }
 
 /// replaygain.c's parse_value: `strtol`'s whole decibels, then up to five

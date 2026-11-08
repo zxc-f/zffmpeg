@@ -13,10 +13,20 @@
 // mov_read_free, mov_merge_tts_data, mov_build_index, mov_fix_index's
 // identity case, sanity_checks, fix_timescale, mov_read_header,
 // mov_find_next_sample, mov_switch_root, mov_finalize_packet,
-// mov_read_packet), libavformat/isom.c (ff_mp4_obj_type,
-// ff_mov_lang_to_iso639, ff_mp4_read_descr, ff_mp4_parse_es_descr,
-// ff_mp4_read_dec_config_descr), libavformat/isom_tags.c
-// (ff_codec_movaudio_tags), libavformat/isom.h (ff_mov_get_lpcm_codec_id),
+// mov_read_packet; T33a2: mov_read_udta_string, mov_read_mac_string,
+// mov_metadata_track_or_disc_number, mov_metadata_int8_bypass_padding,
+// mov_metadata_int8_no_padding, mov_metadata_gnre, mov_metadata_loci,
+// mov_metadata_hmmt, mov_read_covr, mov_read_meta, mov_read_ilst,
+// mov_read_keys, mov_read_custom, mov_read_chpl, mov_read_chap,
+// mov_read_chapters, mov_read_kind, mov_read_uuid,
+// mov_parse_uuid_spherical, mov_parse_stsd_subtitle),
+// libavformat/isom.c (ff_mp4_obj_type, ff_mov_lang_to_iso639,
+// ff_mp4_read_descr, ff_mp4_parse_es_descr, ff_mp4_read_dec_config_descr,
+// ff_codec_movsubtitle_tags, ff_mov_track_kind_table),
+// libavformat/isom_tags.c (ff_codec_movaudio_tags), libavformat/isom.h
+// (ff_mov_get_lpcm_codec_id), libavformat/aviobuf.c (avio_get_str,
+// avio_get_str16be, avio_get_str16le, read_string_to_bprint),
+// libavutil/common.h (GET_UTF16, PUT_UTF8),
 // libavformat/utils.c (ff_get_pcm_codec_id), libavformat/mov_esds.c
 // (ff_mov_read_esds) and libavformat/aviobuf.c's avio_seek and avio_feof
 // at the pinned reference revision.
@@ -46,14 +56,26 @@
 //! seeks back, as `mov_read_default` does. A `moov` after `mdat` is read
 //! by seeking; from a source that cannot seek it is `UnsupportedStreamingSize`.
 //!
+//! Metadata (T33a2): `udta` strings, `meta` with its `hdlr`, `keys` and
+//! iTunes `ilst` tags, `----` (iTunSMPB's gapless counts, ReplayGain), `kind`
+//! dispositions, `uuid` (XMP skipped, an ISML manifest's bit rates), the
+//! chapters of `chpl`, `HMMT` and QuickTime chapter tracks (`tref`/`chap`),
+//! which on a seekable input become discarded data streams as FFmpeg makes
+//! them, and on a pipe stay subtitle streams.
+//!
 //! Refused here, where FFmpeg reads on (notes.md "MP4 demuxing"): an edit
-//! list that changes the index (T33b), video and subtitle tracks (T33a3),
-//! fragments (`moof`, T33c), compressed movie headers (`cmov`), a `dref`
-//! alias that may name another file, and a WAV codec tag in an `ms` sample
-//! entry. `udta`, `meta` and `uuid` boxes are skipped (T33a2).
+//! list that changes the index (T33b), video tracks and subtitle tracks
+//! other than chapter tracks (T33a3), fragments (`moof`, T33c), compressed
+//! movie headers (`cmov`), a `dref` alias that may name another file, a WAV
+//! codec tag in an `ms` sample entry, and a cover picture (`covr`) inside a
+//! track or before one. A cover picture after the tracks, which FFmpeg makes
+//! an attached-picture stream, is skipped.
 
 const std = @import("std");
 const demux = @import("demux.zig");
+const chapters_mod = @import("chapters.zig");
+const mp3 = @import("mp3.zig");
+const id3v1 = @import("id3v1.zig");
 const seek = @import("seek.zig");
 const rational = @import("../core/rational.zig");
 const metadata = @import("../core/metadata.zig");
@@ -103,8 +125,10 @@ pub const Limits = struct {
     /// The tracks; FFmpeg has no limit.
     max_tracks: u32 = 1024,
     /// The bytes of a box read into memory: extradata, a `chan` body, an
-    /// `hdlr` name, the compatible brands.
+    /// `hdlr` name, the compatible brands, a tag's value.
     max_box_bytes: u32 = 1 << 26,
+    /// The chapters; FFmpeg has no limit.
+    max_chapters: u32 = 1 << 20,
 };
 
 pub const nopts: i64 = std.math.minInt(i64);
@@ -304,6 +328,15 @@ const Input = struct {
         return false;
     }
 
+    /// Up to `n` bytes skipped, as reads skip them: the count present (the
+    /// rest past the end, which sets `eof`).
+    fn skipCount(in: *Input, gpa: std.mem.Allocator, n: u64) Error!u64 {
+        const start = in.pos;
+        const step = std.math.cast(i64, n) orelse std.math.maxInt(i64);
+        _ = try in.seekTo(gpa, in.pos +| step);
+        return @intCast(in.pos - start);
+    }
+
     /// `ffio_read_size` into owned memory: all `n` bytes, else null
     /// (FFmpeg's AVERROR_INVALIDDATA). The buffer grows with the bytes
     /// read, so a size the input does not hold allocates no more than it
@@ -396,6 +429,8 @@ pub const Codec = enum {
     // Object types that are not audio, which an `esds` can name in any
     // track.
     mov_text,
+    eia_608,
+    ttml,
     mpeg4,
     h264,
     hevc,
@@ -437,7 +472,7 @@ pub const Codec = enum {
     /// `AV_CODEC_PROP_INTRA_ONLY` in FFmpeg's descriptor.
     pub fn intraOnly(c: Codec) bool {
         return switch (c) {
-            .none, .aac, .apple_apac, .ac4, .truehd, .mpegh_3d_audio, .mov_text, .mpeg4, .h264, .hevc, .vvc, .mpeg2video, .mpeg1video, .png, .vc1, .dirac, .vp9, .tscc2, .dvd_subtitle, .mpeg4systems, .bin_data => false,
+            .none, .aac, .apple_apac, .ac4, .truehd, .mpegh_3d_audio, .mov_text, .eia_608, .ttml, .mpeg4, .h264, .hevc, .vvc, .mpeg2video, .mpeg1video, .png, .vc1, .dirac, .vp9, .tscc2, .dvd_subtitle, .mpeg4systems, .bin_data => false,
             else => true,
         };
     }
@@ -707,6 +742,9 @@ pub const Track = struct {
     // AVStream.
     /// `st->id`: the track id, -1 before `tkhd`.
     id: i32 = -1,
+    /// `sc->id`, which a chapter reference names: the track id, 0 before
+    /// `tkhd`.
+    sc_id: i32 = 0,
     /// `avformat_new_stream`'s 1/90000 until the track's time scale is
     /// known.
     time_base: rational.Rational = .{ .num = 1, .den = 90000 },
@@ -738,6 +776,10 @@ pub const Track = struct {
     parse_full: bool = false,
     /// `AV_AUDIO_SERVICE_TYPE` side data from `dac3` or `dec3`.
     service_type: ?u8 = null,
+    /// `AV_PKT_DATA_REPLAYGAIN` coded side data from the format's tags.
+    replaygain: ?mp3.ReplayGain = null,
+    /// `sti->skip_samples` at the start: an AAC track's initial padding.
+    skip_samples: i64 = 0,
     // MOVStreamContext.
     time_scale: i32 = 0,
     stsd_version: u8 = 0,
@@ -831,6 +873,26 @@ pub const Track = struct {
     fn extradataLen(t: *const Track) usize {
         return if (t.extradata) |e| e.len else 0;
     }
+
+    /// mov_read_custom's iTunSMPB: the priming as the initial padding, and
+    /// the remainder as the discard window at the end, in samples.
+    fn applySmpb(t: *Track, counts: mp3.SmpbCounts) void {
+        // codecpar->sample_rate, an int.
+        const samples: rational.Rational = .{ .num = 1, .den = @truncate(t.sample_rate) };
+        if (counts.priming > 0 and counts.priming < 16384) {
+            // An int field.
+            t.initial_padding = @as(i32, @truncate(rational.rescaleQ(counts.priming, t.time_base, samples)));
+        }
+        if (counts.remainder > 0) {
+            const duration = rational.rescaleQ(t.duration, t.time_base, samples);
+            const remainder = rational.rescaleQ(counts.remainder, t.time_base, samples);
+            const total = rational.rescaleQ(counts.samples, t.time_base, samples);
+            if (duration > remainder and duration > total) {
+                t.first_discard_sample = duration - remainder;
+                t.last_discard_sample = duration;
+            }
+        }
+    }
 };
 
 const Atom = struct { type: u32, size: i64 };
@@ -865,6 +927,22 @@ pub const Demuxer = struct {
     /// The packet returned last.
     current: std.ArrayList(u8) = .empty,
     new_extradata: ?[]const u8 = null,
+    // Metadata (T33a2).
+    /// Inside `ilst`: tags are iTunes `data` atoms.
+    itunes_metadata: bool = false,
+    /// `keys`' names (index 0 none, a key of another namespace none);
+    /// empty before a `keys` box.
+    meta_keys: std.ArrayList(?[]u8) = .empty,
+    /// From an `encoder` tag of HandBrake's: its version.
+    handbrake_version: i32 = 0,
+    /// `chap` references: the chapter tracks' ids.
+    chapter_tracks: std.ArrayList(i32) = .empty,
+    chapters: chapters_mod.Chapters = .{},
+    /// An ISML manifest's bit rates, by stream.
+    bitrates: std.ArrayList(i64) = .empty,
+    /// The attached pictures FFmpeg made of `covr` atoms (streams after
+    /// the tracks, not kept).
+    pictures: u32 = 0,
 
     /// The demuxer on a source that cannot seek (a pipe): a `moov` after
     /// `mdat` is `UnsupportedStreamingSize`.
@@ -892,6 +970,11 @@ pub const Demuxer = struct {
         for (d.tracks.items) |*t| t.deinit(d.gpa);
         d.tracks.deinit(d.gpa);
         d.tags.deinit(d.gpa);
+        for (d.meta_keys.items) |k| if (k) |b| d.gpa.free(b);
+        d.meta_keys.deinit(d.gpa);
+        d.chapter_tracks.deinit(d.gpa);
+        d.chapters.deinit(d.gpa);
+        d.bitrates.deinit(d.gpa);
         d.in.deinit(d.gpa);
         d.current.deinit(d.gpa);
     }
@@ -901,9 +984,17 @@ pub const Demuxer = struct {
         d.gpa.destroy(d);
     }
 
+    /// The last stream when it is a track: none before the first, or
+    /// after an attached picture, whose context FFmpeg's boxes would act
+    /// on (the port keeps none for it).
     fn lastTrack(d: *Demuxer) ?*Track {
-        if (d.tracks.items.len == 0) return null;
+        if (d.tracks.items.len == 0 or d.pictures > 0) return null;
         return &d.tracks.items[d.tracks.items.len - 1];
+    }
+
+    /// FFmpeg has a stream (`nb_streams >= 1`): a track or a picture.
+    fn hasStream(d: *const Demuxer) bool {
+        return d.tracks.items.len > 0 or d.pictures > 0;
     }
 
     /// `av_dict_set` of a C string: the value ends at its first NUL.
@@ -976,7 +1067,7 @@ pub const Demuxer = struct {
             a.size = @min(a.size, atom.size - total_size);
 
             const start_pos = d.in.pos;
-            const parsed = try d.parseAtom(a);
+            const parsed = try d.parseAtom(a, atom.type);
             if (!parsed) {
                 _ = try d.in.skipBy(gpa, a.size);
             } else {
@@ -999,9 +1090,9 @@ pub const Demuxer = struct {
         if (total_size < atom.size and atom.size < 0x7ffff) _ = try d.in.skipBy(gpa, atom.size - total_size);
     }
 
-    /// The parse table's entry for `a`, run; false when FFmpeg's table has
-    /// none and the box is skipped.
-    fn parseAtom(d: *Demuxer, a: Atom) Error!bool {
+    /// The parse table's entry for `a` in a box of type `parent`, run;
+    /// false when FFmpeg's table has none and the box is skipped.
+    fn parseAtom(d: *Demuxer, a: Atom, parent: u32) Error!bool {
         const t = a.type;
         switch (t) {
             tag("moov") => try d.readMoov(a),
@@ -1044,14 +1135,27 @@ pub const Demuxer = struct {
             tag("enda") => try d.readEnda(),
             tag("srat") => try d.readSrat(a),
             tag("frma") => try d.readFrma(),
-            // Metadata and chapters (T33a2): skipped whole, with the user
-            // data boxes FFmpeg reads inside them.
-            tag("udta"), tag("meta"), tag("ilst"), tag("uuid"), tag("chpl"), tag("----"), tag("chap"), tag("kind") => return false,
+            // Metadata and chapters (T33a2).
+            tag("udta") => try d.readDefault(a),
+            tag("meta") => try d.readMeta(a),
+            tag("ilst") => try d.readIlst(a),
+            tag("uuid") => try d.readUuid(a),
+            tag("chpl") => try d.readChpl(a),
+            tag("----") => try d.readCustom(a),
+            tag("chap") => try d.readChap(a),
+            tag("kind") => try d.readKind(a),
             // The rest of FFmpeg's parse table: fragments (T33c),
             // compressed headers, encryption, images, timecodes, track
             // groups, and the boxes of video sample entries. Refused.
             tag("moof"), tag("mvex"), tag("traf"), tag("tfdt"), tag("tfhd"), tag("trex"), tag("trun"), tag("sidx"), tag("cmov"), tag("adrm"), tag("sinf"), tag("senc"), tag("saiz"), tag("saio"), tag("pssh"), tag("schm"), tag("schi"), tag("tenc"), tag("iloc"), tag("pitm"), tag("auxC"), tag("idat"), tag("imir"), tag("iref"), tag("ispe"), tag("irot"), tag("iprp"), tag("iinf"), tag("tmcd"), tag("cdsc"), tag("rndr"), tag("sbas"), tag("vdep"), tag("ACLR"), tag("APRG"), tag("AALP"), tag("ARES"), tag("avss"), tag("colr"), tag("DpxE"), tag("fiel"), tag("jp2h"), tag("SMI "), tag("pasp"), tag("clap"), tag("strf"), tag("ddts"), tag("wfex"), tag("chnl"), tag("dvc1"), std.mem.readInt(u32, &[4]u8{ 'C', 'i', 'n', 0x8e }, .little), tag("st3d"), tag("sv3d"), tag("vexu"), tag("hfov"), tag("dmlp"), tag("SmDm"), tag("CoLL"), tag("vpcC"), tag("mdcv"), tag("clli"), tag("dvcC"), tag("dvvC"), tag("dvwC"), tag("hvcE"), tag("SA3D"), tag("SAND"), tag("pcmC"), tag("amve"), tag("lhvC"), tag("mhaC"), tag("vmhd"), tag("iacb") => return error.UnsupportedFormat,
-            else => return false,
+            else => {
+                // A box of user data: a tag.
+                if (parent == tag("udta") or parent == tag("ilst")) {
+                    try d.udtaString(a);
+                } else if (d.found_hdlr_mdta and parent == tag("meta") and t == tag("keys") and d.meta_keys.items.len == 0) {
+                    try d.readKeys(a);
+                } else return false;
+            },
         }
         return true;
     }
@@ -1150,13 +1254,17 @@ pub const Demuxer = struct {
     fn readTrak(d: *Demuxer, a: Atom) Error!void {
         const gpa = d.gpa;
         if (d.tracks.items.len >= d.limits.max_tracks) return error.LimitExceeded;
+        // A track after an attached picture: FFmpeg's streams would not be
+        // the tracks in order (not modelled).
+        if (d.pictures > 0) return error.UnsupportedFormat;
         try d.tracks.append(gpa, .{});
         const index = d.tracks.items.len - 1;
         d.trak_index = index;
         try d.readDefault(a);
         d.trak_index = null;
         const t = &d.tracks.items[index];
-        if (t.media == .video or t.media == .subtitle) return error.UnsupportedFormat; // T33a3
+        // Subtitle tracks wait for the chapter references (finishHeader).
+        if (t.media == .video) return error.UnsupportedFormat; // T33a3
         // An stsc of a track without samples, cleared.
         if (t.chunk_offsets.items.len == 0 and t.stts_count == 0 and t.stsc.items.len > 0) t.stsc.clearRetainingCapacity();
         switch (sanityChecks(t)) {
@@ -1199,6 +1307,7 @@ pub const Demuxer = struct {
             _ = try d.in.rb32(gpa);
         }
         t.id = @bitCast(try d.in.rb32(gpa));
+        t.sc_id = t.id;
         _ = try d.in.rb32(gpa);
         if (version == 1) _ = try d.in.rb64(gpa) else _ = try d.in.rb32(gpa);
         _ = try d.in.rb32(gpa);
@@ -1322,7 +1431,13 @@ pub const Demuxer = struct {
             const id = try codecFromTag(t, format);
             t.codec = id;
             switch (t.media) {
-                .video, .subtitle => return error.UnsupportedFormat, // T33a3
+                .video => return error.UnsupportedFormat, // T33a3
+                // mov_parse_stsd_subtitle: the description's rest is its
+                // extradata (none for `mp4s`, which holds an esds, or
+                // ISMV's `dfxp`).
+                .subtitle => if (t.codec_tag != tag("mp4s") and t.codec_tag != tag("dfxp")) {
+                    try d.readGlbl(.{ .type = 0, .size = size - (d.in.pos - start_pos) });
+                },
                 .audio => {
                     try d.parseStsdAudio(t);
                     if (t.sample_rate < 0) return error.InvalidMov;
@@ -1770,6 +1885,601 @@ pub const Demuxer = struct {
         _ = try d.in.skipBy(d.gpa, 4);
         const rate: i32 = @bitCast(try d.in.rb32(d.gpa));
         if (rate > 0) t.sample_rate = rate;
+    }
+
+    // ---- Metadata (T33a2) ----
+
+    /// `ffio_read_size` of a tag's bytes: null where FFmpeg's read comes
+    /// short (AVERROR_INVALIDDATA), `LimitExceeded` over the limit.
+    fn readSized(d: *Demuxer, n: u64) Error!?[]u8 {
+        if (d.in.size) |size| if (d.in.pos >= size or n > @as(u64, @intCast(size - d.in.pos))) {
+            _ = try d.in.seekTo(d.gpa, size);
+            d.in.eof = true;
+            return null;
+        };
+        if (n > d.limits.max_box_bytes) return error.LimitExceeded;
+        return d.in.readOwned(d.gpa, n);
+    }
+
+    /// The dictionary a user data string goes to: the track's inside a
+    /// `trak`, else the format's.
+    fn udtaTags(d: *Demuxer) *metadata.Dictionary {
+        if (d.trak_index) |i| return &d.tracks.items[i].tags;
+        return &d.tags;
+    }
+
+    /// mov_read_udta_string: a QuickTime user data string (a length, a
+    /// language and the text), a raw one, or iTunes `data` atoms inside
+    /// `ilst` (several make one value joined by `;`), into the track's or
+    /// the format's tags; some keys are numbers, a genre or a location,
+    /// `covr` is a picture.
+    fn udtaString(d: *Demuxer, a_in: Atom) Error!void {
+        const gpa = d.gpa;
+        var a = a_in;
+        if (a.type == tag("HMMT")) return d.readHmmt(@truncate(@as(u64, @bitCast(a.size))));
+        if (a.type == tag("loci")) return d.readLoci(@truncate(@as(u64, @bitCast(a.size))));
+        const entry = udtaKey(a.type);
+        var key: ?[]const u8 = if (entry) |e| e.key else null;
+        var raw = if (entry) |e| e.parse == .raw else false;
+        const parse: UdtaParse = if (entry) |e| e.parse else .none;
+        var data_type: u32 = 0;
+        var langcode: u16 = 0;
+        var lang_buf: [3]u8 = undefined;
+        var language: ?[]const u8 = null;
+        var str_size: u64 = undefined;
+        retry: while (true) {
+            if (d.itunes_metadata and a.size > 8) {
+                const data_size: i32 = @bitCast(try d.in.rb32(gpa));
+                const data_tag = try d.in.rl32(gpa);
+                if (!(data_tag == tag("data") and data_size <= a.size and data_size >= 16)) return;
+                data_type = try d.in.rb32(gpa);
+                _ = try d.in.rb32(gpa);
+                str_size = @intCast(data_size - 16);
+                a.size -= 16;
+                if (key == null and d.found_hdlr_mdta and d.meta_keys.items.len > 0) {
+                    // The index of `keys`, big-endian, read as a type.
+                    const index = @byteSwap(a.type);
+                    if (index < d.meta_keys.items.len and index > 0) if (d.meta_keys.items[index]) |name| {
+                        key = cString(name);
+                    };
+                }
+                if (a.type == tag("covr") or (key != null and std.mem.eql(u8, key.?, "com.apple.quicktime.artwork"))) {
+                    try d.readCovr(data_type, str_size);
+                    a.size -= @intCast(str_size);
+                    if (a.size > 8) continue :retry;
+                    return;
+                }
+            } else if (a.size > 4 and key != null and !d.itunes_metadata and !raw) {
+                str_size = try d.in.rb16(gpa);
+                if (str_size > a.size) {
+                    // "UDTA parsing failed retrying raw".
+                    raw = true;
+                    _ = try d.in.skipBy(gpa, -2);
+                    continue :retry;
+                }
+                langcode = try d.in.rb16(gpa);
+                language = languageCode(langcode, &lang_buf);
+                a.size -= 4;
+            } else {
+                str_size = @bitCast(a.size);
+            }
+            const k = key orelse return;
+            if (a.size < 0 or str_size >= std.math.maxInt(i32) / 2) return error.InvalidMov;
+            if (parse != .none and parse != .raw) return d.udtaNumber(parse, str_size, k);
+            const num = data_type >= 21 and data_type <= 23;
+            // The value's buffer: room for a number, the bytes, or Mac
+            // Roman's UTF-8 at two bytes a byte.
+            const alloc: u64 = (if (num) 512 else if (raw) str_size else str_size * 2) + 1;
+            var value: std.ArrayList(u8) = .empty;
+            defer value.deinit(gpa);
+            if (!raw and (data_type == 3 or (data_type == 0 and (langcode < 0x400 or langcode == 0x7fff)))) {
+                try d.macString(str_size, alloc - 1, &value);
+            } else if (data_type == 21) {
+                const v: i32 = switch (str_size) {
+                    1 => @as(i8, @bitCast(try d.in.r8(gpa))),
+                    2 => @as(i16, @bitCast(try d.in.rb16(gpa))),
+                    3 => @as(i24, @bitCast(@as(u24, @intCast(try d.in.rb24(gpa))))),
+                    4 => @bitCast(try d.in.rb32(gpa)),
+                    else => 0,
+                };
+                try value.print(gpa, "{d}", .{v});
+            } else if (data_type == 22) {
+                const v: u32 = switch (str_size) {
+                    1 => try d.in.r8(gpa),
+                    2 => try d.in.rb16(gpa),
+                    3 => try d.in.rb24(gpa),
+                    4 => try d.in.rb32(gpa),
+                    else => 0,
+                };
+                try value.print(gpa, "{d}", .{v});
+            } else if (data_type == 23 and str_size >= 4) {
+                const v: f32 = @bitCast(try d.in.rb32(gpa));
+                try formatFixed(gpa, &value, v, .{ .precision = 6 });
+            } else if (data_type > 1 and data_type != 4) {
+                // "Skipping unhandled metadata": UTF-16, a picture, ...
+                return;
+            } else {
+                const bytes = try d.readSized(str_size) orelse return error.InvalidMov;
+                defer gpa.free(bytes);
+                try value.appendSlice(gpa, bytes);
+            }
+            const dict = d.udtaTags();
+            const text = value.items[0 .. std.mem.findScalar(u8, value.items, 0) orelse value.items.len];
+            if (d.itunes_metadata and dict.get(k) != null) try putTag(gpa, dict, k, ";", .append);
+            try putTag(gpa, dict, k, text, if (d.itunes_metadata) .append else .replace);
+            if (language) |lang| if (!std.mem.eql(u8, lang, "und")) {
+                // snprintf into `char key2[32]`: at most 31 bytes (the
+                // table's keys leave room).
+                var key2: [64]u8 = undefined;
+                const joined = std.fmt.bufPrint(&key2, "{s}-{s}", .{ k, lang }) catch unreachable; // a key of the table: at most 21 bytes
+                try putTag(gpa, dict, joined[0..@min(joined.len, 31)], text, .replace);
+            };
+            if (std.mem.eql(u8, k, "encoder")) if (handBrakeVersion(text)) |v| {
+                d.handbrake_version = v;
+            };
+            a.size -%= @bitCast(str_size);
+            // The rest of a multi-valued iTunes tag.
+            if (d.itunes_metadata and a.size > 8) continue :retry;
+            return;
+        }
+    }
+
+    /// The parse helpers' tags, which go to the format's tags wherever the
+    /// box is (mov_metadata_track_or_disc_number, the int8 ones, gnre).
+    fn udtaNumber(d: *Demuxer, parse: UdtaParse, len: u64, key: []const u8) Error!void {
+        const gpa = d.gpa;
+        var buf: [32]u8 = undefined;
+        const text: []const u8 = switch (parse) {
+            .number => blk: {
+                _ = try d.in.rb16(gpa);
+                const current: i16 = @bitCast(try d.in.rb16(gpa));
+                var total: i16 = 0;
+                if (@as(u32, @truncate(len)) >= 6) total = @bitCast(try d.in.rb16(gpa));
+                break :blk if (total == 0)
+                    std.fmt.bufPrint(&buf, "{d}", .{current}) catch unreachable // at most 6 bytes
+                else
+                    std.fmt.bufPrint(&buf, "{d}/{d}", .{ current, total }) catch unreachable;
+            },
+            .int8_padded => blk: {
+                for (0..3) |_| _ = try d.in.r8(gpa);
+                break :blk std.fmt.bufPrint(&buf, "{d}", .{try d.in.r8(gpa)}) catch unreachable;
+            },
+            .int8 => std.fmt.bufPrint(&buf, "{d}", .{try d.in.r8(gpa)}) catch unreachable,
+            .gnre => blk: {
+                _ = try d.in.r8(gpa);
+                const genre = try d.in.r8(gpa);
+                if (genre < 1 or genre > id3v1.genre_max) return;
+                break :blk id3v1.genres[genre - 1];
+            },
+            .none, .raw => unreachable, // the caller reads those as strings
+        };
+        try putTag(gpa, &d.tags, key, text, .replace);
+    }
+
+    /// mov_read_mac_string: `len` bytes of Mac Roman as UTF-8, at most
+    /// `max` bytes of it (a character cut at the end); the text ends at a
+    /// NUL, and so where the input ends (FFmpeg reads zeros there).
+    fn macString(d: *Demuxer, len: u64, max: u64, out: *std.ArrayList(u8)) Error!void {
+        const gpa = d.gpa;
+        const limit = std.math.cast(usize, max) orelse std.math.maxInt(usize);
+        var left = len;
+        var ended = false;
+        var chunk: [4096]u8 = undefined;
+        while (left > 0) {
+            const step: usize = @intCast(@min(left, chunk.len));
+            const got = try d.in.read(gpa, chunk[0..step]);
+            for (chunk[0..got]) |c| {
+                if (ended or out.items.len >= limit) continue;
+                if (c == 0) {
+                    ended = true;
+                } else if (c < 0x80) {
+                    try out.append(gpa, c);
+                } else {
+                    try putUtf8(gpa, out, mac_to_unicode[c - 0x80], limit);
+                }
+            }
+            left -= got;
+            if (got < step) break;
+        }
+    }
+
+    /// mov_read_covr: a picture (JPEG, PNG or BMP) FFmpeg makes an
+    /// attached-picture stream of, which the port skips; another type is
+    /// skipped by FFmpeg too.
+    fn readCovr(d: *Demuxer, data_type: u32, len: u64) Error!void {
+        switch (data_type) {
+            0xd, 0xe, 0x1b => {},
+            else => {
+                // "Unknown cover type".
+                _ = try d.in.skipBy(d.gpa, @intCast(len));
+                return;
+            },
+        }
+        // A picture inside a track would come between the tracks.
+        if (d.trak_index != null) return error.UnsupportedFormat;
+        if (d.tracks.items.len + d.pictures >= d.limits.max_tracks) return error.LimitExceeded;
+        // av_get_packet: what is there; none is AVERROR_EOF.
+        const got = try d.in.skipCount(d.gpa, len);
+        if (len > 0 and got == 0) return error.Truncated;
+        d.pictures += 1;
+    }
+
+    /// mov_metadata_loci: a 3GPP location as `location` (and with its
+    /// language).
+    fn readLoci(d: *Demuxer, len_in: u32) Error!void {
+        const gpa = d.gpa;
+        var len = len_in;
+        if (len < 4 + 2 + 1 + 1 + 4 + 4 + 4) return error.InvalidMov; // "loci too short"
+        _ = try d.in.skipBy(gpa, 4);
+        var lang_buf: [3]u8 = undefined;
+        const language = languageCode(try d.in.rb16(gpa), &lang_buf);
+        len -= 6;
+        // avio_get_str's int maxlen: past INT_MAX it is negative, reads
+        // nothing and returns itself, which leaves no length.
+        if (len > std.math.maxInt(i32)) return error.InvalidMov; // "place name too long"
+        var place: std.ArrayList(u8) = .empty;
+        defer place.deinit(gpa);
+        len -= try d.getStr(len, 100, &place);
+        if (len < 1) return error.InvalidMov; // "place name too long"
+        _ = try d.in.skipBy(gpa, 1);
+        len -= 1;
+        if (len < 12) return error.InvalidMov;
+        const longitude = fixed16(try d.in.rb32(gpa));
+        const latitude = fixed16(try d.in.rb32(gpa));
+        const altitude = fixed16(try d.in.rb32(gpa));
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(gpa);
+        try formatFixed(gpa, &buf, latitude, .{ .precision = 4, .plus = true, .width = 8 });
+        try formatFixed(gpa, &buf, longitude, .{ .precision = 4, .plus = true, .width = 9 });
+        if (altitude != 0) try formatFixed(gpa, &buf, altitude, .{ .precision = 6, .plus = true });
+        try buf.print(gpa, "/{s}", .{place.items});
+        if (language) |lang| if (!std.mem.eql(u8, lang, "und")) {
+            var key2: [16]u8 = undefined;
+            try putTag(gpa, &d.tags, std.fmt.bufPrint(&key2, "location-{s}", .{lang}) catch unreachable, buf.items, .replace);
+        };
+        try putTag(gpa, &d.tags, "location", buf.items, .replace);
+    }
+
+    /// avio_get_str: a NUL-ended string of at most `maxlen` bytes, at most
+    /// `buflen - 1` of them kept; the bytes read.
+    fn getStr(d: *Demuxer, maxlen: u32, buflen: u32, out: *std.ArrayList(u8)) Error!u32 {
+        const keep = @min(buflen - 1, maxlen);
+        var i: u32 = 0;
+        while (i < keep) : (i += 1) {
+            const c = try d.in.r8(d.gpa);
+            if (c == 0) return i + 1;
+            try out.append(d.gpa, c);
+        }
+        while (i < maxlen) : (i += 1) {
+            if (try d.in.r8(d.gpa) == 0) return i + 1;
+        }
+        return maxlen;
+    }
+
+    /// mov_metadata_hmmt: chapter marks in milliseconds, without titles.
+    fn readHmmt(d: *Demuxer, len: u32) Error!void {
+        if (len < 2) return;
+        const count = try d.in.rb32(d.gpa);
+        if (count > len / 4) return error.InvalidMov; // an int compared unsigned
+        var i: u32 = 0;
+        while (i < count and !d.in.eof) : (i += 1) {
+            const time: i32 = @bitCast(try d.in.rb32(d.gpa));
+            try d.addChapter(i, .{ .num = 1, .den = 1000 }, time, nopts, null);
+        }
+        if (try d.in.feof(d.gpa)) return error.InvalidMov;
+    }
+
+    fn addChapter(d: *Demuxer, id: i64, time_base: rational.Rational, start: i64, end: i64, title: ?[]const u8) Error!void {
+        if (d.chapters.items.items.len >= d.limits.max_chapters) return error.LimitExceeded;
+        try d.chapters.add(d.gpa, id, time_base, start, end, title);
+    }
+
+    /// mov_read_meta: the `hdlr` found 4 bytes at a time (after a full
+    /// box's version and flags in MP4, at once in QuickTime), then the
+    /// boxes from it.
+    fn readMeta(d: *Demuxer, a: Atom) Error!void {
+        const gpa = d.gpa;
+        var size = a.size;
+        while (size > 8) {
+            if (try d.in.feof(gpa)) return error.Truncated;
+            const t = try d.in.rl32(gpa);
+            size -= 4;
+            if (t == tag("hdlr")) {
+                _ = try d.in.skipBy(gpa, -8);
+                size += 8;
+                return d.readDefault(.{ .type = tag("meta"), .size = size });
+            }
+        }
+    }
+
+    /// mov_read_ilst: iTunes tags; leaving any `ilst` ends the mode, an
+    /// outer one's too.
+    fn readIlst(d: *Demuxer, a: Atom) Error!void {
+        d.itunes_metadata = true;
+        const result = d.readDefault(a);
+        d.itunes_metadata = false;
+        return result;
+    }
+
+    /// mov_read_keys: the names an `mdta` `ilst` indexes.
+    fn readKeys(d: *Demuxer, a: Atom) Error!void {
+        const gpa = d.gpa;
+        if (a.size < 8) return;
+        _ = try d.in.skipBy(gpa, 4);
+        const count = try d.in.rb32(gpa);
+        var size = a.size - 8;
+        if (count > @divTrunc(size, 8) or count >= std.math.maxInt(u32) / 8) return error.InvalidMov;
+        // av_malloc_array(count + 1, 8): ENOMEM past INT_MAX.
+        if ((@as(u64, count) + 1) * 8 > std.math.maxInt(i32)) return error.LimitExceeded;
+        try d.meta_keys.append(gpa, null);
+        var i: u32 = 1;
+        while (i <= count) : (i += 1) {
+            const key_size = try d.in.rb32(gpa);
+            const ty = try d.in.rl32(gpa);
+            try d.meta_keys.append(gpa, null);
+            if (key_size < 8 or key_size > size) return error.InvalidMov;
+            size -= key_size;
+            if (ty != tag("mdta")) {
+                _ = try d.in.skipBy(gpa, key_size - 8);
+                continue;
+            }
+            // A C string, cut at its NUL where it is used.
+            d.meta_keys.items[i] = try d.readSized(key_size - 8) orelse return error.InvalidMov;
+        }
+    }
+
+    /// mov_read_custom: iTunes' `----` (mean, name, data): a format tag
+    /// by its name, iTunSMPB's gapless counts for the last track,
+    /// `DISCSUBTITLE` as `disc_subtitle`, `cdec` dropped.
+    fn readCustom(d: *Demuxer, a: Atom) Error!void {
+        const gpa = d.gpa;
+        const end = rational.satAdd(d.in.pos, a.size);
+        if (!d.hasStream()) return;
+        var parts: [3]?[]u8 = .{ null, null, null }; // mean, name, data
+        defer for (parts) |p| if (p) |b| gpa.free(b);
+        var failed: ?Error = null;
+        for (0..3) |_| {
+            if (end - d.in.pos <= 12) break;
+            const len = try d.in.rb32(gpa);
+            const t = try d.in.rl32(gpa);
+            _ = try d.in.skipBy(gpa, 4);
+            if (len < 12 or @as(i64, len - 12) > end - d.in.pos) break;
+            var n = len - 12;
+            const slot: usize = if (t == tag("mean")) 0 else if (t == tag("name")) 1 else if (t == tag("data") and n > 4) blk: {
+                _ = try d.in.skipBy(gpa, 4);
+                n -= 4;
+                break :blk 2;
+            } else break;
+            if (parts[slot] != null) break;
+            parts[slot] = d.readSized(n) catch |err| {
+                failed = err;
+                break;
+            } orelse {
+                failed = error.InvalidMov;
+                break;
+            };
+        }
+        if (parts[0] != null and parts[1] != null and parts[2] != null) {
+            const mean = cString(parts[0].?);
+            const key = cString(parts[1].?);
+            const val = cString(parts[2].?);
+            if (std.mem.eql(u8, key, "iTunSMPB")) if (mp3.parseSmpb(val)) |counts| if (d.lastTrack()) |t| t.applySmpb(counts);
+            var consumed = false;
+            if (std.mem.eql(u8, mean, "com.apple.iTunes") and std.mem.eql(u8, key, "DISCSUBTITLE")) {
+                try putTag(gpa, &d.tags, "disc_subtitle", val, .replace);
+                consumed = true;
+            }
+            if (!std.mem.eql(u8, key, "cdec")) {
+                // The value went to disc_subtitle: av_dict_set with none
+                // removes the key.
+                if (consumed) _ = d.tags.remove(gpa, key) else try putTag(gpa, &d.tags, key, val, .replace);
+            }
+        }
+        _ = try d.in.seekTo(gpa, end);
+        if (failed) |err| return err;
+    }
+
+    /// mov_read_chpl: Nero chapters, in 100 ns units, with titles.
+    fn readChpl(d: *Demuxer, a: Atom) Error!void {
+        const gpa = d.gpa;
+        var size = a.size - 5;
+        if (size < 0) return;
+        const version = try d.in.r8(gpa);
+        _ = try d.in.rb24(gpa);
+        // Not counted in the size, as FFmpeg does not.
+        if (version != 0) _ = try d.in.rb32(gpa);
+        const count = try d.in.r8(gpa);
+        for (0..count) |i| {
+            if (size < 9) return;
+            const start: i64 = @bitCast(try d.in.rb64(gpa));
+            const len = try d.in.r8(gpa);
+            size -= 9 + @as(i64, len);
+            if (size < 0) return;
+            var title: [255]u8 = undefined;
+            if (try d.in.read(gpa, title[0..len]) != len) return error.InvalidMov;
+            try d.addChapter(@intCast(i), .{ .num = 1, .den = 10_000_000 }, start, nopts, title[0..len]);
+        }
+    }
+
+    /// mov_read_chap: the chapter tracks' ids (the last `chap` wins).
+    fn readChap(d: *Demuxer, a: Atom) Error!void {
+        const gpa = d.gpa;
+        // An unsigned count of the int64 size, as C truncates it.
+        const num: u32 = @truncate(@as(u64, @bitCast(@divTrunc(a.size, 4))));
+        // av_malloc_array: ENOMEM past INT_MAX.
+        if (@as(u64, num) * 4 > std.math.maxInt(i32)) return error.LimitExceeded;
+        d.chapter_tracks.clearRetainingCapacity();
+        var i: u32 = 0;
+        while (i < num and !d.in.eof) : (i += 1) {
+            try d.checkEntries(@as(u64, i) + 1);
+            try d.chapter_tracks.append(gpa, @bitCast(try d.in.rb32(gpa)));
+        }
+    }
+
+    /// mov_read_kind: a DASH role's dispositions for the last track.
+    fn readKind(d: *Demuxer, a: Atom) Error!void {
+        const gpa = d.gpa;
+        if (a.size < 6) return error.InvalidMov;
+        if (!d.hasStream()) return;
+        const version = try d.in.r8(gpa);
+        const flags = try d.in.rb24(gpa);
+        var size = a.size - 4;
+        if (version != 0 or flags != 0) return error.InvalidMov;
+        var scheme: std.ArrayList(u8) = .empty;
+        defer scheme.deinit(gpa);
+        var value: std.ArrayList(u8) = .empty;
+        defer value.deinit(gpa);
+        const scheme_len = try d.readString(&scheme, size);
+        if (scheme_len + 1 >= size) return error.InvalidMov;
+        size -= scheme_len + 1;
+        const value_len = try d.readString(&value, size);
+        // No NUL after the value.
+        if (value_len == size) return error.InvalidMov;
+        const t = d.lastTrack() orelse return; // a picture's
+        if (!std.mem.startsWith(u8, scheme.items, "urn:mpeg:dash:role:2011")) return;
+        for (dash_roles) |role| {
+            if (std.mem.startsWith(u8, value.items, role.value)) t.disposition |= role.disposition;
+        }
+    }
+
+    /// read_string_to_bprint: bytes up to a NUL or `max_len` of them; the
+    /// count, AVERROR_EOF for an empty string the input ended.
+    fn readString(d: *Demuxer, out: *std.ArrayList(u8), max_len: i64) Error!i64 {
+        if (max_len == 0) return 0;
+        var read: i64 = 0;
+        var last: u8 = 0;
+        while (true) {
+            last = try d.in.r8(d.gpa);
+            if (last == 0) break;
+            if (out.items.len >= d.limits.max_box_bytes) return error.LimitExceeded;
+            try out.append(d.gpa, last);
+            read += 1;
+            if (read >= max_len) break;
+        }
+        if (last == 0 and read == 0 and try d.in.feof(d.gpa)) return error.Truncated;
+        return read;
+    }
+
+    /// mov_read_uuid: an ISML manifest's bit rates, XMP (skipped, as
+    /// `export_xmp` is off) and spherical video metadata (read, of no use
+    /// to audio).
+    fn readUuid(d: *Demuxer, a: Atom) Error!void {
+        const gpa = d.gpa;
+        if (a.size < 16 or a.size >= std.math.maxInt(i32)) return error.InvalidMov;
+        if (!d.hasStream()) return;
+        var uuid: [16]u8 = undefined;
+        if (try d.in.read(gpa, &uuid) != 16) return error.InvalidMov;
+        const len: u64 = @intCast(a.size - 16);
+        if (std.mem.eql(u8, &uuid, &uuid_isml_manifest)) {
+            if (len < 4) return error.InvalidMov;
+            _ = try d.in.skipBy(gpa, 4);
+            const buffer = try d.readSized(len - 4) orelse return error.InvalidMov;
+            defer gpa.free(buffer);
+            try d.readBitrates(cString(buffer));
+        } else if (std.mem.eql(u8, &uuid, &uuid_xmp)) {
+            if (!try d.in.skipBy(gpa, @intCast(len))) return error.Truncated;
+        } else if (std.mem.eql(u8, &uuid, &uuid_spherical)) {
+            if (try d.in.skipCount(gpa, len) != len) return error.InvalidMov;
+        }
+    }
+
+    /// Each `systemBitrate="` of a manifest (ASCII case aside): the number
+    /// after it, or 0 unless it is a whole non-negative `long` ending at a
+    /// quote.
+    fn readBitrates(d: *Demuxer, text: []const u8) Error!void {
+        const needle = "systemBitrate=\"";
+        var at: usize = 0;
+        while (std.ascii.findIgnoreCasePos(text, at, needle)) |found| {
+            at = found + needle.len;
+            const rest = text[at..];
+            // strtol's end pointer stays at the start without a digit.
+            const parsed = strtol10(rest);
+            const rate: i64 = if (!parsed.overflow and parsed.value >= 0 and parsed.len < rest.len and rest[parsed.len] == '"') parsed.value else 0;
+            try d.bitrates.append(d.gpa, rate);
+        }
+    }
+
+    /// mov_read_chapters: each chapter track's samples as chapters (a
+    /// length, then UTF-8 or a UTF-16 text with its byte order mark), the
+    /// track made a discarded data stream; on a seekable input, as FFmpeg
+    /// reads them.
+    fn readChapterTracks(d: *Demuxer) Error!void {
+        const gpa = d.gpa;
+        for (d.chapter_tracks.items) |id| {
+            const t = for (d.tracks.items) |*x| {
+                if (x.sc_id == id) break x;
+            } else continue; // "Referenced QT chapter track not found"
+            const saved = d.in.pos;
+            // Video tracks are refused before this.
+            t.media = .data;
+            t.codec = .bin_data;
+            t.discard = true;
+            var title: std.ArrayList(u8) = .empty;
+            defer title.deinit(gpa);
+            const index = t.index.items;
+            for (index, 0..) |sample, i| {
+                var end = if (i + 1 < index.len) index[i + 1].timestamp else t.duration;
+                // "ignoring stream duration which is shorter than chapters"
+                if (end < sample.timestamp) end = nopts;
+                // "Chapter %d not found in file": the track's last.
+                if (!try d.in.seekTo(gpa, sample.pos)) break;
+                const len = try d.in.rb16(gpa);
+                if (@as(i64, len) > @as(i64, sample.size) - 2) continue;
+                title.clearRetainingCapacity();
+                // The C buffer of 2 * len + 1 bytes.
+                const limit = 2 * @as(usize, len);
+                if (len != 0) {
+                    const ch = try d.in.rb16(gpa);
+                    if (ch == 0xfeff) {
+                        try d.getStr16(.big, len, limit, &title);
+                    } else if (ch == 0xfffe) {
+                        try d.getStr16(.little, len, limit, &title);
+                    } else {
+                        try title.appendSlice(gpa, &.{ @truncate(ch >> 8), @truncate(ch) });
+                        if (len == 1 or len == 2) {
+                            title.shrinkRetainingCapacity(len);
+                        } else {
+                            // avio_get_str reads on to a NUL, which the
+                            // seek to the next sample makes moot.
+                            var k: usize = 0;
+                            while (k < len - 2) : (k += 1) {
+                                const c = try d.in.r8(gpa);
+                                if (c == 0) break;
+                                try title.append(gpa, c);
+                            }
+                        }
+                    }
+                }
+                try d.addChapter(@intCast(i), t.time_base, sample.timestamp, end, cString(title.items));
+            }
+            _ = try d.in.seekTo(gpa, saved);
+        }
+    }
+
+    /// avio_get_str16be / avio_get_str16le: UTF-16 of at most `maxlen`
+    /// bytes to a NUL, as UTF-8 of at most `limit` bytes; a bad surrogate
+    /// ends it.
+    fn getStr16(d: *Demuxer, endian: std.lang.Endian, maxlen: u32, limit: usize, out: *std.ArrayList(u8)) Error!void {
+        const gpa = d.gpa;
+        var ret: u32 = 0;
+        while (ret + 1 < maxlen) {
+            ret += 2;
+            var ch: u32 = if (ret <= maxlen) try d.read16(endian) else 0;
+            const hi = ch -% 0xD800;
+            if (hi < 0x800) {
+                ret += 2;
+                const low: u32 = if (ret <= maxlen) try d.read16(endian) else 0;
+                ch = low -% 0xDC00;
+                if (ch > 0x3FF or hi > 0x3FF) break;
+                ch += (hi << 10) + 0x10000;
+            }
+            if (ch == 0) break;
+            try putUtf8(gpa, out, ch, limit);
+        }
+    }
+
+    fn read16(d: *Demuxer, endian: std.lang.Endian) Error!u16 {
+        return std.mem.readInt(u16, &(try d.in.bytes(d.gpa, 2)), endian);
     }
 
     // ---- Sample tables ----
@@ -2378,8 +3088,13 @@ pub const Demuxer = struct {
     /// fragment index hint, and the decoder the read-ahead opens.
     fn finishHeader(d: *Demuxer) Error!void {
         const gpa = d.gpa;
+        if (d.in.seekable()) try d.readChapterTracks();
         for (d.tracks.items) |*t| {
-            if (t.media == .video or t.media == .subtitle) return error.UnsupportedFormat;
+            if (t.media == .video) return error.UnsupportedFormat;
+            // A subtitle track is demuxed only as a chapter track that a
+            // pipe leaves a subtitle stream (T33a3 for the others).
+            if (t.media == .subtitle and (d.in.seekable() or std.mem.findScalar(i32, d.chapter_tracks.items, t.sc_id) == null))
+                return error.UnsupportedFormat;
             fixTimescale(t, d.time_scale);
             if (t.stsc.items.len > 0) if (t.stsd_extradata) |list| {
                 const id = t.stsc.items[0].id;
@@ -2390,10 +3105,23 @@ pub const Demuxer = struct {
                     t.replaceExtradata(gpa, copy);
                 }
             };
+            if (t.media == .audio and t.codec == .aac) t.skip_samples = t.initial_padding;
+            // HandBrake up to 0.10.2 wrote MP3 FFmpeg parses in full.
+            if (d.handbrake_version != 0 and d.handbrake_version <= 1000000 * 0 + 1000 * 10 + 2 and t.codec == .mp3) t.parse_full = true;
+        }
+        for (d.tracks.items) |*t| {
             if (d.use_mfra and t.duration_for_fps > 0) {
                 const rate = rational.rescale(t.data_size, @as(i64, t.time_scale) * 8, t.duration_for_fps);
                 t.bit_rate = if (rate == std.math.minInt(i64)) 0 else rate;
             }
+        }
+        // An ISML manifest's bit rates, by stream.
+        for (d.bitrates.items, 0..) |rate, i| {
+            if (i >= d.tracks.items.len) break;
+            if (rate != 0) d.tracks.items[i].bit_rate = rate;
+        }
+        for (d.tracks.items) |*t| {
+            if (t.media == .audio) t.replaygain = mp3.replayGainFromTags(&d.tags);
             // A codec other than audio's in an audio track (an `esds`
             // object type), not modelled.
             if (t.media == .audio and (t.codec.isVideo() or t.codec == .mov_text or t.codec == .dvd_subtitle or t.codec == .mpeg4systems)) return error.UnsupportedFormat;
@@ -2599,7 +3327,11 @@ pub const Demuxer = struct {
         const audio = t.media == .audio;
         return .{
             .known = !audio or t.codec != .none,
-            .media = if (audio) .audio else .data,
+            .media = switch (t.media) {
+                .audio => .audio,
+                .subtitle => .subtitle,
+                .video, .data => .data,
+            },
             .time_base = t.time_base,
             .sample_rate = std.math.cast(u32, t.sample_rate) orelse 0,
             .channels = std.math.cast(u8, t.channelCount()) orelse 0,
@@ -2614,6 +3346,7 @@ pub const Demuxer = struct {
             .initial_padding = std.math.cast(u32, t.initial_padding) orelse 0,
             .seek_preroll = std.math.cast(u32, t.seek_preroll) orelse 0,
             .frame_size = std.math.cast(u32, t.frame_size) orelse 0,
+            .skip_samples = t.skip_samples,
             .first_discard_sample = t.first_discard_sample,
             .last_discard_sample = t.last_discard_sample,
             .extradata = t.extradata orelse &.{},
@@ -2671,6 +3404,295 @@ pub const Demuxer = struct {
         return error.UnsupportedFormat;
     }
 };
+
+// ---- Metadata tables and text (T33a2) ----
+
+/// How mov_read_udta_string reads a key's value.
+const UdtaParse = enum {
+    /// A string.
+    none,
+    /// The bytes as they are.
+    raw,
+    /// mov_metadata_int8_no_padding.
+    int8,
+    /// mov_metadata_int8_bypass_padding.
+    int8_padded,
+    /// mov_metadata_gnre.
+    gnre,
+    /// mov_metadata_track_or_disc_number.
+    number,
+};
+
+const UdtaKey = struct { key: []const u8, parse: UdtaParse = .none };
+
+/// A © tag: 0xA9 then three letters.
+fn ctag(comptime s: *const [3]u8) u32 {
+    return std.mem.readInt(u32, &([1]u8{0xa9} ++ s.*), .little);
+}
+
+/// mov_read_udta_string's keys (`XMP_` only with `export_xmp`, off).
+fn udtaKey(t: u32) ?UdtaKey {
+    return switch (t) {
+        tag("@PRM") => .{ .key = "premiere_version", .parse = .raw },
+        tag("@PRQ") => .{ .key = "quicktime_version", .parse = .raw },
+        tag("aART") => .{ .key = "album_artist" },
+        tag("akID") => .{ .key = "account_type", .parse = .int8 },
+        tag("apID") => .{ .key = "account_id" },
+        tag("catg") => .{ .key = "category" },
+        tag("cpil") => .{ .key = "compilation", .parse = .int8 },
+        tag("cprt") => .{ .key = "copyright" },
+        tag("desc") => .{ .key = "description" },
+        tag("disk") => .{ .key = "disc", .parse = .number },
+        tag("egid") => .{ .key = "episode_uid", .parse = .int8 },
+        tag("FIRM") => .{ .key = "firmware", .parse = .raw },
+        tag("gnre") => .{ .key = "genre", .parse = .gnre },
+        tag("hdvd") => .{ .key = "hd_video", .parse = .int8 },
+        tag("keyw") => .{ .key = "keywords" },
+        tag("ldes") => .{ .key = "synopsis" },
+        tag("manu") => .{ .key = "make" },
+        tag("modl") => .{ .key = "model" },
+        tag("name") => .{ .key = "name" },
+        tag("pcst") => .{ .key = "podcast", .parse = .int8 },
+        tag("pgap") => .{ .key = "gapless_playback", .parse = .int8 },
+        tag("purd") => .{ .key = "purchase_date" },
+        tag("rtng") => .{ .key = "rating", .parse = .int8 },
+        tag("soaa") => .{ .key = "sort_album_artist" },
+        tag("soal") => .{ .key = "sort_album" },
+        tag("soar") => .{ .key = "sort_artist" },
+        tag("soco") => .{ .key = "sort_composer" },
+        tag("sonm") => .{ .key = "sort_name" },
+        tag("sosn") => .{ .key = "sort_show" },
+        tag("stik") => .{ .key = "media_type", .parse = .int8 },
+        tag("trkn") => .{ .key = "track", .parse = .number },
+        tag("tven") => .{ .key = "episode_id" },
+        tag("tves") => .{ .key = "episode_sort", .parse = .int8_padded },
+        tag("tvnn") => .{ .key = "network" },
+        tag("tvsh") => .{ .key = "show" },
+        tag("tvsn") => .{ .key = "season_number", .parse = .int8_padded },
+        ctag("ART") => .{ .key = "artist" },
+        ctag("PRD") => .{ .key = "producer" },
+        ctag("alb") => .{ .key = "album" },
+        ctag("aut") => .{ .key = "artist" },
+        ctag("chp") => .{ .key = "chapter" },
+        ctag("cmt") => .{ .key = "comment" },
+        ctag("com") => .{ .key = "composer" },
+        ctag("cpy") => .{ .key = "copyright" },
+        ctag("day") => .{ .key = "date" },
+        ctag("dir") => .{ .key = "director" },
+        ctag("dis") => .{ .key = "disclaimer" },
+        ctag("ed1") => .{ .key = "edit_date" },
+        ctag("enc") => .{ .key = "encoder" },
+        ctag("fmt") => .{ .key = "original_format" },
+        ctag("gen") => .{ .key = "genre" },
+        ctag("grp") => .{ .key = "grouping" },
+        ctag("hst") => .{ .key = "host_computer" },
+        ctag("inf") => .{ .key = "comment" },
+        ctag("lyr") => .{ .key = "lyrics" },
+        ctag("mak") => .{ .key = "make" },
+        ctag("mod") => .{ .key = "model" },
+        ctag("nam") => .{ .key = "title" },
+        ctag("ope") => .{ .key = "original_artist" },
+        ctag("prd") => .{ .key = "producer" },
+        ctag("prf") => .{ .key = "performers" },
+        ctag("req") => .{ .key = "playback_requirements" },
+        ctag("src") => .{ .key = "original_source" },
+        ctag("st3") => .{ .key = "subtitle" },
+        ctag("swr") => .{ .key = "encoder" },
+        ctag("too") => .{ .key = "encoder" },
+        ctag("trk") => .{ .key = "track" },
+        ctag("url") => .{ .key = "URL" },
+        ctag("wrn") => .{ .key = "warning" },
+        ctag("wrt") => .{ .key = "composer" },
+        ctag("xyz") => .{ .key = "location" },
+        else => null,
+    };
+}
+
+/// `mac_to_unicode`: Mac Roman's upper half.
+const mac_to_unicode = [128]u16{
+    0x00C4, 0x00C5, 0x00C7, 0x00C9, 0x00D1, 0x00D6, 0x00DC, 0x00E1,
+    0x00E0, 0x00E2, 0x00E4, 0x00E3, 0x00E5, 0x00E7, 0x00E9, 0x00E8,
+    0x00EA, 0x00EB, 0x00ED, 0x00EC, 0x00EE, 0x00EF, 0x00F1, 0x00F3,
+    0x00F2, 0x00F4, 0x00F6, 0x00F5, 0x00FA, 0x00F9, 0x00FB, 0x00FC,
+    0x2020, 0x00B0, 0x00A2, 0x00A3, 0x00A7, 0x2022, 0x00B6, 0x00DF,
+    0x00AE, 0x00A9, 0x2122, 0x00B4, 0x00A8, 0x2260, 0x00C6, 0x00D8,
+    0x221E, 0x00B1, 0x2264, 0x2265, 0x00A5, 0x00B5, 0x2202, 0x2211,
+    0x220F, 0x03C0, 0x222B, 0x00AA, 0x00BA, 0x03A9, 0x00E6, 0x00F8,
+    0x00BF, 0x00A1, 0x00AC, 0x221A, 0x0192, 0x2248, 0x2206, 0x00AB,
+    0x00BB, 0x2026, 0x00A0, 0x00C0, 0x00C3, 0x00D5, 0x0152, 0x0153,
+    0x2013, 0x2014, 0x201C, 0x201D, 0x2018, 0x2019, 0x00F7, 0x25CA,
+    0x00FF, 0x0178, 0x2044, 0x20AC, 0x2039, 0x203A, 0xFB01, 0xFB02,
+    0x2021, 0x00B7, 0x201A, 0x201E, 0x2030, 0x00C2, 0x00CA, 0x00C1,
+    0x00CB, 0x00C8, 0x00CD, 0x00CE, 0x00CF, 0x00CC, 0x00D3, 0x00D4,
+    0xF8FF, 0x00D2, 0x00DA, 0x00DB, 0x00D9, 0x0131, 0x02C6, 0x02DC,
+    0x00AF, 0x02D8, 0x02D9, 0x02DA, 0x00B8, 0x02DD, 0x02DB, 0x02C7,
+};
+
+/// PUT_UTF8 into `out` while it holds fewer than `limit` bytes: a
+/// character the limit cuts keeps its first bytes.
+fn putUtf8(gpa: std.mem.Allocator, out: *std.ArrayList(u8), val: u32, limit: usize) error{OutOfMemory}!void {
+    // Mac Roman's characters and UTF-16's: at most 4 bytes.
+    std.debug.assert(val <= 0x10FFFF);
+    if (val < 0x80) {
+        if (out.items.len < limit) try out.append(gpa, @intCast(val));
+        return;
+    }
+    // av_log2(val) + 4) / 5 bytes.
+    const bytes: u5 = @intCast((31 - @clz(val) + 4) / 5);
+    var shift: u5 = (bytes - 1) * 6;
+    const lead: u32 = (@as(u32, 256) - (@as(u32, 256) >> bytes)) | (val >> shift);
+    if (out.items.len < limit) try out.append(gpa, @truncate(lead));
+    while (shift >= 6) {
+        shift -= 6;
+        if (out.items.len < limit) try out.append(gpa, @truncate(0x80 | ((val >> shift) & 0x3f)));
+    }
+}
+
+/// A C string: the bytes before the first NUL.
+fn cString(b: []const u8) []const u8 {
+    return b[0 .. std.mem.findScalar(u8, b, 0) orelse b.len];
+}
+
+/// A 16.16 fixed-point value as FFmpeg computes it: the int made a float,
+/// divided in float.
+fn fixed16(raw: u32) f32 {
+    const v: i32 = @bitCast(raw);
+    const f: f32 = @floatFromInt(v);
+    return f / 65536.0;
+}
+
+const FixedOptions = struct {
+    precision: u5,
+    /// The `+` flag.
+    plus: bool = false,
+    /// A minimum width, padded with zeros after the sign (the `0` flag).
+    width: usize = 0,
+};
+
+/// glibc's `%f` of a float (promoted to double): the exact value rounded
+/// to `precision` decimals, ties to even; `nan`, `inf` with their sign.
+fn formatFixed(gpa: std.mem.Allocator, out: *std.ArrayList(u8), v: f32, opts: FixedOptions) error{OutOfMemory}!void {
+    const bits: u32 = @bitCast(v);
+    const negative = bits >> 31 != 0;
+    const sign: []const u8 = if (negative) "-" else if (opts.plus) "+" else "";
+    const exp_bits: u8 = @truncate(bits >> 23);
+    const frac: u32 = bits & 0x7fffff;
+    if (exp_bits == 0xff) {
+        // The `0` flag pads these with spaces.
+        const word: []const u8 = if (frac != 0) "nan" else "inf";
+        const len = sign.len + word.len;
+        if (opts.width > len) try out.appendNTimes(gpa, ' ', opts.width - len);
+        try out.appendSlice(gpa, sign);
+        try out.appendSlice(gpa, word);
+        return;
+    }
+    // |v| = mantissa * 2^exponent, exactly.
+    const mantissa: u256 = if (exp_bits == 0) frac else frac | (1 << 23);
+    const exponent: i32 = (if (exp_bits == 0) @as(i32, 1) else exp_bits) - 150;
+    var scale: u256 = 1;
+    for (0..opts.precision) |_| scale *= 10;
+    var scaled: u256 = undefined;
+    if (exponent >= 0) {
+        scaled = (mantissa << @intCast(exponent)) * scale;
+    } else {
+        const shift: u8 = @intCast(-exponent);
+        const product = mantissa * scale;
+        scaled = product >> shift;
+        const rem = product - (scaled << shift);
+        const half = @as(u256, 1) << (shift - 1);
+        if (rem > half or (rem == half and scaled & 1 != 0)) scaled += 1;
+    }
+    var digits: std.ArrayList(u8) = .empty;
+    defer digits.deinit(gpa);
+    try digits.print(gpa, "{d}", .{scaled / scale});
+    if (opts.precision > 0) {
+        try digits.append(gpa, '.');
+        var fraction = scaled % scale;
+        const at = digits.items.len;
+        try digits.appendNTimes(gpa, '0', opts.precision);
+        var k: usize = opts.precision;
+        while (k > 0) : (k -= 1) {
+            digits.items[at + k - 1] = '0' + @as(u8, @intCast(fraction % 10));
+            fraction /= 10;
+        }
+    }
+    try out.appendSlice(gpa, sign);
+    const len = sign.len + digits.items.len;
+    if (opts.width > len) try out.appendNTimes(gpa, '0', opts.width - len);
+    try out.appendSlice(gpa, digits.items);
+}
+
+/// `sscanf(str, "HandBrake %d.%d.%d")` matching all three: the version as
+/// 1000000 * major + 1000 * minor + micro (an int, wrapping).
+fn handBrakeVersion(text: []const u8) ?i32 {
+    const prefix = "HandBrake";
+    if (!std.mem.startsWith(u8, text, prefix)) return null;
+    var at: usize = prefix.len;
+    var parts: [3]i32 = undefined;
+    for (&parts, 0..) |*part, i| {
+        if (i > 0) {
+            if (at >= text.len or text[at] != '.') return null;
+            at += 1;
+        }
+        const parsed = scanInt(text[at..]) orelse return null;
+        part.* = parsed.value;
+        at += parsed.len;
+    }
+    // The reference build's int arithmetic wraps (notes.md "Follow the
+    // reference build").
+    return 1000000 *% parts[0] +% 1000 *% parts[1] +% parts[2];
+}
+
+/// scanf's `%d`: white space, a sign, decimal digits (at least one), as
+/// strtol reads them (saturating), stored into an int (truncating, as
+/// glibc stores its long).
+fn scanInt(text: []const u8) ?struct { value: i32, len: usize } {
+    const parsed = strtol10(text);
+    if (parsed.len == 0) return null;
+    return .{ .value = @truncate(parsed.value), .len = parsed.len };
+}
+
+/// strtol with base 10: white space, a sign, digits; the value, saturated
+/// on overflow (when `errno` is ERANGE), and the bytes used (0 without a
+/// digit).
+fn strtol10(text: []const u8) struct { value: i64, len: usize, overflow: bool } {
+    var i: usize = 0;
+    while (i < text.len and std.ascii.isWhitespace(text[i])) i += 1;
+    var negative = false;
+    if (i < text.len and (text[i] == '+' or text[i] == '-')) {
+        negative = text[i] == '-';
+        i += 1;
+    }
+    const start = i;
+    var magnitude: u64 = 0;
+    var overflow = false;
+    while (i < text.len and std.ascii.isDigit(text[i])) : (i += 1) {
+        const step = @mulWithOverflow(magnitude, 10);
+        const sum = @addWithOverflow(step[0], text[i] - '0');
+        if (step[1] != 0 or sum[1] != 0) overflow = true;
+        magnitude = sum[0];
+    }
+    if (i == start) return .{ .value = 0, .len = 0, .overflow = false };
+    const limit: u64 = if (negative) 1 << 63 else std.math.maxInt(i64);
+    if (overflow or magnitude > limit) {
+        return .{ .value = if (negative) std.math.minInt(i64) else std.math.maxInt(i64), .len = i, .overflow = true };
+    }
+    const value: i64 = if (negative) @bitCast(0 -% magnitude) else @intCast(magnitude);
+    return .{ .value = value, .len = i, .overflow = false };
+}
+
+/// `dash_role_map` of `ff_mov_track_kind_table`.
+const dash_roles = [_]struct { value: []const u8, disposition: u32 }{
+    .{ .value = "caption", .disposition = 0x80 | 0x10000 },
+    .{ .value = "commentary", .disposition = 0x8 },
+    .{ .value = "description", .disposition = 0x100 | 0x20000 },
+    .{ .value = "dub", .disposition = 0x2 },
+    .{ .value = "forced-subtitle", .disposition = 0x40 },
+};
+
+const uuid_isml_manifest = [16]u8{ 0xa5, 0xd4, 0x0b, 0x30, 0xe8, 0x14, 0x11, 0xdd, 0xba, 0x2f, 0x08, 0x00, 0x20, 0x0c, 0x9a, 0x66 };
+const uuid_xmp = [16]u8{ 0xbe, 0x7a, 0xcf, 0xcb, 0x97, 0xa9, 0x42, 0xe8, 0x9c, 0x71, 0x99, 0x94, 0x91, 0xe3, 0xaf, 0xac };
+const uuid_spherical = [16]u8{ 0xff, 0xcc, 0x82, 0x63, 0xf8, 0x55, 0x4a, 0x93, 0x88, 0x14, 0x58, 0x7a, 0x02, 0x52, 0x1f, 0xdd };
 
 /// The `max_stts_delta` option's default: larger `stts` deltas are
 /// corrections.
@@ -2748,7 +3770,16 @@ fn codecFromTag(t: *Track, format: u32) Error!Codec {
         if (isVideoTag(format)) {
             t.media = .video;
         } else if (t.media == .data or (t.media == .subtitle and t.codec == .none)) {
-            if (format == tag("text") or format == tag("tx3g") or format == tag("c608") or format == tag("stpp") or format == tag("dfxp")) {
+            // ff_codec_movsubtitle_tags, MP4's and ISMV's TTML, then
+            // ff_codec_movdata_tags.
+            if (format == tag("text") or format == tag("tx3g")) {
+                id = .mov_text;
+            } else if (format == tag("c608")) {
+                id = .eia_608;
+            } else if (format == tag("stpp") or format == tag("dfxp")) {
+                id = .ttml;
+            }
+            if (id != .none) {
                 t.media = .subtitle;
             } else if (format == tag("gpmd")) {
                 id = .bin_data;
@@ -2931,28 +3962,39 @@ pub fn streamInfo(d: *Demuxer, layer: anytype, i: usize) Demuxer.ReadError!Strea
         8 => 0x20,
         else => 0,
     };
+    // avcodec_parameters_from_context keeps the audio fields of audio
+    // streams only (a chapter track made data loses its rate; its layout
+    // is restored).
+    const audio = t.media == .audio;
     return .{
         .media = t.media,
         .codec = if (t.codec == .none) "none" else codec,
-        .sample_rate = sample_rate,
+        .sample_rate = if (audio) sample_rate else 0,
         .layout = layout,
         .time_base = t.time_base,
         .duration = t.duration,
         .start_time = t.start_time,
-        .initial_padding = t.initial_padding,
+        .initial_padding = if (audio) t.initial_padding else 0,
         .bit_rate = bit_rate,
         .disposition = disposition,
         .id = t.id,
         .codec_tag = t.codec_tag,
         .bits_per_coded_sample = t.bits_per_coded_sample,
         .bits_per_raw_sample = bits_per_raw,
-        .frame_size = frame_size,
-        .block_align = t.block_align,
+        .frame_size = if (audio) frame_size else 0,
+        .block_align = if (audio) t.block_align else 0,
         .profile = profile,
         .nb_frames = t.nb_frames,
-        .seek_preroll = seek_preroll,
+        .seek_preroll = if (audio) seek_preroll else 0,
         .extradata = t.extradata orelse &.{},
     };
+}
+
+/// The chapters after `layer`'s avformat_find_stream_info, which ends
+/// them (compute_chapters_end) from the format's start and duration.
+pub fn chapterList(d: *Demuxer, layer: anytype) error{OutOfMemory}![]const chapters_mod.Chapter {
+    try d.chapters.computeEnds(d.gpa, layer.start_time, layer.duration);
+    return d.chapters.items.items;
 }
 
 /// mov_probe on a probe buffer.
@@ -3098,6 +4140,7 @@ fn vectorLines(gpa: std.mem.Allocator, bytes: []const u8, seekable: bool, out: *
                 try out.append(gpa, '\n');
             },
         }
+        if (d.tracks.items[i].replaygain) |rg| try out.print(gpa, "Y {d} {d} {d} {d} {d}\n", .{ i, rg.track_gain, rg.track_peak, rg.album_gain, rg.album_peak });
         for (d.tracks.items[i].tags.items()) |e| try out.print(gpa, "M {d} {s}={s}\n", .{ i, e.key, e.value });
     }
     try out.appendSlice(gpa, "B");
@@ -3105,6 +4148,10 @@ fn vectorLines(gpa: std.mem.Allocator, bytes: []const u8, seekable: bool, out: *
     try writeTs(out, gpa, layer.duration);
     try out.print(gpa, " {d}\n", .{layer.bit_rate});
     for (d.tags.items()) |e| try out.print(gpa, "G {s}={s}\n", .{ e.key, e.value });
+    for (try chapterList(d, &layer)) |ch| {
+        try out.print(gpa, "H {d} {d}/{d} {d} {d}\n", .{ ch.id, ch.time_base.num, ch.time_base.den, ch.start, ch.end });
+        for (ch.tags.items()) |e| try out.print(gpa, "G {s}={s}\n", .{ e.key, e.value });
+    }
     while (true) {
         const p = layer.next() catch |err| switch (err) {
             error.OutOfMemory => return err,
@@ -3118,6 +4165,47 @@ fn vectorLines(gpa: std.mem.Allocator, bytes: []const u8, seekable: bool, out: *
         if (p.new_extradata) |e| try out.print(gpa, "Q {d} {d}\n", .{ e.len, adler(e) });
     }
     try out.appendSlice(gpa, "R EOF\n");
+}
+
+/// FFmpeg's lines without its attached-picture streams (`covr`), which
+/// the port skips: their stream lines and packets (with the lines after
+/// a packet). Pictures come after the tracks, so the tracks keep their
+/// indexes.
+fn withoutPictures(gpa: std.mem.Allocator, text: []const u8) ![]u8 {
+    var pictures: std.ArrayList(u32) = .empty;
+    defer pictures.deinit(gpa);
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "S ")) continue;
+        var fields = std.mem.splitScalar(u8, line, ' ');
+        _ = fields.next();
+        const index = try std.fmt.parseInt(u32, fields.next().?, 10);
+        const media = fields.next().?;
+        // The last field is the disposition: AV_DISPOSITION_ATTACHED_PIC.
+        const disposition = try std.fmt.parseInt(u32, line[std.mem.findScalarLast(u8, line, ' ').? + 1 ..], 16);
+        if (std.mem.eql(u8, media, "v") and disposition & 0x400 != 0) try pictures.append(gpa, index);
+    }
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    lines = std.mem.splitScalar(u8, text, '\n');
+    var in_picture_packet = false;
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        const kind = line[0];
+        var drop = false;
+        if ((kind == 'S' or kind == 'C' or kind == 'L' or kind == 'M' or kind == 'Y' or kind == 'P') and line.len > 2) {
+            const end = std.mem.findScalarPos(u8, line, 2, ' ') orelse line.len;
+            const index = std.fmt.parseInt(u32, line[2..end], 10) catch std.math.maxInt(u32);
+            drop = std.mem.findScalar(u32, pictures.items, index) != null;
+            if (kind == 'P') in_picture_packet = drop;
+        } else if (kind == 'K' or kind == 'Q' or kind == 'T') {
+            drop = in_picture_packet;
+        }
+        if (drop) continue;
+        try out.appendSlice(gpa, line);
+        try out.append(gpa, '\n');
+    }
+    return out.toOwnedSlice(gpa);
 }
 
 fn expectedError(e: anytype) Error {
@@ -3155,7 +4243,8 @@ test "every MP4 fixture demuxes as FFmpeg's mov demuxer demuxes it (vectors/mov.
                 }
             },
             .accept => {
-                const want = block(fixture.name) orelse return error.MissingVector;
+                const want = try withoutPictures(gpa, block(fixture.name) orelse return error.MissingVector);
+                defer gpa.free(want);
                 var got: std.ArrayList(u8) = .empty;
                 defer got.deinit(gpa);
                 try vectorLines(gpa, bytes, true, &got);
@@ -3214,7 +4303,8 @@ test "every MP4 fixture demuxes from a pipe as FFmpeg demuxes it from one (vecto
                     failures += 1;
                 }
             } else {
-                const want = pipeBlock(fixture.name) orelse return error.MissingVector;
+                const want = try withoutPictures(gpa, pipeBlock(fixture.name) orelse return error.MissingVector);
+                defer gpa.free(want);
                 if (!std.mem.eql(u8, want, got.items)) {
                     std.debug.print("mov fixture {s}\n@@GOT {s}\n{s}@@END\n", .{ fixture.name, fixture.name, got.items });
                     failures += 1;
@@ -3254,7 +4344,7 @@ fn exerciseFragmented(gpa: std.mem.Allocator, bytes: []const u8) error{OutOfMemo
 }
 
 test "the mov demuxer from a pipe of one-byte reads returns what a whole buffer gives" {
-    inline for (.{ "mov_aac_faststart", "mov_pcm_faststart_mov", "mov_stsc_runs", "mov_two_stsd", "mov_data_track", "mov_qt_v1_ima4" }) |name| {
+    inline for (.{ "mov_aac_faststart", "mov_pcm_faststart_mov", "mov_stsc_runs", "mov_two_stsd", "mov_data_track", "mov_qt_v1_ima4", "mov_meta_chapter_track", "mov_meta_keys" }) |name| {
         const bytes = fixtures.mov.bytes(name);
         const expected = try exercise(testing.allocator, bytes, false, .{}, .{});
         try testing.expect(expected > 0);
@@ -3288,7 +4378,7 @@ test "the limits refuse tables, samples and tracks past them" {
 }
 
 test "every prefix of a file opens, refuses or ends as FFmpeg's walk allows, freeing everything" {
-    inline for (.{ "mov_aac_faststart", "mov_qt_v1_ima4", "mov_two_stsd", "mov_alac_stereo" }) |name| {
+    inline for (.{ "mov_aac_faststart", "mov_qt_v1_ima4", "mov_two_stsd", "mov_alac_stereo", "mov_meta_ilst", "mov_meta_chapter_track" }) |name| {
         const bytes = fixtures.mov.bytes(name);
         var len: usize = 0;
         while (len <= bytes.len) : (len += if (len < 1200) 1 else 37) {
@@ -3311,6 +4401,192 @@ test "crafted boxes: 64-bit sizes past the input, sizes below 8, a size of 0 (FF
     try testing.expectEqual(null, try openError(ftyp ++ "\x00\x00\x00\x00moov", .{}));
 }
 
+/// A box of `parts`, its size the real one or `declared`, from `a`.
+fn testBox(a: std.mem.Allocator, kind: []const u8, declared: ?u32, parts: []const []const u8) ![]const u8 {
+    var len: usize = 8;
+    for (parts) |p| len += p.len;
+    const out = try a.alloc(u8, len);
+    std.mem.writeInt(u32, out[0..4], declared orelse @intCast(len), .big);
+    @memcpy(out[4..8], kind[0..4]);
+    var at: usize = 8;
+    for (parts) |p| {
+        @memcpy(out[at..][0..p.len], p);
+        at += p.len;
+    }
+    return out;
+}
+
+/// A fixture with `tail` after it: boxes at the top level, read after the
+/// samples' `mdat`.
+fn withTail(a: std.mem.Allocator, comptime name: []const u8, tail: []const []const u8) ![]const u8 {
+    var parts: std.ArrayList([]const u8) = .empty;
+    try parts.append(a, fixtures.mov.bytes(name));
+    try parts.appendSlice(a, tail);
+    return std.mem.concat(a, u8, parts.items);
+}
+
+/// An iTunes `data` atom.
+fn testData(a: std.mem.Allocator, kind: u32, value: []const u8) ![]const u8 {
+    var head: [8]u8 = undefined;
+    std.mem.writeInt(u32, head[0..4], kind, .big);
+    @memset(head[4..8], 0);
+    return testBox(a, "data", null, &.{ &head, value });
+}
+
+/// Opens `bytes` (from a pipe unless `seekable`) and reads every packet;
+/// the first error, or the demuxer for `check`.
+fn openAndRead(bytes: []const u8, seekable: bool, limits: Limits) !*Demuxer {
+    var reader: std.Io.Reader = .fixed(bytes);
+    const d = if (seekable) try Demuxer.initSeekable(testing.allocator, &reader, .fixed(&reader), limits) else try Demuxer.init(testing.allocator, &reader, limits);
+    errdefer d.deinit();
+    while (try d.next()) |_| {}
+    return d;
+}
+
+test "metadata: a tag over the box limit is LimitExceeded, one cut by the end InvalidMov" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var text: [100]u8 = @splat('t');
+    const name = try testBox(a, "\xa9nam", null, &.{ "\x00\x64\x15\xc7", &text });
+    const file = try withTail(a, "mov_aac_faststart", &.{try testBox(a, "udta", null, &.{name})});
+    try testing.expectEqual(error.LimitExceeded, (try openError(file, .{ .max_box_bytes = 64 })).?);
+    const d = try openAndRead(file, true, .{});
+    defer d.deinit();
+    try testing.expectEqualStrings(&text, d.tags.get("title").?);
+    try testing.expectEqualStrings(&text, d.tags.get("title-eng").?);
+    // The length runs 4 bytes past the box at the end of the file.
+    const cut = try testBox(a, "\xa9nam", null, &.{ "\x00\x08\x15\xc7", "abcdef" });
+    try testing.expectEqual(error.InvalidMov, (try openError(try withTail(a, "mov_aac_faststart", &.{try testBox(a, "udta", null, &.{cut})}), .{})).?);
+}
+
+test "metadata: many data atoms of one iTunes tag join in linear time" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const count = 20000;
+    const one = try testData(a, 1, "x");
+    const parts = try a.alloc([]const u8, count);
+    @memset(parts, one);
+    const artist = try testBox(a, "\xa9ART", null, parts);
+    const file = try withTail(a, "mov_aac_faststart", &.{try testBox(a, "udta", null, &.{try testBox(a, "ilst", null, &.{artist})})});
+    const d = try openAndRead(file, true, .{});
+    defer d.deinit();
+    const value = d.tags.get("artist").?;
+    try testing.expectEqual(2 * count - 1, value.len);
+    try testing.expectEqualStrings("x;x;", value[0..4]);
+}
+
+test "metadata: counts a box declares past a pipe's end stop with the input" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ftyp = "\x00\x00\x00\x10ftypisom\x00\x00\x02\x00";
+    const mvhd = fixtures.mov.bytes("mov_empty_moov");
+    const mvhd_at = std.mem.find(u8, mvhd, "mvhd").? - 4;
+    const mvhd_box = mvhd[mvhd_at..][0..std.mem.readInt(u32, mvhd[mvhd_at..][0..4], .big)];
+    // keys declaring 16M names in a box declared huge: the names end at
+    // the input, without an array of 16M.
+    const hdlr = try testBox(a, "hdlr", null, &.{ "\x00\x00\x00\x00", "\x00\x00\x00\x00mdta", "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" });
+    const keys = try testBox(a, "keys", 0x7fff_0000, &.{ "\x00\x00\x00\x00\x00\xff\xff\xff", "\x00\x00\x00\x0cmdtakey1" });
+    const meta = try testBox(a, "meta", 0x7fff_f000, &.{ "\x00\x00\x00\x00", hdlr, keys });
+    const moov = try testBox(a, "moov", 0x7fff_ff00, &.{ mvhd_box, meta });
+    try testing.expectEqual(error.InvalidMov, Demuxer.init(testing.allocator, @constCast(&std.Io.Reader.fixed(try std.mem.concat(a, u8, &.{ ftyp, moov }))), .{}));
+    // chap declaring 512M ids: those present, then the end.
+    const chap = try testBox(a, "chap", 0x7fff_0000, &.{"\x00\x00\x00\x01\x00\x00\x00\x02"});
+    const moov2 = try testBox(a, "moov", 0x7fff_ff00, &.{ mvhd_box, chap });
+    var reader: std.Io.Reader = .fixed(try std.mem.concat(a, u8, &.{ ftyp, moov2 }));
+    const d = try Demuxer.init(testing.allocator, &reader, .{});
+    defer d.deinit();
+    try testing.expectEqualSlices(i32, &.{ 1, 2, 0 }, d.chapter_tracks.items);
+}
+
+test "metadata: kind, ---- and covr cut on a pipe fail as FFmpeg's reads do" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const base = "mov_aac_faststart";
+    // A kind whose strings the input ends before: AVERROR_EOF.
+    const kind = try testBox(a, "kind", 100, &.{"\x00\x00\x00\x00"});
+    try testing.expectError(error.Truncated, openAndRead(try withTail(a, base, &.{kind}), false, .{}));
+    // A kind value without its NUL: AVERROR_INVALIDDATA.
+    const no_nul = try testBox(a, "kind", null, &.{ "\x00\x00\x00\x00", "urn\x00dub" });
+    try testing.expectError(error.InvalidMov, openAndRead(try withTail(a, base, &.{no_nul}), true, .{}));
+    // A ---- whose data the input ends inside: ffio_read_size's error.
+    const mean = try testBox(a, "mean", null, &.{"\x00\x00\x00\x00com.apple.iTunes"});
+    const name = try testBox(a, "name", null, &.{"\x00\x00\x00\x00iTunSMPB"});
+    const custom = try testBox(a, "----", 1000, &.{ mean, name, "\x00\x00\x00\x64data\x00\x00\x00\x01\x00\x00\x00\x00 0000" });
+    try testing.expectError(error.InvalidMov, openAndRead(try withTail(a, base, &.{custom}), false, .{}));
+    // A cover with none of its bytes: AVERROR_EOF; with some: a picture.
+    const covr = try testBox(a, "covr", 1000, &.{"\x00\x00\x03\x00data\x00\x00\x00\x0d\x00\x00\x00\x00"});
+    const ilst = try testBox(a, "ilst", 1000, &.{covr});
+    try testing.expectError(error.Truncated, openAndRead(try withTail(a, base, &.{ilst}), false, .{}));
+    const partial = try testBox(a, "ilst", 1000, &.{try testBox(a, "covr", 1000, &.{ "\x00\x00\x03\x00data\x00\x00\x00\x0d\x00\x00\x00\x00", "\xff\xd8" })});
+    const d = try openAndRead(try withTail(a, base, &.{partial}), false, .{});
+    defer d.deinit();
+    try testing.expectEqual(1, d.pictures);
+}
+
+test "metadata: an ISML manifest under 4 bytes and a short uuid are AVERROR_INVALIDDATA" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const isml = try testBox(a, "uuid", null, &.{ &uuid_isml_manifest, "\x00\x00" });
+    try testing.expectEqual(error.InvalidMov, (try openError(try withTail(a, "mov_aac_faststart", &.{isml}), .{})).?);
+    try testing.expectEqual(error.InvalidMov, (try openError(try withTail(a, "mov_aac_faststart", &.{try testBox(a, "uuid", null, &.{"short"})}), .{})).?);
+}
+
+test "metadata: numbers print as glibc's printf, versions as sscanf reads them" {
+    const gpa = testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    // %+08.4f, %+09.4f and %+f of n / 65536 in float, from glibc (ties
+    // to even at 2048, 6144, 10240).
+    const loci = [_]struct { i32, []const u8, []const u8, []const u8 }{
+        .{ 0, "+00.0000", "+000.0000", "+0.000000" },
+        .{ -1, "-00.0000", "-000.0000", "-0.000015" },
+        .{ 3277, "+00.0500", "+000.0500", "+0.050003" },
+        .{ 3201851, "+48.8564", "+048.8564", "+48.856369" },
+        .{ -803840, "-12.2656", "-012.2656", "-12.265625" },
+        .{ std.math.maxInt(i32), "+32768.0000", "+32768.0000", "+32768.000000" },
+        .{ std.math.minInt(i32), "-32768.0000", "-32768.0000", "-32768.000000" },
+        .{ 16777217, "+256.0000", "+256.0000", "+256.000000" },
+        .{ 13421773, "+204.8000", "+204.8000", "+204.800003" },
+        .{ 2048, "+00.0312", "+000.0312", "+0.031250" },
+        .{ 6144, "+00.0938", "+000.0938", "+0.093750" },
+        .{ 10240, "+00.1562", "+000.1562", "+0.156250" },
+    };
+    for (loci) |c| {
+        const v = fixed16(@bitCast(c[0]));
+        inline for (.{ FixedOptions{ .precision = 4, .plus = true, .width = 8 }, FixedOptions{ .precision = 4, .plus = true, .width = 9 }, FixedOptions{ .precision = 6, .plus = true } }, 1..) |opts, k| {
+            out.clearRetainingCapacity();
+            try formatFixed(gpa, &out, v, opts);
+            try testing.expectEqualStrings(c[k], out.items);
+        }
+    }
+    const floats = [_]struct { u32, []const u8 }{
+        .{ 0x7fc00000, "nan" },             .{ 0xffc00000, "-nan" },     .{ 0x7f800000, "inf" },                                            .{ 0xff800000, "-inf" },
+        .{ 0x80000000, "-0.000000" },       .{ 0x00000001, "0.000000" }, .{ 0x7f7fffff, "340282346638528859811704183484516925440.000000" }, .{ 0x40490fd0, "3.141590" },
+        .{ 0x4b800001, "16777218.000000" }, .{ 0x3e2aaaab, "0.166667" },
+    };
+    for (floats) |c| {
+        out.clearRetainingCapacity();
+        try formatFixed(gpa, &out, @bitCast(c[0]), .{ .precision = 6 });
+        try testing.expectEqualStrings(c[1], out.items);
+    }
+    const versions = [_]struct { []const u8, ?i32 }{
+        .{ "HandBrake 0.10.2", 10002 },               .{ "HandBrake0.10.2", 10002 },                       .{ "HandBrake  1.2.3x", 1002003 },
+        .{ "HandBrake 1. 2.3", 1002003 },             .{ "HandBrake 1 .2.3", null },                       .{ "HandBrake +1.-2.3", 998003 },
+        .{ "HandBrake 99999999999.0.0", 1568325056 }, .{ "HandBrake 1.2", null },                          .{ " HandBrake 1.2.3", null },
+        .{ "HandBrake\t2147.483.647", 2147483647 },   .{ "HandBrake 99999999999999999999.0.0", -1000000 }, .{ "HandBrake -99999999999999999999.1.2", 1002 },
+    };
+    for (versions) |c| try testing.expectEqual(c[1], handBrakeVersion(c[0]));
+    // PUT_UTF8 cut by the buffer: the first bytes of a character.
+    out.clearRetainingCapacity();
+    try putUtf8(gpa, &out, 0x1F600, 2);
+    try testing.expectEqualSlices(u8, "\xf0\x9f", out.items);
+}
+
 test "the probe scores FFmpeg's boxes" {
     try testing.expectEqual(100, probeScore(fixtures.mov.bytes("mov_aac_stereo")[0..64]));
     try testing.expectEqual(95, probeScore("\x00\x00\x00\x08free\x00\x00\x00\x08junk"));
@@ -3325,7 +4601,7 @@ test "the probe scores FFmpeg's boxes" {
 }
 
 test "the mov demuxer and the generic layer free everything under every allocation failure" {
-    inline for (.{ "mov_aac_faststart", "mov_two_tracks_mov", "mov_two_stsd", "mov_mp2_mov", "mov_ac3_stereo_mov", "mov_qt_v1_ima4", "mov_data_track", "mov_cut_in_mdat", "mov_alac_editlist" }) |name| {
+    inline for (.{ "mov_aac_faststart", "mov_two_tracks_mov", "mov_two_stsd", "mov_mp2_mov", "mov_ac3_stereo_mov", "mov_qt_v1_ima4", "mov_data_track", "mov_cut_in_mdat", "mov_alac_editlist", "mov_meta_ilst", "mov_meta_keys", "mov_meta_itunsmpb", "mov_meta_in_trak", "mov_meta_udta_strings", "mov_meta_chapter_track", "mov_meta_hmmt", "mov_meta_covr", "mov_meta_uuid", "mov_meta_tags_mov" }) |name| {
         const bytes = fixtures.mov.bytes(name);
         try hostile.checkAll(exercise, .{ bytes, true, Limits{}, hostile.TestPlan{} });
         try hostile.checkAll(exercise, .{ bytes, false, Limits{}, hostile.TestPlan{ .max_packets = 8 } });
@@ -3371,6 +4647,16 @@ const fuzz_corpus: []const []const u8 = &.{
     fuzzSeed("mov_ctts", false, 0, null),
     fuzzSeed("mov_alac_editlist", false, 0, .{ .ts = 3000 }),
     fuzzSeed("mov_opus_stereo", false, 0, null),
+    fuzzSeed("mov_meta_ilst", false, 0, null),
+    fuzzSeed("mov_meta_keys", true, 3, null),
+    fuzzSeed("mov_meta_itunsmpb", false, 0, null),
+    fuzzSeed("mov_meta_chapter_track", false, 1, null),
+    fuzzSeed("mov_meta_chapter_track", true, 0, null),
+    fuzzSeed("mov_meta_udta_strings", false, 0, null),
+    fuzzSeed("mov_meta_covr", false, 0, null),
+    fuzzSeed("mov_meta_hmmt", true, 0, null),
+    fuzzSeed("mov_meta_uuid", false, 2, null),
+    fuzzSeed("mov_meta_tags_mov", false, 0, null),
 };
 
 test "fuzz: the mov demuxer on arbitrary input, from a file or a pipe, with limits and a seek" {

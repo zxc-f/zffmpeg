@@ -32,6 +32,10 @@ pub const Error = error{
 pub const Entry = struct {
     key: []const u8,
     value: []const u8,
+    /// The length of the value's allocation when an `append` left room
+    /// after it, else 0 (the allocation is the value). The dictionary's
+    /// own bookkeeping: it makes repeated appends linear.
+    capacity: usize = 0,
 };
 
 /// What `put` does when the dictionary already has an entry with the key.
@@ -46,6 +50,10 @@ pub const Duplicates = enum {
     keep_distinct,
     /// Nothing, when an entry already has the key (`AV_DICT_DONT_OVERWRITE`).
     keep_existing,
+    /// `AV_DICT_APPEND`: the first entry with the key gets the value added
+    /// to its own and is replaced as `replace` replaces it (under the new
+    /// key's spelling, last); without one, the entry is added.
+    append,
 };
 
 pub const Dictionary = struct {
@@ -85,9 +93,10 @@ pub const Dictionary = struct {
     pub fn put(d: *Dictionary, gpa: Allocator, key: []const u8, value: []const u8, duplicates: Duplicates) Error!void {
         try checkTag(key);
         try checkTag(value);
+        if (duplicates == .append) if (d.find(key, 0)) |index| return d.appendTo(gpa, index, key, value);
         const replaced: ?usize = switch (duplicates) {
             .replace => d.find(key, 0),
-            .keep => null,
+            .keep, .append => null,
             .keep_existing => if (d.find(key, 0) != null) return else null,
             .keep_distinct => blk: {
                 var start: usize = 0;
@@ -105,6 +114,28 @@ pub const Dictionary = struct {
         if (replaced) |index| freeEntry(gpa, d.entries.swapRemove(index));
         // Either the capacity was ensured, or swapRemove just freed a slot.
         d.entries.appendAssumeCapacity(.{ .key = owned_key, .value = owned_value });
+    }
+
+    /// `append` to the entry at `index`: its value grows in place (by
+    /// doubling, so repeated appends stay linear), then the entry moves
+    /// last under `key`'s spelling.
+    fn appendTo(d: *Dictionary, gpa: Allocator, index: usize, key: []const u8, value: []const u8) Error!void {
+        const old = d.entries.items[index];
+        const owned_key = try gpa.dupe(u8, key);
+        errdefer gpa.free(owned_key);
+        // Both lengths are of allocations: the sum cannot overflow.
+        const len = old.value.len + value.len;
+        var storage = storageOf(old);
+        if (len > storage.len) {
+            const grown = @max(len, storage.len *| 2, 16);
+            // On failure the old storage stays the entry's.
+            storage = try gpa.realloc(storage, grown);
+        }
+        @memcpy(storage[old.value.len..len], value);
+        gpa.free(old.key);
+        _ = d.entries.swapRemove(index);
+        // swapRemove freed the slot this takes.
+        d.entries.appendAssumeCapacity(.{ .key = owned_key, .value = storage[0..len], .capacity = storage.len });
     }
 
     /// Removes the first entry whose key matches, as `av_dict_set` with no
@@ -142,9 +173,15 @@ fn checkTag(bytes: []const u8) error{InvalidTag}!void {
     if (std.mem.findScalar(u8, bytes, 0) != null) return error.InvalidTag;
 }
 
+/// The allocation an entry's value lives in.
+fn storageOf(entry: Entry) []u8 {
+    // The dictionary allocated it; `value` is a const view of it.
+    return @constCast(entry.value.ptr)[0..@max(entry.value.len, entry.capacity)];
+}
+
 fn freeEntry(gpa: Allocator, entry: Entry) void {
     gpa.free(entry.key);
-    gpa.free(entry.value);
+    gpa.free(storageOf(entry));
 }
 
 fn expectValue(d: *const Dictionary, key: []const u8, expected: []const u8) !void {
@@ -208,6 +245,27 @@ test "keep appends every duplicate; keep_distinct skips an equal key and value" 
     try std.testing.expectEqual(5, d.count());
 }
 
+test "append joins values as AV_DICT_APPEND, moving the entry last under the new spelling" {
+    const gpa = std.testing.allocator;
+    var d: Dictionary = .empty;
+    defer d.deinit(gpa);
+    try d.put(gpa, "artist", "A", .append);
+    try d.put(gpa, "x", "1", .replace);
+    try d.put(gpa, "y", "2", .replace);
+    try d.put(gpa, "ARTIST", ";", .append);
+    try expectEntries(&d, &.{ .{ "y", "2" }, .{ "x", "1" }, .{ "ARTIST", "A;" } });
+    try d.put(gpa, "artist", "B", .append);
+    try expectEntries(&d, &.{ .{ "y", "2" }, .{ "x", "1" }, .{ "artist", "A;B" } });
+    // Many appends grow one allocation; the clone copies the value alone.
+    for (0..1000) |_| try d.put(gpa, "artist", "xy", .append);
+    try std.testing.expectEqual(3 + 2000, d.get("artist").?.len);
+    var copy = try d.clone(gpa);
+    defer copy.deinit(gpa);
+    try expectValue(&copy, "artist", d.get("artist").?);
+    try d.put(gpa, "artist", "", .replace);
+    try expectValue(&d, "artist", "");
+}
+
 test "remove takes the first match and moves the last entry into its place" {
     const gpa = std.testing.allocator;
     var d: Dictionary = .empty;
@@ -265,6 +323,8 @@ fn buildUnderFailures(gpa: Allocator) !void {
         .{ .key = "A", .value = "3", .duplicates = .replace },
         .{ .key = "b", .value = "2", .duplicates = .keep_distinct },
         .{ .key = "b", .value = "4", .duplicates = .keep_distinct },
+        .{ .key = "c", .value = "x", .duplicates = .append },
+        .{ .key = "C", .value = "yz", .duplicates = .append },
     };
     for (steps) |step| {
         var saved = try d.clone(gpa);
@@ -279,10 +339,10 @@ fn buildUnderFailures(gpa: Allocator) !void {
             return err;
         };
     }
-    try expectEntries(&d, &.{ .{ "b", "2" }, .{ "A", "3" }, .{ "b", "4" } });
+    try expectEntries(&d, &.{ .{ "b", "2" }, .{ "A", "3" }, .{ "b", "4" }, .{ "C", "xyz" } });
     var copy = try d.clone(gpa);
     defer copy.deinit(gpa);
-    try std.testing.expectEqual(3, copy.count());
+    try std.testing.expectEqual(4, copy.count());
 }
 
 test "every allocation failure leaves the dictionary unchanged and leaks nothing" {

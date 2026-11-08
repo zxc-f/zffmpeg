@@ -4247,8 +4247,51 @@ configuration parsing is exercised without needing a full decoder.
         copy 32 ms against the program's -c copy -f framecrc 265 ms (0.12x).
       Remaining work or blocker / next action: none; T33a2 is next.
       ```
-    - [ ] **T33a2 — Metadata and chapters.** Needs T33a1. udta, meta and
+    - [x] **T33a2 — Metadata and chapters.** Needs T33a1. udta, meta and
       ilst tags, keys, chpl and chapter tracks.
+
+      ```text
+      ID / parent: T33a2 / T33a
+      State: verified (G5, local Linux x86-64 runs)
+      Supported behavior and explicit exclusions: the mov demuxer's
+        metadata and chapters, as FFmpeg reads them: udta and its
+        QuickTime strings (languages, Mac Roman), meta, ilst's iTunes data
+        atoms, keys (mdta), ---- (iTunSMPB with its skip samples and
+        discard window, ReplayGain side data, DISCSUBTITLE), loci, kind
+        (dispositions), uuid (XMP, ISML bit rates, spherical), HandBrake's
+        MP3 parse; chpl, HMMT and QuickTime chapter tracks into chapters
+        (avpriv_new_chapter, compute_chapters_end); format and stream
+        tags. zffprobe prints the format's tags. Excluded (notes.md "MP4
+        demuxing"): attached pictures (skipped, or refused inside a
+        track), zffprobe's stream tags and chapters (the library reads
+        them), invalid UTF-8 replacement in zffprobe's output.
+      Needs (verified) / lands with / verified after: T33a1 verified.
+      Contract and source provenance: port.md "MP4 contract" (Metadata and
+        chapters); mov.c's metadata readers, demux_utils.c and demux.c's
+        chapter code (derived) in format/mov.zig and format/chapters.zig;
+        metadata.Dictionary's append (AV_DICT_APPEND).
+      Required fixtures / optional corpus: 34 more mp4/ fixtures (8 from
+        the reference build's muxers with -metadata, use_metadata_tags and
+        chapters; 26 crafted), 117 in all; vectors mov.txt and
+        mov_pipe.txt extended (additions only).
+      Comparison rule and intentional differences: as T33a1, with every
+        tag, chapter and side datum; refusals in compare.py's MP4 tables.
+      Evidence: the commit that checks this card. G3: crafted-byte tests
+        for each malformed metadata path (limits, cuts, 20 000 data atoms
+        in one tag for linear appends, huge keys and chap counts on a
+        pipe), glibc and sscanf ground truth for loci's numbers, ten more
+        fuzz seeds (23), a 2000-round mutation smoke in ReleaseSafe (16
+        committed), allocation and remap sweeps over ten metadata
+        fixtures, prefix and one-byte-read tests on the tag and chapter
+        fixtures; six zffprobe process cases. G5 locally on Linux x86-64
+        (no CI run link): zig fmt, the fixture check, zig build test
+        667/667 (413 steps) in Debug, ReleaseSafe and ReleaseFast, the
+        cross builds, every vector generator, compare.py 13102/0/0
+        required (MP4 fixtures 234 cells, 19 recorded) and 66/66 optional.
+        Speed check (a 10-minute AAC M4A, one core): zffprobe 2.3 ms
+        against ffprobe's 3.2 ms (0.72x).
+      Remaining work or blocker / next action: none; T33a3 is next.
+      ```
     - [ ] **T33a3 — Video tracks.** Needs T33a1. Visual sample entries
       with avcC, hvcC, vpcC and av1C, ctts reordering and the generic
       layer's video timestamps, on crafted fixtures (the reference build

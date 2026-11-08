@@ -5570,7 +5570,7 @@ def adts_probe_score(buf):
     return 0
 
 
-# MP4, MOV, M4A and 3GP fixtures (TODO.md T33a1): files the reference
+# MP4, MOV, M4A and 3GP fixtures (TODO.md T33a1, T33a2): files the reference
 # build's mp4, mov and ipod muxers make (mov_fixtures.sh), and boxes crafted
 # here around their sample entries. What FFmpeg makes of each is
 # mov_vectors.c's (vectors/mov.txt); the manifest records whether the port
@@ -5580,12 +5580,24 @@ MOV_DIR = HERE / "mp4"
 MOV_MANIFEST = MOV_DIR / "manifest.zon"
 MOV_README = MOV_DIR / "README.md"
 
+# The tags the T33a2 fixtures ask the muxers for: every key of the mp4
+# muxer's iTunes list and the mov muxer's user data strings, and stream
+# tags (words: mov_fixtures.sh splits the options at spaces).
+MOV_METADATA_OPTIONS = (
+    "-metadata title=Tïtle_ünïcode -metadata artist=Ärtist -metadata album=Album -metadata album_artist=Album_artist "
+    "-metadata composer=Composer -metadata date=2024-05-06 -metadata track=3/12 -metadata disc=1/2 "
+    "-metadata genre=Rock -metadata comment=Comment -metadata copyright=(c)_2024 -metadata grouping=Group "
+    "-metadata lyrics=La_la -metadata description=Description -metadata synopsis=Synopsis -metadata show=Show "
+    "-metadata episode_id=E1 -metadata network=Network -metadata keywords=k1,k2 -metadata make=Make "
+    "-metadata model=Model -metadata location=+48.8566+002.3522/ "
+    "-metadata:s:a:0 language=fra -metadata:s:a:0 handler_name=Voice_track -metadata:s:a:0 title=Stream_title")
+
 # Each entry: the file's extension, its inputs (a generate.py signal as
 # channels, the input's channel layout, rate, sample count, seed and signal
 # kind as AAC_FFMPEG's, or a committed fixture's path under fixtures/), the
 # ffmpeg options after the inputs (codec, muxer and its flags), and the
 # file's SHA-256. Every command adds the bit-exact flags and drops the
-# inputs' metadata.
+# inputs' metadata, unless its options map it (`-map_metadata`).
 MOV_FFMPEG = {
     "mov_aac_stereo": ("mp4", [(2, "stereo", 48000, 5760, 201, "smooth")],
                        "-c:a aac -b:a 64k -use_editlist 0",
@@ -5671,6 +5683,33 @@ MOV_FFMPEG = {
     "mov_two_tracks_mov": ("mov", [(1, "mono", 8000, 1600, 233, "tones"), (2, "stereo", 16000, 1600, 234, "smooth")],
                            "-map 0 -map 1 -c:a pcm_s16le -use_editlist 0",
         "aec486afe99637336a69ad22255f412f6c9d13a0179057ea1b087307657fe39c"),
+    # Metadata and chapters (T33a2): the muxers' tags from `-metadata` (the
+    # inputs' metadata is still dropped), and chapters copied from a
+    # fixture with `-map_metadata 0`, which keeps them and their titles.
+    "mov_meta_tags_mp4": ("mp4", [(2, "stereo", 48000, 3072, 235, "smooth")],
+                          "-c:a aac -b:a 64k -use_editlist 0 " + MOV_METADATA_OPTIONS,
+        "b228a756bd98c0c39a8303c34a790b5d95d97ef01427622149f19e90b110c55c"),
+    "mov_meta_tags_mov": ("mov", [(1, "mono", 22050, 2048, 236, "tones")],
+                          "-c:a pcm_s16be -use_editlist 0 " + MOV_METADATA_OPTIONS,
+        "2eaabaef02caed0f4ee07dc4725cb405eb1b442b1a830cd9de20dff9de3dae6c"),
+    "mov_meta_tags_ipod": ("m4a", [(2, "stereo", 44100, 3072, 237, "tones")],
+                           "-c:a alac -use_editlist 0 -f ipod " + MOV_METADATA_OPTIONS,
+        "e5ac664700a6d0dae294ae23b5630b2cf822ba14cd4b9076ebd2880550d7fd3e"),
+    "mov_meta_mdta_mp4": ("mp4", [(2, "stereo", 48000, 3072, 238, "smooth")],
+                          "-c:a aac -b:a 64k -use_editlist 0 -movflags +use_metadata_tags "
+                          "-metadata com.example.custom=Custom_ünï " + MOV_METADATA_OPTIONS,
+        "7cf0a749671fa8ae3d119a39f09f6c017ae4c287b500cc4f5388b5c6be22d912"),
+    "mov_meta_mdta_mov": ("mov", [(1, "mono", 16000, 2048, 239, "smooth")],
+                          "-c:a pcm_s24le -use_editlist 0 -movflags +use_metadata_tags "
+                          "-metadata com.example.custom=Custom " + MOV_METADATA_OPTIONS,
+        "150c48a764edfb82861e98f6ee01d81fa727380e90d14f5e6187ab741ff8bc59"),
+    "mov_meta_chapters_mp4": ("mp4", ["mp4/mov_meta_chpl.mp4"], "-map_metadata 0 -c copy -use_editlist 0",
+        "0c74aec0bb5b79bb64fb7a78c53403ae46f133064be942d92a62d7e9de1059e1"),
+    "mov_meta_chapters_mov": ("mov", ["mp4/mov_meta_chpl.mp4"], "-map_metadata 0 -c copy -use_editlist 0",
+        "1fffd65826ef018b5c4b7e2c44d3c23e51ebe936fe78d66830a8c63d42f7e79b"),
+    "mov_meta_chapters_mp3": ("mp4", ["mp3/mp3_apic_chap.mp3"],
+                              "-map_metadata 0 -map 0:a -c copy -use_editlist 0",
+        "b91208c10d5c14d80a8d92a16966921eb12f0be13e8af55b83d10dd75ded9269"),
 }
 
 
@@ -5782,7 +5821,7 @@ def mov_sound_entry(fmt, channels=1, bits=16, rate=8000, version=0, cid=0, v1=No
 
 def mov_track(entries, samples, durations, time_scale, track_id=1, chunks=None, handler=b"soun", hdlr_name=b"SoundHandler\0",
               stsc=None, stsz=None, co64=False, extra_stbl=b"", stsd_count=None, mdhd=None, tkhd=None, edts=b"",
-              stts=None, mdhd_duration=None, lang=0x55c4, minf_extra=b""):
+              stts=None, mdhd_duration=None, lang=0x55c4, minf_extra=b"", trak_extra=b""):
     """A trak and the bytes of its chunks (placed by mov_movie). `chunks`
     gives the samples per chunk (one chunk of all by default); `stsc`,
     `stsz` and `stts` replace the tables written from them."""
@@ -5824,7 +5863,7 @@ def mov_track(entries, samples, durations, time_scale, track_id=1, chunks=None, 
         mdhd_box = mdhd if mdhd is not None else mov_full(b"mdhd", 0, 0, struct.pack(">IIIIHH", 0, 0, time_scale, total, lang, 0))
         tkhd_box = tkhd if tkhd is not None else mov_full(b"tkhd", 0, 3, struct.pack(">IIIII", 0, 0, track_id, 0, 0) + bytes(8) +
                                                        bytes(8) + struct.pack(">9I", 0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000) + bytes(8))
-        return mov_box(b"trak", tkhd_box + edts + mov_box(b"mdia", mdhd_box + hdlr + minf))
+        return mov_box(b"trak", tkhd_box + edts + mov_box(b"mdia", mdhd_box + hdlr + minf) + trak_extra)
     data = []
     k = 0
     for n in chunks:
@@ -6072,7 +6111,273 @@ def build_mov_crafted(fx):
        "side data at each change.", mov_movie([mov_track(two_entries, aac_samples, aac_durations, aac_rate, chunks=[2, 2, 1],
                                                           stsc=mov_full(b"stsc", 0, 0, struct.pack(">I", 3) + struct.pack(">III", 1, 2, 1) +
                                                                         struct.pack(">III", 2, 2, 2) + struct.pack(">III", 3, 1, 1)))]))
+    build_mov_metadata(ok, bad, aac)
 
+
+# Metadata and chapters (TODO.md T33a2): boxes FFmpeg's mov demuxer reads
+# as tags, dispositions, bit rates, gapless counts and chapters.
+
+# ISO 639-2 codes packed in 15 bits, and QuickTime's ones.
+MOV_LANG_ENG = 0x15C7
+MOV_LANG_UND = 0x55C4
+MOV_LANG_FRA = 0x1A41
+
+
+def mov_data(payload, kind=1):
+    """An iTunes `data` atom: its type, a zero locale and the value."""
+    return mov_box(b"data", struct.pack(">II", kind, 0) + payload)
+
+
+def mov_hdlr(handler, name=b"\0"):
+    return mov_full(b"hdlr", 0, 0, bytes(4) + handler + bytes(12) + name)
+
+
+def mov_meta(*boxes, iso=True, handler=b"mdir"):
+    """A `meta` box: a full box in MP4, a plain one in QuickTime."""
+    body = mov_hdlr(handler) + b"".join(boxes)
+    return mov_full(b"meta", 0, 0, body) if iso else mov_box(b"meta", body)
+
+
+def mov_ilst(*items):
+    return mov_box(b"ilst", b"".join(items))
+
+
+def mov_text(kind, text, lang):
+    """A QuickTime user data string: its length, its language, the text."""
+    return mov_box(kind, struct.pack(">HH", len(text), lang) + text)
+
+
+def mov_custom(mean, name, value=None):
+    """An iTunes `----` atom (mean, name and data)."""
+    body = mov_full(b"mean", 0, 0, mean) + mov_full(b"name", 0, 0, name)
+    if value is not None:
+        body += mov_box(b"data", struct.pack(">II", 1, 0) + value)
+    return mov_box(b"----", body)
+
+
+def mov_keys(*keys):
+    """A `keys` box of (namespace, name) pairs."""
+    return mov_full(b"keys", 0, 0, struct.pack(">I", len(keys)) + b"".join(
+        mov_box(ns, name) for ns, name in keys))
+
+
+def mov_fixed16(v):
+    return struct.pack(">i", round(v * 65536))
+
+
+def mov_loci(lang, place, longitude, latitude, altitude):
+    return mov_full(b"loci", 0, 0, struct.pack(">H", lang) + place + b"\0" + b"\0" + mov_fixed16(longitude) +
+                    mov_fixed16(latitude) + mov_fixed16(altitude) + b"Earth\0" + b"\0")
+
+
+def mov_chpl(chapters, version=1, count=None):
+    body = struct.pack(">I", 0) if version else b""
+    body += bytes([len(chapters) if count is None else count])
+    for start, title in chapters:
+        body += struct.pack(">QB", start, len(title)) + title
+    return mov_full(b"chpl", version, 0, body)
+
+
+def mov_kind(scheme, value, version=0):
+    return mov_full(b"kind", version, 0, scheme + b"\0" + value + b"\0")
+
+
+def mov_uuid(uuid, body):
+    return mov_box(b"uuid", bytes(uuid) + body)
+
+
+MOV_UUID_ISML = [0xa5, 0xd4, 0x0b, 0x30, 0xe8, 0x14, 0x11, 0xdd, 0xba, 0x2f, 0x08, 0x00, 0x20, 0x0c, 0x9a, 0x66]
+MOV_UUID_XMP = [0xbe, 0x7a, 0xcf, 0xcb, 0x97, 0xa9, 0x42, 0xe8, 0x9c, 0x71, 0x99, 0x94, 0x91, 0xe3, 0xaf, 0xac]
+MOV_UUID_SPHERICAL = [0xff, 0xcc, 0x82, 0x63, 0xf8, 0x55, 0x4a, 0x93, 0x88, 0x14, 0x58, 0x7a, 0x02, 0x52, 0x1f, 0xdd]
+
+# The sample description of the mov muxer's chapter tracks (movenc.c).
+MOV_TEXT_STUB = bytes([0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0,
+                       0, 0, 0, 0x0D]) + b"ftab" + bytes([0, 1, 0, 1, 0])
+MOV_ENCD = bytes([0, 0, 0, 0x0C]) + b"encd" + bytes([0, 0, 1, 0])
+
+
+def mov_chapter_track(samples, durations, track_id=2, time_scale=1000, **kw):
+    """A QuickTime text track whose samples are chapter titles."""
+    entry = mov_box(b"text", bytes(6) + struct.pack(">H", 1) + MOV_TEXT_STUB)
+    return mov_track([entry], samples, durations, time_scale, track_id=track_id, handler=b"text",
+                     hdlr_name=b"ChapterHandler\0", **kw)
+
+
+def mov_chap(*ids):
+    return mov_box(b"tref", mov_box(b"chap", b"".join(struct.pack(">I", i) for i in ids)))
+
+
+def build_mov_metadata(ok, bad, aac):
+    mp3_entry, mp3_samples, mp3_durations, mp3_rate = mov_samples((MOV_DIR / "mov_mp3_copy_mp4.mp4").read_bytes())
+
+    def mp3(**kw):
+        return mov_track([mp3_entry], mp3_samples, mp3_durations, mp3_rate, **kw)
+
+    def ctag(name):
+        return b"\xa9" + name
+
+    udta = mov_box(b"udta", mov_text(ctag(b"nam"), b"Title", MOV_LANG_ENG) +
+                   mov_text(ctag(b"ART"), b"Caf\x8e \xa5 \xd7", 0) +
+                   mov_text(ctag(b"day"), b"2024", MOV_LANG_UND) +
+                   mov_text(ctag(b"cmt"), b"\xd7\xd7 Mac", 0x7FFF) +
+                   mov_text(ctag(b"enc"), b"HandBrake 0.10.2 2015", MOV_LANG_UND) +
+                   mov_box(b"@PRM", b"raw\0cut") +
+                   mov_box(b"desc", b"zzraw") +
+                   mov_box(b"zzzz", b"unknown") +
+                   mov_box(b"trkn", struct.pack(">HHHHH", 6, MOV_LANG_ENG, 0, 4, 9)) +
+                   mov_text(ctag(b"xyz"), b"+48.8566+002.3522/", MOV_LANG_FRA) +
+                   mov_text(ctag(b"prf"), b"\xd7\xd7\xd7", 0) +
+                   mov_text(ctag(b"too"), b"", MOV_LANG_UND))
+    ok("mov_meta_udta_strings", "QuickTime user data strings in moov: a packed language (`title-eng`), Mac Roman for a "
+       "language of 0 and 0x7FFF, a raw `@PRM` cut at its NUL, a length past the box read raw, an unknown box, a track "
+       "number, an empty string, Mac Roman cut at twice its length in UTF-8; a HandBrake 0.10.2 encoder, which makes FFmpeg parse an MP3 track in full.",
+       mov_movie([mp3()], moov_extra=udta))
+    udta_new = mov_box(b"udta", mov_text(ctag(b"enc"), b"HandBrake 0.10.3", MOV_LANG_UND))
+    ok("mov_meta_handbrake_new", "A HandBrake 0.10.3 encoder string: the MP3 track is not parsed in full.",
+       mov_movie([mp3()], moov_extra=udta_new))
+
+    def item(kind, *parts):
+        return mov_box(kind, b"".join(parts))
+    ilst = mov_ilst(
+        item(ctag(b"nam"), mov_data(b"Ilst title")),
+        item(ctag(b"ART"), mov_data(b"A"), mov_data(b"B")),
+        item(ctag(b"alb"), mov_data(b"X")),
+        item(b"aART", mov_data(b"Mac \x8e", 0)),
+        item(ctag(b"cmt"), mov_data("UTF-16".encode("utf-16-be"), 2)),
+        item(b"soal", mov_data(b"\xff", 21)),
+        item(b"soar", mov_data(b"\x80\x00\x00", 21)),
+        item(b"sonm", mov_data(b"\xff\xff\xff\xfe", 21)),
+        item(b"soco", mov_data(b"\xff\xfe", 22)),
+        item(b"sosn", mov_data(b"\x01\x02\x03\x04\x05", 22)),
+        item(ctag(b"day"), mov_data(struct.pack(">f", 3.14159), 23)),
+        item(ctag(b"grp"), mov_data(b"\x00\x01", 23)),
+        item(b"rtng", mov_data(b"\x04", 21)),
+        item(b"cpil", mov_data(b"\x01", 21)),
+        item(b"tves", mov_data(b"\x00\x00\x00\x07", 21)),
+        item(b"trkn", mov_data(struct.pack(">HHHH", 0, 3, 12, 0), 0)),
+        item(b"disk", mov_data(struct.pack(">HHH", 0, 1, 2), 0)),
+        item(b"gnre", mov_data(struct.pack(">H", 18), 0)),
+        item(b"desc", mov_box(b"data", struct.pack(">II", 1, 0) + b"short", size=200)),
+        item(b"ldes", mov_box(b"note", b"not data")),
+        item(b"covr", mov_data(b"\x01\x02\x03", 1)),
+        item(ctag(b"wrt"), mov_data(b"Composer", 4)),
+        item(b"name", mov_data(b"N\0cut")),
+        item(ctag(b"alb"), mov_data(b"Y")),
+        mov_ilst(item(ctag(b"st3"), mov_data(b"Inner"))),
+        item(ctag(b"too"), mov_data(b"After")))
+    ok("mov_meta_ilst", "iTunes tags in an MP4 meta: two values of one tag and two tags of one key joined by `;`, "
+       "Mac Roman for type 0, UTF-16 skipped, signed and unsigned integers of 1 to 5 bytes, a float, numbers, a "
+       "genre, a disc and a track (format tags), a data atom longer than its tag, a tag without one, a cover of an "
+       "unknown type, a value cut at its NUL; an `ilst` inside the `ilst` ends iTunes mode, so the tag after it is "
+       "read as a QuickTime string.", mov_movie([aac()], moov_extra=mov_box(b"udta", mov_meta(ilst))))
+
+    def index(i):
+        return struct.pack(">I", i)
+    keys = mov_keys((b"mdta", b"com.apple.quicktime.title"), (b"udta", b"ignored"), (b"mdta", b"com.example.custom"),
+                    (b"mdta", b"com.apple.quicktime.artwork"))
+    keyed = mov_ilst(item(index(1), mov_data(b"Keyed title")), item(index(2), mov_data(b"no key")),
+                     item(index(3), mov_data(b"Custom")), item(index(4), mov_data(b"\x01", 1)),
+                     item(index(9), mov_data(b"out of range")), item(ctag(b"nam"), mov_data(b"Table key")))
+    ok("mov_meta_keys", "QuickTime metadata keys (an `mdta` handler, `keys`, then `ilst` by index): names, a key of "
+       "another namespace and an index past the keys skipped, an artwork key of an unknown cover type, and a table "
+       "key among them.", mov_movie([aac()], moov_extra=mov_meta(keys, keyed, handler=b"mdta")))
+    ok("mov_meta_keys_qt", "The same keys in a QuickTime `meta` without a full box header.",
+       mov_movie([aac()], moov_extra=mov_meta(keys, keyed, iso=False, handler=b"mdta")))
+    bad_count = mov_full(b"keys", 0, 0, struct.pack(">I", 100) + mov_box(b"mdta", b"k"))
+    bad("mov_meta_keys_count", "A `keys` box declaring 100 keys in 9 bytes: AVERROR_INVALIDDATA.",
+        mov_movie([aac()], moov_extra=mov_meta(bad_count, handler=b"mdta")), "InvalidMov")
+    bad_size = mov_full(b"keys", 0, 0, struct.pack(">I", 1) + struct.pack(">I", 4) + b"mdta")
+    bad("mov_meta_keys_size", "A key of size 4: AVERROR_INVALIDDATA.",
+        mov_movie([aac()], moov_extra=mov_meta(bad_size, handler=b"mdta")), "InvalidMov")
+
+    apple = b"com.apple.iTunes"
+    smpb = b" 00000000 00000400 0000012C 0000000000000ED4 00000000 00000000"
+    customs = mov_ilst(mov_custom(apple, b"iTunSMPB", smpb),
+                       mov_custom(apple, b"replaygain_track_gain", b"-6.50 dB"),
+                       mov_custom(apple, b"replaygain_track_peak", b"0.988"),
+                       mov_custom(apple, b"REPLAYGAIN_ALBUM_GAIN", b"-7.25 dB"),
+                       mov_custom(apple, b"DISCSUBTITLE", b"Disc sub"),
+                       mov_custom(apple, b"cdec", b"dropped"),
+                       mov_custom(apple, b"no data"),
+                       mov_box(b"----", mov_full(b"mean", 0, 0, apple) + mov_full(b"mean", 0, 0, apple) +
+                               mov_full(b"name", 0, 0, b"twice")),
+                       mov_custom(b"org.example", b"Custom\0cut", b"Value"))
+    ok("mov_meta_itunsmpb", "iTunes `----` atoms: iTunSMPB (1024 samples of priming, the initial padding and skip "
+       "samples, and a remainder of 300, a discard window), ReplayGain (coded side data), DISCSUBTITLE, cdec "
+       "dropped, one without data, one with two means, a name cut at its NUL.",
+       mov_movie([aac()], moov_extra=mov_box(b"udta", mov_meta(customs))))
+    in_trak = mov_box(b"udta", mov_text(ctag(b"nam"), b"Track title", MOV_LANG_ENG) +
+                      mov_meta(mov_ilst(mov_custom(apple, b"iTunSMPB", smpb), item(ctag(b"ART"), mov_data(b"Track artist")))))
+    ok("mov_meta_in_trak", "User data inside the track: stream tags, and iTunSMPB read while the track's time base is "
+       "still 1/90000.", mov_movie([aac(trak_extra=in_trak)]))
+
+    chapters = [(0, "Intro ünïcode".encode()), (400000, b"Middle"), (900000, "最后".encode())]
+    ok("mov_meta_chpl", "Nero chapters (chpl, version 1) with UTF-8 titles.",
+       mov_movie([aac()], moov_extra=mov_box(b"udta", mov_chpl(chapters))))
+    ok("mov_meta_chpl_short", "A version 0 chpl declaring 3 chapters whose second title runs past the box.",
+       mov_movie([aac()], moov_extra=mov_box(b"udta", mov_chpl(chapters[:2], version=0, count=3)[:-3] +
+                                             mov_box(b"free", b""))))
+    hmmt = mov_box(b"HMMT", struct.pack(">IIII", 3, 0, 500, 1500))
+    ok("mov_meta_hmmt", "Nero chapters, then HMMT marks with the same ids: the first two lose their titles, the "
+       "third is new.", mov_movie([aac()], moov_extra=mov_box(b"udta", mov_chpl(chapters[:2]) + hmmt)))
+    bad("mov_meta_hmmt_count", "HMMT declaring more marks than its box holds: AVERROR_INVALIDDATA.",
+        mov_movie([aac()], moov_extra=mov_box(b"udta", mov_box(b"HMMT", struct.pack(">II", 9, 0)))), "InvalidMov")
+
+    utf16be = b"\xfe\xff" + "Héllo".encode("utf-16-be")
+    utf16le = b"\xff\xfe" + "A😀".encode("utf-16-le")
+    titles = [struct.pack(">H", 5) + b"Intro" + MOV_ENCD, struct.pack(">H", len(utf16be)) + utf16be,
+              struct.pack(">H", len(utf16le)) + utf16le, struct.pack(">H", 1) + b"Z", struct.pack(">H", 9) + b"ab",
+              struct.pack(">H", 0)]
+    text = mov_chapter_track(titles, [1000] * 6, mdhd_duration=4500)
+    ok("mov_meta_chapter_track", "A QuickTime chapter track (tref/chap naming a missing track and the text track): "
+       "UTF-8, UTF-16 with either byte order mark and a surrogate pair, a one-byte title, a length past its sample "
+       "(skipped), an empty title, and a track shorter than its last chapter. From a pipe FFmpeg keeps it a subtitle "
+       "stream.", mov_movie([aac(edts=mov_chap(7, 2)), text]))
+    cut = mov_movie([aac(edts=mov_chap(2)), text])
+    ok("mov_meta_chapter_cut", "The chapter track's file cut 6 bytes short: the sample at the end reads a length "
+       "of 0 there (an empty title); the next, past the end, ends the chapters.", cut[:-6])
+    ok("mov_meta_chapter_self", "A chap reference to the audio track itself: it becomes a discarded data stream "
+       "whose packets are chapter titles.", mov_movie([aac(edts=mov_chap(1))]))
+
+    loci = mov_loci(MOV_LANG_ENG, b"Paris", 2.3522, 48.8566, 35.0) + mov_loci(MOV_LANG_UND, b"Nowhere", -0.5, -12.25, 0)
+    ok("mov_meta_loci", "3GPP locations (loci): with a language and an altitude, then with `und` and none; and a "
+       "meta box without an hdlr.", mov_movie([aac()], moov_extra=mov_box(b"udta", loci + mov_box(b"meta", bytes(12)))))
+    bad("mov_meta_loci_short", "A loci box too short for its coordinates: AVERROR_INVALIDDATA.",
+        mov_movie([aac()], moov_extra=mov_box(b"udta", mov_full(b"loci", 0, 0, bytes(10)))), "InvalidMov")
+
+    role = b"urn:mpeg:dash:role:2011"
+    kinds = mov_box(b"udta", mov_kind(role, b"caption") + mov_kind(role, b"dub") + mov_kind(b"urn:other", b"commentary"))
+    ok("mov_meta_kind", "kind boxes in the track: DASH roles caption and dub as dispositions, another scheme ignored.",
+       mov_movie([aac(trak_extra=kinds)]))
+    bad("mov_meta_kind_version", "A kind box of version 1: AVERROR_INVALIDDATA.",
+        mov_movie([aac(trak_extra=mov_box(b"udta", mov_kind(role, b"dub", version=1)))]), "InvalidMov")
+
+    manifest = b'<smil><audio SystemBitrate="128000"/><audio systemBitrate="x"/></smil>'
+    uuids = (mov_uuid(MOV_UUID_XMP, b"<x:xmpmeta/>") + mov_uuid(MOV_UUID_ISML, bytes(4) + manifest) +
+             mov_uuid(MOV_UUID_SPHERICAL, b"<rdf:SphericalVideo/>") + mov_uuid(bytes(16), b"other"))
+    ok("mov_meta_uuid", "uuid boxes: XMP skipped, an ISML manifest's bit rate for the first stream, spherical "
+       "metadata read, an unknown uuid.", mov_movie([aac()], moov_extra=uuids))
+    bad("mov_meta_uuid_short", "A uuid box of 10 bytes: AVERROR_INVALIDDATA.",
+        mov_movie([aac()], moov_extra=mov_box(b"uuid", bytes(10))), "InvalidMov")
+
+    deep = mov_text(ctag(b"nam"), b"Deep", MOV_LANG_UND)
+    for _ in range(10):
+        deep = mov_box(b"udta", deep)
+    bad("mov_meta_deep", "User data boxes nested past the depth limit: AVERROR_INVALIDDATA.",
+        mov_movie([aac()], moov_extra=deep), "InvalidMov")
+    tail = mov_box(b"udta", mov_box(ctag(b"nam"), struct.pack(">HH", 9, MOV_LANG_ENG) + b"Short"))
+    bad("mov_meta_string_past_end", "A user data string whose length runs past the end of the file (moov last): "
+        "AVERROR_INVALIDDATA.", mov_movie([aac()], faststart=False, moov_extra=tail), "InvalidMov")
+
+    jpeg = b"\xff\xd8\xff\xe0" + bytes(28)
+    covr = mov_box(b"udta", mov_meta(mov_ilst(item(ctag(b"nam"), mov_data(b"Pictured")),
+                                              item(b"covr", mov_data(jpeg, 13), mov_data(b"\x89PNG\r\n\x1a\n", 14)))))
+    ok("mov_meta_covr", "Two cover pictures (JPEG, PNG) after the track, which FFmpeg makes attached-picture "
+       "streams and the port skips.", mov_movie([aac()], moov_extra=covr))
+    bad("mov_meta_covr_in_trak", "A cover picture inside the track: FFmpeg's picture stream would come before the "
+        "track's end, which the port does not model.",
+        mov_movie([aac(trak_extra=mov_box(b"udta", mov_meta(mov_ilst(item(b"covr", mov_data(jpeg, 13))))))]),
+        "UnsupportedFormat")
 
 def build_mov_fixtures():
     fx = []

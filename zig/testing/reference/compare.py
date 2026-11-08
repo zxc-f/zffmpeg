@@ -4112,17 +4112,23 @@ KNOWN_MOV_PROBE_REFUSALS = {
     "mov_unknown_entry": ("UnsupportedFormat", "an unknown sample entry: no codec"),
     "mov_cut_in_moov": ("UnsupportedFormat", "no audio stream: ffprobe reports the format alone"),
     "mov_empty_moov": ("UnsupportedFormat", "no audio stream: ffprobe reports the format alone"),
+    "mov_meta_chapter_self": ("UnsupportedFormat", "no audio stream (its track is its own chapter track): ffprobe "
+                                                   "reports the format alone"),
+    "mov_meta_covr_in_trak": ("UnsupportedFormat", "a cover picture inside a track, whose attached-picture stream "
+                                                   "the port does not model (T33a2)"),
 }
 # The program's stream copy that the hash driver refuses (T33a1).
 KNOWN_MOV_COPY_DIFFERENCES = {
     "mov_aac_editlist": (("refused", "UnsupportedFormat"), "an edit list that changes the index (T33b)"),
     "mov_elst_empty_edit": (("refused", "UnsupportedFormat"), "an edit list that changes the index (T33b)"),
     "mov_video_track": (("refused", "UnsupportedFormat"), "a video track (T33a3)"),
+    "mov_meta_covr_in_trak": (("refused", "UnsupportedFormat"), "a cover picture inside a track (T33a2)"),
+    "mov_meta_covr": ("audio map", "FFmpeg's attached-picture streams of `covr`, which the port skips (T33a2)"),
 }
 # MP4 fixtures the program opens but cannot copy (nothing to map: no audio
 # stream, or a track without a codec), which the hash driver refuses with
 # UnsupportedFormat, as zffprobe does (T33a1).
-MOV_COPY_NOTHING_TO_MAP = {"mov_cut_in_moov", "mov_empty_moov", "mov_dref_alias"}
+MOV_COPY_NOTHING_TO_MAP = {"mov_cut_in_moov", "mov_empty_moov", "mov_dref_alias", "mov_meta_chapter_self"}
 # FFmpeg's error for an input it cannot open, by its message, and the
 # error and status zffprobe names for it.
 MOV_OPEN_ERRORS = {
@@ -4208,15 +4214,16 @@ def compare_mov(args, lines, failures):
     for name in sorted(set(KNOWN_MOV_PROBE_REFUSALS) - seen_refusals):
         total += 1
         failures.append(f"KNOWN_MOV_PROBE_REFUSALS lists {name}, which is not a fixture")
-    record("MP4 fixtures (T33a1)", same, total, understood=understood)
+    record("MP4 fixtures (T33a1, T33a2)", same, total, understood=understood)
     lines += [
         "",
-        "## MP4 fixtures (T33a1)",
+        "## MP4 fixtures (T33a1, T33a2)",
         "",
         f"MP4, M4A, MOV, 3GP and 3G2 fixtures probed by zffprobe as ffprobe probes their first audio stream and "
         f"format tags, or refused with the error FFmpeg's names, and stream-copied by the hash driver into "
         f"framecrc as the ffmpeg program copies them: {same}/{total}, {understood} of them recorded refusals "
-        f"(edit lists, T33b; video, T33a3; codecs and references the port does not read).",
+        f"or differences (edit lists, T33b; video, T33a3; codecs and references the port does not read; cover "
+        f"pictures, T33a2).",
         "",
         "| Fixture | Result |",
         "| --- | --- |",

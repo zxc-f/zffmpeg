@@ -533,6 +533,12 @@ const probe_cases = [_]ProbeCase{
     .{ .name = "MP4 without moov", .set = .mp4, .fixture = "mov_no_moov.mp4", .exit_code = 2, .stderr_contains = ": InvalidMov\n" },
     .{ .name = "MP4 cut inside a table", .set = .mp4, .fixture = "mov_cut_in_stbl.mp4", .exit_code = 2, .stderr_contains = ": Truncated\n" },
     .{ .name = "MP4 mdhd version 2", .set = .mp4, .fixture = "mov_mdhd_v2.mp4", .exit_code = 3, .stderr_contains = ": PatchWelcome\n" },
+    .{ .name = "MP4 iTunes tags", .set = .mp4, .fixture = "mov_meta_tags_mp4.mp4", .exit_code = 0, .stdout_contains = "tag:compatible_brands=isomiso2mp41\ntag:title=T\xc3\xaftle_\xc3\xbcn\xc3\xafcode\ntag:artist=\xc3\x84rtist\ntag:album_artist=Album_artist\n", .stderr = "" },
+    .{ .name = "MP4 iTunes tags end with the track, the disc and the location", .set = .mp4, .fixture = "mov_meta_tags_mp4.mp4", .exit_code = 0, .stdout_contains = "tag:track=3/12\ntag:disc=1/2\ntag:location-eng=+48.8566+002.3522/\ntag:location=+48.8566+002.3522/\n", .stderr = "" },
+    .{ .name = "MP4 metadata keys", .set = .mp4, .fixture = "mov_meta_keys.mp4", .exit_code = 0, .stdout_contains = "tag:com.apple.quicktime.title=Keyed title\ntag:com.example.custom=Custom\ntag:title=Table key\n", .stderr = "" },
+    .{ .name = "MP4 chapter track from standard input", .set = .mp4, .args = &.{"-"}, .stdin_fixture = "mov_meta_chapter_track.mp4", .exit_code = 0, .stdout_contains = "codec=aac\nsample_fmt=fltp\nchannels=2\nchannel_layout=stereo\nsample_rate=48000\nnb_samples=5120\n", .stderr = "" },
+    .{ .name = "MP4 kind box of version 1", .set = .mp4, .fixture = "mov_meta_kind_version.mp4", .exit_code = 2, .stderr_contains = ": InvalidMov\n" },
+    .{ .name = "MP4 cover picture inside a track", .set = .mp4, .fixture = "mov_meta_covr_in_trak.mp4", .exit_code = 3, .stderr_contains = ": UnsupportedFormat\n" },
     .{ .name = "E-AC-3", .set = .eac3, .fixture = "eac3_ffmpeg_stereo_48k", .exit_code = 0, .stdout = "format=eac3\ncodec=eac3\nsample_fmt=fltp\nchannels=2\nchannel_layout=stereo\nsample_rate=48000\nnb_samples=10752\nduration_num=20160\nduration_den=90000\n", .stderr = "" },
     .{ .name = "E-AC-3 from a pipe", .set = .eac3, .args = &.{"-"}, .stdin_fixture = "eac3_ffmpeg_51side_44k", .exit_code = 0, .stdout_contains = "codec=eac3\nsample_fmt=fltp\nchannels=6\nchannel_layout=5.1(side)\nsample_rate=44100\nnb_samples=N/A\n", .stderr = "" },
     // The first packet fails after setting the layout: the read-ahead

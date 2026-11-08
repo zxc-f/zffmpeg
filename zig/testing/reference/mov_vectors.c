@@ -28,7 +28,9 @@
 //                            channel's id, comma-separated, for a custom
 //                            one; 0 otherwise)
 //
-// Y, B, H, M, G, P, K, Q, T and R are mp3_vectors.c's. With -pipe as the
+// Y, B, H, M, G, P, K, Q, T and R are mp3_vectors.c's; T33a2 compares the
+// tags (M, G), chapters (H with their G lines) and ReplayGain (Y) they
+// print. With -pipe as the
 // first argument, each file is read through an AVIOContext that cannot
 // seek, as from a pipe (zig/testing/vectors/mov_pipe.txt). See
 // zig/testing/reference/README.md for the build commands.

@@ -62,15 +62,18 @@ fn isRelative(ts: i64) bool {
 /// avformat_find_stream_info's defaults.
 const probesize = 5_000_000;
 const max_analyze_duration = 5 * 1_000_000;
+/// `max_subtitle_analyze_duration`'s default, a subtitle stream's limit.
+const max_subtitle_analyze_duration = 30 * 1_000_000;
 const max_ts_probe = 50;
 
 /// What the layer needs to know of a stream.
 pub const Setup = struct {
     /// False for a stream whose codec is unknown (`AV_CODEC_ID_NONE`).
     known: bool,
-    /// The stream's media type: audio, or data (a data stream needs no
-    /// codec parameters, its packets are keyframes, and its timings count
-    /// as a text stream's).
+    /// The stream's media type: audio, data (a data stream needs no codec
+    /// parameters, its packets are keyframes, and its timings count as a
+    /// text stream's) or subtitle (as data, but its packets keep their
+    /// flags and its read-ahead has the subtitle limit).
     media: Media = .audio,
     /// The codec's descriptor has `AV_CODEC_PROP_INTRA_ONLY`: every packet
     /// is a keyframe.
@@ -88,6 +91,10 @@ pub const Setup = struct {
     /// the packet at timestamp 0, and the discard window
     /// `first_discard_sample` to `last_discard_sample` (none when 0).
     start_skip_samples: i64 = 0,
+    /// The demuxer's `skip_samples` at the start (mov's initial padding of
+    /// AAC): the first packet's skip-samples side data, and the start
+    /// time, which libavformat moves past them.
+    skip_samples: i64 = 0,
     first_discard_sample: i64 = 0,
     last_discard_sample: i64 = 0,
     /// What the reference build's decoder does when
@@ -108,7 +115,16 @@ pub const Setup = struct {
     mpa_codec: ?mpegaudio.Codec = null,
 };
 
-pub const Media = enum { audio, data };
+pub const Media = enum {
+    audio,
+    data,
+    subtitle,
+
+    /// A text stream's timings (update_stream_timings' `is_text`).
+    fn isText(m: Media) bool {
+        return m != .audio;
+    }
+};
 
 /// A stream's parser, as its demuxer asks for one.
 pub const ParserKind = enum {
@@ -595,7 +611,7 @@ pub fn Layer(comptime Source: type) type {
         }
 
         fn state(l: *Self, i: usize) Error!*StreamState {
-            while (l.states.items.len <= i) try l.states.append(l.gpa, .{});
+            while (l.states.items.len <= i) try l.states.append(l.gpa, .{ .skip_samples = l.src.setup(l.states.items.len).skip_samples });
             return &l.states.items[i];
         }
 
@@ -673,8 +689,18 @@ pub fn Layer(comptime Source: type) type {
                         const dur = rational.satSub(s.fps_last_dts, s.fps_first_dts);
                         t = @max(t, rational.rescaleQ(dur, setup.time_base, .{ .num = 1, .den = 1_000_000 }));
                     }
-                    if (t >= max_analyze_duration) break;
-                    if (pkt.duration > 0 and pkt.duration < std.math.maxInt(i64) - s.codec_info_duration) s.codec_info_duration += pkt.duration;
+                    const limit: i64 = if (setup.media == .subtitle) max_subtitle_analyze_duration else max_analyze_duration;
+                    if (t >= limit) break;
+                    if (pkt.duration > 0 and pkt.duration < std.math.maxInt(i64) - s.codec_info_duration) {
+                        const start = l.src.startTime(pkt.stream).*;
+                        // A subtitle's analyzed duration is at most its
+                        // time since the start.
+                        if (setup.media == .subtitle and pkt.pts != nopts and start != nopts and pkt.pts >= start and
+                            @as(u64, @bitCast(pkt.pts)) -% @as(u64, @bitCast(start)) < std.math.maxInt(i64))
+                        {
+                            s.codec_info_duration = @min(pkt.pts - start, s.codec_info_duration + pkt.duration);
+                        } else s.codec_info_duration += pkt.duration;
+                    }
                 }
                 // try_decode_frame: the decoder opens once, setting the
                 // sample format at once (Vorbis) or from a frame it
@@ -753,7 +779,7 @@ pub fn Layer(comptime Source: type) type {
             for (0..l.src.streamCount()) |i| {
                 const setup = l.src.setup(i);
                 const tb = setup.time_base;
-                const is_text = setup.media == .data;
+                const is_text = setup.media.isText();
                 const st_start = l.src.startTime(i).*;
                 const st_duration = l.src.durationOf(i).*;
                 if (st_start != nopts and tb.den != 0) {
@@ -1039,8 +1065,9 @@ pub fn Layer(comptime Source: type) type {
 
         /// has_codec_parameters for an audio stream.
         fn hasCodecParameters(setup: Setup, s: StreamState) bool {
-            // A data stream needs nothing.
-            if (setup.media == .data) return true;
+            // A data stream needs nothing, a subtitle stream (of the
+            // codecs here) neither.
+            if (setup.media != .audio) return true;
             if (!setup.known) return false;
             if (setup.decoder == .mpegaudio) {
                 // The frame size is determinable: a decoded header gives it.
@@ -1486,7 +1513,6 @@ pub fn Layer(comptime Source: type) type {
         /// update_initial_timestamps: the first real timestamp makes the
         /// held relative ones absolute and sets the start time.
         fn updateInitialTimestamps(l: *Self, stream: usize, s: *StreamState, setup: Setup, dts: i64, pts_in: i64) void {
-            _ = setup;
             if (s.first_dts != nopts or dts == nopts or s.cur_dts == nopts or
                 s.cur_dts < std.math.minInt(i32) + relative_ts_base or
                 dts < std.math.minInt(i32) + (s.cur_dts - relative_ts_base) or isRelative(dts)) return;
@@ -1501,14 +1527,24 @@ pub fn Layer(comptime Source: type) type {
                 if (h.stream != stream) continue;
                 if (isRelative(h.pts)) h.pts +%= shift;
                 if (isRelative(h.dts)) h.dts +%= shift;
-                if (start.* == nopts and h.pts != nopts) start.* = h.pts;
+                if (start.* == nopts and h.pts != nopts) start.* = skipStart(setup, s.*, h.pts);
             }
             // update_dts_from_pts with no delay: a dts from the pts.
             it = l.held();
             while (it.next()) |h| {
                 if (h.stream == stream and h.pts != nopts and h.dts == nopts) h.dts = h.pts;
             }
-            if (start.* == nopts) start.* = pts;
+            if (start.* == nopts) start.* = skipStart(setup, s.*, pts);
+        }
+
+        /// An audio stream's start time from its first pts: past the
+        /// samples the demuxer skips (saturating, so a missing pts with a
+        /// skip becomes a value, as FFmpeg's does).
+        fn skipStart(setup: Setup, s: StreamState, pts: i64) i64 {
+            if (setup.media != .audio) return pts;
+            const rate = std.math.cast(i32, setup.sample_rate) orelse return pts;
+            if (rate == 0) return pts;
+            return rational.satAdd(pts, rational.rescaleQ(s.skip_samples, .{ .num = 1, .den = rate }, setup.time_base));
         }
 
         /// update_initial_durations: the held packets without timestamps
