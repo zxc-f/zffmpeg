@@ -11,17 +11,46 @@ Examples below match that compiler's standard library (its installed
 - [0.17.0 build system guide](https://ziglang.org/learn/build-system/)
 
 0.15.2 exists as a patch release. The Writergate notes live in the 0.15.1
-page. Do not mix 0.13–0.14 blog posts, 0.15 migration gists, or the build
-guide's stale unit-test sample into new code. That sample still calls
-`ArrayList.init` and does not compile on 0.17.0. When a webpage and the
-installed std disagree, the installed std wins.
+page. 0.13–0.14 blogs and the build guide's unit-test sample are also wrong
+(that sample still calls `ArrayList.init`). They are not the pages an agent
+copies. These are, and none of them is 0.17.0:
+
+| Source an agent will trust | What it still shows | On this pin |
+| --- | --- | --- |
+| 0.15.1 release notes, the Writergate upgrade | `File.stdout().writer(&buffer)`, no `Io` | Does not compile. `writer` takes `io`. |
+| [Andrew Kelley, 2025-10-29](https://andrewkelley.me/post/zig-new-async-io-text-version.html) | `DebugAllocator`, `Threaded.init(gpa)`, `threaded.cpu_count = 1` | The design of async, and the wrong setup. `DebugAllocator` is deprecated. `init` takes `(gpa, options)`. There is no `cpu_count` field. Use `zig-async`. |
+| zigcc/skills `zig-0.16`, the cookbook, learningzig.org, zig-by-example | `writer` without `io`, `ArrayList.initCapacity`, 4096-byte buffers, `readFileAlloc` as "read a file" | 0.16 call shapes. 4096 is below the measured write knee. `readFileAlloc` of a media file is an unbounded allocation. |
+| zigimg `DEFAULT_BUFFER_SIZE` | 4096, always `file.reader` | Right for a seekable image. Wrong as a default for a demuxer that must take a pipe. |
+| 0.17.0 release notes | No I/O chapter | Do not invent a 0.17 I/O redesign from `master`. 0.17 did not redesign `std.Io`. |
+
+When a webpage and the installed std disagree, the installed std wins.
 
 This is the reference half of the project's `zig-0-17` skill. The workflow and
 the checklist to run before sending Zig are in [SKILL.md](../SKILL.md). Where
 this guide and [CLAUDE.md](../../../../CLAUDE.md) differ, CLAUDE.md wins.
+Mode, buffer size, skip, and `end` versus `flush` are
+[`zig-io`](../../zig-io/SKILL.md). Spawning, waiting, cancelling, or sharing
+a queue or a lock is [`zig-async`](../../zig-async/SKILL.md).
+
+## Failure catalog
+
+Read this on every Zig change. The sections below are the reference. These
+are the lines that come out wrong when a section is skimmed.
+
+| Do not write | What happens | Write |
+| --- | --- | --- |
+| `const w = adapter.interface` | Compiles. `drain` uses `@fieldParentPtr` on the copy's address, so the parent pointer is garbage. Silent corruption, not a type error. | `const w = &adapter.interface`, and do not move the adapter while that pointer is live. |
+| `file.reader` on a pipe, or `File.stdout().writer` | The first operation can return 0 bytes, then the adapter switches to streaming. Treating that 0 as EOF drops the start of the stream. | `readerStreaming` / `writerStreaming` for a pipe or stdio. Positional `file.reader` only after `stat().kind == .file` (`zig-io`). |
+| `pub fn parse(...) !Header` that `try`s a reader | `EndOfStream` becomes part of the public API. `ReadFailed` hides the OS error and `error.Canceled`, which live on the adapter's `.err`. | A named error set. Map `EndOfStream`. On `ReadFailed`, return `reader.err orelse error.IoFailure`, as `io_patterns.zig` does. |
+| `Writer.end` to mean "finished" | In positional mode `end` calls `setLength` to the logical position (`Io/File/Writer.zig`). A header seek followed by `end` truncates the file. | `flush`. Call `end` only to set the file length on purpose. |
+| `const line = try reader.takeDelimiter('\n')` kept, or `peek` passed into a later read | The slice points into the reader buffer. The next read rebases it. | `readSliceAll` into storage the caller owns. A line that might exceed the buffer is `streamDelimiter` into a writer. |
+| A 1024-byte or 4096-byte buffer on a file or pipe adapter | Small writes miss the measured knee (zig-io W1: 31–71×). | `av.file.default_buffer_len` (64 KiB) for a file or pipe adapter. A smaller buffer is for a line of text, and the comment says so. |
+| `Dir.readFileAlloc` or `allocRemaining` of a media payload | A header-declared size becomes one unbounded allocation. | Stream. A count from the file is not a reason to read the payload into one slice. |
+| `io.async` for a producer and a consumer, `std.Thread.Pool`, `async`/`await` keywords | Keywords are gone. `Thread.Pool` is gone. `io.async` may run inline; `Group.async` may not run until `await`. | Nothing, until T59. Then `zig-async`. |
 
 ## Contents
 
+- [Failure catalog](#failure-catalog): the lines that come out wrong when the rest is skimmed
 - [What "modern" means here](#what-modern-means-here): the 0.15, 0.16 and 0.17 breaks
 - [The `@as` placebo](#the-as-placebo): casts, coercion and where `@as` still belongs
 - [I/O is two breaks, not a rename](#io-is-two-breaks-not-a-rename): Writergate, `Io`, readers, writers, imports, processes, time and cancellation
@@ -269,6 +298,9 @@ pub fn readHeader(io: std.Io, path: []const u8) !Header {
     const file = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
 
+    // Unknown kind, so streaming. A regular file uses file.reader after
+    // stat().kind == .file; that choice is zig-io, not this example.
+    // 64 bytes is a header probe, not a media buffer (av.file.default_buffer_len).
     var buf: [64]u8 = undefined;
     var file_reader = file.readerStreaming(io, &buf);
     return parseHeader(&file_reader.interface);
@@ -276,7 +308,8 @@ pub fn readHeader(io: std.Io, path: []const u8) !Header {
 ```
 
 `std.fs.cwd().openFile(path)` is gone. `openFile` is on `std.Io.Dir` and the
-`Io` argument is required. `defer file.close(io)` matches it.
+`Io` argument is required. `defer file.close(io)` matches it. Do not paste
+this function into a demuxer: it always streams, so a skip reads every byte.
 
 ### Readers
 
@@ -290,9 +323,10 @@ const value = try reader.takeInt(u32, .little);
 `Reader.fixed` ends after those bytes. `takeInt` reads exactly the width of
 `T` and returns `error.EndOfStream` if the slice is short. It also **asserts
 that the reader buffer is at least the encoded width (`@bitSizeOf(T) / 8`)**.
-A zero-length buffer (`&.{}`) trips that assert in safe builds. Give file
-readers a real buffer. Four bytes covers a RIFF size field. Use more if one
-call consumes a whole chunk.
+A zero-length buffer (`&.{}`) trips that assert in safe builds. That is the
+assert, not a reason to parse a file with `takeInt`. Give file readers a
+real buffer, and read fields with `readSliceAll` unless the caller has
+guaranteed the capacity.
 
 This repository's parsers read required fields with `readSliceAll` into a
 small local array, then `std.mem.readInt`
@@ -300,10 +334,16 @@ small local array, then `std.mem.readInt`
 That works with any reader buffer, including zero bytes. Use `takeInt` only
 where the buffer capacity is known to cover the field.
 
-`File.reader(file, io, buffer)` prefers positional reads and falls back to
-streaming. Positional reads return `error.Unseekable` on a pipe. A path that
-must work without seeking uses `readerStreaming`. Do not retry positional
-reads and call that a streaming implementation.
+`file.reader(io, buffer)` starts positional and, if `pread` fails, switches
+to streaming once. The caller does not see `error.Unseekable`. What shows up
+is a first read of 0 bytes, after which the adapter is streaming. Treating
+that 0 as EOF drops the start of a pipe. Pick the mode before constructing
+the reader (`stat`, or `readerStreaming` for stdin and pipes). Do not inspect
+a short read and reconstruct the reader, and do not retry the positional
+constructor and call that a streaming implementation. The std comment that
+positional mode is "more threadsafe" is about two threads sharing one
+descriptor. This port has one reader on one thread. It does not override
+`stat().kind`.
 
 Short reads are normal. One `read` is not a frame. Required bytes use
 `takeInt`, `readSliceAll`, or `streamExact`.
@@ -313,6 +353,17 @@ WAV file ended cleanly" and it does not mean "the header was truncated".
 Those are different domain errors. Map at the parser boundary. Do not put
 `Reader.Error` in the public error set. An inferred `!` will leak it if the
 parser `try`s straight through.
+
+`error.ReadFailed` is the shared interface error. The OS error, and
+`error.Canceled`, live on the file adapter. Recover them there, as
+`io_patterns.zig` does:
+
+```zig
+reader.readSliceAll(&bytes) catch |err| switch (err) {
+    error.EndOfStream => return error.Truncated,
+    error.ReadFailed => return file_reader.err orelse error.IoFailure,
+};
+```
 
 `StreamTooLong` is the limit error from a limited read. Surface it as a
 resource-limit failure, not as a malformed header.
@@ -324,6 +375,14 @@ rebased. They are the convenient way to parse a file wrong. Read fields with
 `readSliceAll` (as above) or `takeInt` / `takeArray`. A `packed struct` is not
 a WAV header.
 
+`take`, `peek`, and `takeDelimiter` are the same kind of view. The slice
+points into the reader buffer and dies on the next `fill`, `readSliceAll`, or
+`takeDelimiter`. Do not store it. Every "read a file line by line" post uses
+`takeDelimiter`; a line longer than the buffer does not fit in that view.
+`streamDelimiter` into a writer does not assume the line fits. This port's
+parsers do not read lines. A CLI or a test fixture that does must not keep
+the slice.
+
 `std.mem.readInt` is the right call inside a slice kernel that has already
 checked the length. It cannot fail. It is not a stream API. Streaming code
 calls `reader.takeInt`, which uses `readInt` after it has the bytes.
@@ -331,16 +390,25 @@ calls `reader.takeInt`, which uses `readInt` after it has the bytes.
 ### Writers
 
 ```zig
+// A line of text, not a file adapter. A muxer uses av.file.default_buffer_len.
 var out_buf: [1024]u8 = undefined;
-var stdout_writer = std.Io.File.stdout().writer(init.io, &out_buf);
+var stdout_writer = std.Io.File.stdout().writerStreaming(init.io, &out_buf);
 const stdout = &stdout_writer.interface;
 try stdout.print("rate={d}\n", .{rate});
 try stdout.flush();
 ```
 
-`print` without `flush` is a bug. `writeStreamingAll` is the one-shot form
-when a buffer would only exist to be flushed immediately, which is what the
-language reference uses for hello world.
+```zig
+// Compiles. drain's @fieldParentPtr looks at the copy, not the adapter.
+const stdout = stdout_writer.interface;
+```
+
+`print` without `flush` is a bug. `flush` is not `Writer.end`: positional
+`end` sets the file length to the logical position and truncates a header
+rewrite. `writeStreamingAll` is the one-shot form when a buffer would only
+exist to be flushed immediately, which is what the language reference uses
+for hello world. Stdout and pipes use `writerStreaming`. The positional
+`writer` tries `pwrite` first.
 
 In-memory output:
 
@@ -364,10 +432,14 @@ const owned = try aw.toOwnedSlice();
 defer gpa.free(owned);
 ```
 
-The parent writer object must stay put. `&file_reader.interface` points into
-`file_reader`. Moving or returning `file_reader` by value dangles that
-pointer. Keep the file reader in a stable local and pass the interface
-pointer down.
+The parent writer object must stay put, and the interface must not be copied
+out of it. `&file_reader.interface` points into `file_reader`. Moving or
+returning `file_reader` by value dangles that pointer. `const w =
+file_reader.interface` copies the vtable struct; `@fieldParentPtr` in `drain`
+then points at garbage. The compiler accepts the copy. Keep the file reader
+in a stable local and pass `&file_reader.interface` down. Standalone values
+such as `Reader.fixed` and `Writer.fixed` are the interface themselves; those
+copies are the value, not a parent pointer.
 
 `std.debug.print` is stderr diagnostics. It is not probe output, and it is
 not available as a stand-in for a writer in library code.
@@ -380,7 +452,11 @@ Do not write any of these in new code:
 - `std.io.GenericReader`, `GenericWriter`, `AnyReader`, `AnyWriter`
 - `std.io.FixedBufferStream`
 - `std.fs.File.stdout().writer(&buf)` without an `Io`
+- `File.stdout().writer(io, &buf)` for a pipe or a terminal; use `writerStreaming`
+- `const w = adapter.interface` (a copy; borrow `&adapter.interface`)
 - `std.fs.cwd().openFile`
+- `Dir.readFileAlloc` or `Reader.allocRemaining` of a media payload
+- a 4096-byte buffer copied from a tutorial onto a file or pipe adapter
 - a custom "just a slice and a cursor" type when `Reader.fixed` is the cursor
 
 `std.fs` still exists for path helpers (`std.fs.path`). Opening and reading
@@ -414,7 +490,11 @@ This port does not need them for WAV.
 File errors include `Io.Cancelable`. The first tools do not implement
 cancellation. Map that error or exclude it. Do not build an `io.async` task
 graph to read a WAV file. `Io` makes that possible later. Synchronous code
-that takes `Io` is the 0.17 design, not a leftover.
+that takes `Io` is the 0.17 design, not a leftover. `std.Thread.Pool` was
+removed in 0.16. `std.Thread.spawn`, `Thread.Mutex`, and the `async` /
+`await` keywords are not how this port gets a scheduler. That API, and why
+`io.async` is the wrong call for a producer and a consumer, is `zig-async`.
+T53d is synchronous queues. T59 is the first task that may spawn.
 
 ## Allocators and containers
 
@@ -593,7 +673,7 @@ to mean "not applicable".
 | Do not write | Write |
 | --- | --- |
 | `usingnamespace` | A named field, or a normal declaration. Removed in 0.15. |
-| `async` / `await` keywords, `@frameSize` | Not coming back as keywords. Concurrency, if ever needed, is `Io`. |
+| `async` / `await` keywords, `@frameSize`, `std.Thread.Pool`, `std.Thread.spawn` for a pipeline | Keywords are not coming back. `Thread.Pool` was removed in 0.16. A task, a queue, or a cancel is `zig-async`, and not before T59. |
 | `@cImport` / `@cInclude` | Removed in 0.17. C translation is the external `translate-c` package, and this port does not translate FFmpeg headers as its implementation. |
 | `b.addTranslateC` | Still present and not marked deprecated in the 0.17.0 std. This port does not use it either. |
 | `std.mem.indexOf` | Still an alias. New code calls `find`, `findScalar`, `findPos`. |
@@ -901,6 +981,8 @@ source in `lib/std` before using it on input.
 - A loop that steps once per unit of a header-declared count (frames, bytes,
   output samples) lets a 100-byte file claim hours of work. Compute counts in
   closed form, or cap them by the length actually available.
+- `Dir.readFileAlloc` and `Reader.allocRemaining` are the same mistake under
+  the name tutorials use for "read a file". A header size is not a bound.
 - `orderedRemove(0)` in a drain loop is quadratic. Use a head index or
   `std.Deque`.
 - Re-copying a growing value on every append (joining repeated tag keys) is
@@ -1229,69 +1311,27 @@ codecs.
 
 ## A file that already looks like 0.17
 
-```zig
-const std = @import("std");
+The compile-checked example is
+[io_patterns.zig](../../../../zig/examples/io_patterns.zig) (`zig test
+zig/examples/io_patterns.zig`). Copy that, not a program from this guide.
+It already does the things a pasted tutorial gets wrong: `readSliceAll` into
+a local array, a named error for `EndOfStream`, the file adapter's `.err` on
+`ReadFailed`, `writerStreaming` / `readerStreaming`, and `&adapter.interface`
+borrowed only after the adapter is in its final place. It is tested with a
+zero-length buffer, a one-byte artificial limit, and `Reader.failing`.
 
-pub const Header = struct {
-    channels: u16,
-    rate: u32,
-};
+A new file in this repository also has the SPDX line, the provenance
+comment, and `//!` module docs (CLAUDE.md). A product CLI with documented
+statuses returns them from a `u8` `main` ("Typed outcomes, numeric encoding
+at the boundary"). `std.process.exit` skips `defer`; it is only safe before
+any resource is open. A parser takes `*std.Io.Reader` and reads fields from
+the stream. Do not `peek` a header and pass that view to a slice parser: the
+view dies on the next read, and a real parser does not need the file cast
+to a slice.
 
-pub fn readRate(bytes: []const u8) error{ Truncated, BadTag }!Header {
-    var reader: std.Io.Reader = .fixed(bytes);
-    const tag = reader.takeInt(u32, .little) catch return error.Truncated;
-    if (tag != 0x46464952) return error.BadTag; // "RIFF" little-endian
-    const channels = reader.takeInt(u16, .little) catch return error.Truncated;
-    const rate = reader.takeInt(u32, .little) catch return error.Truncated;
-    return .{ .channels = channels, .rate = rate };
-}
-
-pub fn main(init: std.process.Init) !void {
-    const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len < 2) {
-        try std.Io.File.stderr().writeStreamingAll(init.io, "usage: tool <file>\n");
-        std.process.exit(1); // usage status; see port.md "Initial probe output"
-    }
-
-    const file = try std.Io.Dir.cwd().openFile(init.io, args[1], .{});
-    defer file.close(init.io);
-
-    var buf: [64]u8 = undefined;
-    var file_reader = file.readerStreaming(init.io, &buf);
-    const header = try readRate(try file_reader.interface.peek(10));
-
-    var out_buf: [128]u8 = undefined;
-    var stdout_file = std.Io.File.stdout().writer(init.io, &out_buf);
-    const stdout = &stdout_file.interface;
-    try stdout.print("rate={d}\n", .{header.rate});
-    try stdout.flush();
-}
-
-test readRate {
-    const bytes = [_]u8{
-        'R', 'I', 'F', 'F',
-        1, 0,
-        0x44, 0xAC, 0, 0,
-    };
-    const header = try readRate(&bytes);
-    const expected_channels: u16 = 1;
-    const expected_rate: u32 = 44100;
-    try std.testing.expectEqual(expected_channels, header.channels);
-    try std.testing.expectEqual(expected_rate, header.rate);
-}
-```
-
-This tool promises no distinct failure codes, so `!void` and an immediate
-`std.process.exit(1)` for usage are enough. A product CLI with documented
-statuses follows "Typed outcomes, numeric encoding at the boundary" instead.
-
-`readRate` takes a complete slice, so the stream adapter has to obtain those
-bytes first. `peek(10)` fills the reader buffer until ten bytes are available
-or returns `error.EndOfStream`; it requires a buffer of at least ten bytes.
-`buffered()` alone returns only bytes already read ahead, which is nothing
-before the first read. A real parser takes `*std.Io.Reader` and reads fields
-from the stream. The slice function stays the kernel. Do not paper over that
-by casting the file to a slice.
+Mode and buffer size are not in that example's streaming file test. A regular
+file in the tool uses `file.reader` after `stat`, with
+`av.file.default_buffer_len`. That is `zig-io`.
 
 ## Checklist before sending Zig
 

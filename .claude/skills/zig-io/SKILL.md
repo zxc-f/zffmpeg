@@ -1,6 +1,6 @@
 ---
 name: zig-io
-description: How to write I/O code in zffmpeg with Zig 0.17.0's std.Io, measured against FFmpeg's libavformat I/O. Use it whenever you write or change code that opens, reads, writes, skips, seeks or copies files, pipes or standard input/output; adds a demuxer, muxer or parser's read/write path; picks reader or writer buffers; rewrites a header; adds stream copy; or plans threads, queues or cancellation (T53d scheduler, T59 threading). Use it together with zig-0-17, which covers the language and API breaks.
+description: How to write I/O code in zffmpeg with Zig 0.17.0's std.Io, measured against FFmpeg's libavformat I/O. Use it whenever you write or change code that opens, reads, writes, skips, seeks or copies files, pipes or standard input/output; adds a demuxer, muxer or parser's read/write path; picks reader or writer buffers; rewrites a header; or adds stream copy. Use it together with zig-0-17, which covers the language and API breaks. For whether a thread is worth it, use this skill's measurements. For the spawn, wait, cancel, queue, or lock API, use zig-async.
 ---
 
 # I/O in zffmpeg
@@ -16,7 +16,10 @@ another machine with [bench/run_all.sh](bench/run_all.sh).
 ## Workflow
 
 1. Load `zig-0-17` too: it owns the language and API rules; this skill owns the
-   I/O choices. CLAUDE.md wins over both.
+   I/O choices. If the line is about `@as`, an error set, or `ArrayList`, stop
+   and use `zig-0-17`. A spawn, a wait, a cancel, or a shared queue or lock is
+   `zig-async`; this skill only says whether a measurement justifies the
+   thread. CLAUDE.md wins over all three.
 2. Find the row below for what you are writing. Read the analysis section it
    names before deviating from it.
 3. Read the std as the installed `lib/std` (`zig env` prints `lib_dir`): it
@@ -44,9 +47,9 @@ another machine with [bench/run_all.sh](bench/run_all.sh).
 | Large reads (packets, payload) | `readSliceAll`/`readSliceShort` straight into the destination | One `readv` fills the destination and tops up the buffer: FFmpeg's direct read plus read-ahead (analysis "Zig 0.17.0's std.Io", Reader). |
 | Skipping untrusted lengths | `zig/io/skip.zig` (`discardShort`/`discardAll`) | std's `discardShort` overflows `seek + n` on huge skips. On a positional reader a skip is free. |
 | Seeking an input | `av.seek.Seeker.file(&reader)` on a positional reader | `seekTo` only moves the logical position; streaming readers cannot seek back. |
-| Output file | Create with `.exclusive = true` first, `writerStreaming`, flush at `finish`; seek back (header rewrite) only when `stat().kind == .file` | FFmpeg rewrites sizes only on seekable output (`wavenc.c`, `au.c`, `flacenc.c`, `aiffenc.c`); CLAUDE.md's cleanup rules. Writer mode does not change speed (W1). |
+| Output file | Create with `.exclusive = true` first, `writerStreaming`, `flush` at `finish` (not `Writer.end`); seek back (header rewrite) only when `stat().kind == .file` | FFmpeg rewrites sizes only on seekable output (`wavenc.c`, `au.c`, `flacenc.c`, `aiffenc.c`); CLAUDE.md's cleanup rules. Writer mode does not change speed (W1). Positional `end` calls `setLength` to the logical position and truncates a header rewrite. The std's "positional is more threadsafe" comment is about two threads sharing one descriptor, not a reason to switch a single-threaded muxer. |
 | Whole-file copy with no re-mux | `reader.interface.streamRemaining(&writer.interface)` | Reaches `File.Writer.sendFile`: `copy_file_range`, 2 syscalls for 512 MiB, 5–37% faster than a read/write loop (C1, S1). |
-| Concurrency | Synchronous until T59. Then `io.concurrent` (never `io.async`) for a task that must run beside the caller, and `Io.Queue` with batches of frames | A handoff costs microseconds: small packets with little work lose to serial code (Q1). With codec work, FFmpeg's thread per component gives 2–5× less wall time on 16 threads at about the same CPU time, and loses on one core (E2E-C); zffmpeg's one thread makes 15,500 syscalls where FFmpeg makes 257,000–310,000, mostly `futex` (E2E). |
+| Concurrency | Synchronous until T59. The spawn, wait, cancel, and queue API is `zig-async`, not a row to implement from this table | A handoff costs microseconds: small packets with little work lose to serial code (Q1). With codec work, FFmpeg's thread per component gives 2–5× less wall time on 16 threads at about the same CPU time, and loses on one core (E2E-C); zffmpeg's one thread makes 15,500 syscalls where FFmpeg makes 257,000–310,000, mostly `futex` (E2E). |
 | An output header that needs a count the input does not give | Decode once: on a seekable output `Writer.beginDeferred`, then `rewriteHeader` after `finish` (WAV, AU, AIFF; `Request.output_seekable` in `av.convert`), as FFmpeg's muxers rewrite; no count at all for raw, FLAC and Ogg outputs. A counting pass only where the output cannot seek back | The counting pass decoded Ogg and MP3 twice: 45% of the conversion from a file, removed by the deferred header (E2E-C, "Findings for the codebase"). |
 | A speed comparison | Wall time and CPU time or instructions, on all cores and on one (`taskset`), against the pinned build and an assembly build (`bench/build-ffmpeg-native.sh`) | The pinned build runs the same C algorithms; assembly removes 25–70% of their instructions; FFmpeg's threads change wall time, not work (E2E-C). On 4 vCPUs zffmpeg won the PCM paths, on 16 threads it lost all but stream copy (E2E). |
 | Event-driven backend | None: `std.Io.Threaded` from `std.process.Init` | `std.Io.Evented` (io_uring) does not compile in Zig 0.17.0, nor with 0.17.1's library. Libraries (zio, libxev) are references, not dependencies (notes.md). |
@@ -58,8 +61,10 @@ another machine with [bench/run_all.sh](bench/run_all.sh).
   with a pipe: a `probe_cases` entry with `stdin_fixture` or a `convert_cases`
   entry with `stdin_input` in `build.zig`.
 - Buffers are caller-owned, live as long as the adapter, and the adapter is
-  built in its final place before `.interface` is borrowed. Reader views
-  (`take`, `peek`, `buffered`) are not kept across the next read.
+  built in its final place before `.interface` is borrowed. The borrowed
+  value is `&adapter.interface`, never `adapter.interface`: the copy compiles
+  and `drain` corrupts the parent pointer. Reader views (`take`, `peek`,
+  `takeDelimiter`, `buffered`) are not kept across the next read.
 - `take`/`peek`/`takeArray`/`takeInt` only where the buffer capacity is
   guaranteed by the caller; everywhere else `readSliceAll` into local storage.
 - Skips of lengths from the input go through `zig/io/skip.zig`.
@@ -68,17 +73,24 @@ another machine with [bench/run_all.sh](bench/run_all.sh).
   `.err`, which carries `error.Canceled` (CLAUDE.md, `withReadCause`).
 - Output: every request-only check runs before the file is created; header
   rewrites and failure cleanup touch only a regular file this run created;
-  `finish` flushes, and a flush failure is an error even after partial output.
+  `finish` is `flush`, not `Writer.end`, unless the caller means to set the
+  file length to the logical position. A flush failure is an error even after
+  partial output. Do not switch a muxer to a positional writer because the
+  std says positional is more threadsafe.
 - No per-byte or per-field syscall: anything written in pieces smaller than
   4 KiB goes through a buffer of at least 64 KiB (W1: 150 MiB/s unbuffered
-  64-byte writes against 2.8 GiB/s buffered).
+  64-byte writes against 2.8 GiB/s buffered). Do not copy 4096 from a blog,
+  from zigimg, or from a hello-world example. Do not `readFileAlloc` a media
+  file.
 - No thread or queue without a measurement showing a gain on the target
   workload, wall time and CPU time, on one core and on all (Q1, E2E-C).
   Bounded queues carry batches, not single small packets.
 - No pass over the input only to count what a header needs: rewrite the
   header at the end where the output seeks (E2E-C).
-  `Io.Group.async` may run inline; a producer and consumer joined by a bounded
-  queue use `io.concurrent`, or they can deadlock.
+- No `io.async` or `Group.async` added from this skill. `Io.async` may run
+  the function before it returns. `Group.async` is not guaranteed to have
+  called the function until `Group.await` or `Group.cancel`. A producer and
+  a consumer need `io.concurrent`. The contract is `zig-async`.
 - Tests cover `Reader.fixed`, one-byte reads (`std.testing.Reader` with
   `artificial_limit = .limited(1)`), `Reader.failing`, and real files with
   0, 1, 64 and 64 KiB buffers (CLAUDE.md "Zig 0.17 I/O and test patterns").
@@ -95,4 +107,4 @@ another machine with [bench/run_all.sh](bench/run_all.sh).
 | `AVIO_SEEKABLE_NORMAL` checked before header rewrites | `stat().kind == .file` before using `av.seek.OutputSeeker` |
 | `ff_check_interrupt` before every transfer | Cancelation points inside `std.Io` syscalls; `error.Canceled` via `.err` |
 | `av_probe_input_buffer2` and `ffio_rewind_with_probe_data` (probe 2048 bytes, doubling; replay them) | `zig/format/detect.zig` with its `Replay` reader (`zig/format/replay.zig`) |
-| `ffmpeg_sched.c`: a thread per component, queues of 2 | Not adopted yet; it wins wall time on many cores with codec work (E2E-C). See the analysis' "Concurrency" before T53d/T59 |
+| `ffmpeg_sched.c`: a thread per component, queues of 2 | Not adopted yet; it wins wall time on many cores with codec work (E2E-C). The measurement is this skill's "Concurrency"; the call is `zig-async`, and not before T59 |

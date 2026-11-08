@@ -8,3 +8,6 @@ zig-out/
 # Cross-compiled outputs from CI.
 zig-out-*/
 __pycache__/
+
+# HTML snapshots fetched while writing the I/O skills. Not source.
+/doc/skill-sources/

@@ -130,6 +130,9 @@ the [unplanned features](TODO.md#not-planned).
   which `std.Io` tool to use where, from FFmpeg's C I/O layer and measurements
   ([analysis](.claude/skills/zig-io/references/analysis.md)), with a benchmark kit that
   reruns them on another machine ([reproduce](.claude/skills/zig-io/references/reproduce.md)).
+- [.claude/skills/zig-async/](.claude/skills/zig-async/SKILL.md): the project skill for
+  spawning, waiting, cancelling, and sharing a queue or a lock on Zig 0.17.0
+  ([analysis](.claude/skills/zig-async/references/analysis.md)). Threads wait for T59.
 - [build.zig](build.zig), [build.zig.zon](build.zig.zon): the package and build;
   [zig/README.md](zig/README.md) documents commands, version policy and layout.
 - [zig/root.zig](zig/root.zig): root of the `av` library module.

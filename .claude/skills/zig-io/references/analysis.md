@@ -100,11 +100,15 @@ Paths are relative to `lib/std/`.
   operations run as plain syscalls on the calling thread
   (`fileReadStreamingPosix`, `Io/Threaded.zig:9907`) with cancelation checks
   around them; no thread hop for sequential I/O.
-- **Concurrency.** `io.async` "may" run the function immediately on the
-  caller (`Io.zig:2526`); `io.concurrent` (`Io.zig:2565`) either gets a unit
-  of concurrency or fails. `Io.Group.async` inherits `async`'s rule, which
-  zio's contract test "a cancel taken by a group task run on the caller
-  reaches the caller" (`.references/zio/src/io.zig:5118`) exercises.
+- **Concurrency.** `io.async` (`Io.zig:2514`) may run the function before it
+  returns; when it returns, the function has been called or a unit of
+  concurrency has been assigned. `io.concurrent` (`Io.zig:2558`) either gets
+  a unit of concurrency or returns `error.ConcurrencyUnavailable`.
+  `Group.async` (`Io.zig:1361`) is weaker: the function is not guaranteed to
+  have been called until `Group.await` or `Group.cancel`. zio's contract
+  test "a cancel taken by a group task run on the caller reaches the caller"
+  (`.references/zio/src/io.zig:5118`) is the inline case, not a promise that
+  a group task starts. The call shapes are the `zig-async` skill.
   `Io.Queue(T)` (`Io.zig:2384`) is a bounded queue with `put`/`get` of
   several elements, `close`, and cancelable waits.
 - **Evented backend.** `Io.Evented` is `Io.Uring` on Linux (`Io.zig:31-36`),
@@ -431,11 +435,11 @@ Each holds on both machines unless it says otherwise.
   converts and writes; with no codec work, E2E's PCM paths, it gains little
   or loses), frame or slice threading inside a codec (FFmpeg does it only
   for FLAC decoding among the ported codecs), or independent outputs. Hand
-  frames over in batches, so the handoff stays small against the work. Use
-  `io.concurrent` for a task that must run beside the caller (a producer and a
-  consumer on one bounded queue deadlock if `io.async` runs one inline), move
-  batches through `Io.Queue` (`put`/`get` with a minimum count), and measure
-  with the real codec in Q1's place before keeping it.
+  frames over in batches, so the handoff stays small against the work. The
+  spawn, cancel, and queue contract is the `zig-async` skill: `Io.async` may
+  run inline, and `Group.async` may not run until `await` or `cancel`, so a
+  producer and a consumer use `io.concurrent`. Measure with the real codec
+  in Q1's place before keeping it.
 - Cancellation already reaches I/O through `std.Io`'s cancelation points;
   keep mapping `error.Canceled` from the adapter's `.err`, as `withReadCause`
   does, rather than polling a flag as FFmpeg's interrupt callback does.

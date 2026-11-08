@@ -154,10 +154,14 @@ For I/O code, also invoke the project skill `zig-io`
 ([.claude/skills/zig-io/SKILL.md](.claude/skills/zig-io/SKILL.md)): opening,
 reading, writing, skipping, seeking or copying files, pipes and standard
 streams; a demuxer's, muxer's or parser's read or write path; buffer sizes;
-header rewrites; stream copy; threads, queues and cancellation (T53d, T59).
-It says which `std.Io` tool to use where, from FFmpeg's C I/O layer and
-measurements; a change that departs from it needs a measurement with its
-benchmarks, recorded in its analysis.
+header rewrites; stream copy. It says which `std.Io` tool to use where, from
+FFmpeg's C I/O layer and measurements; a change that departs from it needs a
+measurement with its benchmarks, recorded in its analysis.
+
+For a spawn, a wait, a cancel, or a shared queue or lock, also invoke
+`zig-async` ([.claude/skills/zig-async/SKILL.md](.claude/skills/zig-async/SKILL.md)).
+T53d's scheduler is synchronous queues. T59 is the first task that may spawn,
+and only after `zig-io`'s measurement rule. Do not add `io.async` from a blog.
 
 ## Commands
 
@@ -263,6 +267,11 @@ document does not widen support.
   `references/analysis.md` the FFmpeg and std.Io sources (file and line) and
   the measurements; `references/reproduce.md` and `bench/run_all.sh` rerun
   them on another machine; `references/results/` keeps each run.
+- [.claude/skills/zig-async/](.claude/skills/zig-async/SKILL.md): the project
+  skill for spawning, waiting, cancelling, and sharing a queue or a lock.
+  `SKILL.md` holds the which-tool table, the deadlocks, and the checklist;
+  `references/analysis.md` holds the 0.17.0 contract, the sources, and the
+  FFmpeg mapping. Not a reason to add threads before T59.
 
 ## References
 

@@ -1,6 +1,6 @@
 ---
 name: zig-0-17
-description: How to write and change Zig 0.17.0 code in the zffmpeg repository. Use it every time you create or edit a .zig file (anything under zig/, or build.zig) or build.zig.zon, including one-line fixes, tests and examples, and when reviewing Zig or answering how to write something in Zig here. The pinned 0.17.0 standard library moved I/O, containers, builtins, reflection and the build API since 0.13–0.15, so Zig written from memory or from older web examples usually fails to compile or is subtly wrong.
+description: How to write and change Zig 0.17.0 code in the zffmpeg repository. Use it every time you create or edit a .zig file (anything under zig/, or build.zig) or build.zig.zon, including one-line fixes, tests and examples, and when reviewing Zig or answering how to write something in Zig here. The pinned 0.17.0 standard library moved I/O, containers, builtins, reflection and the build API since 0.13–0.15, so Zig written from memory or from older web examples usually fails to compile or is subtly wrong. Official 0.15 and 0.16 pages, and Andrew Kelley's 2025 async post, still show call shapes that do not compile on 0.17.0.
 ---
 
 # Zig 0.17 in zffmpeg
@@ -13,10 +13,13 @@ every Zig change starts from the pinned toolchain's rules instead.
 
 ## Workflow
 
-1. **Read before writing.** For a new file, or the first Zig change in a
-   session, read [references/guide.md](references/guide.md) in full (about 1000
-   lines). For a later small edit in the same session, re-read the sections the
-   change touches, using the map below.
+1. **Read before writing.** Read the failure catalog at the top of
+   [references/guide.md](references/guide.md) on every Zig change. Read the
+   sections the change touches, using the map below. Read the guide in full
+   when the change is a new file that does I/O, parsing, or a public API.
+   Mode, buffer size, skip, and `end` versus `flush` are `zig-io`; do not
+   take them from an example in the guide. Spawning, waiting, cancelling, or
+   sharing a queue or a lock is `zig-async`.
 2. **Apply the project rules.** [CLAUDE.md](../../../CLAUDE.md) wins where it
    differs from the guide. Its sections "Portable Zig code", "Zig 0.17 I/O and
    test patterns", "Modern Zig metaprogramming" and "When adding code" apply to
@@ -49,7 +52,8 @@ every Zig change starts from the pinned toolchain's rules instead.
 | The change involves | Read in [references/guide.md](references/guide.md) |
 | --- | --- |
 | Casts, `@as`, integer conversions | "The `@as` placebo", "Integers" |
-| Readers, writers, files, stdio, `main` | "I/O is two breaks, not a rename" with "Readers", "Writers", "What not to import", "Processes, time, cancellation" |
+| Readers, writers, files, stdio, `main` | "I/O is two breaks, not a rename" with "Readers", "Writers", "What not to import", "Processes, time, cancellation". Mode and buffer size are `zig-io`. |
+| Spawning a task, a queue, a lock, cancellation of a task | Do not invent it from this guide. Load `zig-async`. |
 | `ArrayList`, maps, allocators | "Allocators and containers" |
 | Reflection, generated types, comptime tables | "Type construction", "Reflection" |
 | CLI statuses, parser APIs and state, error domains, test helpers, shared helpers | "Model values, state and boundaries" |
@@ -68,11 +72,13 @@ every Zig change starts from the pinned toolchain's rules instead.
 - No `@as(T, @intCast(x))`. The result type is enough: `const y: T = @intCast(x);`.
 - No `std.io`. No `getStdOut`. No reader or writer without a caller-owned buffer and, for files, an `Io`.
 - No `anytype` reader or writer. The type is `*std.Io.Reader` or `*std.Io.Writer`.
+- Borrow `&adapter.interface`. `const w = adapter.interface` compiles and corrupts: `drain` recovers the parent with `@fieldParentPtr`.
+- No `take`, `peek`, or `takeDelimiter` slice kept across the next read. The slice is a view into the buffer; the next fill rebases it.
 - No `takeStruct` on a file header.
-- `EndOfStream` is mapped before it leaves the parser.
+- `EndOfStream` is mapped before it leaves the parser. `ReadFailed` and `WriteFailed` are not the cause: recover the adapter's `.err`, which carries `error.Canceled`. An inferred `!` on a public parser leaks `EndOfStream`.
 - `main` that does I/O takes `std.process.Init` and passes `init.io` and `init.gpa` down.
 - `ArrayList` is `.empty`, and `append` / `deinit` take the allocator. No `.init(allocator)`.
-- No `@Type`, `@cImport`, `usingnamespace`, `async`/`await`, `void{}`, or `**`.
+- No `@Type`, `@cImport`, `usingnamespace`, `async`/`await` keywords, `void{}`, or `**`. No `std.Thread.Pool` or `std.Thread.spawn` for pipeline work: those are `zig-async`, and not before T59.
 - `@typeInfo(...).@"struct".field_names` and `field_types`, not `.fields`.
 - `std.lang` for language types. `@import("builtin")` only for target facts.
 - `find` / `trimStart` / `allocator.print` / `@fromBackingInt` / `@trunc`.
@@ -90,7 +96,7 @@ every Zig change starts from the pinned toolchain's rules instead.
   on every path").
 - A constant copied from C keeps its expression and precedence, derived from the same named values (`(8 + 3) << 4`, not `8 + 2`).
 - No `std.debug.assert` as the only guard of a public contract, no `catch unreachable` / `else => unreachable` on an error input can cause, no `else => unreachable` over `anyerror`.
-- No `discardShort`/`discardAll` with an untrusted length (use `zig/io/skip.zig`), no `std.math.ldexp` (use `libm.ldexp`). See the guide's "std pitfalls".
+- No `discardShort`/`discardAll` with an untrusted length: the std adds `seek + n` unchecked, so a huge skip panics in safe builds and rewinds in ReleaseFast. Use `zig/io/skip.zig`. No `std.math.ldexp` (use `libm.ldexp`). See the guide's "std pitfalls".
 - Work stays proportional to bytes present: no per-unit loop over a header-declared count, no `orderedRemove(0)` drain, no re-copy of a growing value per append.
 - A buffer that is written before its bound is checked is sized as FFmpeg sizes it; widths come from the value being written, not a second copy of the format.
 - Tests do not print to stdout. `expectEqual` needs no `@as`; peer type resolution types both arguments.

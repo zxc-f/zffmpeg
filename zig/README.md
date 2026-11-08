@@ -5,7 +5,10 @@ This directory holds the native Zig sources. The package is defined by
 repository root. Write new code following
 the project's [`zig-0-17` skill](../.claude/skills/zig-0-17/SKILL.md) and its
 [guide](../.claude/skills/zig-0-17/references/guide.md), and I/O code also
-following the [`zig-io` skill](../.claude/skills/zig-io/SKILL.md).
+following the [`zig-io` skill](../.claude/skills/zig-io/SKILL.md). A spawn,
+wait, cancel, or shared queue or lock also follows the
+[`zig-async` skill](../.claude/skills/zig-async/SKILL.md); that is not a
+reason to add a thread before T59.
 
 ## Compiler
 
