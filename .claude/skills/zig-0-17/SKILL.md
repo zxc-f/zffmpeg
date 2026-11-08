@@ -49,6 +49,12 @@ every Zig change starts from the pinned toolchain's rules instead.
 
 ## Section map
 
+For the relevant change, also load [ffmpeg-c-semantics](../ffmpeg-c-semantics/SKILL.md)
+for C behavior, [ffmpeg-oracle](../ffmpeg-oracle/SKILL.md) for independent
+reference/failure evidence, and [media-pipeline](../media-pipeline/SKILL.md)
+for media ownership, state transitions and timing. The guide's coding
+checks still apply; these skills supply the detailed procedures.
+
 | The change involves | Read in [references/guide.md](references/guide.md) |
 | --- | --- |
 | Casts, `@as`, integer conversions | "The `@as` placebo", "Integers" |

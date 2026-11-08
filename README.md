@@ -133,6 +133,12 @@ the [unplanned features](TODO.md#not-planned).
 - [.claude/skills/zig-async/](.claude/skills/zig-async/SKILL.md): the project skill for
   spawning, waiting, cancelling, and sharing a queue or a lock on Zig 0.17.0
   ([analysis](.claude/skills/zig-async/references/analysis.md)). Threads wait for T59.
+- [.claude/skills/ffmpeg-oracle/](.claude/skills/ffmpeg-oracle/SKILL.md): independent
+  reference evidence, comparison predicates, fixtures and failure harnesses.
+- [.claude/skills/ffmpeg-c-semantics/](.claude/skills/ffmpeg-c-semantics/SKILL.md):
+  preserving C arithmetic, conversions, libc behavior and error treatment in Zig.
+- [.claude/skills/media-pipeline/](.claude/skills/media-pipeline/SKILL.md):
+  media ownership, backpressure, drain/reset, seeking and timestamp contracts.
 - [build.zig](build.zig), [build.zig.zon](build.zig.zon): the package and build;
   [zig/README.md](zig/README.md) documents commands, version policy and layout.
 - [zig/root.zig](zig/root.zig): root of the `av` library module.

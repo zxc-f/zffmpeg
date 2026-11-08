@@ -163,6 +163,21 @@ For a spawn, a wait, a cancel, or a shared queue or lock, also invoke
 T53d's scheduler is synchronous queues. T59 is the first task that may spawn,
 and only after `zig-io`'s measurement rule. Do not add `io.async` from a blog.
 
+For fixtures, reference generators, comparison predicates, recorded
+differences, or G1/G3/G4 validation, invoke
+`ffmpeg-oracle` ([.claude/skills/ffmpeg-oracle/SKILL.md](.claude/skills/ffmpeg-oracle/SKILL.md)).
+It operates the existing reference and failure-testing tools; TODO.md still
+owns the gates and completion evidence.
+
+When porting or reviewing C arithmetic, macros, libc behavior or error
+handling, invoke `ffmpeg-c-semantics`
+([.claude/skills/ffmpeg-c-semantics/SKILL.md](.claude/skills/ffmpeg-c-semantics/SKILL.md)).
+For packet/frame retention, media backpressure, draining, reset, seeking,
+reconfiguration or timestamp changes, invoke `media-pipeline`
+([.claude/skills/media-pipeline/SKILL.md](.claude/skills/media-pipeline/SKILL.md)).
+These apply to the relevant change, not every unrelated Zig edit. They do
+not change the supported subsets or authorize threads before T59.
+
 ## Commands
 
 Toolchain: Zig **0.17.0** exactly. `build.zig` stops with a compile error on any
@@ -272,6 +287,19 @@ document does not widen support.
   `SKILL.md` holds the which-tool table, the deadlocks, and the checklist;
   `references/analysis.md` holds the 0.17.0 contract, the sources, and the
   FFmpeg mapping. Not a reason to add threads before T59.
+- [.claude/skills/ffmpeg-oracle/](.claude/skills/ffmpeg-oracle/SKILL.md):
+  independent expected results, comparison predicates, required/optional
+  coverage and the existing allocation/fuzz harnesses. Its references cover
+  [comparisons](.claude/skills/ffmpeg-oracle/references/comparisons.md) and
+  [failure testing](.claude/skills/ffmpeg-oracle/references/failure-testing.md).
+- [.claude/skills/ffmpeg-c-semantics/](.claude/skills/ffmpeg-c-semantics/SKILL.md):
+  preserving C arithmetic, conversions, macros, libc behavior and error
+  treatment; [the procedure](.claude/skills/ffmpeg-c-semantics/references/behavior.md)
+  maps the existing numeric helpers and reference sources.
+- [.claude/skills/media-pipeline/](.claude/skills/media-pipeline/SKILL.md):
+  packet/frame ownership and media lifecycle/timing across synchronous or
+  future concurrent stages; [the reference](.claude/skills/media-pipeline/references/state-and-time.md)
+  maps the current contracts, consumers and tests.
 
 ## References
 

@@ -857,6 +857,10 @@ try write(container);
 
 ## Hostile input
 
+For allocation sweeps, option-aware fuzz seeds and comparison predicates,
+use [ffmpeg-oracle](../../ffmpeg-oracle/SKILL.md). The rules below govern
+the implementation and the test harness alike.
+
 Every rule here comes from a defect that passed all three test modes and the
 FFmpeg comparison, and was found only by crafted input (the review of
 2026-11-04). The green suites exercise valid streams; these rules are about
@@ -921,6 +925,10 @@ elsewhere. Two sources of truth for one format will disagree on damaged input.
   sizes, offsets and allocation counts still use `std.math.add`/`mul`.
 
 ### C's numeric conversions: model the reference build
+
+Use [ffmpeg-c-semantics](../../ffmpeg-c-semantics/SKILL.md) for the procedure
+that traces C types, build-dependent behavior and independent evidence.
+The quick coding rules below still apply.
 
 FFmpeg's C has no case for NaN, infinity or overflow in its float-to-integer
 conversions; its output is whatever instruction the reference build

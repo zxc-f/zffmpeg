@@ -10,6 +10,13 @@ wait, cancel, or shared queue or lock also follows the
 [`zig-async` skill](../.claude/skills/zig-async/SKILL.md); that is not a
 reason to add a thread before T59.
 
+Reference fixtures, comparisons and failure harnesses use
+[`ffmpeg-oracle`](../.claude/skills/ffmpeg-oracle/SKILL.md). C arithmetic,
+conversions and error handling use
+[`ffmpeg-c-semantics`](../.claude/skills/ffmpeg-c-semantics/SKILL.md).
+Packet/frame ownership, media state transitions and timestamps use
+[`media-pipeline`](../.claude/skills/media-pipeline/SKILL.md).
+
 ## Compiler
 
 Use Zig **0.17.0** exactly. Three files name it, and each does a different job:
