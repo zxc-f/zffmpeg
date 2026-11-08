@@ -5821,7 +5821,7 @@ def mov_sound_entry(fmt, channels=1, bits=16, rate=8000, version=0, cid=0, v1=No
 
 def mov_track(entries, samples, durations, time_scale, track_id=1, chunks=None, handler=b"soun", hdlr_name=b"SoundHandler\0",
               stsc=None, stsz=None, co64=False, extra_stbl=b"", stsd_count=None, mdhd=None, tkhd=None, edts=b"",
-              stts=None, mdhd_duration=None, lang=0x55c4, minf_extra=b"", trak_extra=b""):
+              stts=None, mdhd_duration=None, lang=0x55c4, minf_extra=b"", trak_extra=b"", mhd=None):
     """A trak and the bytes of its chunks (placed by mov_movie). `chunks`
     gives the samples per chunk (one chunk of all by default); `stsc`,
     `stsz` and `stts` replace the tables written from them."""
@@ -5856,7 +5856,7 @@ def mov_track(entries, samples, durations, time_scale, track_id=1, chunks=None, 
         stsd_box = mov_full(b"stsd", 0, 0, struct.pack(">I", len(entries) if stsd_count is None else stsd_count) + b"".join(entries))
         stbl = mov_box(b"stbl", stsd_box + stts_box + stsc_box + stsz_box + stco_box + extra_stbl)
         dref = mov_box(b"dinf", mov_full(b"dref", 0, 0, struct.pack(">I", 1) + mov_full(b"url ", 0, 1, b"")))
-        smhd = mov_full(b"smhd", 0, 0, bytes(4))
+        smhd = mov_full(b"smhd", 0, 0, bytes(4)) if mhd is None else mhd
         minf = mov_box(b"minf", smhd + dref + minf_extra + stbl)
         hdlr = mov_full(b"hdlr", 0, 0, bytes(4) + handler + bytes(12) + hdlr_name)
         total = sum(durations) if mdhd_duration is None else mdhd_duration
@@ -6050,8 +6050,8 @@ def build_mov_crafted(fx):
        mov_movie([aac(), gpmd]))
     video_entry = mov_box(b"avc1", bytes(6) + struct.pack(">H", 1) + bytes(70))
     video = mov_track([video_entry], [b"\0" * 10] * 3, [512] * 3, 12800, track_id=2, handler=b"vide", hdlr_name=b"VideoHandler\0")
-    bad("mov_video_track", "An AAC track and a video track: video is not demuxed yet (T33a3).",
-        mov_movie([aac(), video]), "UnsupportedFormat")
+    ok("mov_video_track", "An AAC track and an avc1 video track of size 0 without avcC: the read-ahead never "
+       "has the video's parameters and runs to the end.", mov_movie([aac(), video]))
     nest = mov_full(b"stss", 0, 0, struct.pack(">I", 0))
     for _ in range(12):
         nest = mov_box(b"edts", nest)
@@ -6112,6 +6112,237 @@ def build_mov_crafted(fx):
                                                           stsc=mov_full(b"stsc", 0, 0, struct.pack(">I", 3) + struct.pack(">III", 1, 2, 1) +
                                                                         struct.pack(">III", 2, 2, 2) + struct.pack(">III", 3, 1, 1)))]))
     build_mov_metadata(ok, bad, aac)
+    build_mov_video(ok, bad, aac)
+
+
+# Video, subtitle and data tracks (TODO.md T33a3): crafted visual sample
+# entries with plausible configuration boxes over random sample bytes, which
+# FFmpeg demuxes without decoding (the reference build has no video codec).
+
+MOV_IDENTITY = (0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000)
+MOV_AVCC = bytes([1, 0x64, 0, 0x1F, 0xFF, 0xE1, 0, 12, 0x67, 0x64, 0, 0x1F, 0xAC, 0xD9, 0x40, 0x50, 0x05, 0xBB, 0x01,
+                  0x10, 1, 0, 4, 0x68, 0xEB, 0xE3, 0xCB])
+MOV_HVCC = bytes([1, 1, 0x60, 0, 0, 0, 0x90, 0, 0, 0, 0, 0, 0x5D, 0xF0, 0, 0xFC, 0xFD, 0xF8, 0xF8, 0, 0, 0x0F, 3,
+                  0x20, 0, 1, 0, 4, 0x40, 1, 0x0C, 1, 0x21, 0, 1, 0, 4, 0x42, 1, 1, 1, 0x22, 0, 1, 0, 3, 0x44, 1, 0xC1])
+MOV_AV1C = bytes([0x81, 0x08, 0x0C, 0, 0x0A, 0x0B, 0, 0, 0, 0x24, 0xC4, 0xFF, 0xDF, 0, 0x68, 2])
+MOV_MP4V_DSI = bytes([0, 0, 1, 0xB0, 1, 0, 0, 1, 0xB5, 0x89, 0x13, 0, 0, 1, 0, 0, 0, 1, 0x20, 0, 0xC4, 0x8D, 0x88, 0,
+                      0xF5, 0x14, 0x04, 0x3C, 0x14, 0x63])
+
+
+def mov_tkhd(track_id, width=0, height=0, matrix=MOV_IDENTITY, flags=3):
+    return mov_full(b"tkhd", 0, flags, struct.pack(">IIIII", 0, 0, track_id, 0, 0) + bytes(8) + bytes(8) +
+                    struct.pack(">9i", *matrix) + struct.pack(">II", width << 16 & 0xFFFFFFFF, height << 16 & 0xFFFFFFFF))
+
+
+def mov_visual_entry(fmt, width, height, extra=b"", depth=0x18, ctab=-1, name=b"", vendor=b"\0\0\0\0", table=b"",
+                     size=None):
+    """A visual sample description: the 86 bytes of QuickTime's and ISO's
+    (a vendor, the size, 72 dpi, a Pascal compressor name, the depth and
+    the color table id), an inline color table, then `extra` boxes."""
+    body = bytes(6) + struct.pack(">H", 1) + struct.pack(">HH", 0, 0) + vendor + struct.pack(">II", 0, 0)
+    body += struct.pack(">HHIIIH", width, height, 0x480000, 0x480000, 0, 1)
+    body += bytes([len(name)]) + name.ljust(31, b"\0")[:31] + struct.pack(">Hh", depth, ctab)
+    return mov_box(fmt, body + table + extra, size)
+
+
+def mov_vmhd(mode=0):
+    return mov_full(b"vmhd", 0, 1, struct.pack(">HHHH", mode, 0, 0, 0))
+
+
+def mov_ctts(entries, version=0):
+    return mov_full(b"ctts", version, 0, struct.pack(">I", len(entries)) + b"".join(struct.pack(">Ii", n, o)
+                                                                                    for n, o in entries))
+
+
+def mov_video_track(entry, sizes, durations, time_scale, seed, track_id=1, width=None, height=None,
+                    matrix=MOV_IDENTITY, flags=3, extra_stbl=b"", **kw):
+    """A video track of random samples of the given sizes."""
+    rng = AdpcmLcg(seed)
+    samples = [adpcm_bytes(rng, n) for n in sizes]
+    tkhd = mov_tkhd(track_id, width if width is not None else 0, height if height is not None else 0, matrix, flags)
+    return mov_track([entry], samples, durations, time_scale, track_id=track_id, handler=b"vide",
+                     hdlr_name=b"VideoHandler\0", tkhd=tkhd, mhd=mov_vmhd(), extra_stbl=extra_stbl, **kw)
+
+
+def mov_esds_video(object_type, dsi):
+    dec = bytes([object_type, 0x11]) + bytes(3) + struct.pack(">II", 2000000, 1000000) + b"\x05" + bytes([len(dsi)]) + dsi
+    es = struct.pack(">H", 1) + b"\x00" + b"\x04" + bytes([len(dec)]) + dec + b"\x06\x01\x02"
+    return mov_full(b"esds", 0, 0, b"\x03" + bytes([len(es)]) + es)
+
+
+def build_mov_video(ok, bad, aac):
+    stss = lambda *n: mov_full(b"stss", 0, 0, struct.pack(">I", len(n)) + b"".join(struct.pack(">I", x) for x in n))
+    sizes12 = [900, 120, 80, 85, 300, 95, 700, 110, 70, 90, 280, 100]
+    avc = mov_visual_entry(b"avc1", 640, 360, mov_box(b"avcC", MOV_AVCC), name=b"\x0bAVC Coding"[1:])
+    # I P B B P B, twice: offsets in decode order.
+    reorder = [(1, 1024), (1, 2560), (1, 0), (1, 512), (1, 2560), (1, 0), (1, 1024), (1, 2560), (1, 0), (1, 512),
+               (1, 2560), (1, 0)]
+    h264 = mov_video_track(avc, sizes12, [512] * 12, 12800, 901, width=640, height=360,
+                           extra_stbl=mov_ctts(reorder) + stss(1, 7))
+    ok("mov_video_h264_ctts", "An avc1 track of 12 frames at 25 fps (1/12800) with B-frame composition offsets "
+       "(ctts) and keyframes 1 and 7: the H.264 reordering delay from ctts, pts after dts.", mov_movie([h264]))
+    negative = [(1, 0), (1, 1024), (1, -512), (1, -512), (1, 1024), (1, -512), (1, 0), (1, 1024), (1, -512),
+                (1, -512), (1, 1024), (1, -512)]
+    h264n = mov_video_track(avc, sizes12, [512] * 12, 12800, 902, width=640, height=360,
+                            extra_stbl=mov_ctts(negative, 1) + stss(1, 7))
+    ok("mov_video_h264_negative_ctts", "Negative composition offsets (ctts version 1) without cslg: FFmpeg shifts "
+       "the dts back by the largest (the last two entries excepted).", mov_movie([h264n]))
+    cslg = mov_full(b"cslg", 0, 0, struct.pack(">iiiii", 512, -512, 1024, 0, 6656))
+    h264c = mov_video_track(avc, sizes12, [512] * 12, 12800, 902, width=640, height=360,
+                            extra_stbl=mov_ctts(negative, 1) + cslg + stss(1, 7))
+    ok("mov_video_h264_cslg", "The negative offsets with a cslg box, which FFmpeg does not read.", mov_movie([h264c]))
+    hev = mov_visual_entry(b"hvc1", 1920, 1080, mov_box(b"hvcC", MOV_HVCC) + mov_box(b"pasp", struct.pack(">II", 1, 1)))
+    sdtp = mov_full(b"sdtp", 0, 0, bytes([0x20, 0x10, 0x18, 0x18, 0x10, 0x18, 0x20, 0x10, 0x18, 0x18, 0x10, 0x18]))
+    hevc = mov_video_track(hev, sizes12, [1001] * 12, 30000, 903, width=1920, height=1080,
+                           extra_stbl=mov_ctts(reorder) + stss(1, 7) + sdtp)
+    ok("mov_video_hevc", "An hvc1 track at 30000/1001 fps with B-frame offsets and sample dependencies (sdtp): "
+       "HEVC's reordering is not estimated (video delay 0), disposable frames flagged.", mov_movie([hevc]))
+    mp4v = mov_visual_entry(b"mp4v", 320, 240, mov_esds_video(0x20, MOV_MP4V_DSI))
+    mpeg4 = mov_video_track(mp4v, sizes12, [40] * 12, 1000, 904, width=320, height=240,
+                            extra_stbl=mov_ctts([(1, 40), (1, 120), (1, 0), (1, 0)] * 3) + stss(1, 5, 9))
+    ok("mov_video_mp4v", "MPEG-4 Part 2 (mp4v with an esds's VOL header) at 1/1000 with B-frames: an unreliable "
+       "time base for mp4v, delayed presentation interpolated by libavformat.", mov_movie([mpeg4]))
+    vpcc = mov_full(b"vpcC", 1, 0, bytes([0, 31, 0x82, 1, 1, 1, 0, 0]))
+    vp9 = mov_video_track(mov_visual_entry(b"vp09", 426, 240, vpcc), sizes12[:8], [1] * 8, 24, 905, width=426,
+                          height=240, extra_stbl=stss(1, 5))
+    ok("mov_video_vp09", "VP9 (vp09) with vpcC color parameters (BT.709, limited range) at 24 fps in a 1/24 time "
+       "base.", mov_movie([vp9]))
+    av1c = mov_box(b"av1C", MOV_AV1C) + mov_box(b"colr", b"nclx" + struct.pack(">HHHB", 9, 16, 9, 0x80))
+    av1 = mov_video_track(mov_visual_entry(b"av01", 1280, 720, av1c), sizes12[:10], [3003] * 10, 90000, 906,
+                          width=1280, height=720, extra_stbl=stss(1))
+    ok("mov_video_av01", "AV1 (av01, av1C) with an nclx colr of BT.2020 PQ full range, 90 kHz at 29.97 fps.",
+       mov_movie([av1]))
+    jpeg_entry = mov_visual_entry(b"jpeg", 160, 120, mov_box(b"fiel", bytes([2, 9])) + mov_box(b"pasp", struct.pack(">II", 4, 3)),
+                                  name=b"Photo - JPEG", vendor=b"appl")
+    mjpeg = mov_video_track(jpeg_entry, [400, 410, 390, 420, 405], [100] * 5, 600, 907, width=160, height=120)
+    ok("mov_video_mjpeg", "Photo-JPEG (jpeg) in QuickTime: intra-only packets, all keyframes without stss, field "
+       "order from fiel, pasp's 4:3 pixels, the vendor and compressor name as tags.",
+       mov_movie([mjpeg], brand=b"qt  "), "mov")
+    table = struct.pack(">IHH", 0, 0x8000, 3) + b"".join(struct.pack(">HHHH", i, c, c // 2, 0xFFFF - c)
+                                                         for i, c in enumerate((0, 0x5500, 0xAA00, 0xFFFF)))
+    raw8 = mov_video_track(mov_visual_entry(b"raw ", 8, 4, depth=8, ctab=0, table=table, name=b"None"),
+                           [32] * 3, [1] * 3, 10, 908, width=8, height=4)
+    ok("mov_video_raw_palette", "Uncompressed 8-bit video (raw , depth 8) with a color table of four entries in the "
+       "description: palette side data on the first packet.", mov_movie([raw8], brand=b"qt  "), "mov")
+    raw24 = mov_video_track(mov_visual_entry(b"raw ", 4, 2, depth=24, ctab=-1), [24] * 4, [2] * 4, 50, 909,
+                            width=4, height=2)
+    ok("mov_video_raw_rgb", "Uncompressed 24-bit RGB (raw , depth 24) at 25 fps in a 1/50 time base.",
+       mov_movie([raw24], brand=b"qt  "), "mov")
+    grey = mov_video_track(mov_visual_entry(b"raw ", 4, 4, depth=0x24, ctab=1), [8] * 2, [1] * 2, 10, 910,
+                           width=4, height=4)
+    ok("mov_video_raw_grey", "Uncompressed 4-bit greyscale video (depth 0x24 with a color table id): a grey ramp "
+       "as its palette.", mov_movie([grey], brand=b"qt  "), "mov")
+    yuv = mov_video_track(mov_visual_entry(b"2vuy", 8, 2, depth=24, name=b"Component Y'CbCr 8-bit 4:2:2"),
+                          [32] * 3, [1001] * 3, 30000, 911, width=8, height=2)
+    ok("mov_video_2vuy", "Uncompressed 4:2:2 (2vuy) at 30000/1001 fps.", mov_movie([yuv], brand=b"qt  "), "mov")
+    def av(track_id=2, **kw):
+        return mov_video_track(avc, sizes12, [512] * 12, 12800, 912, track_id=track_id, width=640, height=360,
+                               extra_stbl=mov_ctts(reorder) + stss(1, 7), **kw)
+    ok("mov_video_audio", "An AAC track and an avc1 track, moov first, chunks interleaved: both streams' packets "
+       "by file position within a second.", mov_movie([aac(), av(chunks=[3, 3, 3, 3])]))
+    ok("mov_video_audio_moov_last", "The AAC and avc1 tracks with the moov after the mdat.",
+       mov_movie([aac(), av(chunks=[6, 6])], faststart=False))
+    small = mov_video_track(mov_visual_entry(b"avc1", 320, 180, mov_box(b"avcC", MOV_AVCC)), sizes12[:6], [1024] * 6,
+                            12800, 913, track_id=3, width=320, height=180, flags=1)
+    ok("mov_video_two_tracks", "Two avc1 tracks (640x360 and an enabled 320x180 one) and an AAC track: the program "
+       "maps the larger video.", mov_movie([aac(), av(), small]))
+    rot = (0, 0x10000, 0, -0x10000, 0, 0, 0, 0, 0x40000000)
+    rotated = mov_video_track(avc, sizes12[:6], [512] * 6, 12800, 914, width=360, height=640, matrix=rot)
+    ok("mov_video_rotation", "A track whose tkhd matrix rotates by 90 degrees: display matrix side data.",
+       mov_movie([rotated]))
+    scaled = mov_video_track(avc, sizes12[:6], [512] * 6, 12800, 915, width=1280, height=360,
+                             matrix=(0x20000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000))
+    ok("mov_video_scaled_matrix", "A tkhd matrix scaling width by two: the display matrix and a 2:1 sample aspect "
+       "ratio from it.", mov_movie([scaled]))
+    clap = mov_box(b"clap", struct.pack(">8i", 600, 1, 340, 1, 0, 1, 0, 1))
+    icc = mov_box(b"colr", b"prof" + bytes(range(40)))
+    aspect_entry = mov_visual_entry(b"avc1", 640, 360, mov_box(b"avcC", MOV_AVCC) + clap + mov_box(b"pasp", struct.pack(">II", 32, 27)) + icc)
+    aspect = mov_video_track(aspect_entry, sizes12[:6], [512] * 6, 12800, 916, width=640, height=360)
+    ok("mov_video_aspect", "pasp (32:27), clap (a 600x340 aperture: cropping side data) and an ICC profile colr.",
+       mov_movie([aspect]))
+    sizediff = mov_video_track(avc, sizes12[:6], [512] * 6, 12800, 917, width=320, height=360)
+    ok("mov_video_track_size", "A tkhd width half the description's: the sample aspect ratio from the sizes.",
+       mov_movie([sizediff]))
+    hdr = (mov_box(b"hvcC", MOV_HVCC) + mov_box(b"mdcv", struct.pack(">8HII", 8500, 39850, 6550, 2300, 35400, 14600,
+                                                                      15635, 16450, 10000000, 50)) +
+           mov_box(b"clli", struct.pack(">HH", 1000, 400)) + mov_box(b"amve", struct.pack(">IHH", 3140000, 15635, 16450)) +
+           mov_box(b"dvcC", bytes([1, 0, 0x10, 0x35, 0x10]) + bytes(19)) +
+           mov_box(b"colr", b"nclc" + struct.pack(">HHH", 9, 16, 9)))
+    hdr_track = mov_video_track(mov_visual_entry(b"dvh1", 3840, 2160, hdr), sizes12[:6], [1001] * 6, 24000, 918,
+                                width=3840, height=2160, extra_stbl=stss(1))
+    ok("mov_video_hdr", "dvh1 with hvcC (HEVC), mdcv, clli, amve, dvcC and an nclc colr: mastering display, content "
+       "light, ambient viewing and Dolby Vision side data.", mov_movie([hdr_track]))
+    smdm = mov_full(b"SmDm", 0, 0, struct.pack(">10HII", 34000, 16000, 13250, 34500, 7500, 3000, 15635, 16450, 0, 0,
+                                                 1000 << 8, 50 << 14 // 10000)) + mov_full(b"CoLL", 0, 0, struct.pack(">HH", 800, 300))
+    vp9h = mov_video_track(mov_visual_entry(b"vp09", 640, 360, vpcc + smdm), sizes12[:4], [1] * 4, 30, 919,
+                           width=640, height=360)
+    ok("mov_video_vp09_hdr", "VP9 with SmDm and CoLL (the older WebM-in-MP4 boxes).", mov_movie([vp9h]))
+    vfr = [512, 512, 1024, 512, 512, 1024, 512, 512] * 3
+    vfr_track = mov_video_track(avc, [100] * 24, vfr, 12800, 920, width=640, height=360, extra_stbl=stss(1, 9, 17))
+    ok("mov_video_vfr", "Variable frame durations (stts runs of 512 and 1024): the frame rate guessed from the "
+       "durations at the header.", mov_movie([vfr_track]))
+    vfr_ctts = mov_video_track(avc, sizes12, [512, 1024] * 6, 12800, 921, width=640, height=360,
+                               extra_stbl=mov_ctts(reorder) + stss(1, 7))
+    ok("mov_video_vfr_ctts", "Variable durations with B-frame offsets: durations taken in presentation order "
+       "(mov_update_sample_durations).", mov_movie([vfr_ctts]))
+    zero = mov_video_track(avc, sizes12[:5], [0] * 5, 12800, 922, width=640, height=360)
+    ok("mov_video_zero_duration", "A video stts whose samples all last 0: no frame rate, the read-ahead runs to "
+       "the end, durations of 1 after it.", mov_movie([zero]))
+    coarse = mov_video_track(avc, sizes12[:5], [0] * 5, 600, 923, width=640, height=360)
+    ok("mov_video_zero_duration_coarse", "Zero durations in a 1/600 time base: libavformat gives each packet the "
+       "time base's tick.", mov_movie([coarse]))
+    big = mov_video_track(mov_visual_entry(b"avc1", 65535, 65535, mov_box(b"avcC", MOV_AVCC)), sizes12[:3], [512] * 3,
+                          12800, 924, width=65535, height=65535)
+    ok("mov_video_huge_size", "A 65535x65535 description and tkhd.", mov_movie([big]))
+    unknown = mov_video_track(mov_visual_entry(b"zzzz", 64, 64), sizes12[:4], [512] * 4, 12800, 925, width=64,
+                              height=64)
+    ok("mov_video_unknown_tag", "A video track whose format no table names: codec none, the read-ahead never "
+       "completes.", mov_movie([aac(), unknown]))
+    text_entry = mov_box(b"tx3g", bytes(6) + struct.pack(">H", 1) + MOV_TEXT_STUB)
+    subtitles = [struct.pack(">H", len(t)) + t for t in (b"Hello", b"", b"World!")]
+    sub = mov_track([text_entry], subtitles, [1000, 500, 1500], 1000, track_id=3, handler=b"sbtl",
+                    hdlr_name=b"SubtitleHandler\0", tkhd=mov_tkhd(3, 640, 60), mhd=mov_full(b"nmhd", 0, 0, b""))
+    ok("mov_video_mov_text", "Video, audio and a tx3g (mov_text) subtitle track: a subtitle stream with its packets "
+       "and the tkhd's size.", mov_movie([aac(), av(), sub]))
+    cdat = lambda b: mov_box(b"cdat", b)
+    c608 = [cdat(b"\x94\x2c\x94\x2c"), cdat(b"\x14\x20") + mov_box(b"cdt2", b"\x15\x2f"), cdat(b"\x80\x80")]
+    cc = mov_track([mov_box(b"c608", bytes(6) + struct.pack(">H", 1))], c608, [1001] * 3, 30000, track_id=2,
+                   handler=b"clcp", hdlr_name=b"ClosedCaptionHandler\0", mhd=mov_full(b"nmhd", 0, 0, b""))
+    ok("mov_video_c608", "A c608 closed-caption track: EIA-608 packets rewritten as cc_data triplets.",
+       mov_movie([av(track_id=1), cc]))
+    tmcd_entry = mov_box(b"tmcd", bytes(6) + struct.pack(">H", 1) + struct.pack(">IIIIBB", 0, 0, 2500, 100, 25, 0))
+    tmcd = mov_track([tmcd_entry], [struct.pack(">I", 90000)], [100], 2500, track_id=3, handler=b"tmcd",
+                     hdlr_name=b"TimeCodeHandler\0", mhd=mov_full(b"gmhd", 0, 0, b""))
+    bad("mov_video_tmcd", "A video track and a tmcd timecode track: timecode tracks are refused (their timecode "
+        "tag and stream group are not ported).", mov_movie([av(track_id=1), tmcd]), "UnsupportedFormat")
+    # Malformed video descriptions and boxes.
+    whole = mov_movie([h264])
+    entry_at = whole.index(b"avc1") - 4
+    ok("mov_video_short_entry", "A visual sample description whose declared size is 16: FFmpeg reads its fixed "
+       "fields from the boxes after it.", whole[:entry_at] + struct.pack(">I", 16) + whole[entry_at + 4:])
+    bad("mov_video_cut_entry", "The file cut inside the visual sample description: AVERROR_EOF.",
+        whole[:entry_at + 60], "Truncated")
+    vp_bad = mov_video_track(mov_visual_entry(b"vp09", 64, 64, mov_full(b"vpcC", 1, 0, bytes([0, 31, 0x82, 1, 1, 1, 0, 4]))),
+                             [10] * 2, [1] * 2, 30, 926, width=64, height=64)
+    bad("mov_video_vpcc_init_data", "A vpcC declaring codec initialization data: AVERROR_INVALIDDATA.",
+        mov_movie([vp_bad]), "InvalidMov")
+    fiel_bad = mov_video_track(mov_visual_entry(b"jpeg", 64, 64, mov_box(b"fiel", b"\x01")), [10] * 2, [1] * 2, 30, 927,
+                               width=64, height=64)
+    bad("mov_video_fiel_short", "A fiel box of one byte: AVERROR_INVALIDDATA.", mov_movie([fiel_bad], brand=b"qt  "),
+        "InvalidMov", "mov")
+    dv_bad = mov_video_track(mov_visual_entry(b"hvc1", 64, 64, mov_box(b"hvcC", MOV_HVCC) + mov_box(b"dvcC", b"\x01\x00")),
+                             [10] * 2, [1] * 2, 30, 928, width=64, height=64)
+    bad("mov_video_dvcc_short", "A dvcC of two bytes: AVERROR_INVALIDDATA.", mov_movie([dv_bad]), "InvalidMov")
+    md_bad = mov_video_track(mov_visual_entry(b"hvc1", 64, 64, mov_box(b"hvcC", MOV_HVCC) + mov_box(b"mdcv", bytes(10))),
+                             [10] * 2, [1] * 2, 30, 929, width=64, height=64)
+    bad("mov_video_mdcv_short", "An mdcv under 24 bytes: AVERROR_INVALIDDATA.", mov_movie([md_bad]), "InvalidMov")
+    clap_bad = mov_video_track(mov_visual_entry(b"avc1", 64, 64, mov_box(b"avcC", MOV_AVCC) + mov_box(b"clap", struct.pack(">8i", 100, 1, 64, 1, 0, 1, 0, 1))),
+                               [10] * 2, [1] * 2, 30, 930, width=64, height=64)
+    ok("mov_video_clap_invalid", "A clap wider than the picture: FFmpeg ignores the box.", mov_movie([clap_bad]))
+    pal_cut = mov_video_track(mov_visual_entry(b"raw ", 2, 2, depth=8, ctab=0, table=struct.pack(">IHH", 0, 0x8000, 200)),
+                              [4] * 2, [1] * 2, 10, 931, width=2, height=2)
+    ok("mov_video_palette_overread", "A color table declaring 201 entries in a description holding none: FFmpeg "
+       "reads them from the boxes and samples after it.", mov_movie([pal_cut], brand=b"qt  "), "mov")
 
 
 # Metadata and chapters (TODO.md T33a2): boxes FFmpeg's mov demuxer reads

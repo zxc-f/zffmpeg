@@ -28,6 +28,22 @@
 //                            channel's id, comma-separated, for a custom
 //                            one; 0 otherwise)
 //
+//   V <index> <width> <height> <sar> <codec sar> <pixel format> <field order>
+//     <color range> <primaries> <transfer> <space> <chroma location>
+//     <alpha mode> <r_frame_rate> <avg_frame_rate> <video delay> <level>
+//     <codec frame rate>
+//                            a video or subtitle stream's picture
+//                            parameters (T33a3): the stream's and the
+//                            codec's sample aspect ratios, the pixel
+//                            format's name (none without one) and the
+//                            enums' values
+//   X <index> <type> <size> <adler>
+//                            each coded side datum of a stream other than
+//                            audio (whose ReplayGain is Y): its
+//                            AVPacketSideDataType, size and Adler-32 from
+//                            0 (T33a3)
+//   Z <size> <adler>         a packet's palette side data (T33a3)
+//
 // Y, B, H, M, G, P, K, Q, T and R are mp3_vectors.c's; T33a2 compares the
 // tags (M, G), chapters (H with their G lines) and ReplayGain (Y) they
 // print. With -pipe as the
@@ -47,6 +63,7 @@
 #include "libavutil/dict.h"
 #include "libavutil/intreadwrite.h"
 #include "libavutil/log.h"
+#include "libavutil/pixdesc.h"
 #include "libavutil/replaygain.h"
 
 static void print_error(int err)
@@ -181,6 +198,21 @@ static void run(const char *path)
             const AVReplayGain *rg = (const AVReplayGain *)sd->data;
             printf("Y %u %d %u %d %u\n", i, rg->track_gain, rg->track_peak, rg->album_gain, rg->album_peak);
         }
+        if (par->codec_type == AVMEDIA_TYPE_VIDEO || par->codec_type == AVMEDIA_TYPE_SUBTITLE) {
+            const char *pix = par->format < 0 ? "none" : av_get_pix_fmt_name(par->format);
+            printf("V %u %d %d %d/%d %d/%d %s %d %d %d %d %d %d %d %d/%d %d/%d %d %d %d/%d\n", i, par->width, par->height,
+                   st->sample_aspect_ratio.num, st->sample_aspect_ratio.den, par->sample_aspect_ratio.num,
+                   par->sample_aspect_ratio.den, pix ? pix : "unknown", (int)par->field_order, (int)par->color_range,
+                   (int)par->color_primaries, (int)par->color_trc, (int)par->color_space, (int)par->chroma_location,
+                   (int)par->alpha_mode, st->r_frame_rate.num, st->r_frame_rate.den, st->avg_frame_rate.num,
+                   st->avg_frame_rate.den, par->video_delay, par->level, par->framerate.num, par->framerate.den);
+        }
+        for (int k = 0; k < par->nb_coded_side_data; k++) {
+            const AVPacketSideData *csd = &par->coded_side_data[k];
+            if (par->codec_type == AVMEDIA_TYPE_AUDIO)
+                break;
+            printf("X %u %d %zu %lu\n", i, (int)csd->type, csd->size, adler(csd->data, csd->size));
+        }
         const AVDictionaryEntry *tag = NULL;
         while ((tag = av_dict_iterate(st->metadata, tag)))
             printf("M %u %s=%s\n", i, tag->key, tag->value);
@@ -217,6 +249,9 @@ static void run(const char *path)
         side = av_packet_get_side_data(pkt, AV_PKT_DATA_STRINGS_METADATA, &size);
         if (side)
             printf("T %zu %lu\n", size, adler(side, size));
+        side = av_packet_get_side_data(pkt, AV_PKT_DATA_PALETTE, &size);
+        if (side)
+            printf("Z %zu %lu\n", size, adler(side, size));
         av_packet_unref(pkt);
     }
     printf("R ");

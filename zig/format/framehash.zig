@@ -3,7 +3,8 @@
 // libavformat/framecrcenc.c, framehash.c (ff_framehash_write_header) and
 // hashenc.c (the framemd5 and streamhash muxers, format version 2) at the
 // pinned reference revision describe the output, restated here.
-//! FFmpeg's hash muxers for one audio stream (TODO.md T19b): `framecrc`
+//! FFmpeg's hash muxers for audio and video streams (TODO.md T19b, several
+//! streams since T33a3): `framecrc`
 //! (each packet's Adler-32), `framemd5` (each packet's MD5) and
 //! `streamhash` (the SHA-256 of every packet's bytes), written as FFmpeg
 //! writes them with `-fflags +bitexact`, so the text compares byte for byte.
@@ -36,11 +37,27 @@ pub const Stream = struct {
     time_base: time.TimeBase,
     /// The codec, as FFmpeg names it (`avcodec_get_name`).
     codec: []const u8,
-    sample_rate: u32,
-    layout: channel_layout.Layout,
+    /// An audio stream's rate and layout.
+    sample_rate: u32 = 0,
+    layout: channel_layout.Layout = .{ .unspecified = 0 },
     /// The codec's extradata, hashed in the header when present.
     extradata: ?[]const u8 = null,
+    /// A video stream's picture: then `#dimensions` and `#sar` replace the
+    /// audio lines.
+    video: ?Video = null,
 };
+
+/// A video stream's header fields: the codec's size and the stream's
+/// sample aspect ratio.
+pub const Video = struct {
+    width: i32,
+    height: i32,
+    sar_num: i32,
+    sar_den: i32,
+};
+
+/// The streams one writer takes.
+pub const max_streams = 8;
 
 /// A packet's side data as framecrc names it (`av_packet_side_data_name`).
 pub const SideData = struct {
@@ -67,39 +84,63 @@ fn decimal(buf: *[24]u8, value: i64) []const u8 {
 pub const Writer = struct {
     kind: Kind,
     out: *std.Io.Writer,
-    stream: Stream,
-    /// streamhash's running hash and byte count.
-    sha: Sha256 = .init(.{}),
-    size: u64 = 0,
+    /// The streams, by output index (`init`'s one stream is `single`).
+    single: [1]Stream = undefined,
+    many: ?[]const Stream = null,
+    /// streamhash's running hash and byte count, by stream.
+    sha: [max_streams]Sha256 = @splat(.init(.{})),
+    size: [max_streams]u64 = @splat(0),
 
+    /// One audio stream, index 0.
     pub fn init(kind: Kind, out: *std.Io.Writer, stream: Stream) Writer {
-        return .{ .kind = kind, .out = out, .stream = stream };
+        return .{ .kind = kind, .out = out, .single = .{stream} };
     }
 
-    /// The muxer's header.
+    /// Several streams in output order, borrowed until the writer is done.
+    pub fn initMany(kind: Kind, out: *std.Io.Writer, list: []const Stream) error{TooManyStreams}!Writer {
+        if (list.len > max_streams) return error.TooManyStreams;
+        return .{ .kind = kind, .out = out, .many = list };
+    }
+
+    fn streamList(w: *const Writer) []const Stream {
+        return w.many orelse &w.single;
+    }
+
+    /// The muxer's header: framecrc's extradata lines, or framemd5's and
+    /// streamhash's format lines and extradata hashes, then
+    /// ff_framehash_write_header's lines for each stream.
     pub fn writeHeader(w: *Writer) std.Io.Writer.Error!void {
         const out = w.out;
         switch (w.kind) {
-            .framecrc => if (w.stream.extradata) |e| {
-                try out.print("#extradata 0: {d:>8}, 0x{x:0>8}\n", .{ e.len, adler32(e) });
+            .framecrc => for (w.streamList(), 0..) |st, i| if (st.extradata) |e| {
+                try out.print("#extradata {d}: {d:>8}, 0x{x:0>8}\n", .{ i, e.len, adler32(e) });
             },
             .framemd5, .streamhash => {
                 try out.print("#format: {s} checksums\n#version: 2\n#hash: {s}\n", .{
                     if (w.kind == .framemd5) "frame" else "stream",
                     if (w.kind == .framemd5) "MD5" else "SHA256",
                 });
-                if (w.stream.extradata) |e| {
-                    try out.print("#extradata 0, {d:>31}, ", .{e.len});
+                for (w.streamList(), 0..) |st, i| if (st.extradata) |e| {
+                    try out.print("#extradata {d}, {d:>31}, ", .{ i, e.len });
                     try w.writeHash(e);
                     try out.writeAll("\n");
-                }
+                };
             },
         }
-        try out.print("#tb 0: {d}/{d}\n#media_type 0: audio\n#codec_id 0: {s}\n#sample_rate 0: {d}\n#channel_layout_name 0: ", .{
-            w.stream.time_base.num, w.stream.time_base.den, w.stream.codec, w.stream.sample_rate,
-        });
-        try w.stream.layout.describe(out);
-        try out.writeAll("\n");
+        for (w.streamList(), 0..) |st, i| {
+            try out.print("#tb {d}: {d}/{d}\n", .{ i, st.time_base.num, st.time_base.den });
+            if (st.video) |v| {
+                try out.print("#media_type {d}: video\n#codec_id {d}: {s}\n#dimensions {d}: {d}x{d}\n#sar {d}: {d}/{d}\n", .{
+                    i, i, st.codec, i, v.width, v.height, i, v.sar_num, v.sar_den,
+                });
+            } else {
+                try out.print("#media_type {d}: audio\n#codec_id {d}: {s}\n#sample_rate {d}: {d}\n#channel_layout_name {d}: ", .{
+                    i, i, st.codec, i, st.sample_rate, i,
+                });
+                try st.layout.describe(out);
+                try out.writeAll("\n");
+            }
+        }
         switch (w.kind) {
             .framecrc => {},
             .framemd5 => try out.writeAll("#stream#, dts,        pts, duration,     size, hash\n"),
@@ -136,8 +177,9 @@ pub const Writer = struct {
     /// Adler-32 (T27a); framemd5 and streamhash do not show it.
     pub fn writePacketSide(w: *Writer, p: packet.Packet, side: []const SideData) std.Io.Writer.Error!void {
         if (w.kind == .streamhash) {
-            w.sha.update(p.data);
-            w.size += p.data.len;
+            if (p.stream_index >= w.streamList().len) return error.WriteFailed;
+            w.sha[p.stream_index].update(p.data);
+            w.size[p.stream_index] += p.data.len;
             return;
         }
         var dts: [24]u8 = undefined;
@@ -170,9 +212,11 @@ pub const Writer = struct {
     /// streamhash's trailer; nothing for the others.
     pub fn finish(w: *Writer) std.Io.Writer.Error!void {
         if (w.kind != .streamhash) return;
-        var digest: [Sha256.digest_length]u8 = undefined;
-        w.sha.final(&digest);
-        try w.out.print("0, {d:>11}, {s}\n", .{ w.size, &std.fmt.bytesToHex(digest, .lower) });
+        for (0..w.streamList().len) |i| {
+            var digest: [Sha256.digest_length]u8 = undefined;
+            w.sha[i].final(&digest);
+            try w.out.print("{d}, {d:>11}, {s}\n", .{ i, w.size[i], &std.fmt.bytesToHex(digest, .lower) });
+        }
     }
 };
 

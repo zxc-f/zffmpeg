@@ -81,6 +81,7 @@ const rational = @import("../core/rational.zig");
 const metadata = @import("../core/metadata.zig");
 const channel_layout = @import("../core/channel_layout.zig");
 const mov_chan = @import("mov_chan.zig");
+const mov_video = @import("mov_video.zig");
 const mpeg4audio = @import("../codec/mpeg4audio.zig");
 const alac = @import("../codec/alac.zig");
 const opusdec = @import("../codec/opusdec.zig");
@@ -447,6 +448,19 @@ pub const Codec = enum {
     dvd_subtitle,
     mpeg4systems,
     bin_data,
+    // Video codecs of `ff_codec_movvideo_tags` and `ff_codec_bmp_tags`
+    // (T33a3), generated from the reference build's tables.
+    @"012v", @"4xm", @"8bps", aasc, agm, aic, amv, apv, arbc, asv1, asv2, aura, aura2, av1, avrp, avs3, avui,
+    cavs, cdtoons, cfhd, cinepak, clearvideo, cljr, cllc, cscd, cyuv, dnxhd, dpx, dvvideo, dxtory, dxv,
+    escape130, evc, exr, ffv1, ffvhuff, fic, flashsv, flic, flv1, fmvc, fraps, frwu, g2m, gif, h261, h263,
+    h263i, hap, hq_hqa, hqx, huffyuv, hymt, imm4, imm5, imm6, indeo2, indeo3, indeo4, indeo5, jpegls, kgv1,
+    kmvc, lagarith, lcevc, lead, loco, lscr, m101, magicyuv, media100, mimic, mjpegb, msa1, mscc, msmpeg4v1,
+    msmpeg4v2, msmpeg4v3, msrle, mss1, mss2, msvideo1, mszh, mts2, mv30, mvdv, mvha, mwsc, notchlc, pixlet,
+    prores, prores_raw, prosumer, qdraw, qpeg, qtrle, r10k, r210, rasc, rawvideo, rpza, rscc, rtv1, rv40,
+    rv60, scpr, screenpresso, sgi, sgirle, sheervideo, smc, snow, sp5x, speedhq, srgc, svq1, svq3, targa,
+    targa_y216, tdsc, theora, tiff, truemotion1, truemotion2, truemotion2rt, tscc, ulti, utvideo, v210, vble,
+    vc1image, vcr1, vixl, vmix, vmnc, vp3, vp4, vp5, vp6, vp6a, vp6f, vp7, vp8, vqc, wcmv, wmv1, wmv2, wmv3,
+    wmv3image, wnv1, xan_wc4, y41p, ylc, yuv4, zerocodec, zlib, zmbv,
 
     /// `avcodec_get_name`.
     pub fn name(c: Codec) []const u8 {
@@ -473,6 +487,7 @@ pub const Codec = enum {
     pub fn intraOnly(c: Codec) bool {
         return switch (c) {
             .none, .aac, .apple_apac, .ac4, .truehd, .mpegh_3d_audio, .mov_text, .eia_608, .ttml, .mpeg4, .h264, .hevc, .vvc, .mpeg2video, .mpeg1video, .png, .vc1, .dirac, .vp9, .tscc2, .dvd_subtitle, .mpeg4systems, .bin_data => false,
+            .@"4xm", .aasc, .agm, .arbc, .av1, .avs3, .cavs, .cdtoons, .cfhd, .cinepak, .clearvideo, .cscd, .escape130, .evc, .ffv1, .fic, .flashsv, .flic, .flv1, .fmvc, .g2m, .gif, .h261, .h263, .h263i, .imm4, .imm5, .imm6, .indeo2, .indeo3, .indeo4, .indeo5, .kgv1, .kmvc, .lcevc, .lscr, .mimic, .msa1, .msmpeg4v1, .msmpeg4v2, .msmpeg4v3, .msrle, .mss1, .msvideo1, .mts2, .mv30, .mvdv, .mwsc, .qpeg, .qtrle, .rasc, .rpza, .rscc, .rv40, .rv60, .scpr, .screenpresso, .smc, .snow, .svq1, .svq3, .tdsc, .theora, .truemotion1, .truemotion2, .tscc, .ulti, .vc1image, .vmnc, .vp3, .vp4, .vp5, .vp6, .vp6a, .vp6f, .vp7, .vp8, .vqc, .wcmv, .wmv1, .wmv2, .wmv3, .wmv3image, .xan_wc4, .zerocodec, .zmbv => false,
             else => true,
         };
     }
@@ -486,11 +501,19 @@ pub const Codec = enum {
         };
     }
 
+    /// `AV_CODEC_PROP_FIELDS` in FFmpeg's descriptor.
+    pub fn fields(c: Codec) bool {
+        return switch (c) {
+            .mpeg1video, .mpeg2video, .vc1, .h264 => true,
+            else => false,
+        };
+    }
+
     /// The media type a codec's descriptor gives (`mov_codec_id`'s
     /// lookups set it from the table they found the tag in).
     fn isVideo(c: Codec) bool {
         return switch (c) {
-            .mpeg4, .h264, .hevc, .vvc, .mpeg2video, .mpeg1video, .mjpeg, .png, .jpeg2000, .vc1, .dirac, .vp9, .tscc2 => true,
+            .@"012v", .@"4xm", .@"8bps", .aasc, .agm, .aic, .amv, .apv, .arbc, .asv1, .asv2, .aura, .aura2, .av1, .avrp, .avs3, .avui, .cavs, .cdtoons, .cfhd, .cinepak, .clearvideo, .cljr, .cllc, .cscd, .cyuv, .dirac, .dnxhd, .dpx, .dvvideo, .dxtory, .dxv, .escape130, .evc, .exr, .ffv1, .ffvhuff, .fic, .flashsv, .flic, .flv1, .fmvc, .fraps, .frwu, .g2m, .gif, .h261, .h263, .h263i, .h264, .hap, .hevc, .hq_hqa, .hqx, .huffyuv, .hymt, .imm4, .imm5, .imm6, .indeo2, .indeo3, .indeo4, .indeo5, .jpeg2000, .jpegls, .kgv1, .kmvc, .lagarith, .lcevc, .lead, .loco, .lscr, .m101, .magicyuv, .media100, .mimic, .mjpeg, .mjpegb, .mpeg1video, .mpeg2video, .mpeg4, .msa1, .mscc, .msmpeg4v1, .msmpeg4v2, .msmpeg4v3, .msrle, .mss1, .mss2, .msvideo1, .mszh, .mts2, .mv30, .mvdv, .mvha, .mwsc, .notchlc, .pixlet, .png, .prores, .prores_raw, .prosumer, .qdraw, .qpeg, .qtrle, .r10k, .r210, .rasc, .rawvideo, .rpza, .rscc, .rtv1, .rv40, .rv60, .scpr, .screenpresso, .sgi, .sgirle, .sheervideo, .smc, .snow, .sp5x, .speedhq, .srgc, .svq1, .svq3, .targa, .targa_y216, .tdsc, .theora, .tiff, .truemotion1, .truemotion2, .truemotion2rt, .tscc, .tscc2, .ulti, .utvideo, .v210, .vble, .vc1, .vc1image, .vcr1, .vixl, .vmix, .vmnc, .vp3, .vp4, .vp5, .vp6, .vp6a, .vp6f, .vp7, .vp8, .vp9, .vqc, .vvc, .wcmv, .wmv1, .wmv2, .wmv3, .wmv3image, .wnv1, .xan_wc4, .y41p, .ylc, .yuv4, .zerocodec, .zlib, .zmbv => true,
             else => false,
         };
     }
@@ -613,100 +636,183 @@ fn languageCode(code_in: u16, out: *[3]u8) ?[]const u8 {
     if (lang.len == 0) return null;
     return lang;
 }
-/// The video codec tags `ff_codec_movvideo_tags` and `ff_codec_bmp_tags`
-/// hold in the reference build, sorted: a data track's sample entry whose
-/// format is one of them is a video track to FFmpeg (`mov_codec_id`).
-const video_tags = [_]u32{
-    0x00000000, 0x00000001, 0x00000002, 0x00000003, 0x00000004, 0x10000001, 0x10000002, 0x10000004,
-    0x20203859, 0x20474e4d, 0x20525644, 0x20616774, 0x20636d73, 0x20637664, 0x20656c72, 0x20666967,
-    0x20676e70, 0x20696773, 0x206c7664, 0x20727865, 0x2076316d, 0x20776172, 0x20787064, 0x302e3151,
-    0x30303859, 0x30313243, 0x30313259, 0x30313272, 0x30313276, 0x30313449, 0x30313459, 0x30313476,
-    0x30315742, 0x30323449, 0x3032344a, 0x30323452, 0x30324d4c, 0x30324d54, 0x30325254, 0x30325442,
-    0x30333145, 0x30335056, 0x3033564d, 0x30343449, 0x3034344a, 0x30344e53, 0x30345056, 0x30345652,
-    0x30355056, 0x30355649, 0x30355844, 0x30357664, 0x30365056, 0x30365652, 0x30375056, 0x30385056,
-    0x30395056, 0x30434c59, 0x3047304d, 0x3047384d, 0x30484c55, 0x304c4f43, 0x304d4741, 0x30514853,
-    0x3052304d, 0x3059304d, 0x3059384d, 0x30594c55, 0x30595155, 0x305a4c42, 0x30726853, 0x312d6376,
-    0x312e3151, 0x3130314d, 0x3130374d, 0x31305641, 0x31307661, 0x31313449, 0x31313452, 0x31313459,
-    0x31325452, 0x3132564e, 0x31335056, 0x31335649, 0x31345041, 0x3134504d, 0x31345649, 0x31356478,
-    0x31363248, 0x31365056, 0x31375056, 0x3141534d, 0x31435156, 0x31435657, 0x31474e50, 0x31495641,
-    0x314c4f43, 0x314d4741, 0x314d4950, 0x31514853, 0x31515653, 0x31524356, 0x31535046, 0x3153534d,
-    0x31564646, 0x3156474b, 0x31564944, 0x31564c46, 0x31564c50, 0x31564d57, 0x31564e57, 0x31565053,
-    0x31565341, 0x31565346, 0x31565452, 0x31584d56, 0x31617664, 0x31626d64, 0x31636c6e, 0x31637661,
-    0x31637665, 0x31637668, 0x3163766c, 0x31637676, 0x31645641, 0x31656c72, 0x3167706d, 0x31687664,
-    0x31697676, 0x31706148, 0x31717673, 0x31726853, 0x31755632, 0x3176316d, 0x3176326d, 0x31766164,
-    0x31766468, 0x31766478, 0x31766568, 0x31767061, 0x31767975, 0x3230314d, 0x3230374d, 0x3231564e,
-    0x32315659, 0x32316961, 0x32323449, 0x3232344a, 0x32323450, 0x32323456, 0x32323459, 0x32335641,
-    0x32335649, 0x32335652, 0x3234504d, 0x32356961, 0x32365056, 0x32424752, 0x32435156, 0x3243534d,
-    0x32435354, 0x32484c55, 0x32484d55, 0x32495641, 0x324a5049, 0x324b4d44, 0x324d3247, 0x324d4741,
-    0x324d4950, 0x32504d4c, 0x32505657, 0x32514853, 0x32524356, 0x32525541, 0x3253344d, 0x3253534d,
-    0x3253544d, 0x32535641, 0x32564933, 0x32564944, 0x32564d53, 0x32564d57, 0x32565341, 0x3259304d,
-    0x3259384d, 0x32594c55, 0x32594d55, 0x32595155, 0x32595559, 0x32637661, 0x3267706d, 0x32686478,
-    0x32687664, 0x326a5641, 0x32706a6d, 0x32726853, 0x32737661, 0x32766468, 0x32766478, 0x32767561,
-    0x32767579, 0x32797862, 0x3330374d, 0x33316961, 0x3334504d, 0x33356961, 0x33363248, 0x33363249,
-    0x3336324c, 0x3336324d, 0x33363253, 0x33363254, 0x33363255, 0x33363258, 0x33363268, 0x33363273,
-    0x33445844, 0x3347504d, 0x334d3247, 0x334d4741, 0x33514853, 0x33515653, 0x3354344d, 0x33564944,
-    0x33564d57, 0x33585644, 0x33637661, 0x33687664, 0x33726853, 0x33737661, 0x33766468, 0x33766478,
-    0x3430374d, 0x3432524a, 0x34325652, 0x34325659, 0x34343449, 0x3434344a, 0x34355053, 0x34356478,
-    0x34363247, 0x34363248, 0x34363251, 0x34363256, 0x34363258, 0x34363268, 0x34363278, 0x34367672,
-    0x3447504d, 0x34484c55, 0x34484d55, 0x344d3247, 0x344d4741, 0x344d4d49, 0x344d4e4d, 0x344d5356,
-    0x344d5447, 0x344d5944, 0x34504d46, 0x34504d47, 0x34504d51, 0x34504d52, 0x34504d53, 0x34504d55,
-    0x34504d5a, 0x34514853, 0x34534141, 0x34564944, 0x34564c46, 0x34564c47, 0x34584448, 0x3459304d,
-    0x3459384d, 0x34594c55, 0x34594d55, 0x34637661, 0x34687664, 0x34726853, 0x34766468, 0x34766478,
-    0x34767579, 0x3530374d, 0x35315652, 0x35316961, 0x35324c53, 0x35327664, 0x3535354c, 0x35356478,
-    0x35356961, 0x35363542, 0x3536354c, 0x354d3247, 0x354d4741, 0x354d4d49, 0x35514853, 0x35564443,
-    0x35564944, 0x35687664, 0x35706148, 0x35726853, 0x35766468, 0x35766478, 0x36313259, 0x36313459,
-    0x36314f4e, 0x36315652, 0x36315659, 0x36316961, 0x36356961, 0x364d4741, 0x364d4d49, 0x36564944,
-    0x36687664, 0x36726853, 0x36766468, 0x36766478, 0x374d4741, 0x37514853, 0x37726853, 0x37766468,
-    0x37766478, 0x38303376, 0x38303476, 0x38303479, 0x38307076, 0x38565559, 0x38766468, 0x38766478,
-    0x39307076, 0x39356478, 0x39514853, 0x39555659, 0x39565559, 0x39766468, 0x39766478, 0x41303449,
-    0x41323449, 0x41344d45, 0x41365056, 0x41424752, 0x4148564d, 0x41507464, 0x4152304d, 0x4152324d,
-    0x4152344d, 0x4152384d, 0x41524742, 0x41524c55, 0x41524d55, 0x41525155, 0x41525541, 0x41564d57,
-    0x41565559, 0x4159384d, 0x415a5052, 0x41706148, 0x42313459, 0x42323459, 0x42393049, 0x42393249,
-    0x42393449, 0x42413049, 0x42413249, 0x42413449, 0x42433049, 0x42433249, 0x42433449, 0x42463049,
-    0x42463449, 0x42494c5a, 0x43324a4c, 0x43324a4d, 0x43425241, 0x4343344d, 0x43435349, 0x4343534d,
-    0x43435352, 0x43475253, 0x434c4641, 0x434c4c43, 0x434d4e49, 0x43534141, 0x43534152, 0x43534454,
-    0x4353574d, 0x43564144, 0x43564147, 0x43564d46, 0x43564d4b, 0x4356534d, 0x43565543, 0x43594448,
-    0x4441454c, 0x44435343, 0x44484643, 0x44495658, 0x444f4344, 0x444f4355, 0x44564933, 0x454c4256,
-    0x454c5257, 0x45565847, 0x46315657, 0x46365056, 0x46564d41, 0x47423432, 0x47444553, 0x4745504d,
-    0x47455051, 0x474e504d, 0x47504a43, 0x47504a49, 0x47504a4c, 0x47504a4d, 0x47504a5a, 0x47504d58,
-    0x4752304d, 0x4752324d, 0x4752344d, 0x4752384d, 0x47524c55, 0x47524d55, 0x47525155, 0x47564951,
-    0x48535356, 0x48564443, 0x48564646, 0x485a534d, 0x49445844, 0x49474944, 0x49544c55, 0x49555641,
-    0x4a445641, 0x4a4d4c53, 0x4a53544d, 0x4b315856, 0x4b324a4c, 0x4b435544, 0x4c393049, 0x4c393249,
-    0x4c393449, 0x4c413049, 0x4c413249, 0x4c413449, 0x4c433049, 0x4c433249, 0x4c433449, 0x4c463049,
-    0x4c463449, 0x4c47504a, 0x4c584956, 0x4d414857, 0x4d415243, 0x4d444956, 0x4d475844, 0x4d58564d,
-    0x4d706148, 0x4e313036, 0x4f43455a, 0x4f434f4c, 0x4f4f5644, 0x50313036, 0x50313459, 0x504a4d4d,
-    0x504a564d, 0x50504953, 0x50564d57, 0x5243534c, 0x52474241, 0x52474742, 0x524a4c43, 0x52504353,
-    0x5334504d, 0x53444646, 0x53445553, 0x53454d4d, 0x5347414c, 0x534c4a4d, 0x53504238, 0x53564143,
-    0x544d5948, 0x544e7464, 0x55575246, 0x55594648, 0x55595659, 0x56324d45, 0x56344d44, 0x56344d50,
-    0x56344d53, 0x56424d5a, 0x56434946, 0x56444341, 0x56444c53, 0x5644564d, 0x56485045, 0x564c4a49,
-    0x564d4357, 0x564d5834, 0x564e5559, 0x564e5955, 0x564f4547, 0x56534d55, 0x56555941, 0x56555943,
-    0x56555949, 0x56574157, 0x56595559, 0x57415257, 0x57465646, 0x574f4e53, 0x58444c55, 0x58495658,
-    0x584f4547, 0x58505356, 0x58514843, 0x58564944, 0x58657244, 0x59455247, 0x5947414d, 0x594e5955,
-    0x59555956, 0x59565955, 0x59706148, 0x5a455650, 0x5a544456, 0x61343662, 0x61356478, 0x61706a6d,
-    0x61707464, 0x61766468, 0x61766478, 0x617a7072, 0x62356478, 0x62706a6d, 0x62766478, 0x63356478,
-    0x63617264, 0x63637374, 0x63696c66, 0x636c636e, 0x636e4d56, 0x63766463, 0x63766470, 0x63766478,
-    0x6376736d, 0x64356478, 0x64686478, 0x64687374, 0x64687664, 0x64697663, 0x646f6369, 0x64737664,
-    0x64766478, 0x65356478, 0x65687664, 0x656c726d, 0x65766478, 0x66356478, 0x66666974, 0x66696c73,
-    0x66766478, 0x67303152, 0x67363162, 0x67627862, 0x6765706a, 0x6765706d, 0x676c6178, 0x676c7661,
-    0x67727862, 0x68347061, 0x68637061, 0x68645641, 0x68727061, 0x69717673, 0x6b303152, 0x6b426b51,
-    0x6c737664, 0x6d616877, 0x6d617263, 0x6d76736c, 0x6e33786d, 0x6e34786d, 0x6e357664, 0x6e35786d,
-    0x6e525641, 0x6e617858, 0x6e637061, 0x6e645641, 0x6e695641, 0x6e727061, 0x6f47795a, 0x6f637061,
-    0x6f656874, 0x70316961, 0x7033786d, 0x7034786d, 0x70356961, 0x70357664, 0x7035786d, 0x70637664,
-    0x70687664, 0x706c7664, 0x706d5641, 0x70707664, 0x70725641, 0x70755641, 0x71316961, 0x71356961,
-    0x71687664, 0x72383462, 0x726f7478, 0x72707a61, 0x73637061, 0x73637664, 0x73697664, 0x73767579,
-    0x746c7870, 0x746e7464, 0x7631706d, 0x76323130, 0x76323161, 0x7632706d, 0x7634706d, 0x76617664,
-    0x76645641, 0x7667706d, 0x76797862, 0x77726471, 0x78315641, 0x78347061, 0x78766961, 0x79757632,
+/// `ff_codec_movvideo_tags`, then `ff_codec_bmp_tags`, as `mov_codec_id`
+/// looks a format up in them (the first match of the first table that has
+/// it), sorted by tag; generated from the reference build's tables.
+const video_tags = [_]struct { u32, Codec }{
+    .{ 0x00000000, .rawvideo }, .{ 0x00000001, .msrle }, .{ 0x00000002, .msrle }, .{ 0x00000003, .rawvideo },
+    .{ 0x00000004, .mpeg4 }, .{ 0x10000001, .mpeg1video }, .{ 0x10000002, .mpeg2video }, .{ 0x10000004, .mpeg4 },
+    .{ 0x20203859, .rawvideo }, .{ 0x20474e4d, .png }, .{ 0x20525644, .mpeg2video }, .{ 0x20616774, .targa },
+    .{ 0x20636d73, .smc }, .{ 0x20637664, .dvvideo }, .{ 0x20656c72, .qtrle }, .{ 0x20666967, .gif },
+    .{ 0x20676e70, .png }, .{ 0x20696773, .sgi }, .{ 0x206c7664, .dvvideo }, .{ 0x20727865, .exr },
+    .{ 0x2076316d, .mpeg1video }, .{ 0x20776172, .rawvideo }, .{ 0x20787064, .dpx }, .{ 0x302e3151, .qpeg },
+    .{ 0x30303859, .rawvideo }, .{ 0x30313243, .v210 }, .{ 0x30313259, .rawvideo }, .{ 0x30313272, .r210 },
+    .{ 0x30313276, .v210 }, .{ 0x30313449, .rawvideo }, .{ 0x30313459, .rawvideo }, .{ 0x30313476, .rawvideo },
+    .{ 0x30315742, .mpeg1video }, .{ 0x30323449, .rawvideo }, .{ 0x3032344a, .rawvideo }, .{ 0x30323452, .rawvideo },
+    .{ 0x30324d4c, .mimic }, .{ 0x30324d54, .truemotion2 }, .{ 0x30325254, .truemotion2rt },
+    .{ 0x30325442, .prosumer }, .{ 0x30333145, .escape130 }, .{ 0x30335056, .vp3 }, .{ 0x3033564d, .mv30 },
+    .{ 0x30343449, .rawvideo }, .{ 0x3034344a, .rawvideo }, .{ 0x30344e53, .mpeg4 }, .{ 0x30345056, .vp4 },
+    .{ 0x30345652, .rv40 }, .{ 0x30355056, .vp5 }, .{ 0x30355649, .indeo5 }, .{ 0x30355844, .mpeg4 },
+    .{ 0x30357664, .dvvideo }, .{ 0x30365056, .vp6 }, .{ 0x30365652, .rv60 }, .{ 0x30375056, .vp7 },
+    .{ 0x30385056, .vp8 }, .{ 0x30395056, .vp9 }, .{ 0x30434c59, .ylc }, .{ 0x3047304d, .magicyuv },
+    .{ 0x3047384d, .magicyuv }, .{ 0x30484c55, .utvideo }, .{ 0x304c4f43, .msmpeg4v3 }, .{ 0x304d4741, .agm },
+    .{ 0x30514853, .speedhq }, .{ 0x3052304d, .magicyuv }, .{ 0x3059304d, .magicyuv }, .{ 0x3059384d, .magicyuv },
+    .{ 0x30594c55, .utvideo }, .{ 0x30595155, .utvideo }, .{ 0x305a4c42, .mpeg4 }, .{ 0x30726853, .sheervideo },
+    .{ 0x312d6376, .vc1 }, .{ 0x312e3151, .qpeg }, .{ 0x3130314d, .m101 }, .{ 0x3130374d, .mpeg2video },
+    .{ 0x31305641, .av1 }, .{ 0x31307661, .av1 }, .{ 0x31313449, .rawvideo }, .{ 0x31313452, .rawvideo },
+    .{ 0x31313459, .rawvideo }, .{ 0x31325452, .indeo2 }, .{ 0x3132564e, .rawvideo }, .{ 0x31335056, .vp3 },
+    .{ 0x31335649, .indeo3 }, .{ 0x31345041, .msmpeg4v3 }, .{ 0x3134504d, .msmpeg4v1 }, .{ 0x31345649, .indeo4 },
+    .{ 0x31356478, .mpeg2video }, .{ 0x31363248, .h261 }, .{ 0x31365056, .vp6 }, .{ 0x31375056, .vp7 },
+    .{ 0x3141534d, .msa1 }, .{ 0x31435156, .vqc }, .{ 0x31435657, .vc1 }, .{ 0x31474e50, .png },
+    .{ 0x31495641, .mjpeg }, .{ 0x314c4f43, .msmpeg4v3 }, .{ 0x314d4741, .agm }, .{ 0x314d4950, .mpeg1video },
+    .{ 0x31514853, .speedhq }, .{ 0x31515653, .svq1 }, .{ 0x31524356, .vcr1 }, .{ 0x31535046, .fraps },
+    .{ 0x3153534d, .mss1 }, .{ 0x31564646, .ffv1 }, .{ 0x3156474b, .kgv1 }, .{ 0x31564944, .mpeg4 },
+    .{ 0x31564c46, .flv1 }, .{ 0x31564c50, .mpeg4 }, .{ 0x31564d57, .wmv1 }, .{ 0x31564e57, .wnv1 },
+    .{ 0x31565053, .screenpresso }, .{ 0x31565341, .asv1 }, .{ 0x31565346, .flashsv }, .{ 0x31565452, .rtv1 },
+    .{ 0x31584d56, .vmix }, .{ 0x31617664, .h264 }, .{ 0x31626d64, .mjpeg }, .{ 0x31636c6e, .notchlc },
+    .{ 0x31637661, .h264 }, .{ 0x31637665, .evc }, .{ 0x31637668, .hevc }, .{ 0x3163766c, .lcevc },
+    .{ 0x31637676, .vvc }, .{ 0x31645641, .dvvideo }, .{ 0x31656c72, .sgirle }, .{ 0x3167706d, .mpeg1video },
+    .{ 0x31687664, .dvvideo }, .{ 0x31697676, .vvc }, .{ 0x31706148, .hap }, .{ 0x31717673, .svq1 },
+    .{ 0x31726853, .sheervideo }, .{ 0x31755632, .rawvideo }, .{ 0x3176316d, .mpeg1video },
+    .{ 0x3176326d, .mpeg2video }, .{ 0x31766164, .av1 }, .{ 0x31766468, .mpeg2video }, .{ 0x31766478, .mpeg2video },
+    .{ 0x31766568, .hevc }, .{ 0x31767061, .apv }, .{ 0x31767975, .rawvideo }, .{ 0x3230314d, .m101 },
+    .{ 0x3230374d, .mpeg2video }, .{ 0x3231564e, .rawvideo }, .{ 0x32315659, .rawvideo }, .{ 0x32316961, .h264 },
+    .{ 0x32323449, .rawvideo }, .{ 0x3232344a, .rawvideo }, .{ 0x32323450, .rawvideo }, .{ 0x32323456, .rawvideo },
+    .{ 0x32323459, .rawvideo }, .{ 0x32335641, .rawvideo }, .{ 0x32335649, .indeo3 }, .{ 0x32335652, .rawvideo },
+    .{ 0x3234504d, .msmpeg4v2 }, .{ 0x32356961, .h264 }, .{ 0x32365056, .vp6 }, .{ 0x32424752, .rawvideo },
+    .{ 0x32435156, .vqc }, .{ 0x3243534d, .mjpeg }, .{ 0x32435354, .tscc2 }, .{ 0x32484c55, .utvideo },
+    .{ 0x32484d55, .utvideo }, .{ 0x32495641, .mjpeg }, .{ 0x324a5049, .jpeg2000 }, .{ 0x324b4d44, .mpeg4 },
+    .{ 0x324d3247, .g2m }, .{ 0x324d4741, .agm }, .{ 0x324d4950, .mpeg2video }, .{ 0x32504d4c, .mpeg2video },
+    .{ 0x32505657, .vc1image }, .{ 0x32514853, .speedhq }, .{ 0x32524356, .mpeg2video }, .{ 0x32525541, .aura2 },
+    .{ 0x3253344d, .mpeg4 }, .{ 0x3253534d, .mss2 }, .{ 0x3253544d, .mts2 }, .{ 0x32535641, .cavs },
+    .{ 0x32564933, .mpeg4 }, .{ 0x32564944, .msmpeg4v2 }, .{ 0x32564d53, .h264 }, .{ 0x32564d57, .wmv2 },
+    .{ 0x32565341, .asv2 }, .{ 0x3259304d, .magicyuv }, .{ 0x3259384d, .magicyuv }, .{ 0x32594c55, .utvideo },
+    .{ 0x32594d55, .utvideo }, .{ 0x32595155, .utvideo }, .{ 0x32595559, .rawvideo }, .{ 0x32637661, .h264 },
+    .{ 0x3267706d, .mpeg2video }, .{ 0x32686478, .mpeg2video }, .{ 0x32687664, .dvvideo }, .{ 0x326a5641, .jpeg2000 },
+    .{ 0x32706a6d, .jpeg2000 }, .{ 0x32726853, .sheervideo }, .{ 0x32737661, .cavs }, .{ 0x32766468, .mpeg2video },
+    .{ 0x32766478, .mpeg2video }, .{ 0x32767561, .rawvideo }, .{ 0x32767579, .rawvideo }, .{ 0x32797862, .v210 },
+    .{ 0x3330374d, .mpeg2video }, .{ 0x33316961, .h264 }, .{ 0x3334504d, .msmpeg4v3 }, .{ 0x33356961, .h264 },
+    .{ 0x33363248, .h263 }, .{ 0x33363249, .h263i }, .{ 0x3336324c, .h263 }, .{ 0x3336324d, .h263 },
+    .{ 0x33363253, .h263 }, .{ 0x33363254, .h263 }, .{ 0x33363255, .h263 }, .{ 0x33363258, .h263 },
+    .{ 0x33363268, .h263 }, .{ 0x33363273, .h263 }, .{ 0x33445844, .dxv }, .{ 0x3347504d, .msmpeg4v3 },
+    .{ 0x334d3247, .g2m }, .{ 0x334d4741, .agm }, .{ 0x33514853, .speedhq }, .{ 0x33515653, .svq3 },
+    .{ 0x3354344d, .mpeg4 }, .{ 0x33564944, .msmpeg4v3 }, .{ 0x33564d57, .wmv3 }, .{ 0x33585644, .msmpeg4v3 },
+    .{ 0x33637661, .h264 }, .{ 0x33687664, .dvvideo }, .{ 0x33726853, .sheervideo }, .{ 0x33737661, .avs3 },
+    .{ 0x33766468, .mpeg2video }, .{ 0x33766478, .mpeg2video }, .{ 0x3430374d, .mpeg2video }, .{ 0x3432524a, .mjpeg },
+    .{ 0x34325652, .rawvideo }, .{ 0x34325659, .rawvideo }, .{ 0x34343449, .rawvideo }, .{ 0x3434344a, .rawvideo },
+    .{ 0x34355053, .sp5x }, .{ 0x34356478, .mpeg2video }, .{ 0x34363247, .mpeg4 }, .{ 0x34363248, .h264 },
+    .{ 0x34363251, .h264 }, .{ 0x34363256, .h264 }, .{ 0x34363258, .h264 }, .{ 0x34363268, .h264 },
+    .{ 0x34363278, .h264 }, .{ 0x34367672, .h264 }, .{ 0x3447504d, .msmpeg4v1 }, .{ 0x34484c55, .utvideo },
+    .{ 0x34484d55, .utvideo }, .{ 0x344d3247, .g2m }, .{ 0x344d4741, .agm }, .{ 0x344d4d49, .imm4 },
+    .{ 0x344d4e4d, .mpeg4 }, .{ 0x344d5356, .h263 }, .{ 0x344d5447, .mpeg4 }, .{ 0x344d5944, .mpeg4 },
+    .{ 0x34504d46, .mpeg4 }, .{ 0x34504d47, .mpeg4 }, .{ 0x34504d51, .mpeg4 }, .{ 0x34504d52, .mpeg4 },
+    .{ 0x34504d53, .mpeg4 }, .{ 0x34504d55, .mpeg4 }, .{ 0x34504d5a, .mpeg4 }, .{ 0x34514853, .speedhq },
+    .{ 0x34534141, .aasc }, .{ 0x34564944, .msmpeg4v3 }, .{ 0x34564c46, .vp6f }, .{ 0x34564c47, .mpeg4 },
+    .{ 0x34584448, .mpeg4 }, .{ 0x3459304d, .magicyuv }, .{ 0x3459384d, .magicyuv }, .{ 0x34594c55, .utvideo },
+    .{ 0x34594d55, .utvideo }, .{ 0x34637661, .h264 }, .{ 0x34687664, .dvvideo }, .{ 0x34726853, .sheervideo },
+    .{ 0x34766468, .mpeg2video }, .{ 0x34766478, .mpeg2video }, .{ 0x34767579, .yuv4 }, .{ 0x3530374d, .mpeg2video },
+    .{ 0x35315652, .rawvideo }, .{ 0x35316961, .h264 }, .{ 0x35324c53, .dvvideo }, .{ 0x35327664, .dvvideo },
+    .{ 0x3535354c, .rawvideo }, .{ 0x35356478, .mpeg2video }, .{ 0x35356961, .h264 }, .{ 0x35363542, .rawvideo },
+    .{ 0x3536354c, .rawvideo }, .{ 0x354d3247, .g2m }, .{ 0x354d4741, .agm }, .{ 0x354d4d49, .imm5 },
+    .{ 0x35514853, .speedhq }, .{ 0x35564443, .dvvideo }, .{ 0x35564944, .msmpeg4v3 }, .{ 0x35687664, .dvvideo },
+    .{ 0x35706148, .hap }, .{ 0x35726853, .sheervideo }, .{ 0x35766468, .mpeg2video }, .{ 0x35766478, .mpeg2video },
+    .{ 0x36313259, .targa_y216 }, .{ 0x36313459, .rawvideo }, .{ 0x36314f4e, .rawvideo }, .{ 0x36315652, .rawvideo },
+    .{ 0x36315659, .rawvideo }, .{ 0x36316961, .h264 }, .{ 0x36356961, .h264 }, .{ 0x364d4741, .agm },
+    .{ 0x364d4d49, .imm6 }, .{ 0x36564944, .msmpeg4v3 }, .{ 0x36687664, .dvvideo }, .{ 0x36726853, .sheervideo },
+    .{ 0x36766468, .mpeg2video }, .{ 0x36766478, .mpeg2video }, .{ 0x374d4741, .agm }, .{ 0x37514853, .speedhq },
+    .{ 0x37726853, .sheervideo }, .{ 0x37766468, .mpeg2video }, .{ 0x37766478, .mpeg2video },
+    .{ 0x38303376, .rawvideo }, .{ 0x38303476, .rawvideo }, .{ 0x38303479, .rawvideo }, .{ 0x38307076, .vp8 },
+    .{ 0x38565559, .wnv1 }, .{ 0x38766468, .mpeg2video }, .{ 0x38766478, .mpeg2video }, .{ 0x39307076, .vp9 },
+    .{ 0x39356478, .mpeg2video }, .{ 0x39514853, .speedhq }, .{ 0x39555659, .rawvideo }, .{ 0x39565559, .rawvideo },
+    .{ 0x39766468, .mpeg2video }, .{ 0x39766478, .mpeg2video }, .{ 0x41303449, .rawvideo },
+    .{ 0x41323449, .rawvideo }, .{ 0x41344d45, .mpeg4 }, .{ 0x41365056, .vp6a }, .{ 0x41424752, .rawvideo },
+    .{ 0x4148564d, .mvha }, .{ 0x41507464, .media100 }, .{ 0x4152304d, .magicyuv }, .{ 0x4152324d, .magicyuv },
+    .{ 0x4152344d, .magicyuv }, .{ 0x4152384d, .magicyuv }, .{ 0x41524742, .rawvideo }, .{ 0x41524c55, .utvideo },
+    .{ 0x41524d55, .utvideo }, .{ 0x41525155, .utvideo }, .{ 0x41525541, .aura }, .{ 0x41564d57, .vc1 },
+    .{ 0x41565559, .rawvideo }, .{ 0x4159384d, .magicyuv }, .{ 0x415a5052, .rpza }, .{ 0x41706148, .hap },
+    .{ 0x42313459, .rawvideo }, .{ 0x42323459, .rawvideo }, .{ 0x42393049, .rawvideo }, .{ 0x42393249, .rawvideo },
+    .{ 0x42393449, .rawvideo }, .{ 0x42413049, .rawvideo }, .{ 0x42413249, .rawvideo }, .{ 0x42413449, .rawvideo },
+    .{ 0x42433049, .rawvideo }, .{ 0x42433249, .rawvideo }, .{ 0x42433449, .rawvideo }, .{ 0x42463049, .rawvideo },
+    .{ 0x42463449, .rawvideo }, .{ 0x42494c5a, .zlib }, .{ 0x43324a4c, .jpeg2000 }, .{ 0x43324a4d, .jpeg2000 },
+    .{ 0x43425241, .arbc }, .{ 0x4343344d, .mpeg4 }, .{ 0x43435349, .rscc }, .{ 0x4343534d, .mscc },
+    .{ 0x43435352, .rscc }, .{ 0x43475253, .srgc }, .{ 0x434c4641, .flic }, .{ 0x434c4c43, .cllc },
+    .{ 0x434d4e49, .h264 }, .{ 0x43534141, .aasc }, .{ 0x43534152, .rasc }, .{ 0x43534454, .tdsc },
+    .{ 0x4353574d, .mwsc }, .{ 0x43564144, .h264 }, .{ 0x43564147, .h264 }, .{ 0x43564d46, .fmvc },
+    .{ 0x43564d4b, .kmvc }, .{ 0x4356534d, .msvideo1 }, .{ 0x43565543, .hq_hqa }, .{ 0x43594448, .rawvideo },
+    .{ 0x4441454c, .lead }, .{ 0x44435343, .cscd }, .{ 0x44484643, .cfhd }, .{ 0x44495658, .mpeg4 },
+    .{ 0x444f4344, .mpeg4 }, .{ 0x444f4355, .clearvideo }, .{ 0x44564933, .msmpeg4v3 }, .{ 0x454c4256, .vble },
+    .{ 0x454c5257, .msrle }, .{ 0x45565847, .wmv2 }, .{ 0x46315657, .mpeg4 }, .{ 0x46365056, .vp6f },
+    .{ 0x46564d41, .amv }, .{ 0x47423432, .rawvideo }, .{ 0x47444553, .mpeg4 }, .{ 0x4745504d, .mpeg1video },
+    .{ 0x47455051, .qpeg }, .{ 0x474e504d, .png }, .{ 0x47504a43, .mjpeg }, .{ 0x47504a49, .mjpeg },
+    .{ 0x47504a4c, .mjpeg }, .{ 0x47504a4d, .mjpeg }, .{ 0x47504a5a, .mjpeg }, .{ 0x47504d58, .mpeg1video },
+    .{ 0x4752304d, .magicyuv }, .{ 0x4752324d, .magicyuv }, .{ 0x4752344d, .magicyuv }, .{ 0x4752384d, .magicyuv },
+    .{ 0x47524c55, .utvideo }, .{ 0x47524d55, .utvideo }, .{ 0x47525155, .utvideo }, .{ 0x47564951, .mjpeg },
+    .{ 0x48535356, .h264 }, .{ 0x48564443, .dvvideo }, .{ 0x48564646, .ffvhuff }, .{ 0x485a534d, .mszh },
+    .{ 0x49445844, .dxv }, .{ 0x49474944, .mpeg4 }, .{ 0x49544c55, .ulti }, .{ 0x49555641, .avui },
+    .{ 0x4a445641, .mjpeg }, .{ 0x4a4d4c53, .mjpeg }, .{ 0x4a53544d, .mjpeg }, .{ 0x4b315856, .h263 },
+    .{ 0x4b324a4c, .jpeg2000 }, .{ 0x4b435544, .truemotion1 }, .{ 0x4c393049, .rawvideo }, .{ 0x4c393249, .rawvideo },
+    .{ 0x4c393449, .rawvideo }, .{ 0x4c413049, .rawvideo }, .{ 0x4c413249, .rawvideo }, .{ 0x4c413449, .rawvideo },
+    .{ 0x4c433049, .rawvideo }, .{ 0x4c433249, .rawvideo }, .{ 0x4c433449, .rawvideo }, .{ 0x4c463049, .rawvideo },
+    .{ 0x4c463449, .rawvideo }, .{ 0x4c47504a, .mjpeg }, .{ 0x4c584956, .vixl }, .{ 0x4d414857, .msvideo1 },
+    .{ 0x4d415243, .msvideo1 }, .{ 0x4d444956, .mpeg4 }, .{ 0x4d475844, .mpeg4 }, .{ 0x4d58564d, .mpeg4 },
+    .{ 0x4d706148, .hap }, .{ 0x4e313036, .media100 }, .{ 0x4f43455a, .zerocodec }, .{ 0x4f434f4c, .loco },
+    .{ 0x4f4f5644, .rawvideo }, .{ 0x50313036, .media100 }, .{ 0x50313459, .y41p }, .{ 0x504a4d4d, .mjpeg },
+    .{ 0x504a564d, .mjpeg }, .{ 0x50504953, .mpeg4 }, .{ 0x50564d57, .wmv3image }, .{ 0x5243534c, .lscr },
+    .{ 0x52474241, .rawvideo }, .{ 0x52474742, .rawvideo }, .{ 0x524a4c43, .cljr }, .{ 0x52504353, .scpr },
+    .{ 0x5334504d, .mpeg4 }, .{ 0x53444646, .mpeg4 }, .{ 0x53445553, .avrp }, .{ 0x53454d4d, .mpeg2video },
+    .{ 0x5347414c, .lagarith }, .{ 0x534c4a4d, .jpegls }, .{ 0x53504238, .@"8bps" }, .{ 0x53564143, .cavs },
+    .{ 0x544d5948, .hymt }, .{ 0x544e7464, .media100 }, .{ 0x55575246, .frwu }, .{ 0x55594648, .huffyuv },
+    .{ 0x55595659, .rawvideo }, .{ 0x56324d45, .mpeg2video }, .{ 0x56344d44, .mpeg4 }, .{ 0x56344d50, .mpeg4 },
+    .{ 0x56344d53, .mpeg4 }, .{ 0x56424d5a, .zmbv }, .{ 0x56434946, .fic }, .{ 0x56444341, .mjpeg },
+    .{ 0x56444c53, .dvvideo }, .{ 0x5644564d, .mvdv }, .{ 0x56485045, .mpeg4 }, .{ 0x564c4a49, .mjpeg },
+    .{ 0x564d4357, .wcmv }, .{ 0x564d5834, .@"4xm" }, .{ 0x564e5559, .rawvideo }, .{ 0x564e5955, .rawvideo },
+    .{ 0x564f4547, .mpeg4 }, .{ 0x56534d55, .h264 }, .{ 0x56555941, .rawvideo }, .{ 0x56555943, .cyuv },
+    .{ 0x56555949, .rawvideo }, .{ 0x56574157, .mpeg4 }, .{ 0x56595559, .rawvideo }, .{ 0x57415257, .rawvideo },
+    .{ 0x57465646, .mpeg4 }, .{ 0x574f4e53, .snow }, .{ 0x58444c55, .mpeg4 }, .{ 0x58495658, .mpeg4 },
+    .{ 0x584f4547, .mpeg4 }, .{ 0x58505356, .mpeg4 }, .{ 0x58514843, .hqx }, .{ 0x58564944, .mpeg4 },
+    .{ 0x58657244, .mpeg4 }, .{ 0x59455247, .rawvideo }, .{ 0x5947414d, .magicyuv }, .{ 0x594e5955, .rawvideo },
+    .{ 0x59555956, .rawvideo }, .{ 0x59565955, .rawvideo }, .{ 0x59706148, .hap }, .{ 0x5a455650, .truemotion1 },
+    .{ 0x5a544456, .rawvideo }, .{ 0x61343662, .rawvideo }, .{ 0x61356478, .mpeg2video }, .{ 0x61706a6d, .mjpeg },
+    .{ 0x61707464, .media100 }, .{ 0x61766468, .mpeg2video }, .{ 0x61766478, .mpeg2video }, .{ 0x617a7072, .rpza },
+    .{ 0x62356478, .mpeg2video }, .{ 0x62706a6d, .mjpegb }, .{ 0x62766478, .mpeg2video },
+    .{ 0x63356478, .mpeg2video }, .{ 0x63617264, .dirac }, .{ 0x63637374, .tscc }, .{ 0x63696c66, .flic },
+    .{ 0x636c636e, .notchlc }, .{ 0x636e4d56, .vmnc }, .{ 0x63766463, .dvvideo }, .{ 0x63766470, .dvvideo },
+    .{ 0x63766478, .mpeg2video }, .{ 0x6376736d, .msvideo1 }, .{ 0x64356478, .mpeg2video },
+    .{ 0x64686478, .mpeg2video }, .{ 0x64687374, .h264 }, .{ 0x64687664, .dvvideo }, .{ 0x64697663, .cinepak },
+    .{ 0x646f6369, .aic }, .{ 0x64737664, .dvvideo }, .{ 0x64766478, .mpeg2video }, .{ 0x65356478, .mpeg2video },
+    .{ 0x65687664, .hevc }, .{ 0x656c726d, .msrle }, .{ 0x65766478, .mpeg2video }, .{ 0x66356478, .mpeg2video },
+    .{ 0x66666974, .tiff }, .{ 0x66696c73, .mpeg2video }, .{ 0x66766478, .mpeg2video }, .{ 0x67303152, .r10k },
+    .{ 0x67363162, .rawvideo }, .{ 0x67627862, .rawvideo }, .{ 0x6765706a, .mjpeg }, .{ 0x6765706d, .mpeg1video },
+    .{ 0x676c6178, .h264 }, .{ 0x676c7661, .h264 }, .{ 0x67727862, .rawvideo }, .{ 0x68347061, .prores },
+    .{ 0x68637061, .prores }, .{ 0x68645641, .dnxhd }, .{ 0x68727061, .prores_raw }, .{ 0x69717673, .svq1 },
+    .{ 0x6b303152, .r10k }, .{ 0x6b426b51, .cdtoons }, .{ 0x6c737664, .dvvideo }, .{ 0x6d616877, .msvideo1 },
+    .{ 0x6d617263, .msvideo1 }, .{ 0x6d76736c, .h263 }, .{ 0x6e33786d, .mpeg2video }, .{ 0x6e34786d, .mpeg2video },
+    .{ 0x6e357664, .dvvideo }, .{ 0x6e35786d, .mpeg2video }, .{ 0x6e525641, .mjpeg }, .{ 0x6e617858, .xan_wc4 },
+    .{ 0x6e637061, .prores }, .{ 0x6e645641, .dnxhd }, .{ 0x6e695641, .h264 }, .{ 0x6e727061, .prores_raw },
+    .{ 0x6f47795a, .h263 }, .{ 0x6f637061, .prores }, .{ 0x6f656874, .theora }, .{ 0x70316961, .h264 },
+    .{ 0x7033786d, .mpeg2video }, .{ 0x7034786d, .mpeg2video }, .{ 0x70356961, .h264 }, .{ 0x70357664, .dvvideo },
+    .{ 0x7035786d, .mpeg2video }, .{ 0x70637664, .dvvideo }, .{ 0x70687664, .dvvideo }, .{ 0x706c7664, .dvvideo },
+    .{ 0x706d5641, .mpeg2video }, .{ 0x70707664, .dvvideo }, .{ 0x70725641, .avrp }, .{ 0x70755641, .rawvideo },
+    .{ 0x71316961, .h264 }, .{ 0x71356961, .h264 }, .{ 0x71687664, .dvvideo }, .{ 0x72383462, .rawvideo },
+    .{ 0x726f7478, .dxtory }, .{ 0x72707a61, .rpza }, .{ 0x73637061, .prores }, .{ 0x73637664, .dvvideo },
+    .{ 0x73697664, .dvvideo }, .{ 0x73767579, .rawvideo }, .{ 0x746c7870, .pixlet }, .{ 0x746e7464, .media100 },
+    .{ 0x7631706d, .mpeg1video }, .{ 0x76323130, .@"012v" }, .{ 0x76323161, .@"012v" }, .{ 0x7632706d, .mpeg2video },
+    .{ 0x7634706d, .mpeg4 }, .{ 0x76617664, .h264 }, .{ 0x76645641, .dvvideo }, .{ 0x7667706d, .mpeg2video },
+    .{ 0x76797862, .rawvideo }, .{ 0x77726471, .qdraw }, .{ 0x78315641, .rawvideo }, .{ 0x78347061, .prores },
+    .{ 0x78766961, .h264 }, .{ 0x79757632, .rawvideo },
 };
 
-fn isVideoTag(format: u32) bool {
+/// The video codec of a sample description's format, or null when neither
+/// table has it.
+fn videoCodec(format: u32) ?Codec {
     var lo: usize = 0;
     var hi: usize = video_tags.len;
     while (lo < hi) {
         const mid = lo + (hi - lo) / 2;
-        if (video_tags[mid] == format) return true;
-        if (video_tags[mid] < format) lo = mid + 1 else hi = mid;
+        if (video_tags[mid][0] == format) return video_tags[mid][1];
+        if (video_tags[mid][0] < format) lo = mid + 1 else hi = mid;
     }
-    return false;
+    return null;
 }
 
 /// `ff_ac3_channel_layout_tab`.
@@ -834,8 +940,11 @@ pub const Track = struct {
     /// The decoder FFmpeg's read-ahead opens (decided at open, from the
     /// codec and its extradata).
     decoder: demux.Decoder = .none,
+    // Video and subtitle parameters (T33a3).
+    video: Video = .{},
 
     fn deinit(t: *Track, gpa: std.mem.Allocator) void {
+        t.video.deinit(gpa);
         t.tags.deinit(gpa);
         if (t.extradata) |e| gpa.free(e);
         if (t.stsd_extradata) |list| {
@@ -895,6 +1004,96 @@ pub const Track = struct {
     }
 };
 
+/// `AVPacketSideDataType` of the coded side data a track can carry.
+pub const SideDataType = enum(u8) {
+    palette = 0,
+    replaygain = 4,
+    displaymatrix = 5,
+    stereo3d = 6,
+    mastering_display_metadata = 20,
+    spherical = 21,
+    content_light_level = 22,
+    icc_profile = 28,
+    dovi_conf = 29,
+    ambient_viewing_environment = 35,
+    frame_cropping = 36,
+};
+
+/// A stream's coded side datum, its bytes as FFmpeg's structure holds them.
+pub const SideDatum = struct { type: SideDataType, data: []u8 };
+
+/// A track's video (and subtitle) codec parameters and the stream fields
+/// FFmpeg's mov demuxer sets for them.
+pub const Video = struct {
+    /// `codecpar->width` and `height`.
+    width: i32 = 0,
+    height: i32 = 0,
+    /// `sc->width` and `sc->height`: tkhd's, in whole pixels.
+    track_width: i32 = 0,
+    track_height: i32 = 0,
+    /// tkhd's display matrix after the movie's, when not the identity.
+    display_matrix: ?[9]i32 = null,
+    /// `st->sample_aspect_ratio`.
+    sar: rational.Rational = .{ .num = 0, .den = 1 },
+    /// `pasp`'s spacing.
+    h_spacing: i32 = 0,
+    v_spacing: i32 = 0,
+    /// `AVFieldOrder`, `AVColorRange`, the color enums, `AVAlphaMode`.
+    field_order: u8 = 0,
+    color_range: u8 = 0,
+    color_primaries: u16 = 2,
+    color_trc: u16 = 2,
+    color_space: u16 = 2,
+    alpha_mode: u8 = 0,
+    /// `st->r_frame_rate` and `st->avg_frame_rate`.
+    r_frame_rate: rational.Rational = .{ .num = 0, .den = 0 },
+    avg_frame_rate: rational.Rational = .{ .num = 0, .den = 0 },
+    /// `codecpar->video_delay`.
+    video_delay: i32 = 0,
+    /// The QuickTime color table (`sc->palette`, kept across sample
+    /// descriptions), sent with the first packet while `has_palette`.
+    palette: ?*[256]u32 = null,
+    has_palette: bool = false,
+    /// ARES's display aspect ratio, which avformat_find_stream_info makes
+    /// the sample aspect ratio.
+    display_aspect: rational.Rational = .{ .num = 0, .den = 0 },
+    /// `codecpar->coded_side_data`, in FFmpeg's order (a type added again
+    /// replaces its data in place).
+    side_data: std.ArrayList(SideDatum) = .empty,
+    /// The structures FFmpeg exports at the end of the header.
+    mastering: ?[88]u8 = null,
+    content_light: ?[8]u8 = null,
+    ambient: ?[24]u8 = null,
+    /// FFStreamInfo's frame-rate estimation, which mov_build_index feeds.
+    rfps: demux.Rfps = .{},
+
+    fn deinit(v: *Video, gpa: std.mem.Allocator) void {
+        if (v.palette) |p| gpa.destroy(p);
+        for (v.side_data.items) |sd| gpa.free(sd.data);
+        v.side_data.deinit(gpa);
+        v.rfps.deinit(gpa);
+    }
+
+    /// av_packet_side_data_add: `data` (owned) for `type`, replacing an
+    /// earlier one of the type in place.
+    fn addSideData(v: *Video, gpa: std.mem.Allocator, ty: SideDataType, data: []u8) error{OutOfMemory}!void {
+        for (v.side_data.items) |*sd| if (sd.type == ty) {
+            gpa.free(sd.data);
+            sd.data = data;
+            return;
+        };
+        v.side_data.append(gpa, .{ .type = ty, .data = data }) catch |err| {
+            gpa.free(data);
+            return err;
+        };
+    }
+
+    pub fn sideData(v: *const Video, ty: SideDataType) ?[]const u8 {
+        for (v.side_data.items) |sd| if (sd.type == ty) return sd.data;
+        return null;
+    }
+};
+
 const Atom = struct { type: u32, size: i64 };
 
 /// The `free` box contents FFmpeg treats as a fragment index hint.
@@ -926,6 +1125,8 @@ pub const Demuxer = struct {
     data_offset: i64 = 0,
     /// The packet returned last.
     current: std.ArrayList(u8) = .empty,
+    /// The color table sent with the packet returned last.
+    palette_bytes: [1024]u8 = undefined,
     new_extradata: ?[]const u8 = null,
     // Metadata (T33a2).
     /// Inside `ilst`: tags are iTunes `data` atoms.
@@ -943,6 +1144,8 @@ pub const Demuxer = struct {
     /// The attached pictures FFmpeg made of `covr` atoms (streams after
     /// the tracks, not kept).
     pictures: u32 = 0,
+    /// mvhd's display matrix (zeros without one).
+    movie_matrix: [3][3]i32 = @splat(@splat(0)),
 
     /// The demuxer on a source that cannot seek (a pipe): a `moov` after
     /// `mdat` is `UnsupportedStreamingSize`.
@@ -1125,7 +1328,7 @@ pub const Demuxer = struct {
             tag("free") => try d.readFree(a),
             tag("esds") => try d.readEsds(),
             tag("wave") => try d.readWave(a),
-            tag("alac") => try d.readAlac(a),
+            tag("alac") => try d.readExtradataAtom(a, .alac),
             tag("glbl"), tag("avcC"), tag("hvcC"), tag("vvcC"), tag("av1C"), tag("evcC"), tag("lvcC"), tag("apvC") => try d.readGlbl(a),
             tag("dfLa") => try d.readDfla(a),
             tag("dOps") => try d.readDops(a),
@@ -1135,6 +1338,29 @@ pub const Demuxer = struct {
             tag("enda") => try d.readEnda(),
             tag("srat") => try d.readSrat(a),
             tag("frma") => try d.readFrma(),
+            // Video configuration boxes (T33a3).
+            tag("colr") => try d.readColr(a),
+            tag("pasp") => try d.readPasp(),
+            tag("clap") => try d.readClap(),
+            tag("fiel") => try d.readFiel(a),
+            tag("vpcC") => try d.readVpcc(a),
+            tag("dvcC"), tag("dvvC"), tag("dvwC") => try d.readDvcc(a),
+            tag("SmDm") => try d.readSmdm(a),
+            tag("mdcv") => try d.readMdcv(a),
+            tag("CoLL") => try d.readColl(a),
+            tag("clli") => try d.readClli(a),
+            tag("amve") => try d.readAmve(a),
+            tag("vmhd") => try d.readVmhd(),
+            tag("dvc1") => try d.readDvc1(a),
+            tag("avss") => try d.readExtradataAtom(a, .cavs),
+            tag("jp2h") => try d.readExtradataAtom(a, .jpeg2000),
+            tag("DpxE") => try d.readExtradataAtom(a, .r10k),
+            tag("SMI ") => try d.readExtradataAtom(a, .svq3),
+            tag("APRG"), tag("AALP") => try d.readAvid(a),
+            tag("ARES") => try d.readAres(a),
+            tag("ACLR") => try d.readAclr(a),
+            tag("strf") => try d.readStrf(a),
+            std.mem.readInt(u32, &[4]u8{ 'C', 'i', 'n', 0x8e }, .little) => try d.readTarga(a),
             // Metadata and chapters (T33a2).
             tag("udta") => try d.readDefault(a),
             tag("meta") => try d.readMeta(a),
@@ -1146,8 +1372,9 @@ pub const Demuxer = struct {
             tag("kind") => try d.readKind(a),
             // The rest of FFmpeg's parse table: fragments (T33c),
             // compressed headers, encryption, images, timecodes, track
-            // groups, and the boxes of video sample entries. Refused.
-            tag("moof"), tag("mvex"), tag("traf"), tag("tfdt"), tag("tfhd"), tag("trex"), tag("trun"), tag("sidx"), tag("cmov"), tag("adrm"), tag("sinf"), tag("senc"), tag("saiz"), tag("saio"), tag("pssh"), tag("schm"), tag("schi"), tag("tenc"), tag("iloc"), tag("pitm"), tag("auxC"), tag("idat"), tag("imir"), tag("iref"), tag("ispe"), tag("irot"), tag("iprp"), tag("iinf"), tag("tmcd"), tag("cdsc"), tag("rndr"), tag("sbas"), tag("vdep"), tag("ACLR"), tag("APRG"), tag("AALP"), tag("ARES"), tag("avss"), tag("colr"), tag("DpxE"), tag("fiel"), tag("jp2h"), tag("SMI "), tag("pasp"), tag("clap"), tag("strf"), tag("ddts"), tag("wfex"), tag("chnl"), tag("dvc1"), std.mem.readInt(u32, &[4]u8{ 'C', 'i', 'n', 0x8e }, .little), tag("st3d"), tag("sv3d"), tag("vexu"), tag("hfov"), tag("dmlp"), tag("SmDm"), tag("CoLL"), tag("vpcC"), tag("mdcv"), tag("clli"), tag("dvcC"), tag("dvvC"), tag("dvwC"), tag("hvcE"), tag("SA3D"), tag("SAND"), tag("pcmC"), tag("amve"), tag("lhvC"), tag("mhaC"), tag("vmhd"), tag("iacb") => return error.UnsupportedFormat,
+            // groups, stereoscopic and spherical video, layered video and
+            // Dolby Vision enhancement layers. Refused.
+            tag("moof"), tag("mvex"), tag("traf"), tag("tfdt"), tag("tfhd"), tag("trex"), tag("trun"), tag("sidx"), tag("cmov"), tag("adrm"), tag("sinf"), tag("senc"), tag("saiz"), tag("saio"), tag("pssh"), tag("schm"), tag("schi"), tag("tenc"), tag("iloc"), tag("pitm"), tag("auxC"), tag("idat"), tag("imir"), tag("iref"), tag("ispe"), tag("irot"), tag("iprp"), tag("iinf"), tag("tmcd"), tag("cdsc"), tag("rndr"), tag("sbas"), tag("vdep"), tag("ddts"), tag("wfex"), tag("chnl"), tag("st3d"), tag("sv3d"), tag("vexu"), tag("hfov"), tag("dmlp"), tag("hvcE"), tag("SA3D"), tag("SAND"), tag("pcmC"), tag("lhvC"), tag("mhaC"), tag("iacb") => return error.UnsupportedFormat,
             else => {
                 // A box of user data: a tag.
                 if (parent == tag("udta") or parent == tag("ilst")) {
@@ -1227,7 +1454,11 @@ pub const Demuxer = struct {
         _ = try d.in.rb32(gpa);
         _ = try d.in.rb16(gpa);
         _ = try d.in.skipBy(gpa, 10);
-        for (0..9 + 7) |_| _ = try d.in.rb32(gpa);
+        // The movie's display matrix, which tkhd's apply.
+        for (0..3) |i| for (0..3) |j| {
+            d.movie_matrix[i][j] = @bitCast(try d.in.rb32(gpa));
+        };
+        for (0..7) |_| _ = try d.in.rb32(gpa);
     }
 
     /// mov_metadata_creation_time.
@@ -1263,8 +1494,6 @@ pub const Demuxer = struct {
         try d.readDefault(a);
         d.trak_index = null;
         const t = &d.tracks.items[index];
-        // Subtitle tracks wait for the chapter references (finishHeader).
-        if (t.media == .video) return error.UnsupportedFormat; // T33a3
         // An stsc of a track without samples, cleared.
         if (t.chunk_offsets.items.len == 0 and t.stts_count == 0 and t.stsc.items.len > 0) t.stsc.clearRetainingCapacity();
         switch (sanityChecks(t)) {
@@ -1275,6 +1504,24 @@ pub const Demuxer = struct {
         fixTimescale(t, d.time_scale);
         t.time_base = .{ .num = 1, .den = t.time_scale };
         try d.buildIndex(t);
+        try d.updateSampleDurations(t);
+        if (t.media == .video) {
+            const v = &t.video;
+            if (v.h_spacing != 0 and v.v_spacing != 0) v.sar = rational.reduce(v.h_spacing, v.v_spacing, std.math.maxInt(i32)).q;
+            if (v.sar.num == 0 and v.width != 0 and v.height != 0 and v.track_height != 0 and v.track_width != 0 and
+                (v.width != v.track_width or v.height != v.track_height))
+            {
+                v.sar = rational.reduce(@as(i64, v.height) * v.track_width, @as(i64, v.width) * v.track_height, std.math.maxInt(i32)).q;
+            }
+            // r_frame_rate from a constant stts (the last sample's
+            // duration not compared).
+            var constant = t.stts_count > 0 and t.tts_count > 0;
+            var i: usize = 1;
+            while (t.stts_count > 0 and i + 1 < t.tts_count) : (i += 1) {
+                if (t.tts.items[i].duration != t.tts.items[0].duration) constant = false;
+            }
+            if (constant) v.r_frame_rate = rational.reduce(t.time_scale, t.tts.items[0].duration, std.math.maxInt(i32)).q;
+        }
         // A constant duration across `stts` keeps MP3 unparsed.
         if (t.codec == .mp3 and t.time_scale == t.sample_rate) {
             var constant = true;
@@ -1313,7 +1560,21 @@ pub const Demuxer = struct {
         _ = try d.in.rb32(gpa);
         _ = try d.in.rb32(gpa);
         for (0..4) |_| _ = try d.in.rb16(gpa);
-        for (0..9 + 2) |_| _ = try d.in.rb32(gpa);
+        var matrix: [3][3]i32 = undefined;
+        for (0..3) |i| for (0..3) |j| {
+            matrix[i][j] = @bitCast(try d.in.rb32(gpa));
+        };
+        // 16.16 fixed point.
+        const width: i32 = @bitCast(try d.in.rb32(gpa));
+        const height: i32 = @bitCast(try d.in.rb32(gpa));
+        t.video.track_width = width >> 16;
+        t.video.track_height = height >> 16;
+        // Kept for any track, exported for video ones; the aspect ratio
+        // is the stream's whatever its type.
+        if (mov_video.displayMatrix(matrix, d.movie_matrix)) |m| t.video.display_matrix = m;
+        if (t.video.display_matrix) |m| if (mov_video.matrixAspect(m, width, height)) |sar| {
+            t.video.sar = sar;
+        };
     }
 
     fn readMdhd(d: *Demuxer) Error!void {
@@ -1431,12 +1692,17 @@ pub const Demuxer = struct {
             const id = try codecFromTag(t, format);
             t.codec = id;
             switch (t.media) {
-                .video => return error.UnsupportedFormat, // T33a3
+                .video => try d.parseStsdVideo(t),
                 // mov_parse_stsd_subtitle: the description's rest is its
                 // extradata (none for `mp4s`, which holds an esds, or
                 // ISMV's `dfxp`).
-                .subtitle => if (t.codec_tag != tag("mp4s") and t.codec_tag != tag("dfxp")) {
-                    try d.readGlbl(.{ .type = 0, .size = size - (d.in.pos - start_pos) });
+                .subtitle => {
+                    if (t.codec_tag != tag("mp4s") and t.codec_tag != tag("dfxp")) {
+                        try d.readGlbl(.{ .type = 0, .size = size - (d.in.pos - start_pos) });
+                    }
+                    t = d.lastTrack().?;
+                    t.video.width = t.video.track_width;
+                    t.video.height = t.video.track_height;
                 },
                 .audio => {
                     try d.parseStsdAudio(t);
@@ -1456,6 +1722,9 @@ pub const Demuxer = struct {
                 _ = try d.in.skipBy(gpa, rest.size);
             }
             t = d.lastTrack().?;
+            // mov_finalize_stsd_entry: AVC-Intra without avcC gets
+            // generated parameter sets (not ported).
+            if (t.codec == .h264 and t.extradataLen() == 0 and isAvci(t.codec_tag)) return error.UnsupportedFormat;
             if (t.extradata) |e| {
                 // The description's extradata moves to its slot.
                 const list = t.stsd_extradata.?;
@@ -1466,6 +1735,113 @@ pub const Demuxer = struct {
             t.stsd_count += 1;
         }
         if (d.in.eof) return error.Truncated; // "reached eof, corrupted STSD atom"
+    }
+
+    /// mov_parse_stsd_video: the visual sample description's size, depth
+    /// and compressor name, then the color table read again from the
+    /// description's start (ff_get_qtpalette).
+    fn parseStsdVideo(d: *Demuxer, t: *Track) Error!void {
+        const gpa = d.gpa;
+        const stsd_start = d.in.pos - 16;
+        if (d.isom) {
+            _ = try d.in.skipBy(gpa, 2);
+            _ = try d.in.skipBy(gpa, 2);
+            _ = try d.in.skipBy(gpa, 12);
+        } else {
+            _ = try d.in.rb16(gpa);
+            _ = try d.in.rb16(gpa);
+            const vendor = try d.in.rl32(gpa);
+            var buf: [32]u8 = undefined;
+            try putTag(gpa, &t.tags, "vendor_id", fourccString(&buf, vendor), .replace);
+            _ = try d.in.rb32(gpa);
+            _ = try d.in.rb32(gpa);
+        }
+        t.video.width = try d.in.rb16(gpa);
+        t.video.height = try d.in.rb16(gpa);
+        _ = try d.in.rb32(gpa);
+        _ = try d.in.rb32(gpa);
+        _ = try d.in.rb32(gpa);
+        _ = try d.in.rb16(gpa);
+        // The compressor name: a Pascal string in 32 bytes, as Mac Roman.
+        const len: u8 = @min(try d.in.r8(gpa), 31);
+        var name: std.ArrayList(u8) = .empty;
+        defer name.deinit(gpa);
+        try d.macString(len, 31, &name);
+        if (len < 31) _ = try d.in.skipBy(gpa, 31 - len);
+        if (name.items.len > 0) try putTag(gpa, &t.tags, "encoder", name.items, .replace);
+        // codec_tag YV12 triggers an UV swap in rawdec.c.
+        if (std.mem.startsWith(u8, name.items, "Planar Y'CbCr 8-bit 4:2:0")) {
+            t.codec_tag = tag("I420");
+            t.video.width &= ~@as(i32, 1);
+            t.video.height &= ~@as(i32, 1);
+        }
+        // Flash Media Server's Sorenson Spark under H.263's tag.
+        if (t.codec_tag == tag("H263") and std.mem.startsWith(u8, name.items, "Sorenson H263")) t.codec = .flv1;
+        t.bits_per_coded_sample = try d.in.rb16(gpa);
+        _ = try d.in.seekTo(gpa, stsd_start);
+        if (try d.readPalette(t)) {
+            t.bits_per_coded_sample &= 0x1F;
+            t.video.has_palette = true;
+        }
+    }
+
+    /// ff_get_qtpalette: for a depth of 1, 2, 4 or 8 bits, a greyscale
+    /// ramp, the default Macintosh table or the description's own colors
+    /// into the track's palette; whether the video is palettized.
+    fn readPalette(d: *Demuxer, t: *Track) Error!bool {
+        const gpa = d.gpa;
+        _ = try d.in.skipBy(gpa, 82);
+        const depth_field = try d.in.rb16(gpa);
+        const bit_depth: u5 = @truncate(depth_field & 0x1F);
+        const greyscale = depth_field & 0x20 != 0;
+        const color_table_id = try d.in.rb16(gpa);
+        // No greyscale palette for Cinepak.
+        if (greyscale and t.codec == .cinepak) return false;
+        if (bit_depth != 1 and bit_depth != 2 and bit_depth != 4 and bit_depth != 8) return false;
+        const palette = t.video.palette orelse blk: {
+            const p = try gpa.create([256]u32);
+            p.* = @splat(0);
+            t.video.palette = p;
+            break :blk p;
+        };
+        const color_count = @as(u32, 1) << bit_depth;
+        if (greyscale and bit_depth > 1 and color_table_id != 0) {
+            // A grey ramp from white.
+            var color_index: i32 = 255;
+            const color_dec: i32 = @intCast(256 / (color_count - 1));
+            for (0..color_count) |i| {
+                const v: u32 = @intCast(color_index);
+                palette[i] = 0xFF00_0000 | (v << 16) | (v << 8) | v;
+                color_index -= color_dec;
+                if (color_index < 0) color_index = 0;
+            }
+        } else if (color_table_id != 0) {
+            // -1: the default Macintosh table.
+            const table = mov_video.defaultPalette(bit_depth);
+            for (0..color_count) |i| {
+                palette[i] = 0xFF00_0000 | (@as(u32, table[i * 3]) << 16) | (@as(u32, table[i * 3 + 1]) << 8) | table[i * 3 + 2];
+            }
+        } else {
+            // The table in the description: 16-bit components, their top
+            // bytes.
+            const color_start = try d.in.rb32(gpa);
+            _ = try d.in.rb16(gpa);
+            const color_end = try d.in.rb16(gpa);
+            if (color_start <= 255 and color_end <= 255) {
+                var i = color_start;
+                while (i <= color_end) : (i += 1) {
+                    _ = try d.in.skipBy(gpa, 2);
+                    const r = try d.in.r8(gpa);
+                    _ = try d.in.r8(gpa);
+                    const g = try d.in.r8(gpa);
+                    _ = try d.in.r8(gpa);
+                    const b = try d.in.r8(gpa);
+                    _ = try d.in.r8(gpa);
+                    palette[i] = 0xFF00_0000 | (@as(u32, r) << 16) | (@as(u32, g) << 8) | b;
+                }
+            }
+        }
+        return true;
     }
 
     /// mov_parse_stsd_audio.
@@ -1707,12 +2083,14 @@ pub const Demuxer = struct {
         try d.readDefault(inner);
     }
 
-    /// mov_read_alac (mov_read_extradata): the whole box, header included,
-    /// appended to the extradata, an ALAC track's only.
-    fn readAlac(d: *Demuxer, a: Atom) Error!void {
+    /// mov_read_extradata: the whole box, header included, appended to
+    /// the extradata of a track of `codec` only (ALAC's `alac`, CAVS's
+    /// `avss`, JPEG 2000's `jp2h`, R10K's `DpxE`, AVUI's and DNxHD's
+    /// `APRG`, `AALP` and `ARES`, SVQ3's `SMI `, Y216's `Cin\x8e`).
+    fn readExtradataAtom(d: *Demuxer, a: Atom, codec: Codec) Error!void {
         const gpa = d.gpa;
         const t = d.lastTrack() orelse return;
-        if (t.codec != .alac) return;
+        if (t.codec != codec) return;
         const total = @as(u64, t.extradataLen()) + @as(u64, @intCast(a.size)) + 8;
         if (total + 64 > std.math.maxInt(i32) or a.size > std.math.maxInt(i32)) return error.InvalidMov;
         if (a.size > d.limits.max_box_bytes) return error.LimitExceeded;
@@ -1737,6 +2115,299 @@ pub const Demuxer = struct {
         t.replaceExtradata(gpa, owned);
     }
 
+    /// mov_read_avid: AVUI's, then DNxHD's.
+    fn readAvid(d: *Demuxer, a: Atom) Error!void {
+        try d.readExtradataAtom(a, .avui);
+        try d.readExtradataAtom(a, .dnxhd);
+    }
+
+    /// mov_read_ares: Avid's width for AVC-Intra 50 (cid 0xd4d, 0xd4e),
+    /// a display aspect ratio for Avid DV and DNxHD, else mov_read_avid.
+    fn readAres(d: *Demuxer, a: Atom) Error!void {
+        const gpa = d.gpa;
+        if (d.lastTrack()) |t| {
+            if (t.codec_tag == tag("AVin") and t.codec == .h264 and a.size > 11) {
+                _ = try d.in.skipBy(gpa, 10);
+                const cid = try d.in.rb16(gpa);
+                if (cid == 0xd4d or cid == 0xd4e) t.video.width = 1440;
+                return;
+            } else if ((t.codec_tag == tag("AVd1") or t.codec_tag == tag("AVj2") or t.codec_tag == tag("AVdn")) and a.size >= 24) {
+                _ = try d.in.skipBy(gpa, 12);
+                const num: i32 = @bitCast(try d.in.rb32(gpa));
+                var den: i32 = @bitCast(try d.in.rb32(gpa));
+                if (num <= 0 or den <= 0) return;
+                switch (try d.in.rb32(gpa)) {
+                    2 => {
+                        if (den >= std.math.maxInt(i32) / 2) return;
+                        den *= 2;
+                        t.video.display_aspect = .{ .num = num, .den = den };
+                    },
+                    1 => t.video.display_aspect = .{ .num = num, .den = den },
+                    else => {},
+                }
+                return;
+            }
+        }
+        try d.readAvid(a);
+    }
+
+    /// mov_read_aclr: a 16-byte box appended to the extradata of a track
+    /// other than H.264's, its range byte the color range. A body the input
+    /// cuts leaves the box's header in the extradata, without an error.
+    fn readAclr(d: *Demuxer, a: Atom) Error!void {
+        const gpa = d.gpa;
+        const t = d.lastTrack() orelse return;
+        if (t.codec == .h264 or a.size != 16) return;
+        const old = t.extradata orelse &.{};
+        const e = try gpa.alloc(u8, old.len + 24);
+        @memcpy(e[0..old.len], old);
+        std.mem.writeInt(u32, e[old.len..][0..4], 24, .big);
+        std.mem.writeInt(u32, e[old.len + 4 ..][0..4], a.type, .little);
+        const body = d.in.readOwned(gpa, 16) catch |err| {
+            gpa.free(e);
+            return err;
+        };
+        const b = body orelse {
+            const kept = gpa.realloc(e, old.len + 8) catch e[0 .. old.len + 8];
+            t.replaceExtradata(gpa, kept);
+            return;
+        };
+        defer gpa.free(b);
+        @memcpy(e[old.len + 8 ..], b);
+        t.replaceExtradata(gpa, e);
+        switch (b[11]) {
+            1 => t.video.color_range = 1,
+            2 => t.video.color_range = 2,
+            else => {},
+        }
+    }
+
+    /// mov_read_targa_y216: the box appended, then the size from its
+    /// image header.
+    fn readTarga(d: *Demuxer, a: Atom) Error!void {
+        try d.readExtradataAtom(a, .targa_y216);
+        const t = d.lastTrack() orelse return;
+        if (t.extradata) |e| if (e.len >= 40) {
+            t.video.height = std.mem.readInt(u16, e[36..38], .big);
+            t.video.width = std.mem.readInt(u16, e[38..40], .big);
+        };
+    }
+
+    /// mov_read_strf: the extradata after a 40-byte BITMAPINFOHEADER.
+    fn readStrf(d: *Demuxer, a: Atom) Error!void {
+        if (!d.hasStream() or a.size <= 40) return;
+        if (a.size > 1 << 30) return error.InvalidMov;
+        const t = d.lastTrack() orelse return;
+        _ = try d.in.skipBy(d.gpa, 40);
+        try d.getExtradata(t, a.size - 40);
+    }
+
+    /// mov_read_dvc1: VC-1's sequence header after its profile byte.
+    fn readDvc1(d: *Demuxer, a: Atom) Error!void {
+        if (!d.hasStream()) return;
+        if (a.size >= 1 << 28 or a.size < 7) return error.InvalidMov;
+        const t = d.lastTrack() orelse return;
+        const profile_level = try d.in.r8(d.gpa);
+        if (profile_level & 0xf0 != 0xc0) return;
+        _ = try d.in.skipBy(d.gpa, 6);
+        try d.getExtradata(t, a.size - 7);
+    }
+
+    /// mov_read_colr: nclx and nclc color parameters (validated against
+    /// the enums' names), or prof's ICC profile as side data.
+    fn readColr(d: *Demuxer, a: Atom) Error!void {
+        const gpa = d.gpa;
+        if (!d.hasStream()) return;
+        var kind: [4]u8 = undefined;
+        if (try d.in.read(gpa, &kind) != 4) return error.InvalidMov;
+        const nclx = std.mem.eql(u8, &kind, "nclx");
+        if (!nclx and !std.mem.eql(u8, &kind, "nclc") and !std.mem.eql(u8, &kind, "prof")) return;
+        const t = d.lastTrack() orelse return;
+        if (std.mem.eql(u8, &kind, "prof")) {
+            // av_packet_side_data_new of `atom.size - 4` bytes: a size
+            // below 4 is a huge size_t, ENOMEM.
+            if (a.size < 4 or a.size - 4 > d.limits.max_box_bytes) return error.LimitExceeded;
+            const icc = try d.in.readOwned(gpa, @intCast(a.size - 4)) orelse return error.InvalidMov;
+            try t.video.addSideData(gpa, .icc_profile, icc);
+            return;
+        }
+        var primaries = try d.in.rb16(gpa);
+        var trc = try d.in.rb16(gpa);
+        var matrix = try d.in.rb16(gpa);
+        if (nclx) t.video.color_range = if ((try d.in.r8(gpa)) >> 7 != 0) 2 else 1;
+        if (!mov_video.knownPrimaries(primaries)) primaries = mov_video.unspecified_color;
+        if (!mov_video.knownTransfer(trc)) trc = mov_video.unspecified_color;
+        if (!mov_video.knownSpace(matrix)) matrix = mov_video.unspecified_color;
+        t.video.color_primaries = primaries;
+        t.video.color_trc = trc;
+        t.video.color_space = matrix;
+    }
+
+    /// mov_read_pasp: the pixel spacing (a zero vertical one ignored).
+    fn readPasp(d: *Demuxer) Error!void {
+        const num: i32 = @bitCast(try d.in.rb32(d.gpa));
+        const den: i32 = @bitCast(try d.in.rb32(d.gpa));
+        const t = d.lastTrack() orelse return;
+        if (den != 0) {
+            t.video.h_spacing = num;
+            t.video.v_spacing = den;
+        }
+    }
+
+    /// mov_read_clap: the clean aperture as frame-cropping side data; an
+    /// invalid box is ignored (FFmpeg errors only with AV_EF_EXPLODE).
+    fn readClap(d: *Demuxer) Error!void {
+        const gpa = d.gpa;
+        const t = d.lastTrack() orelse return;
+        if (t.video.width == 0 or t.video.height == 0) return;
+        var fields: [8]i32 = undefined;
+        for (&fields) |*f| f.* = @bitCast(try d.in.rb32(gpa));
+        const crop = mov_video.clapCropping(t.video.width, t.video.height, fields) orelse return;
+        try t.video.addSideData(gpa, .frame_cropping, try gpa.dupe(u8, &crop));
+    }
+
+    /// mov_read_fiel: the field order.
+    fn readFiel(d: *Demuxer, a: Atom) Error!void {
+        if (!d.hasStream()) return;
+        if (a.size < 2) return error.InvalidMov;
+        const order = try d.in.rb16(d.gpa);
+        const t = d.lastTrack() orelse return;
+        t.video.field_order = if (order & 0xFF00 == 0x0100) 1 else if (order & 0xFF00 == 0x0200) switch (order & 0xFF) {
+            0x01 => 2,
+            0x06 => 3,
+            0x09 => 4,
+            0x0E => 5,
+            else => 0,
+        } else 0;
+    }
+
+    /// mov_read_vpcc: VP9's color parameters (version 1 only).
+    fn readVpcc(d: *Demuxer, a: Atom) Error!void {
+        const gpa = d.gpa;
+        if (!d.hasStream()) return;
+        if (a.size < 5) return error.InvalidMov;
+        if (try d.in.r8(gpa) != 1) return;
+        _ = try d.in.skipBy(gpa, 3);
+        _ = try d.in.skipBy(gpa, 2);
+        const range = try d.in.r8(gpa);
+        var primaries: u16 = try d.in.r8(gpa);
+        var trc: u16 = try d.in.r8(gpa);
+        var space: u16 = try d.in.r8(gpa);
+        // codecInitializationDataSize must be 0.
+        if (try d.in.rb16(gpa) != 0) return error.InvalidMov;
+        if (!mov_video.knownPrimaries(primaries)) primaries = mov_video.unspecified_color;
+        if (!mov_video.knownTransfer(trc)) trc = mov_video.unspecified_color;
+        if (!mov_video.knownSpace(space)) space = mov_video.unspecified_color;
+        const t = d.lastTrack() orelse return;
+        t.video.color_range = if (range & 1 != 0) 2 else 1;
+        t.video.color_primaries = primaries;
+        t.video.color_trc = trc;
+        t.video.color_space = space;
+    }
+
+    /// mov_read_dvcc_dvvc: Dolby Vision's configuration record (at most
+    /// 24 bytes read) as side data.
+    fn readDvcc(d: *Demuxer, a: Atom) Error!void {
+        const gpa = d.gpa;
+        if (!d.hasStream()) return;
+        var buf: [24]u8 = undefined;
+        const n: usize = @intCast(@min(a.size, buf.len));
+        if (try d.in.read(gpa, buf[0..n]) != n) return error.InvalidMov;
+        if (n < 4) return error.InvalidMov;
+        const t = d.lastTrack() orelse return;
+        const record = mov_video.doviConfig(buf[0..n]);
+        try t.video.addSideData(gpa, .dovi_conf, try gpa.dupe(u8, &record));
+    }
+
+    /// mov_read_smdm: mastering display metadata, version 0, the first
+    /// one kept.
+    fn readSmdm(d: *Demuxer, a: Atom) Error!void {
+        const gpa = d.gpa;
+        if (!d.hasStream()) return error.InvalidMov;
+        if (a.size < 5) return error.InvalidMov;
+        if (try d.in.r8(gpa) != 0) return;
+        const t = d.lastTrack() orelse return;
+        if (t.video.mastering != null) return;
+        _ = try d.in.skipBy(gpa, 3);
+        var primaries: [3][2]rational.Rational = undefined;
+        for (0..3) |i| for (0..2) |j| {
+            primaries[i][j] = .{ .num = try d.in.rb16(gpa), .den = 1 << 16 };
+        };
+        const white = [2]rational.Rational{ .{ .num = try d.in.rb16(gpa), .den = 1 << 16 }, .{ .num = try d.in.rb16(gpa), .den = 1 << 16 } };
+        const max: rational.Rational = .{ .num = @bitCast(try d.in.rb32(gpa)), .den = 1 << 8 };
+        const min: rational.Rational = .{ .num = @bitCast(try d.in.rb32(gpa)), .den = 1 << 14 };
+        t.video.mastering = mov_video.masteringDisplay(primaries, white, min, max);
+    }
+
+    /// mov_read_mdcv: the ISO mastering display colour volume, its
+    /// primaries in G, B, R order.
+    fn readMdcv(d: *Demuxer, a: Atom) Error!void {
+        const gpa = d.gpa;
+        if (!d.hasStream()) return error.InvalidMov;
+        if (a.size < 24) return error.InvalidMov;
+        const t = d.lastTrack() orelse return;
+        if (t.video.mastering != null) return;
+        const chroma_den = 50000;
+        const luma_den = 10000;
+        var primaries: [3][2]rational.Rational = undefined;
+        for ([3]usize{ 1, 2, 0 }) |j| {
+            primaries[j][0] = .{ .num = try d.in.rb16(gpa), .den = chroma_den };
+            primaries[j][1] = .{ .num = try d.in.rb16(gpa), .den = chroma_den };
+        }
+        const white = [2]rational.Rational{ .{ .num = try d.in.rb16(gpa), .den = chroma_den }, .{ .num = try d.in.rb16(gpa), .den = chroma_den } };
+        const max: rational.Rational = .{ .num = @bitCast(try d.in.rb32(gpa)), .den = luma_den };
+        const min: rational.Rational = .{ .num = @bitCast(try d.in.rb32(gpa)), .den = luma_den };
+        t.video.mastering = mov_video.masteringDisplay(primaries, white, min, max);
+    }
+
+    /// mov_read_coll: content light levels, version 0, the first kept.
+    fn readColl(d: *Demuxer, a: Atom) Error!void {
+        const gpa = d.gpa;
+        if (!d.hasStream()) return error.InvalidMov;
+        if (a.size < 5) return error.InvalidMov;
+        if (try d.in.r8(gpa) != 0) return;
+        _ = try d.in.skipBy(gpa, 3);
+        const t = d.lastTrack() orelse return;
+        if (t.video.content_light != null) return;
+        t.video.content_light = mov_video.contentLight(try d.in.rb16(gpa), try d.in.rb16(gpa));
+    }
+
+    /// mov_read_clli: content light levels, the first kept.
+    fn readClli(d: *Demuxer, a: Atom) Error!void {
+        const gpa = d.gpa;
+        if (!d.hasStream()) return error.InvalidMov;
+        if (a.size < 4) return error.InvalidMov;
+        const t = d.lastTrack() orelse return;
+        if (t.video.content_light != null) return;
+        t.video.content_light = mov_video.contentLight(try d.in.rb16(gpa), try d.in.rb16(gpa));
+    }
+
+    /// mov_read_amve: the ambient viewing environment, the first kept.
+    fn readAmve(d: *Demuxer, a: Atom) Error!void {
+        const gpa = d.gpa;
+        if (!d.hasStream()) return error.InvalidMov;
+        if (a.size < 6) return error.InvalidMov;
+        const t = d.lastTrack() orelse return;
+        if (t.video.ambient != null) return;
+        const illuminance: rational.Rational = .{ .num = @bitCast(try d.in.rb32(gpa)), .den = 10000 };
+        const x: rational.Rational = .{ .num = try d.in.rb16(gpa), .den = 50000 };
+        const y: rational.Rational = .{ .num = try d.in.rb16(gpa), .den = 50000 };
+        t.video.ambient = mov_video.ambientViewing(illuminance, x, y);
+    }
+
+    /// mov_read_vmhd: the graphics mode's alpha mode, for a video track.
+    fn readVmhd(d: *Demuxer) Error!void {
+        _ = try d.in.rb32(d.gpa);
+        const mode = try d.in.rb16(d.gpa);
+        const t = d.lastTrack() orelse return;
+        if (t.media != .video) return;
+        t.video.alpha_mode = switch (mode) {
+            0x100 => 2,
+            0x102 => 1,
+            else => 0,
+        };
+    }
+
     fn readGlbl(d: *Demuxer, a_in: Atom) Error!void {
         const gpa = d.gpa;
         const t = d.lastTrack() orelse return;
@@ -1755,6 +2426,8 @@ pub const Demuxer = struct {
         }
         if (t.extradataLen() > 1) return; // "ignoring multiple glbl"
         try d.getExtradata(t, a.size);
+        // HEVC-based Dolby Vision under dvh1 with an hvcC: HEVC.
+        if (a.type == tag("hvcC") and t.codec_tag == tag("dvh1")) t.codec = .hevc;
     }
 
     fn readDfla(d: *Demuxer, a: Atom) Error!void {
@@ -2858,6 +3531,49 @@ pub const Demuxer = struct {
         }
         _ = gpa;
         try d.checkEditList(t);
+        // A video stream starts at its first sample's pts.
+        if (t.start_time == nopts and t.media == .video and t.index.items.len > 0) {
+            t.start_time = rational.satAdd(t.index.items[0].timestamp, t.dts_shift);
+            if (t.tts.items.len > 0) t.start_time = rational.satAdd(t.start_time, t.tts.items[0].offset);
+        }
+        estimateVideoDelay(t);
+    }
+
+    /// mov_update_sample_durations: a reordered video track's durations
+    /// from its samples' presentation order, when every sample's pts is
+    /// distinct and the gaps fit an unsigned int; else as they were.
+    fn updateSampleDurations(d: *Demuxer, t: *Track) Error!void {
+        const gpa = d.gpa;
+        const count = t.index.items.len;
+        if (t.media != .video or t.ctts_count == 0 or t.stts_count < 2 or t.tts.items.len == 0 or count < 2) return;
+        // Each merged entry is one sample: the index must have them all.
+        if (count != t.tts_count) return;
+        const Sample = struct { index: u32, pts: i64 };
+        const samples = try gpa.alloc(Sample, count);
+        defer gpa.free(samples);
+        for (t.index.items, 0..) |e, i| {
+            const entry = t.tts.items[i];
+            if (entry.count == 0) return;
+            const offset = @as(i64, t.dts_shift) + entry.offset;
+            if ((offset > 0 and e.timestamp > std.math.maxInt(i64) - offset) or (offset < 0 and e.timestamp < std.math.minInt(i64) - offset)) return;
+            samples[i] = .{ .index = @intCast(i), .pts = e.timestamp + offset };
+        }
+        std.mem.sort(Sample, samples, {}, struct {
+            fn less(_: void, a: Sample, b: Sample) bool {
+                return if (a.pts != b.pts) a.pts < b.pts else a.index < b.index;
+            }
+        }.less);
+        var durations = try gpa.alloc(u32, count);
+        defer gpa.free(durations);
+        for (0..count - 1) |i| {
+            if (samples[i].pts >= samples[i + 1].pts) return;
+            const gap: u64 = @as(u64, @bitCast(samples[i + 1].pts)) -% @as(u64, @bitCast(samples[i].pts));
+            if (gap == 0 or gap > std.math.maxInt(u32)) return;
+            durations[samples[i].index] = @intCast(gap);
+        }
+        // The last in presentation order keeps its own.
+        durations[samples[count - 1].index] = t.tts.items[samples[count - 1].index].duration;
+        for (t.tts.items[0..count], durations) |*e, dur| e.duration = dur;
     }
 
     /// mov_merge_tts_data: the time-to-sample tables expanded to one entry
@@ -2978,6 +3694,8 @@ pub const Demuxer = struct {
                 if (t.pseudo_stream_id == -1 or stsc[stsc_index].id -% 1 == t.pseudo_stream_id) {
                     if (sample_size > 0x3FFFFFFF) return; // "Sample size too large"
                     t.index.appendAssumeCapacity(.{ .pos = current_offset, .timestamp = current_dts, .size = sample_size, .key = keyframe });
+                    // The first 99 frames feed the frame-rate estimate.
+                    if (t.media == .video and t.index.items.len < 100) try t.video.rfps.addFrame(gpa, current_dts, t.time_base);
                 }
                 current_offset += sample_size;
                 stream_size +%= sample_size;
@@ -3090,11 +3808,8 @@ pub const Demuxer = struct {
         const gpa = d.gpa;
         if (d.in.seekable()) try d.readChapterTracks();
         for (d.tracks.items) |*t| {
-            if (t.media == .video) return error.UnsupportedFormat;
-            // A subtitle track is demuxed only as a chapter track that a
-            // pipe leaves a subtitle stream (T33a3 for the others).
-            if (t.media == .subtitle and (d.in.seekable() or std.mem.findScalar(i32, d.chapter_tracks.items, t.sc_id) == null))
-                return error.UnsupportedFormat;
+            // DVD subtitles' palette conversion is not ported.
+            if (t.media == .subtitle and t.codec == .dvd_subtitle and t.extradataLen() == 64) return error.UnsupportedFormat;
             fixTimescale(t, d.time_scale);
             if (t.stsc.items.len > 0) if (t.stsd_extradata) |list| {
                 const id = t.stsc.items[0].id;
@@ -3106,6 +3821,12 @@ pub const Demuxer = struct {
                 }
             };
             if (t.media == .audio and t.codec == .aac) t.skip_samples = t.initial_padding;
+            if (t.media == .video and t.nb_frames_for_fps > 0 and t.duration_for_fps > 0)
+                t.video.avg_frame_rate = rational.reduce(@as(i64, t.time_scale) * t.nb_frames_for_fps, t.duration_for_fps, std.math.maxInt(i32)).q;
+            if (t.media == .subtitle and (t.video.width <= 0 or t.video.height <= 0)) {
+                t.video.width = t.video.track_width;
+                t.video.height = t.video.track_height;
+            }
             // HandBrake up to 0.10.2 wrote MP3 FFmpeg parses in full.
             if (d.handbrake_version != 0 and d.handbrake_version <= 1000000 * 0 + 1000 * 10 + 2 and t.codec == .mp3) t.parse_full = true;
         }
@@ -3120,13 +3841,39 @@ pub const Demuxer = struct {
             if (i >= d.tracks.items.len) break;
             if (rate != 0) d.tracks.items[i].bit_rate = rate;
         }
+        // ff_rfps_calculate at the end of the header, before the codec
+        // contexts exist: the time base alone decides whether it is
+        // reliable.
         for (d.tracks.items) |*t| {
+            if (t.media != .video) continue;
+            const tb = t.time_base;
+            const unreliable = @as(i64, tb.den) >= 101 * @as(i64, tb.num) or @as(i64, tb.den) < 5 * @as(i64, tb.num);
+            t.video.rfps.calculate(gpa, tb, unreliable, 0, &t.video.r_frame_rate, &t.video.avg_frame_rate);
+        }
+        for (d.tracks.items) |*t| {
+            if (t.media == .video) try d.exportVideoSideData(t);
             if (t.media == .audio) t.replaygain = mp3.replayGainFromTags(&d.tags);
             // A codec other than audio's in an audio track (an `esds`
             // object type), not modelled.
             if (t.media == .audio and (t.codec.isVideo() or t.codec == .mov_text or t.codec == .dvd_subtitle or t.codec == .mpeg4systems)) return error.UnsupportedFormat;
             t.decoder = decoderFor(t);
         }
+    }
+
+    /// mov_read_header's coded side data of a video stream, after what
+    /// the boxes added: the display matrix, then the mastering display,
+    /// content light level and ambient viewing environment.
+    fn exportVideoSideData(d: *Demuxer, t: *Track) Error!void {
+        const gpa = d.gpa;
+        const v = &t.video;
+        if (v.display_matrix) |m| {
+            const bytes = try gpa.alloc(u8, 36);
+            for (m, 0..) |x, i| std.mem.writeInt(i32, bytes[i * 4 ..][0..4], x, .little);
+            try v.addSideData(gpa, .displaymatrix, bytes);
+        }
+        if (v.mastering) |m| try v.addSideData(gpa, .mastering_display_metadata, try gpa.dupe(u8, &m));
+        if (v.content_light) |c| try v.addSideData(gpa, .content_light_level, try gpa.dupe(u8, &c));
+        if (v.ambient) |a| try v.addSideData(gpa, .ambient_viewing_environment, try gpa.dupe(u8, &a));
     }
 
     // ---- Packets ----
@@ -3181,6 +3928,7 @@ pub const Demuxer = struct {
                 sample.size = @intCast(@min(sample.size, d.next_root_atom - sample.pos));
             }
             var flags: u32 = 0;
+            var palette: ?[]const u8 = null;
             if (!t.discard) {
                 if (!try d.in.seekTo(gpa, sample.pos)) {
                     // "partial file": AVERROR_EOF past the end, else tried
@@ -3190,34 +3938,89 @@ pub const Demuxer = struct {
                     return error.InvalidMov;
                 }
                 d.current.clearRetainingCapacity();
-                try d.current.ensureTotalCapacity(gpa, @min(sample.size, 1 << 20));
-                var left: usize = sample.size;
-                while (left > 0) {
-                    const step = @min(left, 1 << 20);
-                    const old = d.current.items.len;
-                    try d.current.resize(gpa, old + step);
-                    const got = try d.in.read(gpa, d.current.items[old..]);
-                    d.current.shrinkRetainingCapacity(old + got);
-                    left -= got;
-                    if (got < step) break;
+                if (t.codec == .eia_608 and sample.size > 8) {
+                    // get_eia608_packet's error is tried again on the next
+                    // read, unless the input ended.
+                    if (!try d.readEia608(sample.size)) {
+                        if (!d.in.eof) t.current_sample -= 1;
+                        return error.InvalidMov;
+                    }
+                } else {
+                    try d.current.ensureTotalCapacity(gpa, @min(sample.size, 1 << 20));
+                    var left: usize = sample.size;
+                    while (left > 0) {
+                        const step = @min(left, 1 << 20);
+                        const old = d.current.items.len;
+                        try d.current.resize(gpa, old + step);
+                        const got = try d.in.read(gpa, d.current.items[old..]);
+                        d.current.shrinkRetainingCapacity(old + got);
+                        left -= got;
+                        if (got < step) break;
+                    }
+                    if (left > 0) {
+                        // av_get_packet: nothing read is the end; less, a
+                        // corrupt packet.
+                        if (d.current.items.len == 0) return null;
+                        flags |= corrupt_flag;
+                    }
                 }
-                if (left > 0) {
-                    // av_get_packet: nothing read is the end; less, a
-                    // corrupt packet.
-                    if (d.current.items.len == 0) return null;
-                    flags |= corrupt_flag;
+                // The color table goes with the first packet read.
+                if (t.video.has_palette) {
+                    for (t.video.palette.?, 0..) |c, k| std.mem.writeInt(u32, d.palette_bytes[k * 4 ..][0..4], c, .little);
+                    palette = &d.palette_bytes;
+                    t.video.has_palette = false;
                 }
                 // MP3 whose first packet has no frame header is parsed.
                 if (t.codec == .mp3 and !t.parse_full and d.current.items.len > 4 and !mpegaudio.checkHeader(std.mem.readInt(u32, d.current.items[0..4], .big))) t.parse_full = true;
             }
-            const pkt = d.finalizePacket(t, sample, flags);
+            var pkt = d.finalizePacket(t, sample, flags);
             if (t.discard) continue;
+            pkt.palette = palette;
             return pkt;
         }
     }
 
     const corrupt_flag: u32 = 2;
     const disposable_flag: u32 = 0x10;
+
+    /// get_eia608_packet: the `cdat` and `cdt2` atoms of a c608 sample
+    /// as cc_data triplets (other atoms skipped) into `current`; false
+    /// for FFmpeg's AVERROR_INVALIDDATA.
+    fn readEia608(d: *Demuxer, sample_size: u32) Error!bool {
+        const gpa = d.gpa;
+        var src_size: i64 = sample_size;
+        if (src_size < 10) return false;
+        try d.current.resize(gpa, @intCast(@divTrunc(src_size - 8, 2) * 3));
+        var out_size: usize = 0;
+        var ok = true;
+        while (src_size >= 10) {
+            const atom_size = try d.in.rb32(gpa);
+            const atom_type = try d.in.rb32(gpa);
+            const data_size = atom_size -% 8;
+            const cc_field: u8 = if (atom_type == std.mem.readInt(u32, "cdat", .big)) 1 else if (atom_type == std.mem.readInt(u32, "cdt2", .big)) 2 else 0;
+            src_size -= 8;
+            if (data_size < 2 or data_size > src_size or data_size % 2 != 0) {
+                ok = false;
+                break;
+            }
+            if (cc_field == 0) {
+                _ = try d.in.skipBy(gpa, data_size);
+                src_size -= data_size;
+                continue;
+            }
+            var i: u32 = 0;
+            while (i < data_size) : (i += 2) {
+                d.current.items[out_size] = (0x1F << 3) | (1 << 2) | (cc_field - 1);
+                d.current.items[out_size + 1] = try d.in.r8(gpa);
+                d.current.items[out_size + 2] = try d.in.r8(gpa);
+                out_size += 3;
+                src_size -= 2;
+            }
+        }
+        if (src_size > 0) _ = try d.in.skipBy(gpa, src_size);
+        d.current.shrinkRetainingCapacity(out_size);
+        return ok;
+    }
 
     /// mov_finalize_packet.
     fn finalizePacket(d: *Demuxer, t: *Track, sample: IndexEntry, flags_in: u32) demux.SourcePacket {
@@ -3326,11 +4129,32 @@ pub const Demuxer = struct {
         const t = &d.tracks.items[i];
         const audio = t.media == .audio;
         return .{
-            .known = !audio or t.codec != .none,
+            .known = t.media == .data or t.codec != .none,
             .media = switch (t.media) {
                 .audio => .audio,
                 .subtitle => .subtitle,
-                .video, .data => .data,
+                .video => .video,
+                .data => .data,
+            },
+            .video = if (t.media != .video) .{} else .{
+                .codec = switch (t.codec) {
+                    .h264 => .h264,
+                    .hevc => .hevc,
+                    .vvc => .vvc,
+                    .imm6 => .imm6,
+                    .mpeg2video => .mpeg2video,
+                    .gif => .gif,
+                    .rv40 => .rv40,
+                    else => .other,
+                },
+                .fields = t.codec.fields(),
+                .mp4v = t.codec_tag == tag("mp4v"),
+                .width = t.video.width,
+                .delay = t.video.video_delay,
+                .r_frame_rate = t.video.r_frame_rate,
+                .avg_frame_rate = t.video.avg_frame_rate,
+                .rfps_gcd = t.video.rfps.duration_gcd,
+                .sar_known = t.video.sar.num != 0,
             },
             .time_base = t.time_base,
             .sample_rate = std.math.cast(u32, t.sample_rate) orelse 0,
@@ -3727,6 +4551,43 @@ fn fixStsc(list: *std.ArrayList(Stsc)) void {
     }
 }
 
+/// `MAX_REORDER_DELAY`.
+const max_reorder_delay = 16;
+
+/// mov_estimate_video_delay: an H.264 track's reordering delay, the most
+/// swaps any pts needs to sort into a buffer of 17.
+fn estimateVideoDelay(t: *Track) void {
+    if (!(t.video.video_delay <= 0 and t.ctts_count > 0 and t.codec == .h264)) return;
+    var buf: [max_reorder_delay + 1]i64 = @splat(std.math.minInt(i64));
+    var buf_start: usize = 0;
+    var ctts_ind: u32 = 0;
+    var ctts_sample: u32 = 0;
+    t.video.video_delay = 0;
+    for (t.index.items) |e| {
+        if (ctts_ind >= t.tts_count) break;
+        var j = buf_start;
+        buf_start += 1;
+        if (buf_start == max_reorder_delay + 1) buf_start = 0;
+        // The index's timestamp plus the offset, wrapping as int64_t.
+        buf[j] = e.timestamp +% t.tts.items[ctts_ind].offset;
+        var swaps: i32 = 0;
+        while (j != buf_start) {
+            const r = if (j == 0) max_reorder_delay else j - 1;
+            if (buf[j] < buf[r]) {
+                std.mem.swap(i64, &buf[j], &buf[r]);
+                swaps += 1;
+            } else break;
+            j = r;
+        }
+        t.video.video_delay = @max(t.video.video_delay, swaps);
+        ctts_sample += 1;
+        if (ctts_sample == t.tts.items[ctts_ind].count) {
+            ctts_ind += 1;
+            ctts_sample = 0;
+        }
+    }
+}
+
 /// sanity_checks: 0, 1 for a track left without its index, 2 for a broken
 /// one.
 fn sanityChecks(t: *const Track) u8 {
@@ -3743,6 +4604,14 @@ fn fixTimescale(t: *Track, movie_time_scale: i32) void {
     if (t.time_scale > 0) return;
     t.time_scale = movie_time_scale;
     if (t.time_scale <= 0) t.time_scale = 1;
+}
+
+/// TAG_IS_AVCI: AVC-Intra's codec tags.
+fn isAvci(t: u32) bool {
+    inline for (.{ "ai5p", "ai5q", "ai52", "ai53", "ai55", "ai56", "ai1p", "ai1q", "ai12", "ai13", "ai15", "ai16", "aivx", "AVin" }) |name| {
+        if (t == tag(name)) return true;
+    }
+    return false;
 }
 
 /// mov_skip_multiple_stsd: a second description of another format is
@@ -3767,7 +4636,8 @@ fn codecFromTag(t: *Track, format: u32) Error!Codec {
         t.media = .audio;
     } else if (t.media != .audio and format != 0 and format != tag("mp4s")) {
         id = .none;
-        if (isVideoTag(format)) {
+        if (videoCodec(format)) |video| {
+            id = video;
             t.media = .video;
         } else if (t.media == .data or (t.media == .subtitle and t.codec == .none)) {
             // ff_codec_movsubtitle_tags, MP4's and ISMV's TTML, then
@@ -3896,6 +4766,28 @@ pub const StreamInfo = struct {
     nb_frames: i64,
     seek_preroll: i64,
     extradata: []const u8,
+    /// A video or subtitle stream's parameters (T33a3), as
+    /// avformat_find_stream_info leaves them.
+    video: VideoInfo,
+};
+
+/// The video fields `StreamInfo` reports; zero for other streams.
+pub const VideoInfo = struct {
+    width: i32 = 0,
+    height: i32 = 0,
+    /// `st->sample_aspect_ratio`.
+    sar: rational.Rational = .{ .num = 0, .den = 1 },
+    field_order: u8 = 0,
+    color_range: u8 = 0,
+    color_primaries: u16 = 2,
+    color_trc: u16 = 2,
+    color_space: u16 = 2,
+    alpha_mode: u8 = 0,
+    r_frame_rate: rational.Rational = .{ .num = 0, .den = 0 },
+    avg_frame_rate: rational.Rational = .{ .num = 0, .den = 0 },
+    video_delay: i32 = 0,
+    /// The coded side data, in FFmpeg's order.
+    side_data: []const SideDatum = &.{},
 };
 
 /// `ff_flac_set_channel_layout`'s table.
@@ -3962,6 +4854,28 @@ pub fn streamInfo(d: *Demuxer, layer: anytype, i: usize) Demuxer.ReadError!Strea
         8 => 0x20,
         else => 0,
     };
+    var video: VideoInfo = .{ .side_data = t.video.side_data.items };
+    if (t.media == .video or t.media == .subtitle) {
+        const v = &t.video;
+        video.width = v.width;
+        video.height = v.height;
+    }
+    if (t.media == .video) {
+        const v = &t.video;
+        const rates = try layer.frameRates(i);
+        video.sar = v.sar;
+        // ARES's display aspect ratio over the codec context's size.
+        if (v.display_aspect.num != 0 and v.display_aspect.den != 0) video.sar = rational.mul(v.display_aspect, .{ .num = v.height, .den = v.width });
+        video.field_order = v.field_order;
+        video.color_range = v.color_range;
+        video.color_primaries = v.color_primaries;
+        video.color_trc = v.color_trc;
+        video.color_space = v.color_space;
+        video.alpha_mode = v.alpha_mode;
+        video.r_frame_rate = rates[0];
+        video.avg_frame_rate = rates[1];
+        video.video_delay = v.video_delay;
+    }
     // avcodec_parameters_from_context keeps the audio fields of audio
     // streams only (a chapter track made data loses its rate; its layout
     // is restored).
@@ -3987,6 +4901,7 @@ pub fn streamInfo(d: *Demuxer, layer: anytype, i: usize) Demuxer.ReadError!Strea
         .nb_frames = t.nb_frames,
         .seek_preroll = if (audio) seek_preroll else 0,
         .extradata = t.extradata orelse &.{},
+        .video = video,
     };
 }
 
@@ -4140,6 +5055,16 @@ fn vectorLines(gpa: std.mem.Allocator, bytes: []const u8, seekable: bool, out: *
                 try out.append(gpa, '\n');
             },
         }
+        if (s.media == .video or s.media == .subtitle) {
+            const v = s.video;
+            try out.print(gpa, "V {d} {d} {d} {d}/{d} 0/1 none {d} {d} {d} {d} {d} 0 {d} {d}/{d} {d}/{d} {d} -99 0/1\n", .{
+                i,                v.width,              v.height,              v.sar.num,        v.sar.den,       v.field_order,        v.color_range,        v.color_primaries, v.color_trc,
+                v.color_space,    v.alpha_mode,         v.r_frame_rate.num,    v.r_frame_rate.den, v.avg_frame_rate.num, v.avg_frame_rate.den, v.video_delay,
+            });
+        }
+        if (s.media != .audio) for (s.video.side_data) |sd| {
+            try out.print(gpa, "X {d} {d} {d} {d}\n", .{ i, @backingInt(sd.type), sd.data.len, adler(sd.data) });
+        };
         if (d.tracks.items[i].replaygain) |rg| try out.print(gpa, "Y {d} {d} {d} {d} {d}\n", .{ i, rg.track_gain, rg.track_peak, rg.album_gain, rg.album_peak });
         for (d.tracks.items[i].tags.items()) |e| try out.print(gpa, "M {d} {s}={s}\n", .{ i, e.key, e.value });
     }
@@ -4163,6 +5088,7 @@ fn vectorLines(gpa: std.mem.Allocator, bytes: []const u8, seekable: bool, out: *
         try out.print(gpa, " {d} {x} {d} {d}\n", .{ p.duration, p.flags, p.pos, adler(p.data) });
         if (p.skip) |k| try out.print(gpa, "K {d} {d}\n", .{ k[0], k[1] });
         if (p.new_extradata) |e| try out.print(gpa, "Q {d} {d}\n", .{ e.len, adler(e) });
+        if (p.palette) |e| try out.print(gpa, "Z {d} {d}\n", .{ e.len, adler(e) });
     }
     try out.appendSlice(gpa, "R EOF\n");
 }
@@ -4193,12 +5119,12 @@ fn withoutPictures(gpa: std.mem.Allocator, text: []const u8) ![]u8 {
         if (line.len == 0) continue;
         const kind = line[0];
         var drop = false;
-        if ((kind == 'S' or kind == 'C' or kind == 'L' or kind == 'M' or kind == 'Y' or kind == 'P') and line.len > 2) {
+        if ((kind == 'S' or kind == 'C' or kind == 'L' or kind == 'M' or kind == 'Y' or kind == 'V' or kind == 'X' or kind == 'P') and line.len > 2) {
             const end = std.mem.findScalarPos(u8, line, 2, ' ') orelse line.len;
             const index = std.fmt.parseInt(u32, line[2..end], 10) catch std.math.maxInt(u32);
             drop = std.mem.findScalar(u32, pictures.items, index) != null;
             if (kind == 'P') in_picture_packet = drop;
-        } else if (kind == 'K' or kind == 'Q' or kind == 'T') {
+        } else if (kind == 'K' or kind == 'Q' or kind == 'T' or kind == 'Z') {
             drop = in_picture_packet;
         }
         if (drop) continue;
@@ -4344,7 +5270,7 @@ fn exerciseFragmented(gpa: std.mem.Allocator, bytes: []const u8) error{OutOfMemo
 }
 
 test "the mov demuxer from a pipe of one-byte reads returns what a whole buffer gives" {
-    inline for (.{ "mov_aac_faststart", "mov_pcm_faststart_mov", "mov_stsc_runs", "mov_two_stsd", "mov_data_track", "mov_qt_v1_ima4", "mov_meta_chapter_track", "mov_meta_keys" }) |name| {
+    inline for (.{ "mov_aac_faststart", "mov_pcm_faststart_mov", "mov_stsc_runs", "mov_two_stsd", "mov_data_track", "mov_qt_v1_ima4", "mov_meta_chapter_track", "mov_meta_keys", "mov_video_mov_text", "mov_video_raw_palette", "mov_video_c608", "mov_video_hdr" }) |name| {
         const bytes = fixtures.mov.bytes(name);
         const expected = try exercise(testing.allocator, bytes, false, .{}, .{});
         try testing.expect(expected > 0);
@@ -4378,7 +5304,7 @@ test "the limits refuse tables, samples and tracks past them" {
 }
 
 test "every prefix of a file opens, refuses or ends as FFmpeg's walk allows, freeing everything" {
-    inline for (.{ "mov_aac_faststart", "mov_qt_v1_ima4", "mov_two_stsd", "mov_alac_stereo", "mov_meta_ilst", "mov_meta_chapter_track" }) |name| {
+    inline for (.{ "mov_aac_faststart", "mov_qt_v1_ima4", "mov_two_stsd", "mov_alac_stereo", "mov_meta_ilst", "mov_meta_chapter_track", "mov_video_hdr", "mov_video_raw_palette", "mov_video_c608" }) |name| {
         const bytes = fixtures.mov.bytes(name);
         var len: usize = 0;
         while (len <= bytes.len) : (len += if (len < 1200) 1 else 37) {
@@ -4587,6 +5513,96 @@ test "metadata: numbers print as glibc's printf, versions as sscanf reads them" 
     try testing.expectEqualSlices(u8, "\xf0\x9f", out.items);
 }
 
+/// `fixture` with the first box of type `kind` (searched as bytes) given
+/// the body `body` instead of its own, the boxes around it resized.
+fn replaceBox(a: std.mem.Allocator, comptime fixture: []const u8, kind: []const u8, body: []const u8) ![]u8 {
+    const bytes = fixtures.mov.bytes(fixture);
+    const at = std.mem.find(u8, bytes, kind).? - 4;
+    const old_size = std.mem.readInt(u32, bytes[at..][0..4], .big);
+    const grow: i64 = @as(i64, @intCast(body.len + 8)) - old_size;
+    const out = try std.mem.concat(a, u8, &.{ bytes[0..at], "\x00\x00\x00\x00", kind, body, bytes[at + old_size ..] });
+    std.mem.writeInt(u32, out[at..][0..4], @intCast(body.len + 8), .big);
+    // Every box enclosing it (they start before it and end after it) and
+    // the chunk offsets after it move.
+    var o: usize = 0;
+    while (o + 8 <= at) : (o += 1) {
+        const size = std.mem.readInt(u32, out[o..][0..4], .big);
+        if (size < 8 or o + size < at + old_size or o + size > bytes.len) continue;
+        const name = out[o + 4 ..][0..4];
+        const printable = for (name) |c| {
+            if (!std.ascii.isAlphanumeric(c) and c != ' ') break false;
+        } else true;
+        if (printable) std.mem.writeInt(u32, out[o..][0..4], @intCast(@as(i64, size) + grow), .big);
+    }
+    if (std.mem.find(u8, out, "stco")) |stco| {
+        const n = std.mem.readInt(u32, out[stco + 8 ..][0..4], .big);
+        for (0..n) |k| {
+            const p = out[stco + 12 + 4 * k ..][0..4];
+            const v = std.mem.readInt(u32, p, .big);
+            if (v > at) std.mem.writeInt(u32, p, @intCast(@as(i64, v) + grow), .big);
+        }
+    }
+    return out;
+}
+
+test "video boxes: short and malformed configuration boxes fail or are ignored as FFmpeg's readers decide" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // A good fixture opens, as a sanity check of the rewriting.
+    try testing.expectEqual(null, try openError(try replaceBox(a, "mov_video_aspect", "pasp", "\x00\x00\x00\x20\x00\x00\x00\x1b"), .{}));
+    // pasp with a zero vertical spacing is ignored.
+    const d = try openAndRead(try replaceBox(a, "mov_video_aspect", "pasp", "\x00\x00\x00\x20\x00\x00\x00\x00"), true, .{});
+    defer d.deinit();
+    try testing.expectEqual(0, d.tracks.items[0].video.h_spacing);
+    // A colr ICC profile over the box limit, and an empty one: side data
+    // of no bytes.
+    try testing.expectEqual(error.LimitExceeded, (try openError(fixtures.mov.bytes("mov_video_aspect"), .{ .max_box_bytes = 16 })).?);
+    const empty = try openAndRead(try replaceBox(a, "mov_video_aspect", "colr", "prof"), true, .{});
+    defer empty.deinit();
+    try testing.expectEqual(0, empty.tracks.items[0].video.sideData(.icc_profile).?.len);
+    // A colr of an unknown kind is skipped.
+    try testing.expectEqual(null, try openError(try replaceBox(a, "mov_video_aspect", "colr", "zzzz"), .{}));
+    // SmDm, CoLL, clli and amve under their sizes: AVERROR_INVALIDDATA.
+    try testing.expectEqual(error.InvalidMov, (try openError(try replaceBox(a, "mov_video_hdr", "clli", "\x00"), .{})).?);
+    try testing.expectEqual(error.InvalidMov, (try openError(try replaceBox(a, "mov_video_hdr", "amve", "\x00\x00"), .{})).?);
+    try testing.expectEqual(error.InvalidMov, (try openError(try replaceBox(a, "mov_video_vp09_hdr", "SmDm", "\x00"), .{})).?);
+    try testing.expectEqual(error.InvalidMov, (try openError(try replaceBox(a, "mov_video_vp09_hdr", "CoLL", "\x00"), .{})).?);
+    // vpcC under 5 bytes, and of another version (ignored).
+    try testing.expectEqual(error.InvalidMov, (try openError(try replaceBox(a, "mov_video_vp09", "vpcC", "\x01"), .{})).?);
+    try testing.expectEqual(null, try openError(try replaceBox(a, "mov_video_vp09", "vpcC", "\x02\x00\x00\x00\x00"), .{}));
+    // A clap of zero denominators is ignored.
+    const zeros: [32]u8 = @splat(0);
+    try testing.expectEqual(null, try openError(try replaceBox(a, "mov_video_aspect", "clap", &zeros), .{}));
+}
+
+test "video: the palette and the EIA-608 rewriting from crafted samples" {
+    // The palette goes with the first packet only.
+    const d = try openAndRead(fixtures.mov.bytes("mov_video_raw_palette"), true, .{});
+    defer d.deinit();
+    try testing.expect(!d.tracks.items[0].video.has_palette);
+    try testing.expectEqual(0xFF0000FF, d.tracks.items[0].video.palette.?[0]);
+    // A c608 sample whose atom claims more than the sample: an error the
+    // next read meets again.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = try a.dupe(u8, fixtures.mov.bytes("mov_video_c608"));
+    const cdat = std.mem.find(u8, bytes, "cdat\x94").? - 4;
+    std.mem.writeInt(u32, bytes[cdat..][0..4], 200, .big);
+    var reader: std.Io.Reader = .fixed(bytes);
+    const e = try Demuxer.initSeekable(testing.allocator, &reader, .fixed(&reader), .{});
+    defer e.deinit();
+    var failed: u32 = 0;
+    for (0..40) |_| {
+        _ = e.next() catch {
+            failed += 1;
+            continue;
+        } orelse break;
+    }
+    try testing.expect(failed >= 2);
+}
+
 test "the probe scores FFmpeg's boxes" {
     try testing.expectEqual(100, probeScore(fixtures.mov.bytes("mov_aac_stereo")[0..64]));
     try testing.expectEqual(95, probeScore("\x00\x00\x00\x08free\x00\x00\x00\x08junk"));
@@ -4601,7 +5617,7 @@ test "the probe scores FFmpeg's boxes" {
 }
 
 test "the mov demuxer and the generic layer free everything under every allocation failure" {
-    inline for (.{ "mov_aac_faststart", "mov_two_tracks_mov", "mov_two_stsd", "mov_mp2_mov", "mov_ac3_stereo_mov", "mov_qt_v1_ima4", "mov_data_track", "mov_cut_in_mdat", "mov_alac_editlist", "mov_meta_ilst", "mov_meta_keys", "mov_meta_itunsmpb", "mov_meta_in_trak", "mov_meta_udta_strings", "mov_meta_chapter_track", "mov_meta_hmmt", "mov_meta_covr", "mov_meta_uuid", "mov_meta_tags_mov" }) |name| {
+    inline for (.{ "mov_aac_faststart", "mov_two_tracks_mov", "mov_two_stsd", "mov_mp2_mov", "mov_ac3_stereo_mov", "mov_qt_v1_ima4", "mov_data_track", "mov_cut_in_mdat", "mov_alac_editlist", "mov_meta_ilst", "mov_meta_keys", "mov_meta_itunsmpb", "mov_meta_in_trak", "mov_meta_udta_strings", "mov_meta_chapter_track", "mov_meta_hmmt", "mov_meta_covr", "mov_meta_uuid", "mov_meta_tags_mov", "mov_video_h264_ctts", "mov_video_vfr_ctts", "mov_video_hdr", "mov_video_aspect", "mov_video_raw_palette", "mov_video_mov_text", "mov_video_c608", "mov_video_two_tracks", "mov_video_mjpeg" }) |name| {
         const bytes = fixtures.mov.bytes(name);
         try hostile.checkAll(exercise, .{ bytes, true, Limits{}, hostile.TestPlan{} });
         try hostile.checkAll(exercise, .{ bytes, false, Limits{}, hostile.TestPlan{ .max_packets = 8 } });
@@ -4657,6 +5673,14 @@ const fuzz_corpus: []const []const u8 = &.{
     fuzzSeed("mov_meta_hmmt", true, 0, null),
     fuzzSeed("mov_meta_uuid", false, 2, null),
     fuzzSeed("mov_meta_tags_mov", false, 0, null),
+    fuzzSeed("mov_video_h264_ctts", false, 0, null),
+    fuzzSeed("mov_video_hdr", true, 0, null),
+    fuzzSeed("mov_video_vfr_ctts", false, 1, null),
+    fuzzSeed("mov_video_raw_palette", false, 0, null),
+    fuzzSeed("mov_video_c608", true, 0, null),
+    fuzzSeed("mov_video_audio_moov_last", false, 2, null),
+    fuzzSeed("mov_video_aspect", false, 3, null),
+    fuzzSeed("mov_video_mov_text", false, 0, null),
 };
 
 test "fuzz: the mov demuxer on arbitrary input, from a file or a pipe, with limits and a seek" {

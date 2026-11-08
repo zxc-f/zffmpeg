@@ -101,7 +101,7 @@ difference.
 | `mov_unknown_entry.mov` | crafted | yes | A sound track whose sample entry is an unknown format: codec none, no decoder. |
 | `mov_data_track.mp4` | crafted | yes | An audio track and a data track (an unknown handler and entry): the data stream's packets are keyframes, its timings a text stream's. |
 | `mov_data_zero_durations.mp4` | crafted | yes | A gpmd data track whose samples all last 0: discarded, as FFmpeg does. |
-| `mov_video_track.mp4` | crafted | `UnsupportedFormat` | An AAC track and a video track: video is not demuxed yet (T33a3). |
+| `mov_video_track.mp4` | crafted | yes | An AAC track and an avc1 video track of size 0 without avcC: the read-ahead never has the video's parameters and runs to the end. |
 | `mov_deep_nesting.mp4` | crafted | `InvalidMov` | Boxes nested twelve deep in a track: "Atoms too deeply nested". |
 | `mov_empty_moov.mp4` | crafted | yes | A moov holding only mvhd: no streams. |
 | `mov_no_moov.mp4` | crafted | `InvalidMov` | An ftyp and an mdat, no moov: "moov atom not found". |
@@ -150,4 +150,42 @@ difference.
 | `mov_meta_string_past_end.mp4` | crafted | `InvalidMov` | A user data string whose length runs past the end of the file (moov last): AVERROR_INVALIDDATA. |
 | `mov_meta_covr.mp4` | crafted | yes | Two cover pictures (JPEG, PNG) after the track, which FFmpeg makes attached-picture streams and the port skips. |
 | `mov_meta_covr_in_trak.mp4` | crafted | `UnsupportedFormat` | A cover picture inside the track: FFmpeg's picture stream would come before the track's end, which the port does not model. |
+| `mov_video_h264_ctts.mp4` | crafted | yes | An avc1 track of 12 frames at 25 fps (1/12800) with B-frame composition offsets (ctts) and keyframes 1 and 7: the H.264 reordering delay from ctts, pts after dts. |
+| `mov_video_h264_negative_ctts.mp4` | crafted | yes | Negative composition offsets (ctts version 1) without cslg: FFmpeg shifts the dts back by the largest (the last two entries excepted). |
+| `mov_video_h264_cslg.mp4` | crafted | yes | The negative offsets with a cslg box, which FFmpeg does not read. |
+| `mov_video_hevc.mp4` | crafted | yes | An hvc1 track at 30000/1001 fps with B-frame offsets and sample dependencies (sdtp): HEVC's reordering is not estimated (video delay 0), disposable frames flagged. |
+| `mov_video_mp4v.mp4` | crafted | yes | MPEG-4 Part 2 (mp4v with an esds's VOL header) at 1/1000 with B-frames: an unreliable time base for mp4v, delayed presentation interpolated by libavformat. |
+| `mov_video_vp09.mp4` | crafted | yes | VP9 (vp09) with vpcC color parameters (BT.709, limited range) at 24 fps in a 1/24 time base. |
+| `mov_video_av01.mp4` | crafted | yes | AV1 (av01, av1C) with an nclx colr of BT.2020 PQ full range, 90 kHz at 29.97 fps. |
+| `mov_video_mjpeg.mov` | crafted | yes | Photo-JPEG (jpeg) in QuickTime: intra-only packets, all keyframes without stss, field order from fiel, pasp's 4:3 pixels, the vendor and compressor name as tags. |
+| `mov_video_raw_palette.mov` | crafted | yes | Uncompressed 8-bit video (raw , depth 8) with a color table of four entries in the description: palette side data on the first packet. |
+| `mov_video_raw_rgb.mov` | crafted | yes | Uncompressed 24-bit RGB (raw , depth 24) at 25 fps in a 1/50 time base. |
+| `mov_video_raw_grey.mov` | crafted | yes | Uncompressed 4-bit greyscale video (depth 0x24 with a color table id): a grey ramp as its palette. |
+| `mov_video_2vuy.mov` | crafted | yes | Uncompressed 4:2:2 (2vuy) at 30000/1001 fps. |
+| `mov_video_audio.mp4` | crafted | yes | An AAC track and an avc1 track, moov first, chunks interleaved: both streams' packets by file position within a second. |
+| `mov_video_audio_moov_last.mp4` | crafted | yes | The AAC and avc1 tracks with the moov after the mdat. |
+| `mov_video_two_tracks.mp4` | crafted | yes | Two avc1 tracks (640x360 and an enabled 320x180 one) and an AAC track: the program maps the larger video. |
+| `mov_video_rotation.mp4` | crafted | yes | A track whose tkhd matrix rotates by 90 degrees: display matrix side data. |
+| `mov_video_scaled_matrix.mp4` | crafted | yes | A tkhd matrix scaling width by two: the display matrix and a 2:1 sample aspect ratio from it. |
+| `mov_video_aspect.mp4` | crafted | yes | pasp (32:27), clap (a 600x340 aperture: cropping side data) and an ICC profile colr. |
+| `mov_video_track_size.mp4` | crafted | yes | A tkhd width half the description's: the sample aspect ratio from the sizes. |
+| `mov_video_hdr.mp4` | crafted | yes | dvh1 with hvcC (HEVC), mdcv, clli, amve, dvcC and an nclc colr: mastering display, content light, ambient viewing and Dolby Vision side data. |
+| `mov_video_vp09_hdr.mp4` | crafted | yes | VP9 with SmDm and CoLL (the older WebM-in-MP4 boxes). |
+| `mov_video_vfr.mp4` | crafted | yes | Variable frame durations (stts runs of 512 and 1024): the frame rate guessed from the durations at the header. |
+| `mov_video_vfr_ctts.mp4` | crafted | yes | Variable durations with B-frame offsets: durations taken in presentation order (mov_update_sample_durations). |
+| `mov_video_zero_duration.mp4` | crafted | yes | A video stts whose samples all last 0: no frame rate, the read-ahead runs to the end, durations of 1 after it. |
+| `mov_video_zero_duration_coarse.mp4` | crafted | yes | Zero durations in a 1/600 time base: libavformat gives each packet the time base's tick. |
+| `mov_video_huge_size.mp4` | crafted | yes | A 65535x65535 description and tkhd. |
+| `mov_video_unknown_tag.mp4` | crafted | yes | A video track whose format no table names: codec none, the read-ahead never completes. |
+| `mov_video_mov_text.mp4` | crafted | yes | Video, audio and a tx3g (mov_text) subtitle track: a subtitle stream with its packets and the tkhd's size. |
+| `mov_video_c608.mp4` | crafted | yes | A c608 closed-caption track: EIA-608 packets rewritten as cc_data triplets. |
+| `mov_video_tmcd.mp4` | crafted | `UnsupportedFormat` | A video track and a tmcd timecode track: timecode tracks are refused (their timecode tag and stream group are not ported). |
+| `mov_video_short_entry.mp4` | crafted | yes | A visual sample description whose declared size is 16: FFmpeg reads its fixed fields from the boxes after it. |
+| `mov_video_cut_entry.mp4` | crafted | `Truncated` | The file cut inside the visual sample description: AVERROR_EOF. |
+| `mov_video_vpcc_init_data.mp4` | crafted | `InvalidMov` | A vpcC declaring codec initialization data: AVERROR_INVALIDDATA. |
+| `mov_video_fiel_short.mov` | crafted | `InvalidMov` | A fiel box of one byte: AVERROR_INVALIDDATA. |
+| `mov_video_dvcc_short.mp4` | crafted | `InvalidMov` | A dvcC of two bytes: AVERROR_INVALIDDATA. |
+| `mov_video_mdcv_short.mp4` | crafted | `InvalidMov` | An mdcv under 24 bytes: AVERROR_INVALIDDATA. |
+| `mov_video_clap_invalid.mp4` | crafted | yes | A clap wider than the picture: FFmpeg ignores the box. |
+| `mov_video_palette_overread.mov` | crafted | yes | A color table declaring 201 entries in a description holding none: FFmpeg reads them from the boxes and samples after it. |
 <!-- END GENERATED FIXTURE TABLE -->

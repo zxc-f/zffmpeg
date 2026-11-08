@@ -164,15 +164,20 @@ fn hashAac(gpa: std.mem.Allocator, kind: av.framehash.Kind, bytes: []const u8, o
     try w.finish();
 }
 
-/// MP4 and QuickTime (T33a1), `ffmpeg -i <input> -c copy -f <muxer>`: the
-/// audio track the program maps by default (map_auto_audio: the most
-/// channels, a track that had packets in the read-ahead first, and the
-/// default disposition, the first of equals), with the default layout for
-/// its count when it has none, and the track's extradata; its packets as
-/// the program copies them: those before the first keyframe dropped
-/// (of_streamcopy), every timestamp shifted by the input's start time
-/// (the demuxer side's ts_offset), an audio packet's pts set to its dts,
-/// with their flags and their skip-samples and new-extradata side data.
+/// MP4 and QuickTime (T33a1, T33a3), `ffmpeg -i <input> -c copy -f
+/// <muxer>`: the streams the program maps by default, video first
+/// (map_auto_video: the largest picture, a track that had packets in the
+/// read-ahead first, the default disposition, the first of equals; any
+/// codec), then audio (map_auto_audio: the most channels, then the same
+/// bonuses), never subtitles or data (framecrc has no codec for them); the
+/// audio stream's layout the default for its count when it has none, each
+/// stream's extradata. Their packets as the program copies them
+/// (of_streamcopy, mux_fixup_ts): those before each stream's first
+/// keyframe dropped, every timestamp shifted by the input's start time, an
+/// audio packet's pts set to its dts, a dts after the pts or before the
+/// stream's last replaced, a video packet without a duration given one
+/// (guess_pkt_duration), with their flags and side data; and libavformat's
+/// interleaving by dts (ff_interleave_packet_per_dts).
 fn hashMov(gpa: std.mem.Allocator, kind: av.framehash.Kind, bytes: []const u8, out: *std.Io.Writer) !void {
     var reader: std.Io.Reader = .fixed(bytes);
     const d = try av.mov.Demuxer.initSeekable(gpa, &reader, .fixed(&reader), .{});
@@ -180,69 +185,265 @@ fn hashMov(gpa: std.mem.Allocator, kind: av.framehash.Kind, bytes: []const u8, o
     var layer = av.demux.Layer(av.mov.Demuxer).init(gpa, d);
     defer layer.deinit();
     try layer.findStreamInfo();
-    var best: ?usize = null;
-    var best_score: i64 = 0;
+    var best_video: ?usize = null;
+    var best_video_score: i64 = 0;
+    var best_audio: ?usize = null;
+    var best_audio_score: i64 = 0;
     for (0..d.streamCount()) |i| {
         const info = try av.mov.streamInfo(d, &layer, i);
-        if (info.media != .audio) continue;
-        const had_packets = i < layer.states.items.len and layer.states.items[i].codec_info_nb_frames > 0;
+        const had_packets: i64 = if (i < layer.states.items.len and layer.states.items[i].codec_info_nb_frames > 0) 100000000 else 0;
         const default: i64 = if (info.disposition & 1 != 0) 5000000 else 0;
-        const score: i64 = @as(i64, info.layout.channelCount()) + @as(i64, if (had_packets) 100000000 else 0) + default;
-        if (score > best_score) {
-            best_score = score;
-            best = i;
+        switch (info.media) {
+            .video => {
+                const score = @as(i64, info.video.width) * info.video.height + had_packets + default;
+                if (score > best_video_score) {
+                    best_video_score = score;
+                    best_video = i;
+                }
+            },
+            .audio => {
+                const score = @as(i64, info.layout.channelCount()) + had_packets + default;
+                if (score > best_audio_score) {
+                    best_audio_score = score;
+                    best_audio = i;
+                }
+            },
+            .data, .subtitle => {},
         }
     }
-    const index = best orelse return error.UnsupportedFormat;
-    const info = try av.mov.streamInfo(d, &layer, index);
-    const rate = std.math.cast(u32, info.sample_rate) orelse return error.UnsupportedFormat;
-    const tb: av.time.TimeBase = .{ .num = @intCast(info.time_base.num), .den = @intCast(info.time_base.den) };
-    var w: av.framehash.Writer = .init(kind, out, .{
-        .time_base = tb,
-        .codec = info.codec,
-        .sample_rate = rate,
-        .layout = switch (info.layout) {
-            .unspecified => |count| .default(count),
-            else => info.layout,
-        },
-        .extradata = if (info.extradata.len != 0) info.extradata else null,
-    });
-    try w.writeHeader();
-    const offset: i64 = if (layer.start_time == std.math.minInt(i64)) 0 else av.rational.rescaleQ(layer.start_time, .{ .num = 1, .den = 1000000 }, info.time_base);
-    var started = false;
-    while (try layer.next()) |p| {
-        if (p.stream != index) continue;
-        if (!started and p.flags & av.demux.key_flag == 0) continue;
-        started = true;
-        var skip: [10]u8 = @splat(0);
-        var side: [2]av.framehash.SideData = undefined;
-        var n: usize = 0;
-        if (p.new_extradata) |e| {
-            side[n] = .{ .name = "New Extradata", .data = e };
-            n += 1;
+    var inputs: [2]usize = undefined;
+    var count: usize = 0;
+    if (best_video) |i| {
+        inputs[count] = i;
+        count += 1;
+    }
+    if (best_audio) |i| {
+        inputs[count] = i;
+        count += 1;
+    }
+    if (count == 0) return error.UnsupportedFormat;
+    var streams: [2]av.framehash.Stream = undefined;
+    var copies: [2]CopyStream = undefined;
+    for (inputs[0..count], 0..) |index, o| {
+        const info = try av.mov.streamInfo(d, &layer, index);
+        const tb: av.time.TimeBase = .{ .num = @intCast(info.time_base.num), .den = @intCast(info.time_base.den) };
+        const video = info.media == .video;
+        streams[o] = .{
+            .time_base = tb,
+            .codec = info.codec,
+            .extradata = if (info.extradata.len != 0) info.extradata else null,
+        };
+        if (video) {
+            // The stream's aspect ratio, else the codec's (0/1 without a
+            // decoder).
+            const sar: av.rational.Rational = if (info.video.sar.num != 0) info.video.sar else .{ .num = 0, .den = 1 };
+            streams[o].video = .{ .width = info.video.width, .height = info.video.height, .sar_num = sar.num, .sar_den = sar.den };
+        } else {
+            streams[o].sample_rate = std.math.cast(u32, info.sample_rate) orelse return error.UnsupportedFormat;
+            streams[o].layout = switch (info.layout) {
+                .unspecified => |n| .default(n),
+                else => info.layout,
+            };
         }
+        copies[o] = .{
+            .input = index,
+            .video = video,
+            .time_base = info.time_base,
+            .offset = if (layer.start_time == std.math.minInt(i64)) 0 else av.rational.rescaleQ(layer.start_time, .{ .num = 1, .den = 1000000 }, info.time_base),
+            .avg_frame_rate = info.video.avg_frame_rate,
+            .vp9 = std.mem.eql(u8, info.codec, "vp9") or std.mem.eql(u8, info.codec, "vp8"),
+        };
+    }
+    var w = try av.framehash.Writer.initMany(kind, out, streams[0..count]);
+    try w.writeHeader();
+    var mux: Interleaver = .{ .gpa = gpa, .streams = copies[0..count], .writer = &w };
+    defer mux.deinit();
+    while (try layer.next()) |p| {
+        const o = for (copies[0..count], 0..) |c, k| {
+            if (c.input == p.stream) break k;
+        } else continue;
+        const c = &copies[o];
+        if (!c.started and p.flags & av.demux.key_flag == 0) continue;
+        c.started = true;
+        // The program estimates a missing dts (not modelled).
+        var dts = (p.dts orelse return error.MissingTimestamp) - c.offset;
+        var pts: ?i64 = if (!c.video) dts else if (p.pts) |t| t - c.offset else null;
+        // mux_fixup_ts: a dts after the pts, then one before the last
+        // (framecrc allows equal ones).
+        if (pts) |t| if (dts > t) {
+            const clipped = std.math.clamp(c.last_mux_dts, t - 1, dts - 1) + 1;
+            pts = clipped;
+            dts = clipped;
+        };
+        if (c.last_mux_dts != std.math.minInt(i64) and dts < c.last_mux_dts) {
+            if (pts) |t| if (t >= dts) {
+                pts = @max(t, c.last_mux_dts);
+            };
+            dts = c.last_mux_dts;
+        }
+        c.last_mux_dts = dts;
+        var duration = p.duration;
+        if (c.video and duration == 0) {
+            const avg = c.avg_frame_rate;
+            if (avg.num > 0 and avg.den > 0) {
+                duration = av.rational.rescaleQ(1, .{ .num = avg.den, .den = avg.num }, c.time_base);
+            } else if (@as(i64, c.time_base.num) * 1000 > c.time_base.den) duration = 1;
+        }
+        try mux.add(o, p, dts, pts orelse dts, duration);
+    }
+    try mux.flushAll();
+    try w.finish();
+}
+
+/// An output stream of the program's copy.
+const CopyStream = struct {
+    input: usize,
+    video: bool,
+    time_base: av.rational.Rational,
+    /// The input's start time in the stream's time base.
+    offset: i64,
+    avg_frame_rate: av.rational.Rational,
+    /// VP8 and VP9 streams without a buffered packet do not hold back
+    /// libavformat's 10-second rule.
+    vp9: bool,
+    started: bool = false,
+    last_mux_dts: i64 = std.math.minInt(i64),
+};
+
+/// A packet libavformat's interleaver holds, its bytes owned.
+const Buffered = struct {
+    stream: usize,
+    data: []u8,
+    pts: i64,
+    dts: i64,
+    duration: i64,
+    flags: u32,
+    side: [3]av.framehash.SideData = undefined,
+    side_count: usize = 0,
+    owned_side: [3][]u8 = undefined,
+
+    fn deinit(b: *Buffered, gpa: std.mem.Allocator) void {
+        gpa.free(b.data);
+        for (b.owned_side[0..b.side_count]) |x| gpa.free(x);
+    }
+
+    fn addSide(b: *Buffered, name: []const u8, data: []const u8, gpa: std.mem.Allocator) !void {
+        return addSideImpl(b, name, data, gpa);
+    }
+};
+
+/// ff_interleave_packet_per_dts: a list ordered by dts (ties by output
+/// index), each packet inserted after its stream's last; the head is
+/// written while every stream has a packet buffered, or when the newest
+/// is more than 10 seconds after it; the rest at the end.
+const Interleaver = struct {
+    gpa: std.mem.Allocator,
+    streams: []const CopyStream,
+    writer: *av.framehash.Writer,
+    list: std.ArrayList(Buffered) = .empty,
+    head: usize = 0,
+    /// Each stream's last buffered packet (`last_in_packet_buffer`).
+    last: [2]?usize = .{ null, null },
+
+    fn deinit(m: *Interleaver) void {
+        for (m.list.items[m.head..]) |*b| b.deinit(m.gpa);
+        m.list.deinit(m.gpa);
+    }
+
+    /// interleave_compare_dts: `next` comes after `pkt`.
+    fn after(m: *const Interleaver, next: *const Buffered, pkt: *const Buffered) bool {
+        const comp = av.rational.compareTs(next.dts, m.streams[next.stream].time_base, pkt.dts, m.streams[pkt.stream].time_base);
+        if (comp == 0) return pkt.stream < next.stream;
+        return comp > 0;
+    }
+
+    fn add(m: *Interleaver, o: usize, p: av.demux.Packet, dts: i64, pts: i64, duration: i64) !void {
+        var b: Buffered = .{ .stream = o, .data = try m.gpa.dupe(u8, p.data), .pts = pts, .dts = dts, .duration = duration, .flags = p.flags };
+        errdefer b.deinit(m.gpa);
+        // The packet's side data in its order: the demuxer's palette, its
+        // new extradata, then libavformat's skip samples.
+        if (p.palette) |x| try b.addSide("Palette", x, m.gpa);
+        if (p.new_extradata) |x| try b.addSide("New Extradata", x, m.gpa);
         if (p.skip) |sk| {
+            var skip: [10]u8 = @splat(0);
             std.mem.writeInt(u32, skip[0..4], sk[0], .little);
             std.mem.writeInt(u32, skip[4..8], sk[1], .little);
-            side[n] = .{ .name = "Skip Samples", .data = &skip };
-            n += 1;
+            try b.addSide("Skip Samples", &skip, m.gpa);
         }
-        const dts: ?i64 = if (p.dts) |t| t - offset else null;
-        try w.writePacketSide(.{
-            .data = p.data,
-            .time_base = tb,
-            .pts = if (dts) |t| t else if (p.pts) |t| t - offset else null,
-            .dts = dts,
-            .duration = p.duration,
-            .flags = .{
-                .key = p.flags & av.demux.key_flag != 0,
-                .corrupt = p.flags & av.demux.corrupt_flag != 0,
-                .discard = p.flags & av.demux.discard_flag != 0,
-                .disposable = p.flags & 0x10 != 0,
-            },
-        }, side[0..n]);
+        // ff_interleave_add_packet.
+        var at = if (m.last[o]) |l| l + 1 else m.head;
+        if (at < m.list.items.len and m.after(&m.list.items[m.list.items.len - 1], &b)) {
+            while (!m.after(&m.list.items[at], &b)) at += 1;
+        } else at = m.list.items.len;
+        try m.list.insert(m.gpa, at, b);
+        for (&m.last) |*l| if (l.*) |x| if (x >= at) {
+            l.* = x + 1;
+        };
+        m.last[o] = at;
+        try m.drain(false);
     }
-    try w.finish();
+
+    fn flushAll(m: *Interleaver) !void {
+        try m.drain(true);
+    }
+
+    fn drain(m: *Interleaver, eof: bool) !void {
+        while (m.head < m.list.items.len) {
+            var stream_count: usize = 0;
+            var noninterleaved: usize = 0;
+            for (m.streams, 0..) |c, i| {
+                if (m.last[i] != null) stream_count += 1 else if (!c.vp9) noninterleaved += 1;
+            }
+            var flush = eof or stream_count == m.streams.len;
+            if (!flush and m.streams.len == stream_count + noninterleaved) {
+                const top = &m.list.items[m.head];
+                const us: av.rational.Rational = .{ .num = 1, .den = 1000000 };
+                const top_dts = av.rational.rescaleQ(top.dts, m.streams[top.stream].time_base, us);
+                var delta: i64 = std.math.minInt(i64);
+                for (m.last[0..m.streams.len], 0..) |l, i| {
+                    const x = l orelse continue;
+                    delta = @max(delta, av.rational.rescaleQ(m.list.items[x].dts, m.streams[i].time_base, us) -% top_dts);
+                }
+                if (delta > 10000000) flush = true;
+            }
+            if (stream_count == 0 or !flush) return;
+            var b = m.list.items[m.head];
+            if (m.last[b.stream] == m.head) m.last[b.stream] = null;
+            m.head += 1;
+            defer b.deinit(m.gpa);
+            try m.writer.writePacketSide(.{
+                .data = b.data,
+                .time_base = .{ .num = @intCast(m.streams[b.stream].time_base.num), .den = @intCast(m.streams[b.stream].time_base.den) },
+                .pts = b.pts,
+                .dts = b.dts,
+                .duration = b.duration,
+                .stream_index = @intCast(b.stream),
+                .flags = .{
+                    .key = b.flags & av.demux.key_flag != 0,
+                    .corrupt = b.flags & av.demux.corrupt_flag != 0,
+                    .discard = b.flags & av.demux.discard_flag != 0,
+                    .disposable = b.flags & 0x10 != 0,
+                },
+            }, b.side[0..b.side_count]);
+            // The written entries are dropped once they are half the list.
+            if (m.head * 2 >= m.list.items.len) {
+                const keep = m.list.items.len - m.head;
+                std.mem.copyForwards(Buffered, m.list.items[0..keep], m.list.items[m.head..]);
+                m.list.shrinkRetainingCapacity(keep);
+                for (&m.last) |*l| if (l.*) |x| {
+                    l.* = x - m.head;
+                };
+                m.head = 0;
+            }
+        }
+    }
+};
+
+fn addSideImpl(b: *Buffered, name: []const u8, data: []const u8, gpa: std.mem.Allocator) !void {
+    const copy = try gpa.dupe(u8, data);
+    b.owned_side[b.side_count] = copy;
+    b.side[b.side_count] = .{ .name = name, .data = copy };
+    b.side_count += 1;
 }
 
 /// Ogg (T27a), `ffmpeg -i <input> -c copy -f <muxer>`: the input read

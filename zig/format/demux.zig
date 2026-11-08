@@ -50,6 +50,7 @@ const ac3dec = @import("../codec/ac3dec.zig");
 const id3v2 = @import("id3v2.zig");
 const aacdec = @import("../codec/aacdec.zig");
 const mp3dec = @import("../codec/mp3dec.zig");
+const cconv = @import("../core/cconv.zig");
 
 pub const nopts: i64 = std.math.minInt(i64);
 /// libavformat's base for timestamps counted before the first is known.
@@ -113,16 +114,192 @@ pub const Setup = struct {
     /// The MPEG audio codec the stream starts as, which the parser may
     /// change (MP3 when null).
     mpa_codec: ?mpegaudio.Codec = null,
+    /// A video stream's parameters (T33a3).
+    video: VideoSetup = .{},
+};
+
+/// What the layer needs of a video stream: its codec as the timestamp
+/// rules single it out, the width has_codec_parameters asks for, the
+/// reordering delay (`video_delay`, the codec context's `has_b_frames`)
+/// and the frame rates the demuxer set.
+pub const VideoSetup = struct {
+    codec: VideoCodec = .other,
+    /// The codec's descriptor has AV_CODEC_PROP_FIELDS.
+    fields: bool = false,
+    /// The codec tag is `mp4v` (tb_unreliable).
+    mp4v: bool = false,
+    width: i32 = 0,
+    delay: i32 = 0,
+    r_frame_rate: rational.Rational = .{ .num = 0, .den = 0 },
+    avg_frame_rate: rational.Rational = .{ .num = 0, .den = 0 },
+    /// FFStreamInfo's `duration_gcd`, which the demuxer's own frame-rate
+    /// estimate leaves and avformat_find_stream_info's goes on from.
+    rfps_gcd: i64 = 0,
+    /// The stream's sample aspect ratio is set (RV30 and RV40 need a frame
+    /// otherwise).
+    sar_known: bool = false,
+};
+
+/// The codecs libavformat's timestamp rules name.
+pub const VideoCodec = enum { other, h264, hevc, vvc, imm6, mpeg2video, gif, rv30, rv40 };
+
+/// `MAX_STD_TIMEBASES`.
+pub const max_std_timebases = 30 * 12 + 30 + 3 + 6;
+
+/// get_std_framerate: the `i`th standard frame rate, times 12 * 1001.
+pub fn stdFramerate(i_in: usize) i32 {
+    var i = i_in;
+    if (i < 30 * 12) return @intCast((i + 1) * 1001);
+    i -= 30 * 12;
+    if (i < 30) return @intCast((i + 31) * 1001 * 12);
+    i -= 30;
+    if (i < 3) return @as(i32, ([3]i32{ 80, 120, 240 })[i]) * 1001 * 12;
+    i -= 3;
+    return @as(i32, ([6]i32{ 24, 30, 60, 12, 15, 48 })[i]) * 1000 * 12;
+}
+
+/// `av_q2d`.
+fn q2d(q: rational.Rational) f64 {
+    return @as(f64, @floatFromInt(q.num)) / @as(f64, @floatFromInt(q.den));
+}
+
+/// FFStreamInfo's frame-rate estimation: ff_rfps_add_frame and
+/// ff_rfps_calculate (FF_API_R_FRAME_RATE), in double as FFmpeg's.
+pub const Rfps = struct {
+    last_dts: i64 = nopts,
+    duration_count: i32 = 0,
+    rfps_duration_sum: i64 = 0,
+    duration_gcd: i64 = 0,
+    /// `duration_error[2][2][MAX_STD_TIMEBASES]`, allocated by the first
+    /// frame, freed by `calculate`.
+    duration_error: ?*[2][2][max_std_timebases]f64 = null,
+
+    pub fn deinit(r: *Rfps, gpa: std.mem.Allocator) void {
+        if (r.duration_error) |e| gpa.destroy(e);
+        r.duration_error = null;
+    }
+
+    /// ff_rfps_add_frame.
+    pub fn addFrame(r: *Rfps, gpa: std.mem.Allocator, ts: i64, time_base: rational.Rational) error{OutOfMemory}!void {
+        const last = r.last_dts;
+        if (ts != nopts and last != nopts and ts > last and @as(u64, @bitCast(ts)) -% @as(u64, @bitCast(last)) < std.math.maxInt(i64)) {
+            const rel: i64 = if (isRelative(ts)) ts - relative_ts_base else ts;
+            const dts = @as(f64, @floatFromInt(rel)) * q2d(time_base);
+            const duration = ts - last;
+            const err = r.duration_error orelse blk: {
+                const e = try gpa.create([2][2][max_std_timebases]f64);
+                e.* = @splat(@splat(@splat(0)));
+                r.duration_error = e;
+                break :blk e;
+            };
+            for (0..max_std_timebases) |i| {
+                if (err[0][1][i] < 1e10) {
+                    const framerate: f64 = @floatFromInt(stdFramerate(i));
+                    const sdts = dts * framerate / (1001 * 12);
+                    for (0..2) |j| {
+                        const half = @as(f64, @floatFromInt(j)) * 0.5;
+                        const ticks = cconv.lrint(sdts + half);
+                        const e = sdts - @as(f64, @floatFromInt(ticks)) + half;
+                        err[j][0][i] += e;
+                        err[j][1][i] += e * e;
+                    }
+                }
+            }
+            if (r.rfps_duration_sum <= std.math.maxInt(i64) - duration) {
+                r.duration_count +%= 1;
+                r.rfps_duration_sum += duration;
+            }
+            if (@rem(r.duration_count, 10) == 0) {
+                const n: f64 = @floatFromInt(r.duration_count);
+                for (0..max_std_timebases) |i| {
+                    if (err[0][1][i] < 1e10) {
+                        const a0 = err[0][0][i] / n;
+                        const error0 = err[0][1][i] / n - a0 * a0;
+                        const a1 = err[1][0][i] / n;
+                        const error1 = err[1][1][i] / n - a1 * a1;
+                        if (error0 > 0.04 and error1 > 0.04) {
+                            err[0][1][i] = 2e10;
+                            err[1][1][i] = 2e10;
+                        }
+                    }
+                }
+            }
+            // The first 4 values may jitter.
+            if (r.duration_count > 3 and isRelative(ts) == isRelative(last)) r.duration_gcd = rational.gcd(r.duration_gcd, duration);
+        }
+        if (ts != nopts) r.last_dts = ts;
+    }
+
+    /// ff_rfps_calculate for one video stream: `unreliable` is
+    /// tb_unreliable's answer, `codec_info_duration` the read-ahead's.
+    pub fn calculate(r: *Rfps, gpa: std.mem.Allocator, tb: rational.Rational, unreliable: bool, codec_info_duration: i64, r_frame_rate: *rational.Rational, avg_frame_rate: *rational.Rational) void {
+        // Every time base here is 1/n (avpriv_set_pts_info's); FFmpeg
+        // would divide by a zero numerator.
+        std.debug.assert(tb.num > 0);
+        if (tb.num <= 0) return r.reset(gpa);
+        const tb_num: i64 = tb.num;
+        const lower = @max(1, @divTrunc(@as(i64, tb.den), 500 * tb_num));
+        if (unreliable and r.duration_count > 15 and r.duration_gcd > lower and r_frame_rate.num == 0 and
+            r.duration_gcd < @divTrunc(std.math.maxInt(i64), tb_num))
+        {
+            r_frame_rate.* = rational.reduce(tb.den, tb_num * r.duration_gcd, std.math.maxInt(i32)).q;
+        }
+        if (r.duration_count > 1 and r_frame_rate.num == 0 and unreliable) {
+            var num: i32 = 0;
+            var best_error: f64 = 0.01;
+            // r_frame_rate.num is 0 here: the reference is the time base's.
+            const ref_rate: rational.Rational = .{ .num = tb.den, .den = tb.num };
+            // The allocation exists: a count above 1 came from frames.
+            const err = r.duration_error.?;
+            const tbd = q2d(tb);
+            for (0..max_std_timebases) |j| {
+                const std_rate: f64 = @floatFromInt(stdFramerate(j));
+                if (codec_info_duration != 0 and @as(f64, @floatFromInt(codec_info_duration)) * tbd < (1001 * 11.5) / std_rate) continue;
+                if (codec_info_duration == 0 and stdFramerate(j) < 1001 * 12) continue;
+                if (tbd * @as(f64, @floatFromInt(r.rfps_duration_sum)) / @as(f64, @floatFromInt(r.duration_count)) < (1001 * 12.0 * 0.8) / std_rate) continue;
+                for (0..2) |k| {
+                    const n: f64 = @floatFromInt(r.duration_count);
+                    const a = err[k][0][j] / n;
+                    const e = err[k][1][j] / n - a * a;
+                    if (e < best_error and best_error > 0.000000001) {
+                        best_error = e;
+                        num = stdFramerate(j);
+                    }
+                }
+            }
+            // Not more than 1% faster than the reference, to match a
+            // standard rate.
+            if (num != 0 and (ref_rate.num == 0 or @as(f64, @floatFromInt(num)) / (12 * 1001) < 1.01 * q2d(ref_rate))) {
+                r_frame_rate.* = rational.reduce(num, 12 * 1001, std.math.maxInt(i32)).q;
+            }
+        }
+        if (avg_frame_rate.num == 0 and r_frame_rate.num != 0 and r.rfps_duration_sum != 0 and codec_info_duration <= 0 and
+            r.duration_count > 2 and
+            @abs(1.0 / (q2d(r_frame_rate.*) * q2d(tb)) - @as(f64, @floatFromInt(r.rfps_duration_sum)) / @as(f64, @floatFromInt(r.duration_count))) <= 1.0)
+        {
+            avg_frame_rate.* = r_frame_rate.*;
+        }
+        r.reset(gpa);
+    }
+
+    /// The end of ff_rfps_calculate: all but the gcd forgotten.
+    fn reset(r: *Rfps, gpa: std.mem.Allocator) void {
+        r.deinit(gpa);
+        r.last_dts = nopts;
+        r.duration_count = 0;
+        r.rfps_duration_sum = 0;
+    }
 };
 
 pub const Media = enum {
     audio,
     data,
     subtitle,
+    video,
 
     /// A text stream's timings (update_stream_timings' `is_text`).
     fn isText(m: Media) bool {
-        return m != .audio;
+        return m == .data or m == .subtitle;
     }
 };
 
@@ -301,6 +478,8 @@ pub const SourcePacket = struct {
     skip: ?[2]u32 = null,
     new_extradata: ?[]const u8 = null,
     new_metadata: ?[]const u8 = null,
+    /// AV_PKT_DATA_PALETTE: a QuickTime color table (1024 bytes).
+    palette: ?[]const u8 = null,
 };
 
 /// The bytes after a packet's data that `Packet.tail` keeps: a decoder's
@@ -322,6 +501,7 @@ pub const Packet = struct {
     skip: ?[2]u32 = null,
     new_extradata: ?[]const u8 = null,
     new_metadata: ?[]const u8 = null,
+    palette: ?[]const u8 = null,
     /// What FFmpeg's memory holds after `data`, which a decoder reading
     /// past the end sees: zeros (a packet's padding) except for the first
     /// frame the mpegaudio parser cuts from a raw packet without copying
@@ -349,12 +529,14 @@ const Held = struct {
     skip: ?[2]u32,
     new_extradata: ?[]u8,
     new_metadata: ?[]u8,
+    palette: ?[]u8 = null,
     tail: [tail_len]u8 = @splat(0),
 
     fn deinit(h: *Held, gpa: std.mem.Allocator) void {
         gpa.free(h.data);
         if (h.new_extradata) |b| gpa.free(b);
         if (h.new_metadata) |b| gpa.free(b);
+        if (h.palette) |b| gpa.free(b);
     }
 };
 
@@ -435,7 +617,25 @@ const StreamState = struct {
     skip_samples: i64 = 0,
     seek_discard: bool = false,
     seek_to_start: bool = false,
+    // Video streams (T33a3): the codec context's `has_b_frames`,
+    // compute_pkt_fields' reordering state, the read-ahead's frame-rate
+    // estimate and the stream's frame rates it settles.
+    has_b_frames: i32 = 0,
+    last_dts_for_order_check: i64 = nopts,
+    dts_ordered: u8 = 0,
+    dts_misordered: u8 = 0,
+    pts_buffer: [max_reorder_delay + 1]i64 = @splat(nopts),
+    pts_reorder_error: [max_reorder_delay + 1]i64 = @splat(0),
+    pts_reorder_error_count: [max_reorder_delay + 1]u8 = @splat(0),
+    rfps: Rfps = .{},
+    frame_delay_evidence: bool = false,
+    codec_info_duration_fields: i64 = 0,
+    r_frame_rate: rational.Rational = .{ .num = 0, .den = 0 },
+    avg_frame_rate: rational.Rational = .{ .num = 0, .den = 0 },
 };
+
+/// `MAX_REORDER_DELAY`.
+const max_reorder_delay = 16;
 
 /// What the MPEG audio decoder left in the codec context.
 pub const MpaParams = struct {
@@ -562,6 +762,9 @@ pub fn Layer(comptime Source: type) type {
         /// The packet returned last.
         current: ?Held = null,
         eof: bool = false,
+        /// FFStream's `info` exists: avformat_find_stream_info has not
+        /// returned.
+        info_alive: bool = true,
         /// The format's start time, duration (`AV_TIME_BASE` units) and
         /// bit rate after estimate_timings.
         start_time: i64 = nopts,
@@ -582,6 +785,7 @@ pub fn Layer(comptime Source: type) type {
             if (l.current) |*h| h.deinit(l.gpa);
             for (l.states.items) |*s| {
                 s.index.deinit(l.gpa);
+                s.rfps.deinit(l.gpa);
                 if (s.raw) |*p| p.deinit(l.gpa);
                 l.closeDecoder(s);
             }
@@ -611,8 +815,23 @@ pub fn Layer(comptime Source: type) type {
         }
 
         fn state(l: *Self, i: usize) Error!*StreamState {
-            while (l.states.items.len <= i) try l.states.append(l.gpa, .{ .skip_samples = l.src.setup(l.states.items.len).skip_samples });
+            while (l.states.items.len <= i) {
+                const setup = l.src.setup(l.states.items.len);
+                try l.states.append(l.gpa, .{
+                    .skip_samples = setup.skip_samples,
+                    .has_b_frames = setup.video.delay,
+                    .r_frame_rate = setup.video.r_frame_rate,
+                    .avg_frame_rate = setup.video.avg_frame_rate,
+                    .rfps = .{ .duration_gcd = setup.video.rfps_gcd },
+                });
+            }
             return &l.states.items[i];
+        }
+
+        /// A video stream's frame rates after avformat_find_stream_info.
+        pub fn frameRates(l: *Self, i: usize) Error![2]rational.Rational {
+            const s = try l.state(i);
+            return .{ s.r_frame_rate, s.avg_frame_rate };
         }
 
         /// The packets compute_pkt_fields' look-backs reach: the
@@ -634,7 +853,25 @@ pub fn Layer(comptime Source: type) type {
                         all = false;
                         break;
                     }
-                    if (s.first_dts == nopts and s.codec_info_nb_frames < max_ts_probe and setup.media == .audio) {
+                    // A video stream without both frame rates analyzes 20
+                    // frames (40 in a time base coarser than 1/2000) when
+                    // its time base is unreliable.
+                    if (setup.media == .video) {
+                        var fps_analyze_framecount: i32 = 20;
+                        if (q2d(setup.time_base) > 0.0005) fps_analyze_framecount *= 2;
+                        if (!tbUnreliable(setup)) fps_analyze_framecount = 0;
+                        if (!(s.r_frame_rate.num != 0 and s.avg_frame_rate.num != 0) and s.rfps.duration_count < fps_analyze_framecount) {
+                            all = false;
+                            break;
+                        }
+                    }
+                    // Evidence of frame delay with no delay set: three
+                    // frames.
+                    if (s.frame_delay_evidence and s.rfps.duration_count < 2 and s.has_b_frames == 0) {
+                        all = false;
+                        break;
+                    }
+                    if (s.first_dts == nopts and s.codec_info_nb_frames < max_ts_probe and (setup.media == .audio or setup.media == .video)) {
                         all = false;
                         break;
                     }
@@ -685,6 +922,7 @@ pub fn Layer(comptime Source: type) type {
                 if (s.codec_info_nb_frames > 1) {
                     var t: i64 = 0;
                     if (setup.time_base.den > 0) t = rational.rescaleQ(s.codec_info_duration, setup.time_base, .{ .num = 1, .den = 1_000_000 });
+                    if (s.avg_frame_rate.num > 0) t = @max(t, rational.rescaleQ(s.codec_info_nb_frames, .{ .num = s.avg_frame_rate.den, .den = s.avg_frame_rate.num }, .{ .num = 1, .den = 1_000_000 }));
                     if (t == 0 and s.codec_info_nb_frames > 30 and s.fps_first_dts != nopts and s.fps_last_dts != nopts) {
                         const dur = rational.satSub(s.fps_last_dts, s.fps_first_dts);
                         t = @max(t, rational.rescaleQ(dur, setup.time_base, .{ .num = 1, .den = 1_000_000 }));
@@ -700,7 +938,13 @@ pub fn Layer(comptime Source: type) type {
                         {
                             s.codec_info_duration = @min(pkt.pts - start, s.codec_info_duration + pkt.duration);
                         } else s.codec_info_duration += pkt.duration;
+                        // Two fields a frame: no parser repeats pictures.
+                        s.codec_info_duration_fields += 2;
                     }
+                }
+                if (setup.media == .video) {
+                    try s.rfps.addFrame(l.gpa, pkt.dts, setup.time_base);
+                    if (pkt.dts != pkt.pts and pkt.dts != nopts and pkt.pts != nopts) s.frame_delay_evidence = true;
                 }
                 // try_decode_frame: the decoder opens once, setting the
                 // sample format at once (Vorbis) or from a frame it
@@ -732,13 +976,66 @@ pub fn Layer(comptime Source: type) type {
             if (eof_reached) for (0..l.src.streamCount()) |i| {
                 const s = try l.state(i);
                 const setup = l.src.setup(i);
-                if (hasCodecParameters(setup, s.*) or s.found_decoder != 0) continue;
-                try l.openDecoder(s, setup);
+                if (!hasCodecParameters(setup, s.*) and s.found_decoder == 0) try l.openDecoder(s, setup);
+                // The end of the input: H.264's held packets get their dts
+                // from the delay it has.
+                if (l.packet_buffer.len > 0 and !l.delayGuessed(setup)) l.updateDtsFromPts(i, s, setup);
             };
             // The decoders opened for the read-ahead close; what they set
             // stays.
             for (l.states.items) |*s| l.closeDecoder(s);
+            try l.ensureStates();
+            for (l.states.items, 0..) |*s, i| {
+                const setup = l.src.setup(i);
+                if (setup.media != .video) continue;
+                s.rfps.calculate(l.gpa, setup.time_base, tbUnreliable(setup), s.codec_info_duration, &s.r_frame_rate, &s.avg_frame_rate);
+            }
+            for (l.states.items, 0..) |*s, i| {
+                const setup = l.src.setup(i);
+                if (setup.media == .video) estimateFrameRates(setup, s);
+            }
+            l.info_alive = false;
             l.estimateTimings();
+        }
+
+        /// tb_unreliable as avformat_find_stream_info asks it of a video
+        /// stream, whose codec context has no frame rate: the time base
+        /// finer than 1/100 or coarser than 1/5, or a codec whose headers'
+        /// rates are not trusted.
+        fn tbUnreliable(setup: Setup) bool {
+            const tb = setup.time_base;
+            return @as(i64, tb.den) >= 101 * @as(i64, tb.num) or @as(i64, tb.den) < 5 * @as(i64, tb.num) or setup.video.mp4v or
+                switch (setup.video.codec) {
+                    .mpeg2video, .gif, .hevc, .h264 => true,
+                    else => false,
+                };
+        }
+
+        /// avformat_find_stream_info's frame rates of a video stream: the
+        /// average from the analyzed duration, rounded to a standard rate
+        /// within 1%, when the demuxer set none; the real one from the time
+        /// base when nothing set it.
+        fn estimateFrameRates(setup: Setup, s: *StreamState) void {
+            const tb = setup.time_base;
+            if (s.codec_info_duration_fields != 0 and s.avg_frame_rate.num == 0 and s.codec_info_duration != 0) avg: {
+                const tb_num: i64 = tb.num;
+                const tb_den: i64 = tb.den;
+                if (s.codec_info_duration >= @divTrunc(@divTrunc(std.math.maxInt(i64), tb_num), 2) or
+                    s.codec_info_duration_fields >= @divTrunc(std.math.maxInt(i64), tb_den) or s.codec_info_duration < 0) break :avg;
+                s.avg_frame_rate = rational.reduce(s.codec_info_duration_fields * tb_den, s.codec_info_duration * 2 * tb_num, 60000).q;
+                var best_fps: i32 = 0;
+                var best_error: f64 = 0.01;
+                for (0..max_std_timebases) |j| {
+                    const std_fps: rational.Rational = .{ .num = stdFramerate(j), .den = 12 * 1001 };
+                    const e = @abs(q2d(s.avg_frame_rate) / q2d(std_fps) - 1);
+                    if (e < best_error) {
+                        best_error = e;
+                        best_fps = std_fps.num;
+                    }
+                }
+                if (best_fps != 0) s.avg_frame_rate = rational.reduce(best_fps, 12 * 1001, std.math.maxInt(i32)).q;
+            }
+            if (s.r_frame_rate.num == 0) s.r_frame_rate = .{ .num = tb.den, .den = tb.num };
         }
 
         const time_base_q: rational.Rational = .{ .num = 1, .den = 1_000_000 };
@@ -1063,11 +1360,21 @@ pub fn Layer(comptime Source: type) type {
             return setup.seek_preroll;
         }
 
-        /// has_codec_parameters for an audio stream.
+        /// has_codec_parameters.
         fn hasCodecParameters(setup: Setup, s: StreamState) bool {
             // A data stream needs nothing, a subtitle stream (of the
-            // codecs here) neither.
-            if (setup.media != .audio) return true;
+            // codecs here) a known codec.
+            if (setup.media == .data) return true;
+            if (setup.media == .subtitle) return setup.known;
+            if (setup.media == .video) {
+                if (!setup.known) return false; // "unknown codec"
+                if (setup.video.width == 0) return false; // "unspecified size"
+                // No decoder gives a pixel format: try_decode_frame must
+                // have looked for one.
+                if (s.found_decoder >= 0) return false;
+                if ((setup.video.codec == .rv30 or setup.video.codec == .rv40) and !setup.video.sar_known and s.codec_info_nb_frames == 0) return false;
+                return true;
+            }
             if (!setup.known) return false;
             if (setup.decoder == .mpegaudio) {
                 // The frame size is determinable: a decoded header gives it.
@@ -1133,6 +1440,7 @@ pub fn Layer(comptime Source: type) type {
                 .skip = h.skip,
                 .new_extradata = h.new_extradata,
                 .new_metadata = h.new_metadata,
+                .palette = h.palette,
                 .tail = h.tail,
             };
         }
@@ -1416,6 +1724,8 @@ pub fn Layer(comptime Source: type) type {
             const extradata: ?[]u8 = if (raw.new_extradata) |b| try l.gpa.dupe(u8, b) else null;
             errdefer if (extradata) |b| l.gpa.free(b);
             const md: ?[]u8 = if (raw.new_metadata) |b| try l.gpa.dupe(u8, b) else null;
+            errdefer if (md) |b| l.gpa.free(b);
+            const palette: ?[]u8 = if (raw.palette) |b| try l.gpa.dupe(u8, b) else null;
             return .{
                 .stream = raw.stream,
                 .data = data,
@@ -1427,6 +1737,7 @@ pub fn Layer(comptime Source: type) type {
                 .skip = raw.skip,
                 .new_extradata = extradata,
                 .new_metadata = md,
+                .palette = palette,
             };
         }
 
@@ -1454,10 +1765,28 @@ pub fn Layer(comptime Source: type) type {
             try l.parse_queue.pushBack(l.gpa, h.*);
         }
 
-        /// compute_pkt_fields for a stream without reordering
-        /// (`has_b_frames` 0) and without a parser's reordering.
+        /// compute_pkt_fields without a parser's picture types: the video
+        /// stream's DTS order check, the frame duration, the running
+        /// timestamp of a stream that does not reorder, and the pts buffer
+        /// of the reordering delay (`has_b_frames`).
         fn computePktFields(l: *Self, pkt: *Held, setup: Setup) Error!void {
             const s = try l.state(pkt.stream);
+            const video = setup.media == .video;
+            const vcodec: VideoCodec = if (video) setup.video.codec else .other;
+            const onein_oneout = vcodec != .h264 and vcodec != .hevc and vcodec != .vvc and vcodec != .imm6;
+            if (video and pkt.dts != nopts) {
+                if (pkt.dts == pkt.pts and s.last_dts_for_order_check != nopts) {
+                    // uint8_t counters, halved before they pass 255.
+                    if (s.last_dts_for_order_check <= pkt.dts) s.dts_ordered +%= 1 else s.dts_misordered +%= 1;
+                    if (@as(u32, s.dts_ordered) + s.dts_misordered > 250) {
+                        s.dts_ordered >>= 1;
+                        s.dts_misordered >>= 1;
+                    }
+                }
+                s.last_dts_for_order_check = pkt.dts;
+                if (@as(u32, s.dts_ordered) < 8 * @as(u32, s.dts_misordered) and pkt.dts == pkt.pts) pkt.dts = nopts;
+            }
+            const delay = s.has_b_frames;
             // The duration as a fraction of a second, which the running
             // timestamp advances by.
             var inc: ?rational.Rational = null;
@@ -1484,35 +1813,125 @@ pub fn Layer(comptime Source: type) type {
                     pkt.duration = rational.rescaleRnd(1, frame * setup.time_base.den, @as(i64, ctx.sample_rate) * setup.time_base.num, .down);
                 }
             };
+            // A video frame lasts 1/r_frame_rate, else the time base's
+            // tick when it is coarser than a millisecond; the codec
+            // context's frame rate is 0/1 without a decoder, which gives
+            // none.
+            if (video and pkt.duration <= 0) {
+                const tb = setup.time_base;
+                var num: i64 = 0;
+                var den: i64 = 0;
+                if (s.r_frame_rate.num != 0) {
+                    num = s.r_frame_rate.den;
+                    den = s.r_frame_rate.num;
+                } else if (@as(i64, tb.num) * 1000 > tb.den) {
+                    num = tb.num;
+                    den = tb.den;
+                }
+                if (num != 0 and den != 0) {
+                    inc = .{ .num = @intCast(num), .den = @intCast(den) };
+                    pkt.duration = rational.rescaleRnd(1, num * tb.den, den * tb.num, .down);
+                }
+            }
             if (pkt.duration > 0 and (l.packet_buffer.len > 0 or l.parse_queue.len > 0)) l.updateInitialDurations(pkt.stream, s, pkt.duration);
             const presentation_delayed = pkt.dts != nopts and pkt.pts != nopts and pkt.pts > pkt.dts;
-            if (presentation_delayed) {
-                if (pkt.dts == nopts) pkt.dts = s.last_ip_pts;
-                l.updateInitialTimestamps(pkt.stream, s, setup, pkt.dts, pkt.pts);
-                if (pkt.dts == nopts) pkt.dts = s.cur_dts;
-                if (s.last_ip_duration == 0 and pkt.duration >= 0 and pkt.duration <= std.math.maxInt(i32)) s.last_ip_duration = pkt.duration;
-                if (pkt.dts != nopts) s.cur_dts = rational.satAdd(pkt.dts, s.last_ip_duration);
-                if (pkt.duration >= 0 and pkt.duration <= std.math.maxInt(i32)) s.last_ip_duration = pkt.duration;
-                s.last_ip_pts = pkt.pts;
-            } else if (pkt.pts != nopts or pkt.dts != nopts or pkt.duration > 0) {
-                if (pkt.pts == nopts) pkt.pts = pkt.dts;
-                l.updateInitialTimestamps(pkt.stream, s, setup, pkt.pts, pkt.pts);
-                if (pkt.pts == nopts) pkt.pts = s.cur_dts;
-                pkt.dts = pkt.pts;
-                // The duration in seconds: av_mul_q of `(AVRational){
-                // pkt->duration, 1}`, whose int numerator truncates.
-                const step = inc orelse rational.mul(.{ .num = @truncate(pkt.duration), .den = 1 }, setup.time_base);
-                if (pkt.pts != nopts and step.num >= 0) s.cur_dts = rational.addStable(setup.time_base, pkt.pts, step, 1);
+            // Timestamps are interpolated only for a stream without
+            // reordering (not H.264, HEVC, VVC or IMM6).
+            if (delay == 0 and onein_oneout) {
+                if (presentation_delayed) {
+                    if (pkt.dts == nopts) pkt.dts = s.last_ip_pts;
+                    l.updateInitialTimestamps(pkt.stream, s, setup, pkt.dts, pkt.pts, pkt.flags);
+                    if (pkt.dts == nopts) pkt.dts = s.cur_dts;
+                    if (s.last_ip_duration == 0 and pkt.duration >= 0 and pkt.duration <= std.math.maxInt(i32)) s.last_ip_duration = pkt.duration;
+                    if (pkt.dts != nopts) s.cur_dts = rational.satAdd(pkt.dts, s.last_ip_duration);
+                    if (pkt.duration >= 0 and pkt.duration <= std.math.maxInt(i32)) s.last_ip_duration = pkt.duration;
+                    s.last_ip_pts = pkt.pts;
+                } else if (pkt.pts != nopts or pkt.dts != nopts or pkt.duration > 0) {
+                    if (pkt.pts == nopts) pkt.pts = pkt.dts;
+                    l.updateInitialTimestamps(pkt.stream, s, setup, pkt.pts, pkt.pts, pkt.flags);
+                    if (pkt.pts == nopts) pkt.pts = s.cur_dts;
+                    pkt.dts = pkt.pts;
+                    // The duration in seconds: av_mul_q of `(AVRational){
+                    // pkt->duration, 1}`, whose int numerator truncates.
+                    const step = inc orelse rational.mul(.{ .num = @truncate(pkt.duration), .den = 1 }, setup.time_base);
+                    if (pkt.pts != nopts and step.num >= 0) s.cur_dts = rational.addStable(setup.time_base, pkt.pts, step, 1);
+                }
             }
-            // The pts buffer of no delay: dts, else the pts.
-            if (pkt.pts != nopts and pkt.dts == nopts) pkt.dts = pkt.pts;
+            if (pkt.pts != nopts and delay <= max_reorder_delay) {
+                s.pts_buffer[0] = pkt.pts;
+                var i: usize = 0;
+                while (i < delay and s.pts_buffer[i] > s.pts_buffer[i + 1]) : (i += 1) std.mem.swap(i64, &s.pts_buffer[i], &s.pts_buffer[i + 1]);
+                if (l.delayGuessed(setup)) pkt.dts = selectFromPtsBuffer(s, vcodec, &s.pts_buffer, pkt.dts);
+            }
+            if (!onein_oneout) l.updateInitialTimestamps(pkt.stream, s, setup, pkt.dts, pkt.pts, pkt.flags);
             if (pkt.dts > s.cur_dts) s.cur_dts = pkt.dts;
             if (setup.media == .data or (setup.known and setup.intra_only)) pkt.flags |= key_flag;
         }
 
+        /// has_decode_delay_been_guessed without a decoder: only H.264 in
+        /// avformat_find_stream_info waits for decoded frames, which never
+        /// come.
+        fn delayGuessed(l: *const Self, setup: Setup) bool {
+            return !(setup.media == .video and setup.video.codec == .h264) or !l.info_alive;
+        }
+
+        /// select_from_pts_buffer: a missing dts from the reordering
+        /// buffer, and for H.264, HEVC and VVC the buffer's error counts.
+        fn selectFromPtsBuffer(s: *StreamState, vcodec: VideoCodec, buffer: *const [max_reorder_delay + 1]i64, dts_in: i64) i64 {
+            var dts = dts_in;
+            if (vcodec == .h264 or vcodec == .hevc or vcodec == .vvc) {
+                const delay: usize = @intCast(s.has_b_frames);
+                if (dts == nopts) {
+                    var best_score: i64 = std.math.maxInt(i64);
+                    for (0..delay) |i| {
+                        if (s.pts_reorder_error_count[i] == 0) continue;
+                        const score = @divTrunc(s.pts_reorder_error[i], s.pts_reorder_error_count[i]);
+                        if (score < best_score) {
+                            best_score = score;
+                            dts = buffer[i];
+                        }
+                    }
+                } else {
+                    for (0..delay) |i| {
+                        if (buffer[i] == nopts) continue;
+                        const a: u64 = @bitCast(buffer[i]);
+                        const b: u64 = @bitCast(dts);
+                        var diff: u64 = if (buffer[i] < dts) b -% a else a -% b;
+                        const err: u64 = @bitCast(s.pts_reorder_error[i]);
+                        diff = if (diff > std.math.maxInt(i64) - err) std.math.maxInt(i64) else diff + err;
+                        s.pts_reorder_error[i] = @bitCast(diff);
+                        s.pts_reorder_error_count[i] +%= 1;
+                        if (s.pts_reorder_error_count[i] > 250) {
+                            s.pts_reorder_error[i] >>= 1;
+                            s.pts_reorder_error_count[i] >>= 1;
+                        }
+                    }
+                }
+            }
+            if (dts == nopts) dts = buffer[0];
+            return dts;
+        }
+
+        /// update_dts_from_pts: the held packets' dts from their pts,
+        /// reordered through a buffer of the stream's delay.
+        fn updateDtsFromPts(l: *Self, stream: usize, s: *StreamState, setup: Setup) void {
+            const delay = s.has_b_frames;
+            var buffer: [max_reorder_delay + 1]i64 = @splat(nopts);
+            const vcodec: VideoCodec = if (setup.media == .video) setup.video.codec else .other;
+            var it = l.held();
+            while (it.next()) |h| {
+                if (h.stream != stream) continue;
+                if (h.pts == nopts or delay > max_reorder_delay) continue;
+                buffer[0] = h.pts;
+                var i: usize = 0;
+                while (i < delay and buffer[i] > buffer[i + 1]) : (i += 1) std.mem.swap(i64, &buffer[i], &buffer[i + 1]);
+                h.dts = selectFromPtsBuffer(s, vcodec, &buffer, h.dts);
+            }
+        }
+
         /// update_initial_timestamps: the first real timestamp makes the
         /// held relative ones absolute and sets the start time.
-        fn updateInitialTimestamps(l: *Self, stream: usize, s: *StreamState, setup: Setup, dts: i64, pts_in: i64) void {
+        fn updateInitialTimestamps(l: *Self, stream: usize, s: *StreamState, setup: Setup, dts: i64, pts_in: i64, flags: u32) void {
             if (s.first_dts != nopts or dts == nopts or s.cur_dts == nopts or
                 s.cur_dts < std.math.minInt(i32) + relative_ts_base or
                 dts < std.math.minInt(i32) + (s.cur_dts - relative_ts_base) or isRelative(dts)) return;
@@ -1529,12 +1948,9 @@ pub fn Layer(comptime Source: type) type {
                 if (isRelative(h.dts)) h.dts +%= shift;
                 if (start.* == nopts and h.pts != nopts) start.* = skipStart(setup, s.*, h.pts);
             }
-            // update_dts_from_pts with no delay: a dts from the pts.
-            it = l.held();
-            while (it.next()) |h| {
-                if (h.stream == stream and h.pts != nopts and h.dts == nopts) h.dts = h.pts;
-            }
-            if (start.* == nopts) start.* = skipStart(setup, s.*, pts);
+            if (l.delayGuessed(setup)) l.updateDtsFromPts(stream, s, setup);
+            // A discarded packet of a stream other than audio sets no start.
+            if (start.* == nopts and (setup.media == .audio or flags & discard_flag == 0)) start.* = skipStart(setup, s.*, pts);
         }
 
         /// An audio stream's start time from its first pts: past the
@@ -1573,7 +1989,7 @@ pub fn Layer(comptime Source: type) type {
                     h.duration == 0 and rational.satAdd(cur_dts, duration) == cur_dts +% duration)
                 {
                     h.dts = cur_dts;
-                    h.pts = cur_dts;
+                    if (s.has_b_frames == 0) h.pts = cur_dts;
                     h.duration = duration;
                 } else {
                     reached_end = false;
