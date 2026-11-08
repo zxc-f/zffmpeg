@@ -383,7 +383,6 @@ Left open:
 | --- | --- | --- |
 | No committed Ogg fixture or compare.py cell for an Ogg FLAC rate or channel change (its ogg.txt, seek_ogg.txt and opus.txt blocks need the reference build) | `generate.py`, `compare.py` | T33a |
 | A second `av_reduce` in the resampler beside `core/rational.zig`'s | `resample.zig` | T65g |
-| MP3's `Check.frame_size` carries the -1/-2 sentinels `check_seek_failed`/`check_wrong_header` | `mp3.zig` | T65c |
 
 ## Completed preparation
 
@@ -4903,10 +4902,29 @@ optimization, concurrency, fuzz duration and corpus breadth.
     union for the per-codec mapping state, a page-state-only snapshot (the
     duration scan must not create streams), and a Vorbis setup state that
     keeps the skip handshake across `flush()`. MP3's header check
-    (`mp3.zig`'s `Check`, whose `frame_size` carries the -1 and -2 sentinels)
-    returns a tagged result with the same retry, skipped-header and
+    (`mp3.zig`'s `Check`) returns a tagged result instead of encoding the
+    C's -1/-2 failures as frame sizes, with the same retry, skipped-header and
     end-of-window outcomes (raised by the review of `22fc36d`). Done when
     T27a, T27d, T28 and T29a's gates pass unchanged.
+
+    Partial implementation from the state-machine audit:
+    `ogg.zig`'s private start-time-scan progress is a named enum, preserving
+    the C's 0/-1/1 transitions and snapshot behavior; `mp3.zig`'s header
+    check is a tagged result whose valid case alone carries the size and
+    header. A crafted MP3 regression covers valid, invalid/free-format and
+    end-of-window outcomes. The remaining Ogg header/current-stream,
+    out-pointer, per-mapping union, snapshot and Vorbis setup work is still
+    open; this slice does not claim T65c's G5 completion. The navigation map
+    is [doc/state-machines.md](doc/state-machines.md).
+
+    Local validation of this slice on Linux x86-64 with Zig 0.17.0:
+    formatting and fixture checks; 668/668 unit tests in Debug,
+    ReleaseSafe and ReleaseFast, including the existing Ogg/MP3/seek
+    vectors and failure harnesses; all process cases (three added for CLI
+    argument-order/error precedence); compile-only Windows, ARM Linux and
+    ARM macOS guards. The full pinned FFmpeg comparison and optional
+    corpus passed without changing expected vectors or recorded differences.
+    This is working-tree validation, not a G5 claim or a CI run.
   - [ ] **T65d — Filter dispatch and one timestamp helper.** **Start with**
     T53b (`-af`, `-filter_complex`). Derive the per-filter dispatch from the
     `Filter` union (adding a filter touches seven places today) and give

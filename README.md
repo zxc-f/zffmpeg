@@ -123,6 +123,8 @@ the [unplanned features](TODO.md#not-planned).
 - [CLAUDE.md](CLAUDE.md): repository guidance for development; [AGENTS.md](AGENTS.md)
   contains only `@CLAUDE.md` so other agents load the same file.
 - [doc/zigimg-reference.md](doc/zigimg-reference.md): pinned zigimg source analysis.
+- [doc/state-machines.md](doc/state-machines.md): the implementation's state
+  machines, ownership boundaries and behavior-preserving representation choices.
 - [.claude/skills/zig-0-17/](.claude/skills/zig-0-17/SKILL.md): the project skill for writing
   Zig 0.17 here (workflow, checklist and [guide](.claude/skills/zig-0-17/references/guide.md));
   Claude Code uses it for every Zig change.

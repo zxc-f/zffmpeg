@@ -238,11 +238,14 @@ pub const Demuxer = struct {
         const window = try d.src.bytesAt(d.gpa, off, resync_window);
         var i: usize = 0;
         while (i < resync_starts) : (i += 1) {
-            const first = check(window, i);
-            if (first.frame_size > 0) {
-                const second = check(window, i + @as(usize, @intCast(first.frame_size)));
-                if (second.frame_size >= 0 and first.header & mpegaudio.mp3_mask == second.header & mpegaudio.mp3_mask) break;
-            } else if (first.frame_size == check_seek_failed) return error.InvalidMp3;
+            switch (check(window, i)) {
+                .frame => |first| switch (check(window, i + first.size)) {
+                    .frame => |second| if (first.header & mpegaudio.mp3_mask == second.header & mpegaudio.mp3_mask) break,
+                    .invalid_header, .end_of_window => {},
+                },
+                .invalid_header => {},
+                .end_of_window => return error.InvalidMp3,
+            }
         }
         if (i < resync_starts) off += @intCast(i);
         d.pos = off;
@@ -260,20 +263,21 @@ pub const Demuxer = struct {
         if (tag.items.len == id3v1.tag_size) try id3v1.parse(d.gpa, tag.items[0..id3v1.tag_size], &d.tags);
     }
 
-    const check_wrong_header = -1;
-    const check_seek_failed = -2;
+    const Check = union(enum) {
+        frame: struct { size: u32, header: u32 },
+        invalid_header,
+        end_of_window,
+    };
 
-    const Check = struct { frame_size: i64, header: u32 = 0 };
-
-    /// check(): the frame size of a valid header at `at`, or
-    /// CHECK_WRONG_HEADER, or CHECK_SEEK_FAILED when fewer than 4 bytes
-    /// remain.
+    /// check(): a valid frame header, CHECK_WRONG_HEADER, or
+    /// CHECK_SEEK_FAILED when fewer than 4 bytes remain. Only a valid
+    /// frame carries a size and header; the C's -1/-2 stay named outcomes.
     fn check(window: []const u8, at: usize) Check {
-        if (at + 4 > window.len) return .{ .frame_size = check_seek_failed };
+        if (at + 4 > window.len) return .end_of_window;
         const header = std.mem.readInt(u32, window[at..][0..4], .big);
-        const h = mpegaudio.decodeHeader(header) orelse return .{ .frame_size = check_wrong_header };
-        if (h.freeFormat()) return .{ .frame_size = check_wrong_header };
-        return .{ .frame_size = h.frame_size, .header = header };
+        const h = mpegaudio.decodeHeader(header) orelse return .invalid_header;
+        if (h.freeFormat()) return .invalid_header;
+        return .{ .frame = .{ .size = h.frame_size, .header = header } };
     }
 
     /// mp3_parse_vbr_tags at `base`: the first frame's Xing or Info tag,
@@ -486,6 +490,23 @@ pub const Demuxer = struct {
         return false;
     }
 };
+
+test "header checks distinguish an invalid header from the end of the resync window" {
+    const header = [_]u8{ 0xff, 0xfb, 0x90, 0x00 }; // MPEG-1 Layer III, 128 kb/s, 44100 Hz.
+    for (0..header.len) |len| {
+        try testing.expect(Demuxer.check(header[0..len], 0) == .end_of_window);
+    }
+    try testing.expect(Demuxer.check(&.{ 0, 0, 0, 0 }, 0) == .invalid_header);
+    // Free-format headers also ask the search to continue, not stop.
+    try testing.expect(Demuxer.check(&.{ 0xff, 0xfb, 0x00, 0x00 }, 0) == .invalid_header);
+    const frame = switch (Demuxer.check(&header, 0)) {
+        .frame => |f| f,
+        .invalid_header, .end_of_window => return error.TestUnexpectedResult,
+    };
+    try testing.expectEqual(417, frame.size);
+    try testing.expectEqual(0xfffb9000, frame.header);
+    try testing.expect(Demuxer.check(&header, 1) == .end_of_window);
+}
 
 /// An `AVIOContext` over bytes read ahead: reads past them give zeros.
 const Cursor = struct {

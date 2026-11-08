@@ -245,6 +245,10 @@ const OpusState = struct {
     cur_dts: i64 = 0,
 };
 
+/// ogg_get_length's per-stream progress. These preserve the C's 0, -1
+/// and 1 cases, including their save/restore behavior during both scans.
+const StartTimeScan = enum { unseen, awaiting_start, complete };
+
 /// `struct ogg_stream`: a logical stream's page and packet state.
 const Stream = struct {
     serial: u32,
@@ -275,8 +279,7 @@ const Stream = struct {
     incomplete: bool = false,
     page_start: bool = false,
     page_end: bool = false,
-    /// ogg_get_length's progress: 0, -1 waiting for a start, 1 done.
-    got_start: i8 = 0,
+    start_time_scan: StartTimeScan = .unseen,
     got_data: bool = false,
     nb_header: u32 = 0,
     start_trimming: u32 = 0,
@@ -580,10 +583,10 @@ pub const Demuxer = struct {
                 os.info.duration = gpToPts(os, os.granule, null);
                 if (os.info.start_time != nopts) {
                     os.info.duration -= os.info.start_time;
-                    streams_left -= @intFromBool(os.got_start == -1);
-                    os.got_start = 1;
-                } else if (os.got_start == 0) {
-                    os.got_start = -1;
+                    streams_left -= @intFromBool(os.start_time_scan == .awaiting_start);
+                    os.start_time_scan = .complete;
+                } else if (os.start_time_scan == .unseen) {
+                    os.start_time_scan = .awaiting_start;
                     streams_left += 1;
                 }
             }
@@ -603,12 +606,12 @@ pub const Demuxer = struct {
             var unused: i64 = undefined;
             const pts = calcPts(os, &unused);
             if (os.info.duration == nopts) continue;
-            if (pts != nopts and os.info.start_time == nopts and os.got_start == 0) {
+            if (pts != nopts and os.info.start_time == nopts and os.start_time_scan == .unseen) {
                 os.info.duration -= pts;
-                os.got_start = 1;
+                os.start_time_scan = .complete;
                 streams_left -= 1;
-            } else if (os.info.start_time != nopts and os.got_start == 0) {
-                os.got_start = 1;
+            } else if (os.info.start_time != nopts and os.start_time_scan == .unseen) {
+                os.start_time_scan = .complete;
                 streams_left -= 1;
             }
         }

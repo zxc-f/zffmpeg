@@ -5,6 +5,11 @@ description: Design and verify zffmpeg's media state, ownership and timing contr
 
 # Media state, ownership and time
 
+Find the current owner and interacting machines in
+[the state-machine map](../../../doc/state-machines.md). Update its relevant
+entry if the lifecycle or owner changes; keep behavioral contracts in their
+existing source/port/fixture locations.
+
 Read [state and timing](references/state-and-time.md) for the operation being
 changed, then the corresponding contract in port.md and active TODO.md task.
 Preserve the supported API; this skill does not add reference counting,

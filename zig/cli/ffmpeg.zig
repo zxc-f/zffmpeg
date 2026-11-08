@@ -181,6 +181,14 @@ const Parsed = union(enum) {
     usage: Usage,
 };
 
+/// Argument order carries the paths already accepted. Input options precede
+/// `-i`, output options follow it, and the output path closes the command.
+const ParsePaths = union(enum) {
+    input_options,
+    output_options: []const u8,
+    complete: struct { input: []const u8, output: []const u8 },
+};
+
 pub fn main(init: std.process.Init) u8 {
     return @backingInt(run(init));
 }
@@ -325,8 +333,7 @@ fn parse(args: []const [:0]const u8) Parsed {
     if (args.len == 2 and (std.mem.eql(u8, args[1], "-h") or std.mem.eql(u8, args[1], "--help"))) {
         return .help;
     }
-    var input: ?[]const u8 = null;
-    var output: ?[]const u8 = null;
+    var paths: ParsePaths = .input_options;
     var input_format: ?[]const u8 = null;
     var input_sample_rate: ?[]const u8 = null;
     var input_ar: ?[]const u8 = null;
@@ -351,7 +358,7 @@ fn parse(args: []const [:0]const u8) Parsed {
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const arg: []const u8 = args[i];
-        if (output != null) return .{ .usage = .{ .reason = "options after the output are not supported", .arg = arg } };
+        if (paths == .complete) return .{ .usage = .{ .reason = "options after the output are not supported", .arg = arg } };
         if (std.mem.eql(u8, arg, "-y")) {
             yes = true;
             continue;
@@ -360,11 +367,16 @@ fn parse(args: []const [:0]const u8) Parsed {
             no = true;
             continue;
         }
-        // Every other option takes a value, into its slot.
-        const slot: *?[]const u8 = if (std.mem.eql(u8, arg, "-i")) slot: {
-            if (input != null) return .{ .usage = .{ .reason = "only one input is supported" } };
-            break :slot &input;
-        } else if (input == null) slot: {
+        if (std.mem.eql(u8, arg, "-i")) {
+            if (paths != .input_options) return .{ .usage = .{ .reason = "only one input is supported" } };
+            i += 1;
+            if (i == args.len) return .{ .usage = .{ .reason = "missing value for", .arg = arg } };
+            paths = .{ .output_options = args[i] };
+            continue;
+        }
+        // Every remaining option takes a value, into its slot. The final
+        // positional argument transitions the paths to complete instead.
+        const slot: *?[]const u8 = if (paths == .input_options) slot: {
             // FFmpeg's raw demuxer options and the -ar/-ac it maps to them
             // (T22c), and -f (T16).
             if (std.mem.eql(u8, arg, "-sample_rate")) break :slot &input_sample_rate;
@@ -435,7 +447,8 @@ fn parse(args: []const [:0]const u8) Parsed {
                 continue;
             }
             if (arg.len > 1 and arg[0] == '-') return .{ .usage = .{ .reason = "unknown option", .arg = arg } };
-            output = arg;
+            const accepted_input = paths.output_options;
+            paths = .{ .complete = .{ .input = accepted_input, .output = arg } };
             continue;
         };
         i += 1;
@@ -448,9 +461,14 @@ fn parse(args: []const [:0]const u8) Parsed {
         return .{ .usage = .{ .reason = "invalid -dither_method", .arg = text } };
     if (dither_scale) |text| dither.scale = av.dither.scaleFromOption(text) catch
         return .{ .usage = .{ .reason = "invalid -dither_scale", .arg = text } };
+    const complete = switch (paths) {
+        .input_options => return .{ .usage = .{ .reason = "missing -i <input>" } },
+        .output_options => return .{ .usage = .{ .reason = "missing output" } },
+        .complete => |p| p,
+    };
     return .{ .command = .{
-        .input = input orelse return .{ .usage = .{ .reason = "missing -i <input>" } },
-        .output = output orelse return .{ .usage = .{ .reason = "missing output" } },
+        .input = complete.input,
+        .output = complete.output,
         .input_format = input_format,
         .input_sample_rate = input_sample_rate,
         .input_ar = input_ar,

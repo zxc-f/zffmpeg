@@ -271,6 +271,10 @@ document does not widen support.
   change together. Add new revisable decisions there in the same change.
 - [doc/zigimg-reference.md](doc/zigimg-reference.md): pinned zigimg analysis,
   the source of the I/O adapter rules below.
+- [doc/state-machines.md](doc/state-machines.md): navigation map of the
+  implementation's lifecycle, protocol and history state, with owners and
+  validation boundaries. Consult it before changing stateful behavior; the
+  existing source/port/fixture contracts still define transitions and errors.
 - [.claude/skills/zig-0-17/](.claude/skills/zig-0-17/SKILL.md): the project
   skill for writing Zig 0.17 here. `SKILL.md` holds the workflow, a section
   map and the checklist to run before sending Zig; `references/guide.md` covers
