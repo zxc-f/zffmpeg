@@ -34,7 +34,7 @@ const seek = @import("seek.zig");
 const decoded = @import("decoded.zig");
 
 /// What reading the samples can fail with.
-pub const ReadError = ogg.Error || error{
+pub const ReadError = ogg.Error || decoded.DeliveryError || error{
     /// The stream decodes to another sample count than counted ahead.
     FrameCountMismatch,
     /// More than two thirds of the decodes failed: the ffmpeg program's
@@ -243,6 +243,7 @@ pub const DecodedReader = struct {
 
     /// Whole frames of samples into `output`, at least one while any
     /// remain (a frame fits in 4 bytes a channel); empty at the end.
+    /// Insufficient space returns `OutputTooSmall` and preserves samples.
     pub fn readData(r: *DecodedReader, output: []u8) ReadError![]u8 {
         while (r.pendingFrames() == 0) {
             if (!try r.nextFrame()) return output[0..0];
@@ -252,11 +253,7 @@ pub const DecodedReader = struct {
             .planes, .s32 => 4,
         };
         const frame_bytes = width * r.channels;
-        const frames = @min(output.len / frame_bytes, r.pendingFrames());
-        std.debug.assert(frames > 0);
-        if (r.expected) |expected| {
-            if (r.delivered + frames > expected) return error.FrameCountMismatch;
-        }
+        const frames = try decoded.outputFrames(output.len, frame_bytes, r.pendingFrames(), r.delivered, r.expected);
         switch (r.pending) {
             .planes => |*range| {
                 decoded.interleave(output, r.planes[0..r.channels], range[0], frames);

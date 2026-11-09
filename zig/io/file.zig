@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Original file for this project.
-//! File and stream adapters for the WAV and AU paths.
+//! File and stream adapters for container probing and WAV decoding/writing.
 //!
 //! Borrowed-handle functions (`probeFile`, `decodeFile`, `writeFile`) take an
 //! open `std.Io.File` and never close it. Path helpers (`probePath`,
@@ -14,9 +14,9 @@
 //! start, not from the descriptor's offset where FFmpeg's `pipe:` streams
 //! (notes.md "I/O and API"). Each call builds one adapter over the caller's
 //! `buffer` and keeps it for the whole stream, so read-ahead is never lost.
-//! Memory use is that buffer plus the parser's fixed 4 KiB of working storage:
-//! nothing is allocated for the audio, whatever the file size (collected
-//! tags, T21c, are bounded by the parser's retained-bytes limit). Any buffer size works;
+//! PCM paths use fixed scratch storage; compressed containers can allocate
+//! bounded packet, table and metadata storage through the supplied allocator.
+//! Any buffer size works;
 //! `default_buffer_len` is the recommended size. To stream a long recording
 //! out, build a `wav.Writer` over `file.writerStreaming(...).interface`.
 //!
@@ -46,10 +46,11 @@ pub const WriteError = wav.WriteError || std.Io.File.Writer.Error;
 /// Without a `source.length`, a regular file's size is used (`regularLength`).
 pub fn probeFile(io: std.Io, file: std.Io.File, buffer: []u8, limits: detect.Limits, options: detect.Options) ReadError!detect.Probed {
     var with_length = options;
-    if (with_length.source.length == null) with_length.source.length = regularLength(io, file);
+    const regular_length = regularLength(io, file);
+    if (with_length.source.length == null) with_length.source.length = regular_length;
     // A regular file is read positionally, which can seek back, for Ogg's
     // duration scans (T27a); a streaming reader never seeks back.
-    const regular = with_length.source.length != null;
+    const regular = regular_length != null;
     var reader = if (regular) file.reader(io, buffer) else file.readerStreaming(io, buffer);
     if (regular and with_length.source.seeker == null) with_length.source.seeker = .file(&reader);
     return detect.probeWith(&reader.interface, limits, with_length) catch |err| return withReadCause(err, &reader);

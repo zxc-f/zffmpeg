@@ -703,7 +703,7 @@ pcm_formats=pcm_u8,pcm_s8,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,
 
 Everything is disabled and then only what the comparison needs is enabled: the
 file and pipe protocols, the WAV, Wave64, AU, AIFF and CAF demuxers (T12a added AU,
-T21b Wave64, T22b AIFF, T22d CAF, whose muxer stays off), the PCM
+T21b Wave64, T22b AIFF, T22d CAF; T31b enables the CAF muxer too), the PCM
 decoders and encoders T20b compares (T20b widened them from s16 alone), the
 WAV muxer, through which `compare.py` takes FFmpeg's decoded samples in each
 stream's storage format (T21a; it replaced the raw s16le muxer), the Wave64
@@ -1589,3 +1589,27 @@ Change the commit or configuration only in `build-ffmpeg.sh`; the cache key
 follows the script, so CI rebuilds. Then update the tables here from the new
 run's environment step and report, and review every changed FFmpeg verdict.
 The decision itself is recorded in [notes.md](../../../notes.md).
+
+
+### Review regression combinations (2026-11-09)
+
+`compare_review_regressions` adds required checks around the subsystem
+boundaries identified in `codex-review.md`:
+
+- Both CAF ALAC cookie styles, zero-channel fallback, matching and differing
+  cookie rates, and a conflicting `chan` count, from files and pipes. Probes
+  check effective parameters and the separate container clock; WAV outputs
+  check headers and decoded samples against FFmpeg.
+- AAC-LC controls, HE-AAC and HE-AACv2 resampled to 32 kHz into FLAC and Ogg,
+  with optional mono rematrixing and file/pipe inputs and outputs. Encoded
+  byte equality checks block selection as well as sample content.
+- Repeated options in all five encoder option groups, including codec
+  aliases. Each tool's repeated command must match its final-value command;
+  FFmpeg independently decodes both outputs to equal samples. A final
+  invalid option must fail with the exact usage diagnostic before output.
+
+These 114 checks create temporary variants of existing media and never
+rewrite fixture files or committed expectations. The shared output
+predicates check command success before bytes, including late failures with
+complete stdout. Predicate tests reject missing/wrong artifacts, and the
+Ogg-output path checks all producers and decoders before accepting a result.

@@ -51,6 +51,19 @@ pub const SampleFormat = enum {
     fltp,
     dblp,
 
+    /// The storage element, shared by packed and planar forms. Arithmetic
+    /// accumulator types remain specific to each DSP algorithm.
+    pub fn Element(comptime format: SampleFormat) type {
+        return switch (format) {
+            .u8, .u8p => u8,
+            .s16, .s16p => i16,
+            .s32, .s32p => i32,
+            .s64, .s64p => i64,
+            .flt, .fltp => f32,
+            .dbl, .dblp => f64,
+        };
+    }
+
     pub fn bytesPerSample(format: SampleFormat) u8 {
         return switch (format) {
             .u8, .u8p => 1,
@@ -294,4 +307,14 @@ test "interleaved views require whole frames and expose them in channel order" {
     try std.testing.expectEqualSlices(i16, &.{-30}, mono.frame(5));
     const empty = try S16Frames.init(.stereo, &.{});
     try std.testing.expectEqual(0, empty.frameCount());
+}
+
+test "sample storage types agree with packed and planar byte sizes" {
+    inline for (SampleFormat.ffmpeg_order) |format| {
+        try std.testing.expectEqual(format.bytesPerSample(), @sizeOf(format.Element()));
+        const packed_format = comptime format.packedForm();
+        const planar_format = comptime format.planarForm();
+        try std.testing.expect(format.Element() == packed_format.Element());
+        try std.testing.expect(format.Element() == planar_format.Element());
+    }
 }

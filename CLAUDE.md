@@ -15,7 +15,8 @@ PCM encoding, plain or extensible (T21a), in RIFF, RF64/BW64 or Sony Wave64,
 with unknown-length input behind an option (T21b) and LIST/INFO and `bext`
 tags (T21c), AU with every PCM encoding of FFmpeg's table and unknown
 length (T22a), AIFF and AIFF-C with every PCM encoding of FFmpeg's table
-(T22b), raw PCM in FFmpeg's raw formats (T22c), and CAF read only (T22d),
+(T22b), raw PCM in FFmpeg's raw formats (T22c), and CAF PCM reading (T22d),
+extended to PCM/ALAC output in T31b,
 with conversion between every sample format and libswresample's dither
 (T23a), FFmpeg's channel layouts, 1 to 64 channels, in every container
 (T23b), rematrixing between them (T23c) and resampling (T24), with
@@ -93,9 +94,9 @@ probes and extension fallback), `audioconvert` and `dither` (sample format
 conversion, T23a), `convert` (the synchronous T13a conversion and
 stream-copy pipeline) and `file` (file and pipe adapters). Two tools sit on it:
 `zffprobe` probes WAV, Wave64, AU, AIFF, CAF, FLAC, Ogg, MP3, ADTS, AC-3, E-AC-3, MP4 and raw PCM, tags included, and `zffmpeg` (T13b)
-converts and stream-copies between them (CAF as input only; Ogg Vorbis, Opus
+converts and stream-copies across its supported audio paths (Ogg Vorbis, Opus
 and FLAC, MPEG audio, ADTS AAC, AC-3 and E-AC-3, decoded as input; FLAC, MP2, AC-3 and ADTS AAC written as output; IMA WAV and
-Microsoft ADPCM in WAV, ALAC in CAF and G.722 and G.726 in AU both ways, PCM CAF written), carrying tags,
+Microsoft ADPCM in WAV, ALAC in CAF and G.722 and G.726 in AU both ways, PCM CAF written; MP4 probing only), carrying tags,
 with `-c:a`, `-b:a`, `-q:a`, FFmpeg's dither options and its FLAC, ADPCM, G.726, AC-3 and AAC encoder options. Tests cover 129 WAV,
 40 AU, 57 AIFF, 25 raw PCM, 58 CAF, 57 FLAC, 37 Ogg, 71 MP3, 46 ADTS, 41 ADPCM, 33 ALAC, 23 G.72x, 24 AC-3, 18 E-AC-3 and 117 MP4 fixtures, process runs of both tools, and a CI comparison against a
 pinned FFmpeg build that also reads every `zffmpeg` output. Verification is
@@ -135,7 +136,8 @@ is next,
 and TODO.md lays out the roadmap through T65.
  When the state changes, update the current-state statements in
 README.md, port.md ("Status and scope"), the TODO.md introduction and this file
-together.
+together. Also update the capability summaries in `zig/root.zig`, affected
+module headers and command help.
 
 ## Writing Zig: use the `zig-0-17` skill
 

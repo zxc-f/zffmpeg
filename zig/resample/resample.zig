@@ -130,10 +130,7 @@ fn EngineIn(comptime format: audio.SampleFormat, comptime counting: bool) type {
 
         /// The sample and filter element type (`DELEM`, `FELEM`).
         pub const Sample = switch (format) {
-            .s16p => i16,
-            .s32p => i32,
-            .fltp => f32,
-            .dblp => f64,
+            .s16p, .s32p, .fltp, .dblp => format.Element(),
             else => @compileError("not an internal format"),
         };
         const filter_shift: u5 = switch (format) {

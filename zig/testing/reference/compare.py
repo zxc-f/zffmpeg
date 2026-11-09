@@ -2264,18 +2264,30 @@ FLAC_OUTPUT_OPTIONS = [[]] + [["-compression_level", str(level)] for level in ra
 ]
 
 
-def flac_pipe_problem(tpipe, zpipe):
-    """Why two piped FLAC outputs do not match, or None. Both commands must
-    succeed with a FLAC stream: two failures with empty output would
-    otherwise compare equal."""
-    if tpipe.returncode != 0 or zpipe.returncode != 0:
-        return (f"piped: FFmpeg {tpipe.returncode}, zffmpeg {zpipe.returncode} "
-                f"({first_line(text(zpipe.stderr))})")
-    if not zpipe.stdout.startswith(b"fLaC") or not tpipe.stdout.startswith(b"fLaC"):
-        return "piped: no FLAC stream on standard output"
-    if tpipe.stdout != zpipe.stdout:
-        return "the piped output differs"
+def matching_output_problem(theirs, ours, *, magic=None, expected=None, nonempty=False):
+    """Successful commands producing the expected kind of matching bytes.
+    Late failures remain failures even when their stdout is complete."""
+    if theirs.returncode != 0 or ours.returncode != 0:
+        return f"command statuses {theirs.returncode}/{ours.returncode} ({first_line(text(theirs.stderr or ours.stderr))})"
+    if magic is not None and not (theirs.stdout.startswith(magic) and ours.stdout.startswith(magic)):
+        return "no expected media header on standard output"
+    if nonempty and (not theirs.stdout or not ours.stdout):
+        return "no decoded samples"
+    if theirs.stdout != ours.stdout or (expected is not None and ours.stdout != expected):
+        return "the outputs differ"
     return None
+
+
+def generated_file_problem(process, path, magic):
+    if process.returncode != 0:
+        return f"producer exited {process.returncode} ({first_line(text(process.stderr))})"
+    if not path.is_file() or not path.read_bytes().startswith(magic):
+        return "producer did not write the expected media file"
+    return None
+
+
+def flac_pipe_problem(tpipe, zpipe):
+    return matching_output_problem(tpipe, zpipe, magic=b"fLaC")
 
 
 MP2_OUTPUT_OPTIONS = [[], ["-b:a", "64k"], ["-b:a", "128k"], ["-b:a", "256k"], ["-c:a", "mp2fixed"],
@@ -2897,16 +2909,22 @@ def compare_ogg_output(args, lines, failures):
                         continue
                     tpipe = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", source, "-bitexact", *opts, "-f", fmt, "-")
                     zpipe = run(args.zffmpeg, "-i", source, *opts, "-f", fmt, "-")
-                    if tpipe.stdout != zpipe.stdout or zpipe.stdout != ours.read_bytes():
-                        problems.append(f"{label} -f {fmt}: the piped output differs")
+                    problem = matching_output_problem(tpipe, zpipe, magic=b"OggS", expected=ours.read_bytes())
+                    if problem:
+                        problems.append(f"{label} -f {fmt}: {problem}")
                         continue
-                    decoded = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", ours, "-f", "s32le", "-").stdout
+                    decoded = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", ours, "-f", "s32le", "-")
                     flac = work / "ours.flac"
                     flac.unlink(missing_ok=True)
-                    run(args.zffmpeg, "-y", "-i", source, *opts, flac)
-                    expected = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", flac, "-f", "s32le", "-").stdout
-                    if not decoded or decoded != expected:
-                        problems.append(f"{label} .{ext}: FFmpeg's decoding differs from the FLAC output's")
+                    produced = run(args.zffmpeg, "-y", "-i", source, *opts, flac)
+                    problem = generated_file_problem(produced, flac, b"fLaC")
+                    if problem:
+                        problems.append(f"{label} FLAC comparison output: {problem}")
+                        continue
+                    expected = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", flac, "-f", "s32le", "-")
+                    problem = matching_output_problem(expected, decoded, nonempty=True)
+                    if problem:
+                        problems.append(f"{label} .{ext}: FFmpeg's Ogg/FLAC decoding: {problem}")
                         continue
                     same += 1
             result = "pass" if not problems else "**FAIL**: " + "; ".join(problems)
@@ -3272,12 +3290,13 @@ def compare_ogg_decode(args, lines, failures):
             continue
         theirs = run(args.ffmpeg, "-nostdin", "-v", "error", "-i", sample, "-vn", "-f", "s16le", "-")
         ours = run(args.zffmpeg, "-i", sample, "-f", "s16le", "-")
-        if ours.returncode == 0 and ours.stdout == theirs.stdout:
+        problem = matching_output_problem(theirs, ours, nonempty=True)
+        if problem is None:
             passed += 1
             fate_rows.append(f"| {name} | pass |")
         else:
             failed += 1
-            why = "the samples differ" if ours.returncode == 0 else first_line(text(ours.stderr))
+            why = problem
             fate_rows.append(f"| {name} | **FAIL**: {why} |")
             failures.append(f"FATE vorbis {name}: {why}")
     record("FATE Vorbis (T27d)", passed, len(FATE_VORBIS), optional=True, skipped=skipped,
@@ -4999,6 +5018,135 @@ def compare_registries(args, lines, failures):
     record("Registries (T16)", entries - min(len(problems), entries), entries)
 
 
+def compare_review_regressions(args, lines, failures):
+    """Interactions missed by the original per-feature matrix (R2/R3/R5/R7).
+    Mutate only scratch copies of existing, independently generated media."""
+    rows = []
+    same = total = 0
+
+    def check(label, problem):
+        nonlocal same, total
+        total += 1
+        same += problem is None
+        rows.append(f"| {label} | {'pass' if problem is None else '**FAIL**: ' + problem} |")
+        if problem is not None:
+            failures.append(f"review regression {label}: {problem}")
+
+    def convert(binary, source, opts, destination, data=None, reference=False):
+        command = [binary, "-y"]
+        if reference:
+            command += ["-nostdin", "-v", "error"]
+        command += ["-i", ("pipe:" if reference else "-") if data is not None else source]
+        if reference:
+            command += ["-bitexact"]
+        return subprocess.run([str(p) for p in (*command, *opts, destination)],
+                              input=data, capture_output=True, timeout=120)
+
+    with tempfile.TemporaryDirectory() as directory:
+        work = pathlib.Path(directory)
+        # CAF timestamps retain desc's 44.1 kHz clock while its decoder
+        # uses the cookie rate. Both supported cookie styles have pakt first.
+        for name in ("alac_new_kuki", "alac_pakt_before_data"):
+            original = (FIXTURES / "alac" / f"{name}.caf").read_bytes()
+            body = original.index(b"kuki") + 12
+            config = body + (24 if original[body + 4:body + 12] == b"frmaalac" else 0)
+            variants = [(channels, rate, False) for channels in (0, 2) for rate in (22050, 44100, 48000)]
+            variants.append((0, 44100, True))
+            for channels, rate, chan in variants:
+                mutated = bytearray(original)
+                mutated[config + 9] = channels
+                mutated[config + 20:config + 24] = rate.to_bytes(4, "big")
+                if chan:
+                    # ff_mov_read_chan keeps desc's count when a layout
+                    # chunk describes a different number of channels.
+                    chan_body = struct.pack(">III", (121 << 16) | 6, 0, 0)
+                    mutated[body - 12:body - 12] = b"chan" + struct.pack(">q", len(chan_body)) + chan_body
+                source = work / "cookie.caf"
+                source.write_bytes(mutated)
+                for pipe in (False, True):
+                    label = f"{name} channels={channels} rate={rate} chan={chan} {'pipe' if pipe else 'file'}"
+                    data = bytes(mutated) if pipe else None
+                    tp = subprocess.run([str(p) for p in (args.ffprobe, "-v", "error", "-show_entries",
+                        "stream=sample_rate,channels,channel_layout,time_base,duration_ts", "-of", "default=nw=1", "pipe:" if pipe else source)],
+                        input=data, capture_output=True, timeout=120)
+                    zcode, zout, zerr = zffprobe_raw(args.zffprobe, "-" if pipe else source, data=data)
+                    theirs, ours = key_values(text(tp.stdout)), key_values(text(zout))
+                    want = {"sample_rate": str(rate), "channels": "2", "channel_layout": "stereo"}
+                    problem = None
+                    if tp.returncode != 0 or zcode != 0:
+                        problem = f"probe statuses {tp.returncode}/{zcode}: {first_line(text(zerr))}"
+                    elif any(theirs.get(k) != v or ours.get(k) != v for k, v in want.items()):
+                        problem = f"effective configuration differs: reference {theirs}, ours {ours}"
+                    elif theirs.get("time_base") != "1/44100" or ours.get("duration_den") != "44100" or ours.get("duration_num") != theirs.get("duration_ts"):
+                        problem = "the CAF container clock changed with the decoded sample rate"
+                    check(label + " probe", problem)
+                    tpath, zpath = work / "reference.wav", work / "actual.wav"
+                    for path in (tpath, zpath):
+                        path.unlink(missing_ok=True)
+                    tp = convert(args.ffmpeg, source, ["-f", "wav"], tpath, data, True)
+                    zp = convert(args.zffmpeg, source, ["-f", "wav"], zpath, data)
+                    problem = generated_file_problem(tp, tpath, b"RIFF") or generated_file_problem(zp, zpath, b"RIFF")
+                    if problem is None and tpath.read_bytes() != zpath.read_bytes():
+                        problem = "WAV headers or decoded samples differ"
+                    check(label + " decode", problem)
+
+        # Byte equality checks FLAC block selection as well as PCM: SBR's
+        # 2048-sample frames must reach the resampler whole. LC is a control.
+        for name in ("aac_ffmpeg_48k_64k", "aac_fdk_he_44k_stereo", "aac_fdk_hev2_44k"):
+            source = FIXTURES / "aac" / f"{name}.aac"
+            for fmt, magic in (("flac", b"fLaC"), ("ogg", b"OggS")):
+                for remix in ([], ["-ac", "1"]):
+                    for pipe_in in (False, True):
+                        for file_out in (False, True):
+                            label = f"{name} 32k {fmt} {'mono' if remix else 'original layout'} input={'pipe' if pipe_in else 'file'} output={'file' if file_out else 'pipe'}"
+                            data = source.read_bytes() if pipe_in else None
+                            opts = ["-ar", "32000", *remix, "-f", fmt]
+                            tpath, zpath = work / "reference.out", work / "actual.out"
+                            for path in (tpath, zpath):
+                                path.unlink(missing_ok=True)
+                            tp = convert(args.ffmpeg, source, opts, tpath if file_out else "-", data, True)
+                            zp = convert(args.zffmpeg, source, opts, zpath if file_out else "-", data)
+                            if file_out:
+                                tp.stdout = tpath.read_bytes() if tpath.exists() else b""
+                                zp.stdout = zpath.read_bytes() if zpath.exists() else b""
+                            check(label, matching_output_problem(tp, zp, magic=magic))
+
+        source = flac_output_inputs(work)["s16_stereo_44k1"]
+        for codec, fmt, option, value, extra in (
+                ("flac", "flac", "-compression_level", "5", []),
+                ("aac", "adts", "-aac_coder", "fast", []),
+                ("adpcm_ima_wav", "wav", "-block_size", "1024", []),
+                ("g726le", "au", "-code_size", "4", ["-ar", "8000", "-ac", "1"]),
+                ("ac3", "ac3", "-dialnorm", "-31", [])):
+            repeated = [option, "bad", option, value, "-c", "unknown", "-c:a", codec, *extra, "-f", fmt]
+            single = [option, value, "-c:a", codec, *extra, "-f", fmt]
+            tp = convert(args.ffmpeg, source, repeated, "-", reference=True)
+            zp = convert(args.zffmpeg, source, repeated, "-")
+            final = convert(args.zffmpeg, source, single, "-")
+            reference_final = convert(args.ffmpeg, source, single, "-", reference=True)
+            # Check last-value-wins against each tool's effective command;
+            # WAV/AU headers have independently documented mux differences.
+            problem = matching_output_problem(reference_final, tp, nonempty=True) or matching_output_problem(final, zp, nonempty=True)
+            if problem is None:
+                decoded = []
+                for encoded in (tp, zp):
+                    input_format = "aac" if fmt == "adts" else fmt
+                    decoded.append(subprocess.run([args.ffmpeg, "-v", "error", "-f", input_format, "-i", "pipe:", "-f", "s16le", "-"],
+                                                  input=encoded.stdout, capture_output=True, timeout=120))
+                problem = matching_output_problem(*decoded, nonempty=True)
+            check(codec + " invalid then valid option and codec aliases", problem)
+            # A final invalid value still fails before creating an output.
+            path = work / "invalid.out"
+            path.unlink(missing_ok=True)
+            invalid = [option, value, option, "bad", "-c:a", codec, *extra, "-f", fmt]
+            zp = convert(args.zffmpeg, source, invalid, path)
+            check(codec + " final invalid option preflight", None if zp.returncode == 1 and zp.stderr.startswith(f"zffmpeg: invalid value for: {option}\n".encode()) and not path.exists()
+                  else f"exit {zp.returncode}, stderr {text(zp.stderr)!r}, output exists={path.exists()}")
+    record("Review regression combinations", same, total)
+    lines += ["", "## Review regression combinations", "", f"{same}/{total}: effective ALAC configuration, CAF clocks, resampled AAC frame boundaries, repeated encoder options.", "",
+              "| Case | Result |", "| --- | --- |"] + rows
+
+
 def check_oracle_predicates():
     """Fault injection for the predicates that decide a pass: each must reject
     a wrong status or a failed command, or a broken tool could pass."""
@@ -5015,6 +5163,25 @@ def check_oracle_predicates():
     for theirs, ours in ((failed, failed), (good, failed), (failed, good), (Done(0, b"", b""), Done(0, b"", b""))):
         assert flac_pipe_problem(theirs, ours), (theirs, ours)
     assert flac_pipe_problem(good, Done(0, b"fLaC" + bytes(41), b""))
+    for payload, kwargs in ((b"OggS" + bytes(40), {"magic": b"OggS"}),
+                            (bytes(32), {"nonempty": True})):
+        complete = Done(0, payload, b"")
+        late_failure = Done(1, payload, b"late failure\n")
+        assert matching_output_problem(complete, complete, **kwargs) is None
+        for left, right in ((late_failure, complete), (complete, late_failure),
+                            (late_failure, late_failure), (failed, failed)):
+            assert matching_output_problem(left, right, **kwargs)
+        assert matching_output_problem(complete, complete, expected=b"wrong", **kwargs)
+        assert matching_output_problem(Done(0, b"", b""), Done(0, b"", b""), **kwargs)
+    assert matching_output_problem(good, good, magic=b"OggS")
+    with tempfile.TemporaryDirectory() as directory:
+        artifact = pathlib.Path(directory) / "output.flac"
+        assert generated_file_problem(good, artifact, b"fLaC")
+        artifact.write_bytes(good.stdout)
+        assert generated_file_problem(good, artifact, b"fLaC") is None
+        assert generated_file_problem(good._replace(returncode=1), artifact, b"fLaC")
+        artifact.write_bytes(b"wrong")
+        assert generated_file_problem(good, artifact, b"fLaC")
     no_decoder = Done(234, b"", b"[aist#0:0/mp1] Decoding requested, but no decoder found for: mp1\n"
                                 b"Error opening output files: Invalid argument\n")
     assert same_decode_refusal(no_decoder, "UnsupportedOperation")
@@ -5127,6 +5294,7 @@ def main():
     compare_mp2_output(args, lines, failures)
     compare_ac3_output(args, lines, failures)
     compare_aac_output(args, lines, failures)
+    compare_review_regressions(args, lines, failures)
     compare_opus_vectors(args, lines, failures)
     compare_hashes(args, lines, failures)
     compare_fate(args, lines, failures)

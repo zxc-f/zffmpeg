@@ -683,6 +683,8 @@ const zffmpeg_case_fixtures = [_][]const u8{
     "zig/testing/fixtures/wav/duplicate_data.wav",
     "zig/testing/fixtures/raw/raw_alaw_mono_8k.raw",
     "zig/testing/fixtures/flac/flac_rate_change.flac",
+    "zig/testing/fixtures/mp3/mp3_l3_long_stereo.mp3",
+    "zig/testing/fixtures/ogg/ogg_opus_ffmpeg_mono.ogg",
 };
 
 /// T13b: every cell of the operation matrix (files and pipes, transcode and

@@ -753,11 +753,8 @@ pub const Remix = struct {
     fn Kernel(comptime format: audio.SampleFormat) type {
         return struct {
             const Sample = switch (format) {
-                .s16p => i16,
-                .s32p => i32,
-                .fltp => f32,
-                .dblp => f64,
-                else => unreachable,
+                .s16p, .s32p, .fltp, .dblp => format.Element(),
+                else => @compileError("not an internal format"),
             };
             const Inter = switch (format) {
                 .s16p => i32,

@@ -5,7 +5,8 @@
 //! This file is the module's public facade. It exports the supported features
 //! directly; internal declarations stay in their own files.
 //!
-//! - `pcm`: signed 16-bit PCM sample conversion (`codec/pcm.zig`).
+//! - `pcm`: PCM encodings and sample conversion kernels, with decoder and
+//!   encoder stages (`codec/pcm.zig`).
 //! - `audio`: channel layouts, sample formats, stream formats and borrowed
 //!   interleaved samples (`core/audio.zig`).
 //! - `channel_layout`: FFmpeg's channels and channel layouts (native,
@@ -36,17 +37,17 @@
 //!   writer as the other containers' (`format/flacmux.zig`).
 //! - `wav`: bounded RIFF/WAVE, RF64/BW64 and Sony Wave64 parsing and
 //!   known-length writing for the WAV PCM encodings (`format/wav.zig`).
-//! - `au`: bounded Sun AU parsing and known-length writing for s16 big-endian
-//!   PCM (`format/au.zig`).
+//! - `au`: bounded Sun AU parsing and writing for its PCM and G.72x
+//!   encodings (`format/au.zig`, `format/aug72x.zig`).
 //! - `aiff`: bounded AIFF and AIFF-C parsing and known-length writing for
 //!   their PCM encodings (`format/aiff.zig`).
 //! - `raw`: raw PCM reading with given stream parameters and writing, as
 //!   FFmpeg's raw demuxers and muxers (`format/raw.zig`).
-//! - `caf`: bounded Apple CAF reading for linear PCM, A-law and µ-law
+//! - `caf`: bounded Apple CAF reading for linear PCM, A-law, µ-law and ALAC
 //!   (`format/caf.zig`).
-//! - `flac`: native FLAC with 16-bit samples, read as FFmpeg's demuxer,
+//! - `flac`: native FLAC with 4- to 32-bit samples, read as FFmpeg's demuxer,
 //!   parser and decoder read it: packets with libavformat's timestamps and
-//!   their decoding to s16 (`format/flac.zig`, `codec/flac.zig`,
+//!   their decoding to s16 or s32 (`format/flac.zig`, `codec/flac.zig`,
 //!   `codec/flac_parser.zig`, `codec/flacdec.zig`).
 //! - `ogg`: FFmpeg's Ogg demuxer with the FLAC, Opus and Vorbis mappings,
 //!   without decoding (`format/ogg.zig`, `format/vorbiscomment.zig`).
@@ -61,7 +62,7 @@
 //! - `opusdec`: FFmpeg's Opus decoder, CELT, SILK and hybrid frames and
 //!   multistream packets, bit for bit (`codec/opusdec.zig`, with
 //!   `codec/celt.zig` and `codec/silk.zig`).
-//! - `mp3dec`: FFmpeg's float MP3 decoder (mp3float), Layer III frames,
+//! - `mp3dec`: FFmpeg's float MPEG audio decoders, Layers I, II and III,
 //!   bit for bit (`codec/mp3dec.zig`, with `codec/mp3_tab.zig` and
 //!   `codec/mpadsp.zig`).
 //! - `mp2enc`: FFmpeg's MP2 encoders, mp2 and mp2fixed, packet for packet
@@ -75,7 +76,7 @@
 //! - `mpeg4audio`: the AudioSpecificConfig as FFmpeg parses it, and its PCE
 //!   copy (`codec/mpeg4audio.zig`).
 //! - `adtsmux`: FFmpeg's ADTS muxer (`format/adtsmux.zig`).
-//! - `aacdec`: FFmpeg's float AAC decoder for AAC-LC (and SSR) streams,
+//! - `aacdec`: FFmpeg's float AAC decoder for AAC-LC, SSR, HE-AAC and HE-AACv2,
 //!   bit for bit (`codec/aacdec.zig`, with `codec/aac_tab.zig`).
 //! - `oggdecode`: an Ogg stream decoded as the ffmpeg program decodes it
 //!   (`format/oggdecode.zig`, with `format/decoded.zig`).
@@ -108,14 +109,16 @@
 //! - `detect`: content detection with FFmpeg's winner, or a forced format,
 //!   replaying the bytes it read to the chosen parser (`format/detect.zig`,
 //!   `format/replay.zig`).
-//! - `convert`: synchronous WAV/Wave64/AU/AIFF conversion and stream copy, with
+//! - `convert`: synchronous conversion and stream copy across supported
+//!   audio containers and raw PCM, with
 //!   every check made before output starts (`format/convert.zig`).
-//! - `filter`: the audio filter graph: a linear chain of anull, aformat,
-//!   volume and aresample between a buffer source and sink, negotiated and
-//!   run as FFmpeg's libavfilter does, built from filtergraph text too
+//! - `filter`: the audio filter graph, with format conversion, volume,
+//!   resampling, trimming, timestamps, splitting, channel mapping, pan and
+//!   mixing, across several sources and sinks as FFmpeg's libavfilter runs
+//!   them, built from filtergraph text
 //!   (`filter/graph.zig`, with `filter/filters.zig`, `filter/formats.zig`
 //!   and `filter/parse.zig`).
-//! - `file`: file and stream adapters for the WAV and AU paths, with
+//! - `file`: container probing and WAV decode/write file adapters, with
 //!   borrowed-handle and path variants (`io/file.zig`).
 //!
 //! Zig analyzes files lazily, so tests run only in files this module imports.

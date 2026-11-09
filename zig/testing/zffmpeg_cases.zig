@@ -46,7 +46,7 @@ const Harness = struct {
     /// `stderr.txt`.
     fn runWith(h: *Harness, args: []const []const u8, stdin: std.process.SpawnOptions.StdIo, stdout: Stdout) !Outcome {
         const io = h.io;
-        var argv_buffer: [16][]const u8 = undefined;
+        var argv_buffer: [32][]const u8 = undefined;
         argv_buffer[0] = h.exe;
         @memcpy(argv_buffer[1..][0..args.len], args);
         const stderr_file = try h.dir.createFile(io, "stderr.txt", .{});
@@ -77,7 +77,7 @@ const Harness = struct {
     /// the input has no size; standard output goes to `stdout.bin`.
     fn runPiped(h: *Harness, args: []const []const u8, input: []const u8) !Outcome {
         const io = h.io;
-        var argv_buffer: [16][]const u8 = undefined;
+        var argv_buffer: [32][]const u8 = undefined;
         argv_buffer[0] = h.exe;
         @memcpy(argv_buffer[1..][0..args.len], args);
         const stderr_file = try h.dir.createFile(io, "stderr.txt", .{});
@@ -105,7 +105,7 @@ const Harness = struct {
     /// end, which the caller frees (`gpa`).
     fn runCapture(h: *Harness, args: []const []const u8) !struct { outcome: Outcome, stdout: []u8 } {
         const io = h.io;
-        var argv_buffer: [16][]const u8 = undefined;
+        var argv_buffer: [32][]const u8 = undefined;
         argv_buffer[0] = h.exe;
         @memcpy(argv_buffer[1..][0..args.len], args);
         const stderr_file = try h.dir.createFile(io, "stderr.txt", .{});
@@ -206,6 +206,25 @@ const Harness = struct {
 pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+    // Child mode exercises the library adapter through a real stdin pipe
+    // and a redirected regular file, using the same process harness.
+    if (args.len == 5 and std.mem.eql(u8, args[1], "--probe-file")) {
+        const raw = std.mem.eql(u8, args[2], "raw");
+        const length = if (std.mem.eql(u8, args[3], "unknown")) null else try std.fmt.parseInt(u64, args[3], 10);
+        var buffer: [av.file.default_buffer_len]u8 = undefined;
+        const probed = try av.file.probeFile(io, std.Io.File.stdin(), &buffer, .{}, .{
+            .gpa = init.gpa,
+            .source = .{ .format = if (raw) .s16le else null, .length = length, .gpa = init.gpa },
+        });
+        if (raw) {
+            if (probed.frame_count != 4 or probed.codec.pcmCodec() != .s16le) return error.TestUnexpectedResult;
+        } else {
+            if (probed.codec != .opus or probed.format.sample_rate != 48000) return error.TestUnexpectedResult;
+            const regular = std.mem.eql(u8, args[4], "file");
+            if ((probed.frame_count != null) != regular) return error.TestUnexpectedResult;
+        }
+        return 0;
+    }
     if (args.len != 4) return error.Usage;
     // zffmpeg runs in the work directory, so a path relative to ours would
     // not resolve there.
@@ -501,6 +520,68 @@ pub fn main(init: std.process.Init) !u8 {
         var reader = file.readerStreaming(io, &buffer);
         const info = try av.au.probe(&reader.interface, .{});
         if (info.frame_count != long_frames) h.fail(case, "{?d} frames", .{info.frame_count});
+    }
+
+    // Every private option family resolves repeated raw values before
+    // validation, including when codec selection appears after the values.
+    const option_cases = [_]struct {
+        codec: []const u8,
+        format: []const u8,
+        option: []const u8,
+        value: []const u8,
+        extra: []const []const u8 = &.{},
+    }{
+        .{ .codec = "flac", .format = "flac", .option = "-compression_level", .value = "5" },
+        .{ .codec = "aac", .format = "adts", .option = "-aac_coder", .value = "fast" },
+        .{ .codec = "adpcm_ima_wav", .format = "wav", .option = "-block_size", .value = "1024" },
+        .{ .codec = "g726le", .format = "au", .option = "-code_size", .value = "4", .extra = &.{ "-ac", "1", "-ar", "8000" } },
+        .{ .codec = "ac3", .format = "ac3", .option = "-dialnorm", .value = "-31" },
+    };
+    for (option_cases) |option| {
+        var command_args: [24][]const u8 = undefined;
+        const repeated = [_][]const u8{ "-i", "long.wav", option.option, "bad", option.option, option.value, "-c:a", option.codec, "-f", option.format };
+        @memcpy(command_args[0..repeated.len], &repeated);
+        @memcpy(command_args[repeated.len..][0..option.extra.len], option.extra);
+        const count = repeated.len + option.extra.len;
+        command_args[count] = "-";
+        const replaced = try h.runCapture(command_args[0 .. count + 1]);
+        defer h.gpa.free(replaced.stdout);
+        h.expectSuccess("a superseded encoder option is not validated", replaced.outcome);
+        const single = [_][]const u8{ "-i", "long.wav", option.option, option.value, "-c", option.codec, "-f", option.format };
+        @memcpy(command_args[0..single.len], &single);
+        @memcpy(command_args[single.len..][0..option.extra.len], option.extra);
+        command_args[single.len + option.extra.len] = "-";
+        const final_only = try h.runCapture(command_args[0 .. single.len + option.extra.len + 1]);
+        defer h.gpa.free(final_only.stdout);
+        h.expectSuccess("the final encoder option alone", final_only.outcome);
+        if (replaced.stdout.len == 0 or !std.mem.eql(u8, replaced.stdout, final_only.stdout))
+            h.fail("repeated encoder option", "{s}: different encoded outputs", .{option.option});
+        h.expect("a final invalid encoder option fails before output creation", try h.run(&.{ "-i", "long.wav", "-c", option.codec, option.option, option.value, option.option, "bad", "invalid-output" }, .ignore, null), 1, "invalid value for");
+        h.expectAbsent("invalid encoder options create no output", "invalid-output");
+    }
+
+    // A supplied byte length must never turn a pipe into a positional
+    // reader. Raw PCM still uses that length independently of seekability.
+    {
+        const saved_exe = h.exe;
+        h.exe = try std.Io.Dir.cwd().realPathFileAlloc(io, args[0], init.arena.allocator());
+        defer h.exe = saved_exe;
+        const ogg = try fixture_dir.readFileAlloc(io, "ogg" ++ std.fs.path.sep_str ++ "ogg_opus_ffmpeg_mono.ogg", h.gpa, .limited(1 << 14));
+        defer h.gpa.free(ogg);
+        const raw = [_]u8{ 0, 0, 1, 0, 2, 0, 3, 0 };
+        const inputs = [_]struct { kind: []const u8, bytes: []const u8 }{
+            .{ .kind = "ogg", .bytes = ogg }, .{ .kind = "raw", .bytes = &raw },
+        };
+        for (inputs) |input| {
+            try h.write("probe-input", input.bytes);
+            const file = try dir.openFile(io, "probe-input", .{});
+            defer file.close(io);
+            const length = try init.arena.allocator().print("{d}", .{input.bytes.len});
+            for ([_][]const u8{ "unknown", length }) |known| {
+                h.expectSuccess("probeFile: pipe length is independent of seekability", try h.runPiped(&.{ "--probe-file", input.kind, known, "pipe" }, input.bytes));
+                h.expectSuccess("probeFile: regular files keep positional reads", try h.run(&.{ "--probe-file", input.kind, known, "file" }, .{ .file = file }, null));
+            }
+        }
     }
 
     return if (h.failures == 0) 0 else 1;

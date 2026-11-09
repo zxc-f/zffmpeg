@@ -1581,3 +1581,72 @@ This is a whole-codebase, risk-based review, not a claim that every line of the 
 **Blocking fixes required.** R1 is the principal blocker: an ordinary public metadata operation can read freed storage. R9 should be fixed before relying on continuously buffered, long-lived filter graphs; its storage demand grows with total processed input rather than live backlog. R10 is a small, focused packet-flag correction.
 
 The source does not call for wholesale redesign. Small ownership/queue fixes and targeted typed abstractions offer a better maintainability return than unifying distinct codec algorithms. The passing unit suites and substantial successful reference groups provide useful evidence, but approval should also include the new regression sequences and a clean differential run on the documented compiler/libc platform. This assessment concerns the selected snapshot on its own merits and makes no claim about merge compatibility or unreviewed platform behavior.
+
+
+## Implementation follow-up — 2026-11-09
+
+The branch fixes R1–R10 and reconciles D1–D2. The earlier review passes
+remain the record of their inspected snapshots.
+
+| Finding | Correction and regression evidence |
+| --- | --- |
+| R1 | `metadata.Dictionary.appendTo` saves an aliased source offset and rebases after realloc. Tests cover borrowed keys, self-append, substrings, spare capacity, forced moving growth and allocation/remap failures. |
+| R2/R3 | CAF, probing and ALAC decoding derive effective channels, layout, storage and rate from `alac.Config`. Zero cookie channels use `desc`; the cookie rate reaches output headers while duration keeps the descriptor clock. Both cookie styles, matching and differing rates, a conflicting `chan` count, zero/invalid rates, file/pipe paths and allocation failures are covered. |
+| R4 | Shared capacity/count validation and float delivery replace assertions across AAC, MPEG audio, AC-3/E-AC-3, Ogg and native FLAC. `OutputTooSmall` preserves samples for retry. Eight reader paths compare zero/short/exact and irregular deliveries with an uninterrupted decode, then drain to stable EOF. |
+| R5 | AAC's storage bound includes SBR's 2048 samples; conversion keeps the established 1024-sample dither grouping separately. HE-AAC/HE-AACv2 and LC controls resampled into FLAC/Ogg match the reference with rematrixing, file/pipe inputs and file/pipe outputs. |
+| R6 | Ogg-output pipe commands, FLAC comparison generation and both reference decodes must succeed before comparison. The FATE Vorbis comparison also checks reference success. Shared predicates reject failed commands with complete stdout and missing/wrong artifacts. Live fault injection of 288 late command failures rejects all 144 affected Ogg cells. |
+| R7 | Typed encoder groups collect the final raw value per spelling before validation and apply effective values in argument order, with explicit shared-name exclusions and compile-time collision checks. All five option families have process and reference checks for replacement, later codec selection and final-invalid preflight. |
+| R8 | `probeFile` selects positional I/O and its automatic seeker from the actual handle kind, independently of supplied length. Process cases exercise Ogg and raw PCM through real pipes and redirected regular files with known/unknown lengths. |
+| R9 | Link descriptors and synchronized amix planes reuse consumed prefixes at amortized growth boundaries. amix reserves all planes before publishing samples/frame information. Constant-backlog tests assert capacity plateaus, samples/order/PTS, drain and allocation-failure cleanup for packed and planar storage. |
+| R10 | FLAC header parsing preserves `discard_flag | corrupt_flag`. Tests check all four combinations through parser queues and read-ahead, including allocation/remap failures; the generic-layer fuzz corpus now includes Ogg FLAC. |
+| D1/D2 | Updated facade/module summaries, allocation and lifecycle contracts, CAF scope and seeking, AAC/ADTS help, current task introductions, reference configuration narrative and the historical replay link. Changed documentation has no broken local-path targets. |
+
+The focused Zig improvements also centralize sample element types in
+`SampleFormat.Element`, derive compressed codec coverage from the codec
+union, check exhaustive filter descriptor coverage and generate uniform
+filter construction from tags. The existing public dictionary representation
+is retained; its ownership/API migration and the larger FLAC/Ogg/filter
+redesigns continue under T54/T65.
+
+The speed checker additionally uses a real pipe instead of regular-file
+redirection, pins both producer and consumer to the measured CPU, and
+propagates producer failures with `pipefail`.
+
+### Validation of the fixes
+
+Host: Linux x86-64, Zig 0.17.0, glibc 2.44. The reference source and installed
+build are revision `5d5a38a7e46be296eab75982c0986054f731e19e`, Clang 23.1.4,
+assembly disabled.
+
+| Check | Result |
+| --- | --- |
+| `zig build test -j4 --summary all` | 416/416 steps; 675/675 library tests passed; unchanged example/metric runs retained cached passes. |
+| `zig build test -j3 -Doptimize=ReleaseSafe --summary all` | 416/416 steps; 675/675 library tests passed. |
+| `zig build test -j3 -Doptimize=ReleaseFast --summary all` | 416/416 steps; 675/675 library tests passed. |
+| Final CAF test compilation/execution in all three modes | Passed after simplifying the test's cookie-offset expression and clarifying parameter docs. |
+| Debug, ReleaseSafe and ReleaseFast builds; ReleaseSafe test tools | Passed. |
+| Formatting, Python compilation and `git diff --check` | Passed. |
+| Fixture `generate.py --check` | All 776 fixtures, manifests and generated README tables current. No committed media/vector expectations changed. |
+| Full pinned FFmpeg comparison | **13,216 required passed, 0 failed, 0 missing; 66 optional passed, 0 failed, 0 skipped**. Includes 114 new required combination checks. Existing named differences/refusals retain their predicates. |
+| Status/artifact predicate checks and live Ogg fault injection | Passed; all 144 affected cells reject 288 injected late failures. |
+| Compile-only cross builds, ReleaseSafe, `-j2` | x86_64-windows-gnu, aarch64-linux-musl and aarch64-macos: each 7/7 steps, exit 0. |
+| HE-AACv2 → 32 kHz FLAC reproducer | Both tools produce 83,845 bytes with 1,470-sample blocks, SHA-256 `c7fefbd20770e0475cc6ebea0ab1daf36c0d54e781d5eba8bd22fb8a9ab46e56`. |
+| Speed check, repeated HE-AACv2 → 32 kHz FLAC | Five runs on core 2: zffmpeg file 0.507 s, real pipe 0.509 s, pinned reference 0.439 s, native reference 0.295 s. 1.15x/1.16x pinned reference, file/pipe 1.00x; no warning threshold reached. |
+
+Full comparison command:
+
+```sh
+python3 zig/testing/reference/compare.py \
+  --ffmpeg .references/ffmpeg-install/bin/ffmpeg \
+  --ffprobe .references/ffmpeg-install/bin/ffprobe \
+  --zffprobe zig-out/bin/zffprobe --writer zig-out/bin/write-driver \
+  --zffmpeg zig-out/bin/zffmpeg --registry zig-out/bin/registry-dump \
+  --hasher zig-out/bin/hash-driver --opus-vector-driver zig-out/bin/opus-vector-driver \
+  --report /tmp/zffmpeg-review-reference.md
+```
+
+Local logs and generated reports are `/tmp/zffmpeg-review-{debug,safe,fast,install,fixtures,cross,faults,combinations,final-caf,speed}.log`,
+`/tmp/zffmpeg-review-reference.{log,md}`, the per-target cross logs, and
+`/tmp/zffmpeg-review-speed/speed.json`. Existing corpus seeds, mutation smoke
+and allocation sweeps ran in the suites; this follow-up does not claim a
+new sustained fuzz campaign, native non-Linux execution or a new CI run.

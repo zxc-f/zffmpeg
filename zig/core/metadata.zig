@@ -123,15 +123,21 @@ pub const Dictionary = struct {
         const old = d.entries.items[index];
         const owned_key = try gpa.dupe(u8, key);
         errdefer gpa.free(owned_key);
-        // Both lengths are of allocations: the sum cannot overflow.
-        const len = old.value.len + value.len;
+        const len = std.math.add(usize, old.value.len, value.len) catch return error.OutOfMemory;
+        // `put` accepts borrowed values from this dictionary. Remember an
+        // aliased range before realloc can move and free its allocation.
+        const base = @intFromPtr(old.value.ptr);
+        const source = @intFromPtr(value.ptr);
+        const offset: ?usize = if (source >= base and source - base <= old.value.len and
+            value.len <= old.value.len - (source - base)) source - base else null;
         var storage = storageOf(old);
         if (len > storage.len) {
             const grown = @max(len, storage.len *| 2, 16);
             // On failure the old storage stays the entry's.
             storage = try gpa.realloc(storage, grown);
         }
-        @memcpy(storage[old.value.len..len], value);
+        const fragment = if (offset) |at| storage[at..][0..value.len] else value;
+        @memcpy(storage[old.value.len..len], fragment);
         gpa.free(old.key);
         _ = d.entries.swapRemove(index);
         // swapRemove freed the slot this takes.
@@ -264,6 +270,32 @@ test "append joins values as AV_DICT_APPEND, moving the entry last under the new
     try expectValue(&copy, "artist", d.get("artist").?);
     try d.put(gpa, "artist", "", .replace);
     try expectValue(&d, "artist", "");
+}
+
+fn appendAliases(gpa: Allocator) !void {
+    var d: Dictionary = .empty;
+    defer d.deinit(gpa);
+    try d.put(gpa, "tag", "0123456789abcdef", .replace);
+    try d.put(gpa, "other", "value", .replace);
+    const entry = d.items()[0];
+    d.put(gpa, entry.key, entry.value, .append) catch |err| {
+        try expectEntries(&d, &.{ .{ "tag", "0123456789abcdef" }, .{ "other", "value" } });
+        return err;
+    };
+    try expectEntries(&d, &.{ .{ "other", "value" }, .{ "tag", "0123456789abcdef0123456789abcdef" } });
+    const previous = d.get("tag").?;
+    try d.put(gpa, "tag", previous[2..6], .append);
+    try expectValue(&d, "tag", "0123456789abcdef0123456789abcdef2345");
+    // Spare capacity: this append must also accept an aliased substring.
+    try d.put(gpa, "tag", d.get("tag").?[0..2], .append);
+    try expectValue(&d, "tag", "0123456789abcdef0123456789abcdef234501");
+}
+
+test "metadata append rebases borrowed values and keys across moving growth" {
+    try appendAliases(std.testing.allocator);
+    var moving = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
+    try appendAliases(moving.allocator());
+    try @import("../testing/hostile.zig").checkAll(appendAliases, .{});
 }
 
 test "remove takes the first match and moves the last entry into its place" {

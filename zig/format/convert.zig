@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Original file for this project.
 //! Synchronous conversion and stream copy between the supported containers
-//! (TODO.md T13a): WAV, Wave64, AU, AIFF, raw PCM, FLAC and Ogg, CAF as
-//! input only, FLAC, Ogg and MP3 inputs decoded.
+//! (TODO.md T13a and subsequent codec tasks): PCM, FLAC, Ogg, MPEG audio,
+//! ADTS AAC, AC-3/E-AC-3, ADPCM, ALAC and G.72x, within the registry
+//! and operation matrix. MP4 currently supports probing only.
 //!
 //! The operation matrix (TODO.md T13), where WAV stands for WAV or Wave64 on
 //! either side:
@@ -42,14 +43,14 @@
 //! dithers (T23a), and `pcm.Encoder` (the core/stage.zig contract) and writes
 //! the encoded packets. The dither's noise follows FFmpeg's packet sizes for
 //! the input, not this file's packets (`ffmpegPacketFrames`).
-//! Neither keeps container metadata: the output has the writer's canonical
-//! header, so WAV chunks other than `fmt ` and `data`, AU annotations and AIFF
-//! chunks other than `FVER`, `COMM` and `SSND` are dropped.
+//! With `Request.tags`, supported metadata is carried into containers that
+//! write it. Other container-specific chunks are omitted.
 //!
-//! Nothing is allocated. Working memory is fixed, whatever the input length:
-//! a 4 KiB packet buffer, for transcoding 8 KiB of decoded samples and 32 KiB
-//! each of converted samples, the dither's scratch and encoded bytes, plus
-//! the parsers' and writers' own 4 KiB scratch.
+//! PCM conversion without tags or resampling uses fixed scratch buffers.
+//! Compressed inputs, compressed outputs, collected tags and resampling can
+//! allocate; pass `Request.gpa` where required. Call `Conversion.deinit`
+//! after every successful `init`, including when `run` fails. Writers and
+//! resamplers release their run-local allocations before returning.
 
 const std = @import("std");
 const audio = @import("../core/audio.zig");
@@ -187,17 +188,18 @@ pub const Request = struct {
     /// within the resampler's declared tolerance. Null keeps the input's.
     /// With `copy`, another rate is `UnsupportedOperation`.
     sample_rate: ?u32 = null,
-    /// The allocator a rate change needs, for the resampler's filter and
-    /// buffers; a rate change without one is `UnsupportedOperation`.
+    /// The allocator for compressed inputs/outputs and resampling. Paths
+    /// that require one refuse `null` with `UnsupportedOperation`.
     gpa: ?std.mem.Allocator = null,
     /// Carry the input's tags (T21c): `init` puts the tags FFmpeg's command
     /// would carry (`carriedTags`) from those before the input's `data` into
     /// the empty `tags.dictionary`, under FFmpeg's names, and a WAV output
-    /// gets them as FFmpeg's writer would, in a `LIST`/`INFO` chunk. Only RIFF
-    /// and RF64 inputs have tags, and only RIFF and RF64 outputs carry them;
+    /// gets them as FFmpeg's writer would, in a `LIST`/`INFO` chunk. The
+    /// supported FLAC, Ogg, MP3 and ADTS inputs also expose their tags, and
+    /// FLAC, Ogg and CAF outputs write the tags their muxers support;
     /// tags after the input's `data` come too late for the output header and
     /// are not carried. The dictionary must outlive the conversion. Without
-    /// it nothing is allocated.
+    /// it no input tag dictionary is collected.
     tags: ?wav.Tags = null,
 };
 
@@ -724,7 +726,8 @@ pub const Conversion = struct {
         };
     }
 
-    /// Frees what a FLAC input allocated; nothing for the others.
+    /// Releases the input reader and conversion-owned stream tags. Call
+    /// after successful initialization, also when the single run fails.
     pub fn deinit(c: *Conversion) void {
         if (c.gpa) |gpa| c.stream_tags.deinit(gpa);
         deinitParser(&c.input);
@@ -981,7 +984,10 @@ pub const Conversion = struct {
                     dither.Dither.init(s.format, out_format.sample_format, options)
                 else
                     null;
-                if (dithered) |*d| d.setCalls(c.packet_frames, s.frame_count);
+                // AAC's established dither calls use 1024 samples even
+                // when SBR needs room for a complete 2048-sample frame.
+                const dither_frames = if (c.input == .aac) 1024 else c.packet_frames;
+                if (dithered) |*d| d.setCalls(dither_frames, s.frame_count);
                 var stages: Transcoder(W) = .{
                     .decoder = .init(s.input_codec, s.format, &decoded),
                     // libswresample's conversion when the storage or the

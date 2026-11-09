@@ -2,8 +2,8 @@
 // Original file for this project.
 // fftools/ffmpeg_opt.c at the pinned reference revision was read for the -y/-n
 // and same-file behavior; see port.md "zffmpeg command" for the differences.
-//! zffmpeg: converts or stream-copies one WAV, Wave64, AU, AIFF, CAF (input
-//! only), FLAC, Ogg (FLAC, Vorbis and Opus decoded as input, FLAC written),
+//! zffmpeg: converts or stream-copies one WAV, Wave64, AU, AIFF, CAF
+//! (PCM and ALAC), FLAC, Ogg (FLAC, Vorbis and Opus decoded as input, FLAC written),
 //! MPEG audio (every layer decoded as input, MP2 encoded as output) or raw
 //! PCM stream (TODO.md T13b, T21b, T22b, T22c, T22d, T26a, T26c, T27b, T27d,
 //! T28, T29b to T29d).
@@ -63,7 +63,7 @@ const help = usage ++
     \\
     \\Converts one WAV, Wave64, AU, AIFF, CAF (PCM, and ALAC), FLAC, Ogg
     \\(Vorbis, Opus and FLAC input, FLAC output), MPEG audio (MP3, MP2 and MP1
-    \\input, MP2 output), ADTS AAC (input), raw AC-3 or E-AC-3 (input, and
+    \\input, MP2 output), ADTS AAC (input and output), raw AC-3 or E-AC-3 (input, and
     \\AC-3 output) or raw PCM stream (standard input or output with -). The
     \\input container is
     \\detected from content, or for raw PCM from the name (.sb, .ub, .al, .ul,
@@ -71,8 +71,8 @@ const help = usage ++
     \\Before -i, -sample_rate (or -ar) and -ch_layout (or -ac) describe raw
     \\PCM input, 44100 Hz mono by default. The output container is the -f after
     \\-i, or the output name's extension (.wav, .w64, .au, .aif, .aiff, .afc,
-    \\.aifc, .caf, .flac, .ogg, .oga, .opus, .mp2, .ac3, .sb, .ub, .al, .ul,
-    \\.sw). Formats: wav, w64, au, aiff, caf, flac, ogg, oga, opus, mp2, ac3
+    \\.aifc, .caf, .flac, .ogg, .oga, .opus, .mp2, .ac3, .aac, .adts, .sb, .ub, .al, .ul,
+    \\.sw). Formats: wav, w64, au, aiff, caf, flac, ogg, oga, opus, mp2, ac3, adts
     \\and the raw formats u8, s8, s16le,
     \\s16be, s24le, s24be, s32le, s32be, f32le, f32be, f64le, f64be, alaw and
     \\mulaw.
@@ -121,6 +121,11 @@ const help = usage ++
     \\-original, -dmix_mode, -ltrt_cmixlev, -ltrt_surmixlev, -loro_cmixlev,
     \\-loro_surmixlev, -dsurex_mode, -dheadphone_mode, -ad_conv_type,
     \\-stereo_rematrixing, -channel_coupling and -cpl_start_band.
+    \\-c aac (the default for .aac and .adts) encodes AAC-LC into ADTS, with
+    \\-b:a or -q:a, -aac_coder (nmr, twoloop, fast), -aac_rc (cbr, abr),
+    \\-aac_nmr_speed (0 to 4), -aac_ms, -aac_is, -aac_pns, -aac_tns,
+    \\-aac_pce, -aac_allow_71wide, -cutoff and -profile (aac_low or
+    \\mpeg2_aac_low).
     \\-y replaces an existing output; without it (or with -n) an existing output
     \\is an error.
     \\Exit codes: 0 success, 1 usage, 2 invalid or truncated media,
@@ -168,6 +173,91 @@ const Command = struct {
     dither: av.dither.Options,
     overwrite: bool,
 };
+
+/// Codec-private routing stays next to the typed option specifications.
+const EncoderOptions = struct {
+    flac: av.flacenc.AvOptions = .{},
+    adpcm: av.adpcm.EncodeOptions = .{},
+    g726: av.g726.EncodeOptions = .{},
+    aac: av.aacenc.Options = .{},
+    ac3: av.ac3enc.Options = .{},
+};
+
+const EncoderGroup = struct {
+    field: []const u8,
+    Options: type,
+    excluded: []const []const u8 = &.{},
+
+    fn owns(comptime group: EncoderGroup, comptime name: []const u8) bool {
+        for (group.excluded) |excluded| {
+            if (std.mem.eql(u8, name, excluded)) return false;
+        }
+        return true;
+    }
+};
+
+const encoder_groups = [_]EncoderGroup{
+    .{ .field = "flac", .Options = av.flacenc.AvOptions },
+    .{ .field = "adpcm", .Options = av.adpcm.EncodeOptions },
+    .{ .field = "g726", .Options = av.g726.EncodeOptions },
+    .{ .field = "aac", .Options = av.aacenc.Options, .excluded = &.{ "b", "cutoff", "global_quality", "qscale" } },
+    .{ .field = "ac3", .Options = av.ac3enc.Options, .excluded = &.{"b"} },
+};
+
+fn encoderGroupOffset(comptime index: usize) usize {
+    var count: usize = 0;
+    inline for (encoder_groups[0..index]) |group| count += group.Options.option_specs.len;
+    return count;
+}
+
+const encoder_option_count = encoderGroupOffset(encoder_groups.len);
+const RawEncoderOption = struct { arg: []const u8, value: []const u8, position: usize };
+
+comptime {
+    @setEvalBranchQuota(20000);
+    for (encoder_groups, 0..) |group, i| {
+        if (@FieldType(EncoderOptions, group.field) != group.Options) @compileError("encoder option group type mismatch");
+        for (group.Options.option_specs) |spec| {
+            if (!group.owns(spec.name)) continue;
+            for (encoder_groups[i + 1 ..]) |other| {
+                for (other.Options.option_specs) |other_spec| {
+                    if (other.owns(other_spec.name) and std.mem.eql(u8, spec.name, other_spec.name))
+                        @compileError("encoder option belongs to two groups: " ++ spec.name);
+                }
+            }
+        }
+    }
+}
+
+fn encoderOptionIndex(arg: []const u8) ?usize {
+    if (arg.len < 2 or arg[0] != '-') return null;
+    inline for (encoder_groups, 0..) |group, i| {
+        inline for (group.Options.option_specs, 0..) |spec, j| {
+            if (comptime group.owns(spec.name)) {
+                if (std.mem.eql(u8, arg[1..], spec.name)) return encoderGroupOffset(i) + j;
+            }
+        }
+    }
+    return null;
+}
+
+/// Validate only the final spelling/value of each dictionary option. Apply
+/// different names in argument order, preserving order between aliases.
+fn resolveEncoderOptions(raw: *const [encoder_option_count]?RawEncoderOption, args: []const [:0]const u8, target: *EncoderOptions) ?Usage {
+    for (args, 0..) |_, position| {
+        inline for (encoder_groups, 0..) |group, i| {
+            inline for (group.Options.option_specs, 0..) |_, j| {
+                if (raw[encoderGroupOffset(i) + j]) |option| {
+                    if (option.position == position) {
+                        av.options.set(group.Options, &@field(target, group.field), option.arg[1..], option.value) catch
+                            return .{ .reason = "invalid value for", .arg = option.arg };
+                    }
+                }
+            }
+        }
+    }
+    return null;
+}
 
 /// A rejected command line: a reason and, when one is involved, the argument.
 const Usage = struct {
@@ -345,11 +435,7 @@ fn parse(args: []const [:0]const u8) Parsed {
     var format: ?[]const u8 = null;
     var codec: ?[]const u8 = null;
     var bit_rate: ?[]const u8 = null;
-    var flac: av.flacenc.AvOptions = .{};
-    var adpcm: av.adpcm.EncodeOptions = .{};
-    var g726: av.g726.EncodeOptions = .{};
-    var ac3: av.ac3enc.Options = .{};
-    var aac: av.aacenc.Options = .{};
+    var raw_encoder_options: [encoder_option_count]?RawEncoderOption = @splat(null);
     var quality: ?[]const u8 = null;
     var dither_method: ?[]const u8 = null;
     var dither_scale: ?[]const u8 = null;
@@ -401,49 +487,10 @@ fn parse(args: []const [:0]const u8) Parsed {
             if (isQualityOption(arg)) break :slot &quality;
             if (std.mem.eql(u8, arg, "-dither_method")) break :slot &dither_method;
             if (std.mem.eql(u8, arg, "-dither_scale")) break :slot &dither_scale;
-            if (isFlacOption(arg)) {
-                // The FLAC encoder's options, in FFmpeg's syntax (T26c);
-                // FFmpeg leaves them unused for another encoder, as
-                // zffmpeg does.
+            if (encoderOptionIndex(arg)) |index| {
                 i += 1;
                 if (i == args.len) return .{ .usage = .{ .reason = "missing value for", .arg = arg } };
-                av.options.set(av.flacenc.AvOptions, &flac, arg[1..], args[i]) catch
-                    return .{ .usage = .{ .reason = "invalid value for", .arg = arg } };
-                continue;
-            }
-            if (isAdpcmOption(arg)) {
-                // The ADPCM encoders' options (T31a), unused for another
-                // encoder, as FFmpeg leaves them.
-                i += 1;
-                if (i == args.len) return .{ .usage = .{ .reason = "missing value for", .arg = arg } };
-                av.options.set(av.adpcm.EncodeOptions, &adpcm, arg[1..], args[i]) catch
-                    return .{ .usage = .{ .reason = "invalid value for", .arg = arg } };
-                continue;
-            }
-            if (isG726Option(arg)) {
-                // The G.726 encoder's option (T31c), likewise.
-                i += 1;
-                if (i == args.len) return .{ .usage = .{ .reason = "missing value for", .arg = arg } };
-                av.options.set(av.g726.EncodeOptions, &g726, arg[1..], args[i]) catch
-                    return .{ .usage = .{ .reason = "invalid value for", .arg = arg } };
-                continue;
-            }
-            if (isAacOption(arg)) {
-                // The AAC encoder's options and the codec context's
-                // -profile (T32d), likewise.
-                i += 1;
-                if (i == args.len) return .{ .usage = .{ .reason = "missing value for", .arg = arg } };
-                av.options.set(av.aacenc.Options, &aac, arg[1..], args[i]) catch
-                    return .{ .usage = .{ .reason = "invalid value for", .arg = arg } };
-                continue;
-            }
-            if (isAc3Option(arg)) {
-                // The AC-3 encoder's options and the codec context's
-                // -cutoff and -audio_service_type (T32c), likewise.
-                i += 1;
-                if (i == args.len) return .{ .usage = .{ .reason = "missing value for", .arg = arg } };
-                av.options.set(av.ac3enc.Options, &ac3, arg[1..], args[i]) catch
-                    return .{ .usage = .{ .reason = "invalid value for", .arg = arg } };
+                raw_encoder_options[index] = .{ .arg = arg, .value = args[i], .position = i };
                 continue;
             }
             if (arg.len > 1 and arg[0] == '-') return .{ .usage = .{ .reason = "unknown option", .arg = arg } };
@@ -456,6 +503,8 @@ fn parse(args: []const [:0]const u8) Parsed {
         slot.* = args[i];
     }
     if (yes and no) return .{ .usage = .{ .reason = "-y and -n contradict each other" } };
+    var encoder_options: EncoderOptions = .{};
+    if (resolveEncoderOptions(&raw_encoder_options, args, &encoder_options)) |problem| return .{ .usage = problem };
     var dither: av.dither.Options = .{};
     if (dither_method) |text| dither.method = av.dither.methodFromOption(text) catch
         return .{ .usage = .{ .reason = "invalid -dither_method", .arg = text } };
@@ -480,11 +529,11 @@ fn parse(args: []const [:0]const u8) Parsed {
         .format = format,
         .codec = codec,
         .bit_rate = bit_rate,
-        .flac = flac,
-        .adpcm = adpcm,
-        .g726 = g726,
-        .ac3 = ac3,
-        .aac = aac,
+        .flac = encoder_options.flac,
+        .adpcm = encoder_options.adpcm,
+        .g726 = encoder_options.g726,
+        .ac3 = encoder_options.ac3,
+        .aac = encoder_options.aac,
         .quality = quality,
         .dither = dither,
         .overwrite = yes,
@@ -529,54 +578,10 @@ fn alacOptions(flac: av.flacenc.AvOptions) av.alac.EncodeOptions {
     };
 }
 
-fn isAdpcmOption(arg: []const u8) bool {
-    if (arg.len < 2 or arg[0] != '-') return false;
-    inline for (av.adpcm.EncodeOptions.option_specs) |spec| {
-        if (std.mem.eql(u8, arg[1..], spec.name)) return true;
-    }
-    return false;
-}
-
-fn isG726Option(arg: []const u8) bool {
-    if (arg.len < 2 or arg[0] != '-') return false;
-    inline for (av.g726.EncodeOptions.option_specs) |spec| {
-        if (std.mem.eql(u8, arg[1..], spec.name)) return true;
-    }
-    return false;
-}
-
 /// FFmpeg's `-q:a` and its spellings.
 fn isQualityOption(arg: []const u8) bool {
     for ([_][]const u8{ "-q:a", "-q", "-aq", "-qscale:a" }) |name| {
         if (std.mem.eql(u8, arg, name)) return true;
-    }
-    return false;
-}
-
-/// The AAC encoder's options but those `-b:a`, `-cutoff` and `-q:a` set.
-fn isAacOption(arg: []const u8) bool {
-    if (arg.len < 2 or arg[0] != '-') return false;
-    inline for (av.aacenc.Options.option_specs) |spec| {
-        const shared = comptime std.mem.eql(u8, spec.name, "b") or std.mem.eql(u8, spec.name, "cutoff") or
-            std.mem.eql(u8, spec.name, "global_quality") or std.mem.eql(u8, spec.name, "qscale");
-        if (!shared and std.mem.eql(u8, arg[1..], spec.name)) return true;
-    }
-    return false;
-}
-
-/// The AC-3 encoder's options but `b`, which `-b:a` sets.
-fn isAc3Option(arg: []const u8) bool {
-    if (arg.len < 2 or arg[0] != '-') return false;
-    inline for (av.ac3enc.Options.option_specs) |spec| {
-        if (!std.mem.eql(u8, spec.name, "b") and std.mem.eql(u8, arg[1..], spec.name)) return true;
-    }
-    return false;
-}
-
-fn isFlacOption(arg: []const u8) bool {
-    if (arg.len < 2 or arg[0] != '-') return false;
-    inline for (av.flacenc.AvOptions.option_specs) |spec| {
-        if (std.mem.eql(u8, arg[1..], spec.name)) return true;
     }
     return false;
 }

@@ -71,6 +71,7 @@ pub const descriptors = [_]Descriptor{
 };
 
 comptime {
+    if (descriptors.len != @typeInfo(Kind).@"enum".field_names.len) @compileError("each filter kind needs one descriptor");
     for (descriptors, 0..) |d, i| {
         if (!std.mem.eql(u8, d.name, @tagName(d.kind))) @compileError("descriptor name differs from its kind: " ++ d.name);
         for (descriptors[i + 1 ..]) |other| {
@@ -105,16 +106,7 @@ pub const Filter = union(Kind) {
         const d = find(name) orelse return error.UnknownFilter;
         return switch (d.kind) {
             .anull => .anull,
-            .aformat => .{ .aformat = .{} },
-            .volume => .{ .volume = .{} },
-            .aresample => .{ .aresample = .{} },
-            .atrim => .{ .atrim = .{} },
-            .asetpts => .{ .asetpts = .{} },
-            .asplit => .{ .asplit = .{} },
-            .channelsplit => .{ .channelsplit = .{} },
-            .channelmap => .{ .channelmap = .{} },
-            .pan => .{ .pan = .{} },
-            .amix => .{ .amix = .{} },
+            inline else => |kind| @unionInit(Filter, @tagName(kind), .{}),
         };
     }
 

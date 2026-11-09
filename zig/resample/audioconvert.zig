@@ -64,14 +64,8 @@ const Kind = enum {
     }
 
     fn Type(comptime kind: Kind) type {
-        return switch (kind) {
-            .u8 => u8,
-            .s16 => i16,
-            .s32 => i32,
-            .s64 => i64,
-            .flt => f32,
-            .dbl => f64,
-        };
+        const format: audio.SampleFormat = @field(audio.SampleFormat, @tagName(kind));
+        return format.Element();
     }
 
     fn isFloat(comptime kind: Kind) bool {

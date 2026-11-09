@@ -22,6 +22,7 @@ const std = @import("std");
 const bits = @import("bits.zig");
 const lpc = @import("lpc.zig");
 const options_zig = @import("../core/options.zig");
+const audio = @import("../core/audio.zig");
 
 pub const max_channels = 8;
 
@@ -79,12 +80,22 @@ pub const Config = struct {
     channels: u8,
     sample_rate: u32,
 
+    /// Decoder parameters after the cookie's channel fallback. Container
+    /// timestamps keep their own time base, even when this rate differs.
+    pub fn format(c: Config) audio.Format {
+        return .{
+            .sample_rate = c.sample_rate,
+            .layout = .{ .native = channel_masks[c.channels - 1] },
+            .sample_format = if (c.sample_size > 16) .s32p else .s16p,
+        };
+    }
+
     pub const Error = error{
         /// "extradata is too small", "max samples per frame invalid", no
         /// channels in the cookie or the container.
         InvalidData,
         /// AVERROR_PATCHWELCOME: a sample size other than 16, 20, 24 or 32,
-        /// or more than 8 channels.
+        /// more than 8 channels, or a rate outside a positive C int.
         Unsupported,
     };
 
@@ -113,6 +124,9 @@ pub const Config = struct {
             c.channels = std.math.cast(u8, container_channels) orelse return error.Unsupported;
         }
         if (c.channels > max_channels) return error.Unsupported;
+        // avctx's sample rate is a signed int; avcodec_open2 refuses a
+        // cookie that would store a negative value there.
+        if (c.sample_rate > std.math.maxInt(i32)) return error.Unsupported;
         return c;
     }
 };

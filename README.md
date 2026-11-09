@@ -3,23 +3,25 @@
 A native Zig multimedia library and tools, developed incrementally from FFmpeg's
 documented behavior and algorithms, one supported capability at a time.
 
-Current state: six containers and raw PCM work. The `av` library reads and
+Current state: audio containers and raw PCM work. The `av` library reads and
 writes every WAV PCM encoding (u8, 16- to 64-bit integers, float, A-law,
 mu-law, plain or WAVE_FORMAT_EXTENSIBLE) in RIFF, RF64/BW64 or Sony Wave64,
 past 4 GiB, every PCM encoding of Sun AU, AIFF and AIFF-C with every PCM
 encoding of FFmpeg's AIFF table, and raw PCM in FFmpeg's raw formats (bounded
-parsers, writers, file and pipe adapters), and reads Apple CAF with linear
-PCM, A-law and µ-law; it can also read unknown-length WAV, AU and CAF input
+parsers, writers, file and pipe adapters), and reads and writes Apple CAF
+with PCM (A-law and µ-law included) and ALAC; it can also read unknown-length WAV, AU and CAF input
 behind an option, and reads and writes WAV's LIST/INFO and `bext`
 tags as FFmpeg does. Codec and format registries name everything as FFmpeg
-does. The `zffprobe` tool detects WAV, Wave64, AU, AIFF or CAF from the content
-with FFmpeg's scored probes, and raw PCM from `-f` or a raw file extension,
+does. The `zffprobe` tool detects WAV, Wave64, AU, AIFF, CAF, FLAC, Ogg, MPEG
+audio, ADTS AAC, AC-3/E-AC-3 and MP4/MOV with FFmpeg's scored probes, and
+raw PCM from `-f` or a raw file extension,
 validates the file and reports its stream and tags. Both are checked against
 129 WAV, 40 AU, 57 AIFF, 25 raw PCM and 58 CAF fixtures (776 in all with
 today's 57 FLAC, 37 Ogg, 71 MPEG audio, 46 ADTS, 41 ADPCM, 33 ALAC, 23
 G.72x, 24 AC-3, 18 E-AC-3 and 117 MP4 ones) and against a pinned FFmpeg
 build in CI (Linux). The `zffmpeg` tool converts and stream-copies
-between WAV, Wave64, AU, AIFF and raw PCM, and from CAF, carrying tags as FFmpeg does, through the
+between WAV, Wave64, AU, AIFF, CAF and raw PCM, with the compressed audio
+paths described below, carrying tags as FFmpeg does through the
 library's synchronous pipeline (T13), which runs on packets, frames and
 send/receive stages (T14a), and FFmpeg reads every output it writes for the
 fixtures. Transcoding converts between every sample format as libswresample
@@ -36,16 +38,16 @@ The library's audio filter graph negotiates and runs chains of `anull`,
 (T25a), from filtergraph text with FFmpeg's expressions too (T25b), and
 graphs of several inputs and outputs with `asplit`, `channelsplit`,
 `channelmap`, `pan` and `amix` on libavfilter's scheduler (T25c). FLAC
-with 16-bit samples is read as FFmpeg's demuxer, parser and decoder read
+with 4- to 32-bit samples is read as FFmpeg's demuxer, parser and decoder read
 it, packet for packet and sample for sample, damaged streams included:
 `zffprobe` reports it and `zffmpeg` converts it to every PCM output (T26a),
 and the library writes FFmpeg's framecrc, framemd5 and streamhash text for
-comparisons (T19b), checked against 31 FLAC fixtures. WAV and Wave64
+comparisons (T19b), checked against 57 FLAC fixtures. WAV and Wave64
 streams seek as FFmpeg's `av_seek_frame` and `avformat_seek_file` seek
 them, by timestamp or byte position (T52a), on FFmpeg's rational
 arithmetic (T15). FLAC decodes completely since T26b: 4 to 32 bits per
 sample, variable blocking, tags, seek tables, cue sheets and pictures,
-MD5 verification and FFmpeg's seeking, over 56 FLAC fixtures, with
+MD5 verification and FFmpeg's seeking, over 57 FLAC fixtures, with
 FFmpeg's FATE FLAC samples as optional coverage. And `zffmpeg` writes FLAC
 since T26c: FFmpeg's encoder and muxer, byte for byte the ffmpeg program's
 `-bitexact` output at every compression level and with every encoder
@@ -153,7 +155,7 @@ the [unplanned features](TODO.md#not-planned).
 - [zig/testing/fixtures/raw/README.md](zig/testing/fixtures/raw/README.md): the
   raw PCM fixture contract (25 fixtures, each with its parameters).
 - [zig/testing/fixtures/caf/README.md](zig/testing/fixtures/caf/README.md): the
-  CAF fixture contract (58 fixtures, read only).
+  CAF PCM input fixture contract (58 fixtures).
 - [zig/testing/reference/README.md](zig/testing/reference/README.md): the pinned
   FFmpeg reference build and the recorded comparison results.
 - [zig/format/wav.zig](zig/format/wav.zig), [zig/format/au.zig](zig/format/au.zig),
@@ -170,7 +172,7 @@ the [unplanned features](TODO.md#not-planned).
   pipeline, file adapters, and the `zffprobe` and `zffmpeg` tools.
 
 - [zig/examples/io_patterns.zig](zig/examples/io_patterns.zig): runnable I/O example.
-- [zig/codec/pcm.zig](zig/codec/pcm.zig): signed 16-bit PCM decode/encode kernels.
+- [zig/codec/pcm.zig](zig/codec/pcm.zig): PCM encodings, sample conversion kernels and decoder/encoder stages.
 - [zig/core/audio.zig](zig/core/audio.zig), [zig/core/time.zig](zig/core/time.zig):
   audio stream descriptions, time bases and timestamp rescaling.
 - [.github/workflows/ci.yml](.github/workflows/ci.yml): Linux CI for the build and tests.

@@ -132,7 +132,9 @@ def main():
     pin = ["taskset", "-c", str(args.core)]
     commands = {
         "zffmpeg (file)": quote(pin + [zffmpeg, "-y", "-i", source, *args.options, out]),
-        "zffmpeg (pipe)": quote(pin + [zffmpeg, "-y", "-i", "-", *args.options, out]) + " < " + quote([source]),
+        # Redirecting a regular file leaves stdin seekable in zffmpeg.
+        # Both processes share the pinned CPU budget through a real pipe.
+        "zffmpeg (pipe)": "set -o pipefail; " + quote(pin + ["cat", source]) + " | " + quote(pin + [zffmpeg, "-y", "-i", "-", *args.options, out]),
         "reference ffmpeg": quote(pin + [REFERENCE, "-nostdin", "-v", "error", "-y", "-i", source, *args.options, out]),
     }
     if NATIVE.exists():
@@ -140,7 +142,7 @@ def main():
                                                  out])
     # Every command must work before it is timed.
     for label, command in commands.items():
-        done = subprocess.run(command, shell=True, capture_output=True)
+        done = subprocess.run(command, shell=True, executable="bash", capture_output=True)
         if done.returncode != 0:
             sys.exit(f"{label} failed: {done.stderr.decode(errors='replace').strip()}")
     report = work / "speed.json"

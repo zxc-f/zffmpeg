@@ -740,10 +740,29 @@ pub const MixRun = struct {
     /// Queues frame `frame` of input `i`; `pts` is in the output's time
     /// base for the first input.
     pub fn write(r: *MixRun, i: usize, frame: *const Owned, pts: ?i64) error{OutOfMemory}!void {
-        if (i == 0) try r.frames.pushBack(r.gpa, .{ .samples = frame.frameCount(), .pts = pts });
         const view = frame.buffer().view();
         const bytes = frame.frameCount() * r.sampleBytes();
-        for (r.fifos[i].planes, 0..) |*p, k| try p.appendSlice(r.gpa, view.plane(@intCast(k))[0..bytes]);
+        const f = &r.fifos[i];
+        const live = f.planes[0].items.len - f.start;
+        if (f.start > 0 and f.start >= live) {
+            for (f.planes) |p| {
+                if (bytes > p.capacity - p.items.len) {
+                    // Reclaim all planes together only when growth would
+                    // otherwise retain a mostly consumed prefix.
+                    for (f.planes) |*plane| {
+                        std.mem.copyForwards(u8, plane.items[0..live], plane.items[f.start..]);
+                        plane.items.len = live;
+                    }
+                    f.start = 0;
+                    break;
+                }
+            }
+        }
+        // Failure must not leave different sample counts in the planes or
+        // publish a first-input frame whose samples were never queued.
+        for (f.planes) |*p| try p.ensureUnusedCapacity(r.gpa, bytes);
+        if (i == 0) try r.frames.pushBack(r.gpa, .{ .samples = frame.frameCount(), .pts = pts });
+        for (f.planes, 0..) |*p, k| p.appendSliceAssumeCapacity(view.plane(@intCast(k))[0..bytes]);
     }
 
     /// `frame_list_remove_samples`: whole frames leave from the front, a
@@ -1004,4 +1023,50 @@ test "amix's first-input queue drains in linear time" {
     // depend on the machine's load.
     comptime std.debug.assert(@FieldType(MixRun, "frames") == std.Deque(MixRun.FrameInfo));
     try drainOneSampleFrames(64000);
+}
+
+fn steadyMix(gpa: std.mem.Allocator, comptime sample_format: SampleFormat, cycles: usize) !void {
+    const a: AMix = .{ .scalars = .{ .normalize = false } };
+    const format = try audio.Format.init(48000, 2, sample_format);
+    var r = try MixRun.init(gpa, &a, format);
+    defer r.deinit();
+    var secondary = try Owned.alloc(gpa, format, 4, null);
+    defer secondary.free(gpa);
+    for (std.mem.bytesAsSlice(f32, secondary.data)) |*v| v.* = 2;
+    // This input keeps a two-block lead for the whole run.
+    for (0..3) |_| try r.write(1, &secondary, null);
+    var capacity: usize = 0;
+    for (0..cycles) |i| {
+        var primary = try Owned.alloc(gpa, format, 4, @intCast(4 * i));
+        defer primary.free(gpa);
+        for (std.mem.bytesAsSlice(f32, primary.data)) |*v| v.* = 1;
+        try r.write(0, &primary, primary.pts);
+        var out = (try r.output()).frame;
+        defer out.free(gpa);
+        const pts: i64 = @intCast(4 * i);
+        try testing.expectEqual(pts, out.pts.?);
+        for (std.mem.bytesAsSlice(f32, out.data)) |v| try testing.expectEqual(3, v);
+        try testing.expectEqual(8, r.fifoSize(1));
+        try r.write(1, &secondary, null);
+        for (r.fifos[1].planes) |plane| {
+            if (i == 16) capacity = plane.capacity;
+            if (i > 16) try testing.expectEqual(capacity, plane.capacity);
+        }
+    }
+    // End both sources and drain the remaining secondary samples.
+    r.endInput(0);
+    r.endInput(1);
+    var tail = (try r.output()).frame;
+    defer tail.free(gpa);
+    try testing.expectEqual(12, tail.frameCount());
+    for (std.mem.bytesAsSlice(f32, tail.data)) |v| try testing.expectEqual(2, v);
+    r.endInput(1);
+    try testing.expectEqual(.end, try r.output());
+}
+
+test "review: amix reuses packed and planar storage under a steady input lead" {
+    inline for (.{ SampleFormat.flt, SampleFormat.fltp }) |format| {
+        try steadyMix(testing.allocator, format, 512);
+        try @import("../testing/hostile.zig").checkAll(steadyMix, .{ format, 24 });
+    }
 }

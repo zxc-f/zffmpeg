@@ -1449,7 +1449,7 @@ pub fn Layer(comptime Source: type) type {
             if (h.duration == 0 and s.parser_rate > 0 and parser_duration > 0) {
                 h.duration = rational.rescaleQRnd(parser_duration, .{ .num = 1, .den = @intCast(s.parser_rate) }, setup.time_base, .{ .mode = .down });
             }
-            h.flags &= 2; // DISCARD and CORRUPT pass; the key flag is set below
+            h.flags &= discard_flag | corrupt_flag; // the key flag is set below
             try l.computePktFields(h, setup);
             try l.parse_queue.pushBack(l.gpa, h.*);
         }
@@ -1923,6 +1923,7 @@ const test_support = struct {
         seed(fixtures.mp3.bytes("mp3_layer_change"), false, true, null),
         seed(fixtures.mp3.bytes("mp3_xing_lame"), false, false, .{ .file = false, .stream = 0, .ts = 5000, .flags = .{ .byte = true } }),
         seed(fixtures.mp3.bytes("mp3_itunsmpb"), false, false, .{ .file = false, .stream = 0, .ts = 0, .flags = .{ .any = true } }),
+        seed(fixtures.ogg.bytes("ogg_flac_stereo"), true, true, null),
         seed(fixtures.ogg.bytes("ogg_multiplexed"), true, false, .{ .ts = 2000, .stream = 1 }),
         seed(fixtures.ogg.bytes("ogg_chained_opus"), true, false, .{ .ts = 4000 }),
         seed(fixtures.ogg.bytes("ogg_opus_empty_first_packet"), true, true, null),
@@ -1974,4 +1975,34 @@ test "every seed of the generic layer's fuzz entry opens and returns packets" {
 
 test "mutation smoke: the generic layer over mutated MP3 and Ogg seeds" {
     try test_support.hostile.mutationSmoke({}, test_support.fuzzOne, test_support.corpus, 256, 0x64656d7578);
+}
+
+fn checkFlacFlags(gpa: std.mem.Allocator) !void {
+    const ogg = @import("ogg.zig");
+    const fixture = @import("../testing/fixtures.zig").ogg.bytes("ogg_flac_stereo");
+    for ([_]u32{ 0, corrupt_flag, discard_flag, corrupt_flag | discard_flag }) |flags| {
+        for ([_]bool{ false, true }) |read_ahead| {
+            var reader: std.Io.Reader = .fixed(fixture);
+            const source = try ogg.Demuxer.init(gpa, &reader);
+            defer source.deinit();
+            var layer = Layer(ogg.Demuxer).init(gpa, source);
+            defer layer.deinit();
+            var raw = (try source.next()).?;
+            raw.flags = flags;
+            try std.testing.expect(validFlacFrame(raw.data));
+            var held = try layer.own(raw);
+            layer.parseFlac(&held, source.setup(raw.stream)) catch |err| {
+                held.deinit(gpa);
+                return err;
+            };
+            if (read_ahead) try layer.findStreamInfo();
+            const packet = (try layer.next()).?;
+            try std.testing.expectEqual(flags | key_flag, packet.flags);
+        }
+    }
+}
+
+test "review: FLAC header parsing preserves discard and corrupt through queues" {
+    try checkFlacFlags(std.testing.allocator);
+    try @import("../testing/hostile.zig").checkAll(checkFlacFlags, .{});
 }

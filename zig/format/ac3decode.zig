@@ -30,7 +30,7 @@ const decoded = @import("decoded.zig");
 const codecs = @import("../codec/registry.zig");
 
 /// What reading the samples can fail with.
-pub const ReadError = ac3.Error || error{
+pub const ReadError = ac3.Error || decoded.DeliveryError || error{
     /// The stream decodes to another sample count than counted ahead.
     FrameCountMismatch,
     /// More than two thirds of the decodes failed: the ffmpeg program's
@@ -180,20 +180,12 @@ pub const DecodedReader = struct {
 
     /// Whole frames of samples into `output`, at least one while any
     /// remain (a frame fits in 4 bytes a channel); empty at the end.
+    /// Insufficient space returns `OutputTooSmall` and preserves samples.
     pub fn readData(r: *DecodedReader, output: []u8) ReadError![]u8 {
         while (r.pendingFrames() == 0) {
             if (!try r.nextFrame()) return output[0..0];
         }
-        const frame_bytes = 4 * @as(usize, r.channels);
-        const frames = @min(output.len / frame_bytes, r.pendingFrames());
-        std.debug.assert(frames > 0);
-        if (r.expected) |expected| {
-            if (r.delivered + frames > expected) return error.FrameCountMismatch;
-        }
-        decoded.interleave(output, r.planes[0..r.channels], r.pending[0], frames);
-        r.pending[0] += @intCast(frames);
-        r.delivered += frames;
-        return output[0 .. frames * frame_bytes];
+        return decoded.readFloat(output, r.planes[0..r.channels], &r.pending, &r.delivered, r.expected);
     }
 
     /// The next frame libavcodec returns into `pending`; false at the end.

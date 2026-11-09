@@ -64,8 +64,7 @@ pub const DecodedReader = struct {
     /// caller still owns the parser.
     pub fn init(gpa: std.mem.Allocator, parser: caf.Parser, info: caf.Info, sink: ?diagnostics.Sink) ReadError!DecodedReader {
         const a = info.alac.?; // the caller dispatches on it
-        const cookie = a.cookie orelse return error.UnsupportedFormat; // "extradata is too small"
-        const config = alac.Config.parse(&cookie, a.channels) catch return error.UnsupportedFormat;
+        const config = try a.config();
         const packet_buf = try gpa.alloc(u8, @max(a.max_packet, 1));
         return .{
             .gpa = gpa,
@@ -97,7 +96,8 @@ pub const DecodedReader = struct {
     pub fn readHeader(r: *DecodedReader) ReadError!Header {
         const counted: ?u64 = if (!r.count_ahead) null else if (r.parser.seeker) |sk| try r.countAhead(sk) else r.info.frame_count;
         r.expected = counted;
-        var format = r.info.format;
+        var format = r.decoder.config.format();
+        if (format.sample_rate == 0) return error.UnsupportedFormat;
         format.sample_format = if (r.wide()) .s32 else .s16;
         return .{ .stream = .alac, .codec = if (r.wide()) .s32le else .s16le, .format = format, .frame_count = counted, .bits = r.decoder.config.sample_size };
     }
@@ -444,4 +444,54 @@ test "fuzz: ALAC in CAF decoded from arbitrary input" {
 
 test "mutation smoke: ALAC in CAF decoded from mutated input" {
     try hostile.mutationSmoke({}, fuzzOne, fuzz_corpus, 24, 0x63616661);
+}
+
+fn checkCookieFormat(gpa: std.mem.Allocator, bytes: []const u8, rate: u32, seekable: bool) !void {
+    var input: std.Io.Reader = .fixed(bytes);
+    const probed = try detect.probeWith(&input, .{}, .{ .gpa = gpa, .source = .{ .seeker = if (seekable) .fixed(&input) else null } });
+    try testing.expectEqual(2, probed.format.channelCount());
+    try testing.expectEqual(3, probed.format.layout.native);
+    try testing.expectEqual(rate, probed.format.sample_rate);
+    try testing.expectEqual(44100, probed.time_base_duration.?.den);
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(gpa);
+    const header = try decodeBytes(gpa, bytes, seekable, false, &output);
+    try testing.expectEqual(rate, header.format.sample_rate);
+    try testing.expectEqual(2, header.format.channelCount());
+    try testing.expectEqual(3, header.format.layout.native);
+    try testing.expect(output.items.len > 0);
+}
+
+test "review: CAF probe and decoding share ALAC fallback channels and cookie rates" {
+    const gpa = testing.allocator;
+    inline for (.{ "alac_new_kuki", "alac_pakt_before_data" }) |name| {
+        const original = fixtures.alac.bytes(name);
+        const bytes = try gpa.dupe(u8, original);
+        defer gpa.free(bytes);
+        const body = std.mem.find(u8, bytes, "kuki").? + 12;
+        const atom_prefix: usize = if (std.mem.eql(u8, bytes[body + 4 ..][0..8], "frmaalac")) 24 else 0;
+        const cookie = body + atom_prefix;
+        // Both cookies now point at the 24-byte ALACSpecificConfig body.
+        for ([_]u8{ 0, 2 }) |channels| {
+            for ([_]u32{ 22050, 44100, 48000 }) |rate| {
+                bytes[cookie + 9] = channels;
+                std.mem.writeInt(u32, bytes[cookie + 20 ..][0..4], rate, .big);
+                for ([_]bool{ false, true }) |seekable| try checkCookieFormat(gpa, bytes, rate, seekable);
+            }
+        }
+        bytes[cookie + 9] = 0;
+        try hostile.checkAll(checkCookieFormat, .{ bytes, 48000, false });
+        // Zero rates remain visible to probing as in ffprobe, but cannot
+        // configure a decoded output. Negative C-int rates are refused.
+        std.mem.writeInt(u32, bytes[cookie + 20 ..][0..4], 0, .big);
+        var zero_input: std.Io.Reader = .fixed(bytes);
+        const zero = try detect.probeWith(&zero_input, .{}, .{ .gpa = gpa });
+        try testing.expectEqual(0, zero.format.sample_rate);
+        var output: std.ArrayList(u8) = .empty;
+        defer output.deinit(gpa);
+        try testing.expectError(error.UnsupportedFormat, decodeBytes(gpa, bytes, false, false, &output));
+        std.mem.writeInt(u32, bytes[cookie + 20 ..][0..4], 0xffffffff, .big);
+        var invalid: std.Io.Reader = .fixed(bytes);
+        try testing.expectError(error.UnsupportedFormat, detect.probeWith(&invalid, .{}, .{ .gpa = gpa }));
+    }
 }

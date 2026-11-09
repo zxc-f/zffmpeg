@@ -101,8 +101,8 @@ pub const Source = struct {
     /// The input's file name, for the demuxers' extension hints; null for
     /// standard input, which FFmpeg names without an extension too.
     file_name: ?[]const u8 = null,
-    /// The input's length in bytes, when known (a regular file's size): raw
-    /// PCM has no header to give its frame count before the samples.
+    /// The input's length in bytes, when known, independently of whether
+    /// it can seek: raw PCM needs it to give a count before the samples.
     length: ?u64 = null,
     /// Raw PCM stream parameters (`-sample_rate`, `-ch_layout`); null takes
     /// FFmpeg's defaults. Given for any other format, `UnusedOption`.
@@ -427,9 +427,10 @@ pub const Probed = struct {
     /// Sample frames in the stream; null for data of unknown length
     /// (`unknown_length`). Raw PCM is counted while validating.
     frame_count: ?u64,
-    /// For a stream whose time base is not 1/rate (MPEG audio's
-    /// 1/14112000): its duration in that time base, ffprobe's
-    /// `duration_ts`; `frame_count` is it in samples, rounded.
+    /// Duration in the container's clock, ffprobe's `duration_ts`, when
+    /// distinct from decoded sample timing: MPEG audio's 1/14112000 or
+    /// CAF's descriptor rate. `frame_count` follows the format's sample
+    /// count contract (CAF's packet table, or rescaled MPEG timestamps).
     time_base_duration: ?struct { ts: i64, den: u32 } = null,
 };
 
@@ -527,8 +528,7 @@ pub fn probeWith(reader: *std.Io.Reader, limits: Limits, options: Options) Error
                 // ffprobe opens the decoder, and fails when it refuses the
                 // stream: no cookie, a sample size or channel count it does
                 // not take.
-                const cookie = a.cookie orelse return error.UnsupportedFormat;
-                _ = alac.Config.parse(&cookie, a.channels) catch return error.UnsupportedFormat;
+                _ = try a.config();
                 var buffer: [4096]u8 = undefined;
                 const big = if (a.max_packet > buffer.len) try gpa.?.alloc(u8, a.max_packet) else null;
                 defer if (big) |b| gpa.?.free(b);
@@ -537,7 +537,13 @@ pub fn probeWith(reader: *std.Io.Reader, limits: Limits, options: Options) Error
             }
             try parser.finish();
             const codec: codecs.Codec = if (info.alac != null) .alac else .{ .pcm = info.codec };
-            return .{ .container = .caf, .codec = codec, .format = info.format, .frame_count = info.frame_count };
+            return .{
+                .container = .caf,
+                .codec = codec,
+                .format = info.format,
+                .frame_count = info.frame_count,
+                .time_base_duration = if (info.alac) |a| .{ .ts = @intCast(info.frame_count.?), .den = a.container_rate } else null,
+            };
         },
         .raw => {
             var parser = input.rawParser(limits.raw);

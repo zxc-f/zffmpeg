@@ -495,11 +495,8 @@ pub const Dither = struct {
 
     fn Sample(comptime format: audio.SampleFormat) type {
         return switch (format) {
-            .s16p => i16,
-            .s32p => i32,
-            .fltp => f32,
-            .dblp => f64,
-            else => unreachable,
+            .s16p, .s32p, .fltp, .dblp => format.Element(),
+            else => @compileError("not an internal format"),
         };
     }
 

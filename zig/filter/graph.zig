@@ -741,6 +741,14 @@ pub const Graph = struct {
             diagnostics.report(g.diagnostics, .err, "Exhausted frame queue capacity ({d} frames)", .{g.max_queued});
             return error.QueueFull;
         }
+        // Reuse consumed slots before growing. Compact only after at
+        // least half the entries were consumed, amortizing the copy.
+        if (l.fifo.items.len == l.fifo.capacity and l.head > 0 and l.head >= l.queued()) {
+            const live = l.queued();
+            std.mem.copyForwards(Owned, l.fifo.items[0..live], l.fifo.items[l.head..]);
+            l.fifo.items.len = live;
+            l.head = 0;
+        }
         l.fifo.append(g.gpa, f) catch |err| {
             f.free(g.gpa);
             return err;
@@ -1881,3 +1889,33 @@ test "every graph of several inputs and outputs equals FFmpeg's" {
 }
 
 const hostile = @import("../testing/hostile.zig");
+
+fn steadyLink(gpa: std.mem.Allocator, cycles: usize) !void {
+    const format = try audio.Format.init(48000, 2, .s16);
+    var g = try Graph.init(gpa, .{ .format = format }, &.{}, .{}, .{ .max_queued_frames = 2 });
+    defer g.deinit();
+    try g.configure();
+    const values = [_]i16{ 1, -2 };
+    _ = try g.send(try Frame.fromS16(format, &values, 0));
+    var capacity: usize = 0;
+    for (0..cycles) |i| {
+        _ = try g.send(try Frame.fromS16(format, &values, @intCast(i + 1)));
+        const out = (try g.receive()).output;
+        const pts: i64 = @intCast(i);
+        try testing.expectEqual(pts, out.pts.?);
+        try testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&values), out.data);
+        try testing.expectEqual(1, g.queued);
+        const link = g.sinkLink(0);
+        if (i == 16) capacity = link.fifo.capacity;
+        if (i > 16) try testing.expectEqual(capacity, link.fifo.capacity);
+    }
+    g.finishInput();
+    const final_pts: i64 = @intCast(cycles);
+    try testing.expectEqual(final_pts, (try g.receive()).output.pts.?);
+    try testing.expectEqual(.drained, try g.receive());
+}
+
+test "review: a steady live link backlog has bounded storage" {
+    try steadyLink(testing.allocator, 512);
+    try @import("../testing/hostile.zig").checkAll(steadyLink, .{24});
+}

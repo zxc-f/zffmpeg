@@ -12,8 +12,9 @@
 //!
 //! A file is `caff`, version 1, then a 32-byte `desc` chunk describing the
 //! stream, then chunks with 64-bit big-endian sizes to the end of the input,
-//! one of them `data`. The parser is sequential and never seeks: every chunk
-//! before and after `data` is read or skipped and validated, and a `data`
+//! one of them `data`. PCM is read sequentially: every chunk before and
+//! after `data` is read or skipped and validated. ALAC can seek past `data`
+//! to read a trailing packet table, then back to the samples. A PCM `data`
 //! size of -1 (unknown length) runs to the end of the input, behind the same
 //! `unknown_length` option as WAV and AU. Its accepted subset, error names
 //! and error precedence are the contract in zig/testing/fixtures/caf/README.md;
@@ -85,14 +86,23 @@ pub const Alac = struct {
     /// its first 12 bytes made up, as FFmpeg does); null without one,
     /// which FFmpeg's decoder does not open.
     cookie: ?[alac.cookie_len]u8,
-    /// The desc's channels and bits per sample.
+    /// The descriptor's channel count, used when the cookie gives zero.
     channels: u32,
+    /// The descriptor's clock for packet-table timestamps. The decoded
+    /// sample rate comes from the cookie and can differ.
+    container_rate: u32,
     /// Frames the stream starts and ends with that are not samples: the
     /// first packet's skip and the last one's discard.
     priming: u32,
     remainder: u32,
     /// The largest packet in the table.
     max_packet: u32,
+
+    /// The same effective configuration for probing and decoding.
+    pub fn config(a: Alac) error{UnsupportedFormat}!alac.Config {
+        const cookie = a.cookie orelse return error.UnsupportedFormat;
+        return alac.Config.parse(&cookie, a.channels) catch error.UnsupportedFormat;
+    }
 };
 
 /// The default channel limit.
@@ -337,17 +347,14 @@ pub const Parser = struct {
         if (data_size < 0 and !p.limits.unknown_length) return error.UnsupportedStreamingSize;
         p.data = .init(p.reader, 1, if (data_size < 0) null else @as(u64, @intCast(data_size)));
         p.state = .data;
-        const cookie_channels: u32 = if (p.cookie) |c| c[21] else channels;
-        const sample_size: u8 = if (p.cookie) |c| c[17] else 16;
-        const count = std.math.cast(u16, cookie_channels) orelse return error.LimitExceeded;
-        const layout: audio.ChannelLayout = if (count >= 1 and count <= alac.max_channels) .{ .native = alac.channel_masks[count - 1] } else .{ .unspecified = count };
-        const wide = sample_size > 16;
-        const format: audio.Format = .{ .sample_rate = rate, .layout = layout, .sample_format = if (wide) .s32p else .s16p };
+        const a: Alac = .{ .cookie = p.cookie, .channels = channels, .container_rate = rate, .priming = p.priming, .remainder = p.remainder, .max_packet = p.max_packet };
+        const format: audio.Format = if (p.cookie != null) (try a.config()).format() else .{ .sample_rate = rate, .layout = .{ .unspecified = @intCast(channels) }, .sample_format = .s16p };
+        const wide = format.sample_format == .s32p;
         return .{
             .codec = if (wide) .s32le else .s16le,
             .format = format,
             .frame_count = p.duration,
-            .alac = .{ .cookie = p.cookie, .channels = channels, .priming = p.priming, .remainder = p.remainder, .max_packet = p.max_packet },
+            .alac = a,
         };
     }
 

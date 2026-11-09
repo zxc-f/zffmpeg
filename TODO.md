@@ -78,9 +78,9 @@ parser and float decoder sample for sample, and T32b, its E-AC-3
 decoder sample for sample with the raw eac3 demuxer, and T32c, its float
 AC-3 encoder packet for packet with the raw ac3 muxer, and T32d, its AAC
 encoder packet for packet into ADTS with the twoloop and fast coders
-(T32d1) and the default nmr coder (T32d2), which completes T32. **Next:
-T33a (the MP4/MOV demuxer's boxes, sample tables and codec
-configuration).
+(T32d1) and the default nmr coder (T32d2), which completes T32; and T33a1
+(MP4/MOV boxes, sample tables and audio codec configuration) and T33a2
+(metadata and chapters). **Next: T33a3 (MP4/MOV video tracks).
 See [Near-term order](#near-term-order).**
 
 Pick the next ready subtask from the dependency graph, as
@@ -818,7 +818,8 @@ sample formats stay in T20.
 
     Evidence (G5): implementation commit `3bbdcf9`, [run 41660265753](https://github.com/zxc-f/zffmpeg/actions/runs/41660265753).
     [zig/format/detect.zig](zig/format/detect.zig) chooses the container and
-    [zig/format/prefix.zig](zig/format/prefix.zig) replays the bytes it read;
+    [zig/format/replay.zig](zig/format/replay.zig) (originally `prefix.zig`)
+    replays the bytes it read;
     the file adapters' `probeFile` and `probePath` and `zffprobe` use them.
     `zig build test` passed 74/74 in Debug, ReleaseSafe and ReleaseFast (`av`
     67, `io_patterns` 7) together with all 24 `zffprobe` process runs: the 15

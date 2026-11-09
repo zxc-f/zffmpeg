@@ -43,7 +43,7 @@ pub const Container = enum {
     au,
     /// AIFF and AIFF-C.
     aiff,
-    /// Apple Core Audio Format, read only (T22d).
+    /// Apple Core Audio Format: PCM and ALAC reading/writing (T22d, T31b).
     caf,
     /// Native FLAC (T26a), written since T26c.
     flac,
@@ -57,7 +57,7 @@ pub const Container = enum {
     /// FFmpeg's mp2 muxer (T29d): MP2 packets, written only (the mp3
     /// demuxer reads them).
     mp2,
-    /// Raw ADTS AAC (T30a), read without decoding: FFmpeg's `aac` demuxer.
+    /// Raw ADTS AAC: FFmpeg's `aac` demuxer (T30a), decoded since T30b.
     aac,
     /// FFmpeg's ADTS muxer (T30a): AAC packets, written only (the aac
     /// demuxer reads them); no encoder here gives it any yet.

@@ -39,6 +39,7 @@ const bits = @import("../codec/bits.zig");
 const seek = @import("seek.zig");
 const rational = @import("../core/rational.zig");
 const vorbiscomment = @import("vorbiscomment.zig");
+const decoded = @import("decoded.zig");
 
 /// Contract errors (see the FLAC fixture README), plus `IoFailure` for a
 /// failing reader and `OutOfMemory`.
@@ -49,6 +50,8 @@ pub const Error = error{
     /// The decoded samples differ from STREAMINFO's count, which an output
     /// header written before them already holds (`DecodedReader`).
     FrameCountMismatch,
+    /// Caller storage cannot hold one complete decoded sample frame.
+    OutputTooSmall,
     /// STREAMINFO's MD5 differs from the decoded samples' (`DecodedReader`
     /// with `verify_md5`).
     Md5Mismatch,
@@ -1111,7 +1114,8 @@ pub const DecodedReader = struct {
     }
 
     /// Whole frames of samples into `output`, at least one while any remain
-    /// (one frame fits in 32 bytes); empty at the end.
+    /// (one frame fits in 32 bytes); empty at the end. Insufficient space
+    /// returns `OutputTooSmall` and preserves samples.
     pub fn readData(r: *DecodedReader, output: []u8) Error![]u8 {
         while (r.pendingFrames() == 0) {
             if (!try r.nextFrame()) return output[0..0];
@@ -1123,11 +1127,7 @@ pub const DecodedReader = struct {
             .s32 => 4,
         };
         const frame_bytes = width * r.channels;
-        const frames = @min(output.len / frame_bytes, r.pendingFrames());
-        std.debug.assert(frames > 0);
-        if (r.expected) |expected| {
-            if (r.delivered + frames > expected) return error.FrameCountMismatch;
-        }
+        const frames = try decoded.outputFrames(output.len, frame_bytes, r.pendingFrames(), r.delivered, r.expected);
         const count = frames * r.channels;
         switch (r.pending) {
             .s16 => |s| {
