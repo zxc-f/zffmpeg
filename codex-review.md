@@ -5,7 +5,7 @@ Review date: 2026-11-08.
 | Item | Reviewed value |
 | --- | --- |
 | Branch | `claude/sharp-gates-hj8vww` |
-| Snapshot | `9c1e05e1457c69fc437a838295df0db6b247f405` |
+| Snapshot | `355ed43be6369d8b6cb3cf440468e6756f7193fc` |
 | Review pass | First pass complete; second pass must use this same code snapshot |
 | Starting working tree | `?? codex-review.md`; the existing review was untracked; no implementation changes |
 | Scope | Current checkout as a standalone codebase, including code, tests, build/CI, reference tooling, skills and documentation; no commit-range restriction |
@@ -23,8 +23,9 @@ No finding depends on when the defect was introduced.
 Reuse the [completed validation ledger](#validation-completed-in-pass-1): the
 full suites and reference matrix have already run on this snapshot. A second
 review pass should investigate the remaining coverage gaps and new hypotheses,
-without automatically repeating those baseline checks. No second-pass work or
-verification is claimed in this document yet.
+without automatically repeating those baseline checks. Pass 2 is appended at
+[the end](#pass-2--independent-review-of-the-same-snapshot): it records the
+HEAD change since this handoff, adds D2, and reports no new functional defect.
 
 **Assessment:** fix R1's invalid memory read first, then the configuration,
 frame-boundary and buffer-contract defects. Strengthen the oracle before
@@ -847,7 +848,7 @@ Perform an independent **second review pass**, in English, over the current
 code and docs of `claude/sharp-gates-hj8vww` at exactly:
 
 ```text
-9c1e05e1457c69fc437a838295df0db6b247f405
+355ed43be6369d8b6cb3cf440468e6756f7193fc
 ```
 
 This is a continuation of the whole-codebase review, not a review of a new
@@ -964,3 +965,185 @@ do not replace them with second-pass claims or change their counts. Include:
 Before finishing, check the report's links/formatting and verify that only
 `codex-review.md` was intentionally changed. A documentation-only handoff or
 second-pass report edit does not require another application test run.
+
+## Pass 2 — independent review of the same snapshot
+
+Review date: 2026-11-08.
+
+### Identity, inheritance and one snapshot correction
+
+| Item | Pass-2 value |
+| --- | --- |
+| Branch | `claude/sharp-gates-hj8vww` |
+| HEAD | `355ed43be6369d8b6cb3cf440468e6756f7193fc` (`355ed43 z`) |
+| Pass-1 snapshot named by the handoff | `355ed43be6369d8b6cb3cf440468e6756f7193fc` |
+| Difference from the pass-1 tree | `to-review.md` only (43 insertions, 23 deletions); no Zig, test, fixture, build or CI input changed |
+| Starting working tree | `?? codex-review.md`; `?? review-skill.md`; `to-review.md` is tracked and committed at this HEAD |
+| Compiler / host | Zig `0.17.0`, Linux x86-64 |
+| Pass-1 results | Inherited for every unchanged source, test and fixture path; no baseline suite or reference matrix was rerun |
+| Repository edits | This report only; `review-skill.md` was not modified |
+
+The `review-skill.md` untracked file is another review artifact. It is not implementation,
+test, fixture or build input and does not change the snapshot's code identity.
+
+### What pass 2 actually inspected
+
+Pass 2 concentrated on the handoff's remaining gaps:
+
+- Ownership and failure transitions around `caf.Parser`'s ALAC header path, `cafmux`,
+  `flacmux`, `oggmux`, `graph`/`negotiate`, `metadata`, `id3v2`, `apetag`,
+  `vorbiscomment`, `chapters`, `seek` and `wav`'s seek position.
+- ReleaseFast and capacity behavior of the decoded readers, including Ogg Opus, which
+  pass 1 had exercised for Vorbis only.
+- Untested combinations of decoded frame boundaries with resampling, channel rematrixing,
+  dithering and compressed output. This is the gap R5 identified.
+- The public `av` facade, module headers and README current-state prose, which the pass-1
+  documentation sweep did not cover beyond Markdown link targets.
+
+No production code, test, fixture, contract or build file was changed.
+
+### Findings
+
+No new functional correctness or ownership defect (R9) was established. The pass-2
+differential sweeps below agree with the pinned reference except where R2 and R5 already
+record the difference, and the one additional FLAC refusal is the documented
+`FrameCountMismatch` policy rather than a new root cause.
+
+One new documentation finding remains. It is a reportable defect under the same Low
+severity as D1, but it is not a code defect.
+
+#### D2 — [Low] The public facade and module headers describe superseded subsets
+
+**Locations:** [zig/root.zig:8](zig/root.zig#L8),
+[zig/root.zig:39](zig/root.zig#L39),
+[zig/root.zig:45](zig/root.zig#L45),
+[zig/root.zig:47](zig/root.zig#L47),
+[zig/root.zig:111](zig/root.zig#L111),
+[zig/root.zig:113](zig/root.zig#L113),
+[zig/root.zig:118](zig/root.zig#L118);
+[zig/format/caf.zig:15](zig/format/caf.zig#L15);
+[zig/format/convert.zig:4](zig/format/convert.zig#L4);
+[zig/io/file.zig:3](zig/io/file.zig#L3);
+[README.md:12](README.md#L12), [README.md:39](README.md#L39) and
+[README.md:173](README.md#L173);
+[notes.md:227](notes.md#L227) and [notes.md:228](notes.md#L228).
+
+**Trigger:** read the exported `av` facade or the module's first documentation block, which
+is what a user or a new agent sees first.
+
+**Expected versus actual:**
+
+| Location | Current statement | Current implementation |
+| --- | --- | --- |
+| `root.zig:8` | `pcm` is "signed 16-bit PCM sample conversion" | [zig/codec/pcm.zig:5](zig/codec/pcm.zig#L5) covers u8, s8, s16/s24/s32/s64, f32/f64 in both byte orders, A-law and µ-law, plus the stage wrappers |
+| `root.zig:39` | `au` is "signed 16-bit big-endian PCM" | [zig/format/au.zig:5](zig/format/au.zig#L5) covers µ-law, s8, s16/s24/s32, f32/f64 and A-law |
+| `root.zig:45` | `caf` is "linear PCM, A-law and µ-law" | The same module reads ALAC ([zig/format/caf.zig:286](zig/format/caf.zig#L286)), and `cafmux` writes CAF |
+| `root.zig:47` | `flac` is "native FLAC with 16-bit samples" | The decoder handles 4 to 32 bits per sample; the contract and fixtures include 20-, 24- and 32-bit streams |
+| `root.zig:111` | `convert` covers "WAV/Wave64/AU/AIFF" | The operation matrix includes FLAC, Ogg, CAF, MP2, AC-3, ADTS AAC, ADPCM, G.72x and ALAC output |
+| `root.zig:113` | the filter graph is a "linear chain of anull, aformat, volume and aresample" | [zig/filter/filters.zig:50](zig/filter/filters.zig#L50) has eleven filters, including `atrim`, `asetpts`, `asplit`, `channelsplit`, `channelmap`, `pan` and `amix`; `initGraph` has several sources and sinks |
+| `root.zig:118`, `io/file.zig:3` | adapters are "for the WAV and AU paths" | `probeFile` and `decodeFile` are the adapter path for every supported container, including Ogg and FLAC |
+| `caf.zig:15` | "The parser is sequential and never seeks" | The ALAC path seeks past `data` to a `pakt` after it and back ([zig/format/caf.zig:308](zig/format/caf.zig#L308)); the seeker requirement is the reason a pipe refuses that layout |
+| `convert.zig:4` | "CAF as input only" | `Conversion.init` has a `.caf` output branch and `cafmux` writes PCM and ALAC |
+| `notes.md:227` | CAF is "Read only (T22d)"; "the registry has no CAF muxer" | `cafmux` exists, `registry.zig` has a CAF muxer, and the T31b contract and CAF output section exercise it |
+| `notes.md:228` | "never seeking" | The ALAC path seeks past `data` to a `pakt` and back, as the CAF contract's ALAC row says |
+| `README.md:12`, `README.md:39`, `README.md:173` | CAF is PCM/A-law/µ-law only, FLAC is 16-bit only, and `pcm.zig` is signed-16-bit only | Same implementation facts as above; the later README sections already describe the wider FLAC and filter support, so the opening summary contradicts the rest of the file |
+
+**User impact:** the facade is the first thing an API user reads, and the module headers are
+the first thing a maintainer reads. These statements make ALAC-in-CAF, CAF output, 20- to
+32-bit FLAC, multi-input filter graphs, and non-WAV/AU file adapters look absent. The CAF
+"never seeks" sentence is stronger than a missing capability: it is a false I/O contract.
+An ALAC `pakt` after `data` is reachable only through a seeker; code written on the belief
+that the CAF parser never seeks would break that path or mis-handle a pipe.
+
+**Root cause:** each task updated its contract, TODO row and detailed module comments, but
+not the short facade entries or the README opening summary. The pass-1 D1 sweep checked
+Markdown link targets and a named set of support statements; it did not compare these
+shorter prose summaries with the implementations.
+
+**Correction:** update the facade entries to the current supported subsets; state that CAF
+is PCM plus ALAC and that ALAC may seek; remove "input only" from `convert.zig`; describe
+the file adapters by their role rather than by the first two containers; align the README
+opening with its own later sections. No behavior change is implied.
+
+**Regression coverage:** documentation only. A cheap guard is to extend the existing local
+documentation audit to the facade's capability sentences, but that risks encoding prose.
+At minimum, add a review checklist item that a widened format or filter also updates
+`zig/root.zig` and the README opening. No runtime test can catch this class.
+
+This is adjacent to D1 but covers different files and a different artifact (source and
+facade documentation rather than support/help text). It is not a split of a code defect.
+
+### Corrections and stronger evidence for pass-1 findings
+
+- **R2:** the pass-1 trigger and result stand. The pass-2 CAF cookie sweep set the cookie
+  channel byte to 1, 3, 4, 8 and 9 and the sample-size byte to 0, 17, 20, 24, 32 and 48 on
+  `alac_new_kuki.caf`. The invalid cookie values are refused by both tools at probe or
+  conversion (the 1- and 3-channel probes open on both sides, then both conversions fail);
+  only zero channels reproduces R2's probe/conversion mismatch. A `chan` chunk whose count
+  differs from `desc` is ignored by the reference's `ff_mov_read_chan` because the count
+  already differs, so the effective fallback is the decoder context's layout, not
+  `caf.zig`'s `desc` count alone. The recommended correction should pass that effective
+  layout through, not reconstruct a count from `desc`.
+- **R4:** the Ogg Opus reader has the same capacity defect, not only Ogg Vorbis. A
+  one-byte destination after `oggdecode.DecodedReader.readHeader()` aborts at
+  [zig/format/oggdecode.zig:256](zig/format/oggdecode.zig#L256) with
+  `std.debug.assert(frames > 0)`. This is an additional instance of the existing finding,
+  not a new one. AC-3 remains source-inspected: `av.ac3decode` is still not exported from
+  `zig/root.zig`, so the pass-2 diagnostic could not be compiled through the public module.
+- **R5:** the pass-2 combination sweep reproduces the AAC/SBR splitting and confirms it is
+  not a general decoded-reader problem. Opus, Vorbis, native FLAC, MP3, AAC-LC and AC-3
+  inputs with `-ar 32000` into FLAC were byte-identical to the reference. HE-AACv2
+  resampled to 32 kHz remains the only resampled compressed-output mismatch found.
+- **D1:** the pass-1 locations remain correct. D2 adds the untracked facade/module/README
+  surface; the two findings should be fixed together but are listed separately because D1
+  already had an executed audit trail and D2 did not.
+
+### Pass-2-only check ledger
+
+Pass-1 checks remain inherited. Everything below was newly executed in pass 2 from the
+repository root; scratch files are under `/tmp/opencode/` and `/tmp/zffmpeg-branch-review-20261108/`.
+The reference binaries and `zig-out/bin` tools are the pass-1 artifacts whose recorded
+SHA-256 values are in the pass-1 ledger.
+
+| Check | Inputs and options | Observed result |
+| --- | --- | --- |
+| Identity | `git branch --show-current`, `git rev-parse HEAD`, `git status --short`, `zig version` | Branch and HEAD above; `?? codex-review.md`, `?? review-skill.md`; Zig `0.17.0` |
+| Tool identity | `sha256sum` of the reference `ffmpeg`/`ffprobe` and `zig-out/bin/zffmpeg`/`zffprobe` | All four hashes equal the pass-1 ledger; the focused comparisons used the same binaries |
+| Decoded input → FLAC, rate change | 8 inputs (Ogg Opus ×2, Ogg Vorbis, Ogg FLAC, native FLAC, MP3, AAC-LC, AC-3 5.1) with `-ar 32000`; reference `-bitexact` | All 8 byte-identical |
+| Decoded input → s16le/FLAC, resample + dither | 5 inputs (Ogg Opus, Ogg Vorbis, MP3, AAC-LC, native FLAC) × 4 option sets (`-ar 32000`/`11025`/`48000`, triangular dither, `s16le`/FLAC) | All 20 byte-identical |
+| Rematrix + resample + compressed output | 3 inputs (AC-3 5.1, Ogg Opus multistream, HE-AACv2) × 4 option sets (`-ac 2`/`1`, `-ar 32000`, FLAC/s16le, dither) | 10 identical; 2 HE-AACv2 → FLAC cells differ as R5; remaining 0 failures |
+| FLAC input → ALAC CAF | `flac_bps20_lpc`, `flac_bps24`, `flac_bps32_left_side_fixed` | 20- and 32-bit byte-identical; `flac_bps24` fails with the recorded empty-stream `FrameCountMismatch`, the same policy as its FLAC→WAV difference |
+| Decoded input → ALAC CAF | IMA ADPCM, Microsoft ADPCM and G.722 inputs × 3 option sets | All 9 byte-identical |
+| G.726 input → ALAC CAF | G.726 2- and 5-bit inputs × 2 option sets | All 6 byte-identical |
+| CAF ALAC cookie variants | `kuki` channel bytes 0/1/3/4/8/9; sample-size bytes 0/17/20/24/32/48; probe and WAV conversion | Zero channels reproduces R2; the other invalid sizes/counts are refused by both tools, and 4/8-channel probes agree |
+| CAF ALAC `chan` probe | 5.1 `chan` inserted before `kuki`, cookie channels 0 | Reference reports the `desc` count (2); Zig reports 0/`unknown`; this is R2, with the fallback correction noted above |
+| Ogg Opus one-byte `readData`, Debug | `ogg_opus_stereo.ogg`, after `readHeader` | Aborts at `oggdecode.zig:256` (`frames > 0`), confirming R4's Ogg Opus instance |
+| Facade/module documentation audit | `rg` over `zig/root.zig`, `zig/format/caf.zig`, `zig/format/convert.zig`, `zig/io/file.zig`, `README.md`; source comparison | D2's table; no runtime check |
+| Report hygiene | `git diff --check`, Markdown target scan for the edit, final `git status --short` | `git diff --check` reports no whitespace error; final status is ` M codex-review.md` and `?? review-skill.md`. `codex-review.md` is staged in the index at its pass-1 version (a pre-existing index state not created by this pass); this pass's appended section and its one-sentence top pointer are the unstaged difference. Only `codex-review.md` was intentionally changed. |
+
+The focused diagnostics are `/tmp/opencode/short-opus.zig`, `/tmp/opencode/short.ac3`,
+`/tmp/opencode/short.ogg` and the generated CAF variants `/tmp/opencode/caf-*.caf`. The
+`short-opus` test is expected to abort in Debug; it is evidence, not a passing suite.
+
+### Remaining hypotheses and limits
+
+- The CAF ALAC fallback is still only source-traced for a `chan` layout whose count differs
+  from `desc`: the reference's `ff_mov_read_chan` keeps the existing count on a mismatch,
+  so the effective value depends on the order and validity of `desc`/`chan`. A future
+  fixture should pin the interaction before R2's correction is called complete.
+- AC-3/E-AC-3's R4 instance was not executed because `ac3decode` is not in the public
+  `av` module. The release-fast behavior is inferred from the identical source guard.
+- The pass-2 differential sweep covered the listed fixtures and options, not every codec
+  profile, rate, layout or allocator-failure path. It did not rerun the 13,168-case matrix,
+  the mutation smoke, the full suites or the fixture generator.
+- D2 is prose-only. No check yet prevents the facade or README from drifting again.
+- No performance measurement was repeated; no cross-platform runtime or CI run was
+  performed. No other branches or historical repository versions were accessed.
+
+### Pass-2 assessment
+
+Pass 2 adds no new blocker. The pass-1 assessment still governs: R1 is the first fix, then
+R2/R3 configuration, R4/R5 capacity boundaries, R6 oracle statuses, R7/R8 CLI behavior and
+D1/D2 documentation. D2 is a Low documentation defect, not a reason to reopen the code
+findings. The absence of a new functional finding in the sampled combinations is evidence
+for those combinations only, not proof that the remaining unswept input space is clean.
