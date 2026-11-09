@@ -1147,3 +1147,437 @@ R2/R3 configuration, R4/R5 capacity boundaries, R6 oracle statuses, R7/R8 CLI be
 D1/D2 documentation. D2 is a Low documentation defect, not a reason to reopen the code
 findings. The absence of a new functional finding in the sampled combinations is evidence
 for those combinations only, not proof that the remaining unswept input space is clean.
+
+## Pass 3 — whole-codebase review of the selected snapshot
+
+The current codebase has a substantial native Zig implementation and unusually broad executable comparisons with FFmpeg; the ownership boundaries and several shared algorithms are thoughtfully designed. This pass covered the whole source tree by subsystem, with deeper tracing of shared demuxing, metadata ownership, MP3, conversion, filter scheduling, and the current MOV work, and sampled the larger codec kernels. Three actionable defects remain: an aliased metadata append can read freed storage, continuously nonempty filter queues retain consumed storage, and FLAC header parsing loses a packet's discard flag. Unit tests pass in all three requested modes, but the local differential run is not a clean reference-platform certification because its Clang and glibc differ from the documented oracle.
+
+Review date: **2026-11-09**. Snapshot: **`3f74b4f27c6d1c21585a6b3d52c7ddd32472aac1`**. The working tree was clean when this review began. This third pass is appended to `codex-review.md`; the first two passes above are preserved unchanged.
+
+### Relationship to the earlier passes
+
+Passes 1 and 2 record snapshot `355ed43be6369d8b6cb3cf440468e6756f7193fc`; this pass reviews the later selected `3f74b4f` snapshot. No comparison of implementation history was performed. The validation below was executed for this pass and is not inherited from either earlier ledger; its compiler/libc environment also differs, so the results must remain identifiable by pass.
+
+- **R1** is independently reconfirmed by a source trace. It retains its original ID and is not counted as a new defect. The earlier runtime reproduction remains part of the earlier pass's evidence, not a check rerun here.
+- **R9** and **R10** are the two additional findings from this pass: retained filter FIFO storage and lost FLAC discard flags.
+- **R2–R8 and D1–D2** remain recorded above. This pass did not individually revalidate their earlier triggers against this snapshot and does not close or reclassify them. The assessment below covers this pass's findings and limits; it does not replace the earlier assessments.
+
+
+### 1. Confirmed findings: R1 reconfirmed, R9–R10 added
+
+These findings are confirmed by tracing the current implementation and its contracts. Their triggering API sequences were **not executed in separate probe programs**; no observed crash, memory measurement, or runtime flag result is claimed. This follows `to-review.md`'s requirement to give a precise, explicitly untested source argument when demonstrating the issue would require a separate probe program.
+
+| ID | Severity | Defect | Reachability |
+| --- | --- | --- | --- |
+| R1 | High | Self-appending a borrowed metadata value can read its old, freed allocation | Public dictionary API, with an ordinary short value and moving reallocation |
+| R9 | Medium | Filter FIFOs keep consumed prefixes while a small live backlog remains | Normal repeated sends and receives; also an `amix` input with a constant lead |
+| R10 | Low | The FLAC header parser clears `DISCARD` | Public generic demux layer supplied a discard-marked FLAC packet |
+
+No Critical finding was established.
+
+#### R1 — High: metadata append invalidates an aliased source before copying it
+
+**Location:** `zig/core/metadata.zig:122–138`, particularly the reallocation at line 132 and the copy at line 134. Public entry points and borrowing contract: lines 30–31 and 85–96.
+
+**Trigger and expected behavior.** Start with an empty `metadata.Dictionary`, put `"title" = "AB"` using `.replace`, obtain `value = dictionary.get("title").?`, and pass that value to `put(gpa, "title", value, .append)`. The expected value is `"ABAB"`. This uses two ordinary bytes, a valid borrowed value at call entry, and the documented operation that adds copies of its key and value. There is no disjoint-input precondition on `put`.
+
+**Actual behavior and source trace — untested at runtime.**
+
+1. The first `put` duplicates the two-byte value. Its recorded capacity is zero, meaning the allocation is the value slice itself.
+2. `appendTo` saves the old entry and duplicates the new key. The `value` argument still points into the old value allocation.
+3. The requested length is four; the old allocation holds two. The growth policy requests at least sixteen bytes.
+4. If the allocator cannot grow that allocation in place, `gpa.realloc` allocates another region, preserves the old bytes there, and frees the original region.
+5. The subsequent `@memcpy` uses the original `value` slice. It therefore reads the freed allocation instead of the preserved bytes in `storage`.
+
+A conforming allocator may move this allocation during normal growth. The result can be incorrect metadata or an invalid-memory failure; the ownership defect exists independently of whether a particular allocator happens to leave the old bytes readable. Debug, ReleaseSafe, and ReleaseFast all use the same erroneous source slice. The same issue applies to a nonempty subslice of the old value when growth moves it.
+
+**Contract and FFmpeg evidence.** The module promises owned copies and failure atomicity at lines 16–19; `put` explicitly promises copies at lines 91–92. `notes.md`, “Metadata dictionary and WAV tags,” specifies `AV_DICT_APPEND` behavior. In pinned FFmpeg's `libavutil/dict.c:av_dict_set`, `copy_value = av_strdup(value)` happens before the append branch's `av_realloc(tag->value, len)` and `memcpy`. The reference protects an aliased source before invalidating the stored value. The ordinary `.replace` path in the Zig implementation also duplicates the value before freeing the old entry.
+
+**Impact and scope.** This is a public-library ownership defect, not a demonstrated malformed-file problem. The MOV vectors exercise normal metadata appends, but their independently supplied fragments do not establish safety for this API sequence. Existing dictionary append tests likewise use independent fragments. It is High because valid API arguments can become a freed-memory read inside an operation that promises to copy them.
+
+**Focused correction.** Preserve an aliased source before reallocating. A narrow implementation can recognize a source wholly inside the old value, retain its offset, and rebase it onto the new allocation after successful growth; alternatively, copy the aliased fragment before growing. Preserve key/value alias handling, entry ordering, failure atomicity, and amortized linear behavior for repeated independent appends.
+
+**Regression needed.** Append a complete borrowed value and a borrowed subslice using an allocator that forces the growth to move. Cover sufficient existing capacity, moving growth, and allocation failure; assert exact value/order and leak-free cleanup in all three modes. Include a key borrowed from the dictionary so that a fix does not regress the already protected key path. No implementation or test change was made in this review.
+
+#### R9 — Medium: filter queues retain consumed storage for the lifetime of a nonempty stream
+
+**Locations:**
+
+- `zig/filter/graph.zig:744–760`: append to the link's `ArrayList`, advance `head`, and reclaim logical space only when completely empty. Storage is declared at lines 181–183.
+- `zig/filter/multi.zig:742–746` and `847–851`: append input samples to each plane, advance `start`, and reset only after consuming the entire plane. FIFO representation is at lines 647–654.
+
+These are two instances of the same storage-management defect: consumed prefixes are not reused while any unread suffix remains.
+
+**Trigger A: a graph link — untested at runtime.** Configure a graph with no filters between a source and sink and `max_queued_frames = 2`. Send two small frames and receive one; thereafter repeatedly send one frame and receive one. This is legal under the limit: the live queue alternates between one and two frames.
+
+`sendTo` copies and queues the frame without running the scheduler. `receiveFrom` consumes one queued frame and returns it. Each cycle therefore increments both `fifo.items.len` and `head`, preserving a difference of one after the receive. The `head == items.len` branch is never taken. After N such cycles, the backing array contains O(N) descriptors despite only one unread frame. The queue-limit counter decrements correctly, so the configured limit does not prevent this storage growth.
+
+**Trigger B: an `amix` input — untested at runtime.** Use two ordinary float inputs. Give input 1 three equal-sized blocks, then repeatedly supply one block to input 0, take one mixed output, and replenish input 1 by one block. Input 1 remains only two to three blocks ahead. Its `Fifo.start` advances with every output, but every new block is appended after all historical bytes; the FIFO never becomes empty and no consumed prefix is reclaimed.
+
+**Expected versus actual.** Storage should be proportional to peak live backlog, apart from normal allocation slack. Instead, the link keeps historical descriptors and `amix` keeps historical PCM bytes until the queue finally empties or the graph is destroyed. For a continuously ahead 48 kHz stereo f32 input, the latter retains another `48000 × 2 × 4 = 384000` sample bytes per second processed, before allocation slack. This is a source-derived cost, not a measured memory benchmark.
+
+The graph's consumed frame payloads are released through the ordinary ownership path; this is not a claim that every consumed frame payload leaks. `deinit` also releases the arrays. The defect is growing memory demand during a long-lived, otherwise bounded stream, eventually allowing allocation failure unrelated to the live backlog.
+
+**Contract and FFmpeg evidence.** `port.md`, “Filter graph,” specifies FFmpeg's queuing/scheduling and `amix` behavior. `Graph.Options.max_queued_frames` documents the graph queue limit. FFmpeg's `libavfilter/framequeue.c:ff_framequeue_add/ff_framequeue_take` reuse circular slots; `libavutil/audio_fifo.c:av_audio_fifo_write/av_audio_fifo_read` use the reusable `AVFifo` storage. Neither requires a completely empty queue before consumed space becomes reusable. The current Zig `MixRun.frames` already uses `std.Deque`; that separate frame-information queue is not the problem.
+
+**Focused correction.** Use a deque/ring for the link descriptors. For sample planes, use a sample FIFO with reusable front space, or compact a consumed prefix at a growth/threshold boundary. Keep planes synchronized and preserve timestamps, frame grouping, queue counts, and cleanup. Moving the entire unread suffix on every sample consumption would introduce avoidable repeated copying; amortize the compaction.
+
+**Regression needed.** Hold a constant one-frame link backlog and a constant two-block secondary mix backlog across many small, normal blocks. Assert exact samples/PTS/order and a plateau in backing capacity after warm-up. Exercise packed and planar stereo, close/drain, queue limits, and allocation failure. A short test that drains every queue completely between writes will miss this defect.
+
+#### R10 — Low: FLAC header parsing drops the discard flag
+
+**Location:** `zig/format/demux.zig:1452` in `Layer.parseFlac`; related named flags at lines 333–335 and the correct mask in `parseRaw` at line 1325.
+
+**Trigger and expected behavior.** A source using the public `Layer(Source)` supplies a valid complete FLAC frame with `Setup.parser = .flac_headers` and `Packet.flags` containing `discard_flag` (`4`). Such a packet can be decoded for state while its output is not presented. The generic parsing layer should preserve discard and corrupt, and independently compute key status.
+
+**Actual behavior and source trace — untested at runtime.** `parseFlac` executes `h.flags &= 2`. That keeps only `corrupt_flag`; it clears `discard_flag`, despite the accompanying comment saying both pass. `computePktFields` can then add `key_flag` for a known intra-only stream, but never restores discard. A known intra-only FLAC packet starting with flags `4` consequently leaves with `1` instead of `5`; flags `6` leave with `3` instead of `7`.
+
+**Contract and FFmpeg evidence.** `ParserKind.flac_headers` explicitly models `AVSTREAM_PARSE_HEADERS`. Pinned `libavformat/demux.c:parse_packet` preserves `AV_PKT_FLAG_DISCARD | AV_PKT_FLAG_CORRUPT` at line 1315. The neighboring Zig full-parser path uses exactly that named mask. Losing discard changes the output-inclusion instruction seen by a library consumer.
+
+**Reachability limit.** This is a generic demux API defect. The built-in Ogg FLAC source uses this parser mode, but this pass did not establish a current built-in fixture that supplies the discard bit there. MOV's current FLAC setup does not establish that trigger either. No existing CLI output failure is attributed to this finding; its narrow present reachability is why it is Low.
+
+**Focused correction and regression.** Replace the numeric mask with `discard_flag | corrupt_flag`. Feed an existing valid FLAC frame through a small test source with flags `0`, `2`, `4`, and `6`; check both preserved bits and computed key status after parsing, including queued/read-ahead delivery. This needs no new large or malformed media input.
+
+### 2. Ranked Zig modernization opportunities
+
+These are architectural improvements, separate from the defects above. Savings below are estimates, not measured reductions or performance claims. The appropriate direction is small shared mechanisms around clear contracts; codec arithmetic, format-specific error precedence, and independent reference tests should remain explicit.
+
+| Rank | Opportunity | Expected benefit | Implementation risk |
+| --- | --- | --- | --- |
+| 1 | Share the pending decoded-sample cursor and emission bookkeeping | High across several readers | Medium: partial reads and end conditions are observable |
+| 2 | Consolidate registry/tag coverage and filter construction metadata | Moderate; fewer parallel declarations per added component | Low to medium |
+| 3 | Route codec options through typed groups using existing specifications | Moderate; removes repetitive parsing/error paths | Medium: shared option precedence matters |
+| 4 | Centralize sample element types while keeping arithmetic types local | Modest, broadly useful | Low |
+| 5 | Encapsulate metadata value ownership and capacity | Moderate ownership clarity | Medium if the public entry layout changes |
+| 6 | Give demux packet flags a typed operation boundary | Modest, directly prevents mask mistakes | Low if kept internal |
+
+#### 2.1 Share decoded-output bookkeeping, without merging decoder state machines
+
+**Repeated code:** `zig/format/mp3decode.zig:179–201`, `aacdecode.zig:178–197`, and `ac3decode.zig:177–196` have nearly identical pending-range subtraction, output-frame capacity calculation, expected-count validation, float interleaving, and cursor/delivered updates. Related readers in `oggdecode.zig` and `cafalac.zig` have similar storage bookkeeping with additional format-specific behavior. `zig/format/decoded.zig` already supplies `Header`, `Discard`, `ErrorRate`, and `interleave`, so there is a natural existing home for the genuinely common part.
+
+**Proposed design:** A small `PendingSamples` or `DecodedCursor` value holds the pending range, delivered count, and optional expected count. An emission helper takes caller storage, channel count, and the actual decoded planes. Keep `nextFrame`, packet ownership, skip-sample application, stream reconfiguration, decoder errors, and codec-specific draining in each reader. The first extraction can remain f32-specific because the three identical paths already are; introduce a compile-time sample type only when a second real packing type needs the same algorithm.
+
+This would remove roughly dozens of lines per reader and, more usefully, provide one place to reason about advancing the cursor after a successful copy. It should not claim that all `readData` APIs have identical undersized-buffer semantics: the compressed readers currently document/assert a minimum output frame, while the shared PCM path explicitly returns `OutputTooSmall`. Preserve or deliberately reconcile that contract before expanding the helper's reach.
+
+**Validation/tradeoffs:** Compare complete and irregular partial reads, small output chunks satisfying each API's contract, gapless trimming, an empty stream, a final short frame, count mismatches, refusal recovery, and format changes. Keep the per-codec FFmpeg comparisons and allocation-failure tests. Avoid a generic object carrying function pointers to every decoder operation; that adds indirection and obscures error sets for little reduction in duplication.
+
+#### 2.2 Let tags and descriptors establish exhaustive registry coverage
+
+**Repeated declarations:** `zig/filter/filters.zig:50–117` lists filter identities in `Kind`, descriptors, union fields, and the default-construction switch. Its existing compile-time check correctly rejects duplicate names and name/tag disagreement, but does not itself establish one descriptor for every kind. `zig/codec/registry.zig:65–84` repeats the same non-PCM tag list in three methods; its `compressed` list and implementation tables are further places to keep synchronized.
+
+**Proposed design:** Derive the filter kind from a tagged `Filter` union, or retain the public kind and add exhaustive descriptor-coverage validation. Generate only uniform default construction through a compile-time tag switch, with `anull` explicit. A descriptor can name its configuration type and constructor when default construction is not uniform. Keep runtime name lookup simple; there are eleven filters, so a more elaborate lookup structure has no demonstrated need.
+
+For codecs, use a small typed descriptor list for metadata and compile-time checks that every codec has exactly the intended descriptor/implementations. Simplify methods whose only distinction is the PCM payload, while ensuring a future payload-bearing codec forces a deliberate update. Preserve ordering, decoder/encoder availability, aliases, and external names; those are observable registry data, not incidental formatting.
+
+**What disappears:** Repeated tag enumerations and one default initializer per uniform filter; manual coverage bookkeeping can become compile-time validation. Savings are on the order of tens of lines, with the greater benefit in safe component additions. Keep algorithm-specific `queryFormats`, `init`, `deinit`, pads, and runtime activation separate where their contracts differ.
+
+**Validation/tradeoffs:** Compile-time missing/duplicate descriptor checks, every filter's creation/error path, graph and multigraph vectors, and registry comparison against the independent C reference. Use the project's current Zig 0.17 reflection conventions. Do not silently skip a missing declaration with `@hasDecl`; a missing lifecycle method should be an explicit exception or a diagnostic.
+
+#### 2.3 Reuse typed option metadata for the CLI routing layer
+
+**Repeated code:** `zig/cli/ffmpeg.zig:404–447` repeats consume-next-argument, missing-value handling, typed `av.options.set`, invalid-value handling, and continuation for FLAC, ADPCM, G.726, AAC, and AC-3. Lines 532–580 repeat searches over each type's `option_specs`. The option declarations themselves already have a good shared implementation in `zig/core/options.zig`; this opportunity concerns the remaining routing duplication.
+
+**Proposed design:** A small compile-time tuple of option groups names the target options type, its field in a typed CLI-options aggregate, and its explicitly excluded/shared names. One helper recognizes a group-owned option and sets the correctly typed target. Perform the common argument-consumption/error path once. Validate unexpected name collisions at compile time; represent intentionally shared codec-context options separately.
+
+**Preserve:** Input/output option phases, the present missing/invalid diagnostics, aliases, repeated-option behavior, unused options for another encoder, and shared `b`, `cutoff`, quality and profile handling. In particular, AAC intentionally excludes several names from its direct option list. A generated first-match search without that policy would change behavior.
+
+**What disappears and tradeoffs:** Several near-identical branches and lookup helpers, perhaps 40–80 lines net. Keep the typed group list visible and small; generating the entire CLI parser from a schema would make positional rules and useful diagnostics harder to inspect. Validate every current codec option group, shared names, aliases, repeated values, and failures before output creation, then run the affected encode comparisons. No runtime speedup is assumed.
+
+#### 2.4 Make the sample element type a property of the sample format
+
+**Repeated mappings:** `zig/resample/resample.zig:132`, `dither.zig:496`, and `rematrix.zig:755` independently map `.s16p/.s32p/.fltp/.dblp` to `i16/i32/f32/f64`. `resample/audioconvert.zig` has its own private `Kind.Type`. `zig/core/audio.zig:SampleFormat` already owns byte size and packed/planar relationships.
+
+**Proposed design:** Add a compile-time `SampleFormat.Element` function returning the underlying Zig storage type, shared by packed and planar forms. The contract is simply `@sizeOf(Element(format)) == format.bytesPerSample()`. Keep an explicit internal-format restriction at each DSP entry point: accepting a type mapping does not mean that every algorithm supports every sample format.
+
+This removes repeated type switches, probably a few tens of lines. Keep rematrix accumulator widths (`Inter`), fixed-point filter shifts, clipping order, signedness, and float precision local to the algorithms; these are different arithmetic contracts. This is a small use of compile-time specialization, not a reason to fuse resampling, rematrixing, and dithering into one template.
+
+**Validation/tradeoffs:** Instantiate every supported storage format, check size mappings, and retain sample-conversion, dither, rematrix, and resampler vectors in all modes. Do not add channel-count specialization without a measured benefit; multiplying format-pair/channel/rate specializations can inflate compile time and machine code.
+
+#### 2.5 Separate the dictionary's owned representation from borrowed entry views
+
+**Weak invariant:** `zig/core/metadata.zig:30–38` exposes `value` and a separate capacity sentinel, with `storageOf` reconstructing the allocation behind the public slice. R1 is one consequence of needing to track both a borrowed source and an allocation owner through mutation.
+
+**Proposed design:** Internally use an `OwnedEntry` whose value is an owned growable byte buffer, and expose a borrowed entry view containing only key/value slices. Put append/clone/free and alias handling next to the owning buffer. A zero-capacity sentinel and public allocation bookkeeping can disappear. Merely changing the container type does not fix R1: append still needs an explicit alias policy.
+
+**Risk and validation:** `Dictionary.entries` is currently exposed, so privatizing or changing it may affect callers. Prefer the narrow R1 fix first; consider the representation change alongside a deliberate API migration. Preserve order, case-insensitive lookup, duplicate policies, exact allocation sizes, clone independence, and failure atomicity, including the alias regressions above. This may save little source code; its value is making invalid ownership combinations harder to construct.
+
+#### 2.6 Use named flag operations at the demux boundary
+
+**Weak invariant:** `zig/format/demux.zig` carries raw `u32` packet flags through `Packet`, `Held`, and parser transitions, although `zig/core/packet.zig:32` already has named packet flag fields. R10 is a concrete wrong-mask example.
+
+**Proposed design:** First use the existing named constants everywhere. If the raw representation continues to spread, add a small internal flag wrapper with `key`, `corrupt`, `discard`, and a named operation for the flags a parser preserves. Explicit conversion at the FFmpeg-compatible integer boundary should retain any bits the public contract requires; avoid assuming that all future packet flags are exhausted by these three.
+
+**Benefit/tradeoffs:** The direct fix is one line and should not wait for a representation change. A wrapper has modest source savings and introduces conversion points, but makes preservation policy reviewable in one place. Validate flags through direct packets, header parsing, full parsing, buffering, seeking, and framecrc/vector output. This does not justify replacing every timestamp sentinel or wire integer with a large new abstraction.
+
+### 3. Open questions and optional suggestions
+
+#### 3.1 Re-run the live oracle on its documented compiler and libc
+
+The local reference uses the correct FFmpeg revision and component configuration but **Clang 19.1.7 and glibc 2.41**. `notes.md`, “Sample format conversion / Undefined C cases,” records Clang **23.1.4** behavior, and `zig/testing/reference/README.md` requires glibc **2.44 or newer**. This is an observed prerequisite mismatch, not a reason to change expected samples or widen tolerances.
+
+The conversion differences below have a concrete explanation: local reference disassembly uses a 32-bit `cvtss2si` destination where the documented build uses a 64-bit destination. The MP3 tag difference is the documented `sscanf` change. Nevertheless, a clean end-to-end run on the intended platform is still needed; this review did not build that complete environment and cannot certify it from the older host's results.
+
+An optional improvement is to have the local reference workflow check and record the compiler, libc, and a few established behavior cases before running the full comparison. CI already checks the libc requirement and records a compiler cache identity. The local build accepts whichever `clang` is on PATH, while the documented undefined-C results depend on its code generation. A behavior check would make a mismatch explicit without altering the port's intended output.
+
+#### 3.2 Decide whether decoded-reader buffer preconditions should converge
+
+`format/pcmdata.zig` deliberately returns `OutputTooSmall` if data remains and the output cannot hold a frame. Several compressed readers instead document the minimum size and assert that at least one frame fits. Neither policy should be silently changed during refactoring, and the existing precondition means a below-minimum call is not established here as a library defect.
+
+A future public-API cleanup could choose consistent checked errors, or make the minimum capacity more visible through a shared query/helper. Resolve this against callers and `port.md` before adopting the cursor abstraction proposed above. Valid small-buffer, EOF, and zero-length-output tests would then pin the chosen policy.
+
+#### 3.3 Runtime portability and larger codec corpora remain open
+
+The Windows GNU, Linux AArch64 musl, and macOS AArch64 builds succeed, but no executable was run on those targets. This matters especially for intentionally emulated x86 C-conversion results, floating-point operation ordering, byte order, unaligned accesses, filesystem identity, and pipe behavior. Native runs using the documented policy are the evidence needed; compile success alone cannot settle those questions.
+
+The optional FATE Vorbis/E-AC-3/FLAC and RFC Opus corpora were absent. They remain useful follow-up coverage for decoder modes and combinations beyond the small committed fixtures. Their absence is reported separately from required-case failures.
+
+#### 3.4 Keep documented exclusions out of the defect list
+
+No defect is claimed merely because MOV currently exposes the documented audio demux/probe/metadata/chapter subset rather than full MOV conversion, or because a container rejects one of its explicitly unsupported variants. Likewise, the filter contract explicitly excludes EOF timestamps; the source's EOF timestamp handling is therefore not reported as an unimplemented promised behavior. The separately documented Ogg granule/timestamp differences and safe refusals remain subject to their narrow comparison checks, not blanket exceptions.
+
+### 4. Pass-3 validation and coverage
+
+#### 4.1 Snapshot and scope controls
+
+| Item | Observed value |
+| --- | --- |
+| Requested target | `claude/sharp-gates-hj8vww` only |
+| Actual checkout state | Detached HEAD at the previously selected `3f7` snapshot; `git branch --show-current` is empty |
+| Snapshot identifier | `3f74b4f27c6d1c21585a6b3d52c7ddd32472aac1` |
+| Initial `git status --short` | Empty |
+| Local implementation changes included | None |
+| Intentional repository edit | This `codex-review.md` report only |
+| Native validation platform | Linux x86-64 |
+| Zig | `0.17.0` |
+| Local C reference toolchain | Debian Clang `19.1.7`, glibc `2.41` |
+| FFmpeg reference source | `5d5a38a7e46be296eab75982c0986054f731e19e` |
+
+This review used only the selected checkout's code. **No other branch contents or historical versions of this repository were accessed.** There was no fetch, checkout, merge-base computation, branch diff, commit, or publication. An initial identity check displayed the current commit subject and refs containing the selected commit; it did not read another version of the code. The detached state is stated explicitly rather than presenting it as an attached local branch.
+
+The governing sources were `to-review.md`, `AGENTS.md`/`CLAUDE.md`, `port.md`, current `TODO.md` evidence, `notes.md`, `zig/README.md`, fixture contracts, and `zig/testing/reference/README.md`. The Zig 0.17 skill/guide and applicable C-semantics, media-pipeline, and FFmpeg-oracle guidance were consulted. Existing review conclusions were not used as evidence for the findings in this pass.
+
+No implementation, tests, contracts, manifests, or expected vectors were changed. No process limits, core-dump settings, or signal handling were changed. Temporary commands and results are under `/tmp/zff-validation`; normal ignored build/reference artifacts were produced. The first two passes are preserved byte for byte; only this third-pass section is appended. A copy of the earlier text remains at `/tmp/zff-validation/codex-review-before.md`.
+
+#### 4.2 Builds and repository tests
+
+Commands were run from `/workspace/zffmpeg` with the pinned compiler on PATH:
+
+```sh
+export PATH=/workspace/.zffmpeg-tools/bin:$PATH
+export ZIG_GLOBAL_CACHE_DIR=/workspace/.cache/zig
+
+zig version
+zig fmt --check build.zig build.zig.zon zig/
+zig build --summary all
+zig build test --summary all
+zig build test -Doptimize=ReleaseSafe --summary all
+zig build test -Doptimize=ReleaseFast --summary all
+zig build -Doptimize=ReleaseSafe install test-tools --summary all
+python3 zig/testing/fixtures/generate.py --check
+```
+
+| Check | Outcome |
+| --- | --- |
+| Compiler version | `0.17.0`, exit 0 |
+| Formatting | Pass, exit 0 |
+| Debug build | Pass, exit 0 |
+| Debug tests | **676/676 tests**, 416/416 build steps, exit 0 |
+| ReleaseSafe tests | **676/676 tests**, 416/416 build steps, exit 0 |
+| ReleaseFast tests | **676/676 tests**, 416/416 build steps, exit 0 |
+| ReleaseSafe install and test tools | Pass, exit 0 |
+| Fixture regeneration check | Pass, exit 0; manifests and README tables current |
+
+The fixture check covers **776** primary fixtures: 129 WAV, 40 AU, 57 AIFF, 25 raw PCM, 58 CAF, 57 FLAC, 37 Ogg, 71 MP3, 46 ADTS, 41 ADPCM, 33 ALAC, 23 G.72x, 24 AC-3, 18 E-AC-3, and 117 MP4.
+
+The CI-equivalent compile-only checks were also run, with separate installation prefixes and limited build concurrency:
+
+```sh
+for target in x86_64-windows-gnu aarch64-linux-musl aarch64-macos; do
+    zig build -j2 -Dtarget="$target" -Doptimize=ReleaseSafe \
+        -p "/tmp/zff-validation/cross-$target" --summary all
+done
+```
+
+All three returned **exit 0, 7/7 steps succeeded**. These are compile-only results.
+
+`build.zig`, the root imports, and CI wiring were inspected. A static literal-import reachability check found no orphan among the checked library files with test declarations, and a direct check of `zig/examples/*.zig` found every example registered in `build.zig`. These structural checks do not prove branch coverage inside a test or that every algorithm has an independent oracle.
+
+Logs: `results.jsonl`, `test-debug.log`, `test-safe.log`, `test-fast.log`, `build-tools.log`, `fixtures.log`, `cross-results.txt`, and `cross-*.log` under `/tmp/zff-validation`.
+
+#### 4.3 Pinned-source FFmpeg comparison: completed, failed on this host
+
+The existing local reference source's revision was verified. The repository build script successfully built and installed the configured reference:
+
+```sh
+bash zig/testing/reference/build-ffmpeg.sh /tmp/zff-validation/ffmpeg-install
+
+python3 zig/testing/reference/compare.py \
+    --ffmpeg /tmp/zff-validation/ffmpeg-install/bin/ffmpeg \
+    --ffprobe /tmp/zff-validation/ffmpeg-install/bin/ffprobe \
+    --zffprobe zig-out/bin/zffprobe \
+    --writer zig-out/bin/write-driver \
+    --zffmpeg zig-out/bin/zffmpeg \
+    --registry zig-out/bin/registry-dump \
+    --hasher zig-out/bin/hash-driver \
+    --opus-vector-driver zig-out/bin/opus-vector-driver \
+    --report /tmp/zff-validation/reference-report.md
+```
+
+The build returned **0**. The comparison returned **1**:
+
+- Required cases: **12,909 passed, 193 failed, 0 missing**.
+- Optional cases: **0 passed, 0 failed, 66 skipped**.
+- Failure messages: **194**, because one failed MP3 case reports both duration and framecrc differences.
+
+“Passed” is the harness's count, which includes its explicitly checked, documented differences and refusals; it does not mean every accepted case has identical whole-file bytes.
+
+| Failing required group | Cases | Investigation |
+| --- | ---: | --- |
+| General zffmpeg conversions | 90 | Float-input conversions affected by the local reference's integer-conversion behavior |
+| Rematrixing | 75 | Float-input output conversions affected by the same behavior |
+| MPEG audio decoding/conversion | 16 | Two fixtures, eight output paths each; their direct decoded f32 samples match exactly, while conversion to s16 differs |
+| Frame/stream hashes | 11 | Decoded float-input streamhash cases, which hash the converted integer samples |
+| MP3 demux/probe | 1 | `mp3_itunsmpb_bare_0x`, the documented glibc `sscanf` difference |
+
+The first four groups total **192** cases. They are recorded as failed checks, with the toolchain-dependent explanation below; they are not silently removed from the result or relabeled as passes.
+
+**Direct conversion evidence.** The following commands were run on the existing eight-sample WAV fixture:
+
+```sh
+zig-out/bin/zffmpeg -y \
+    -i zig/testing/fixtures/wav/f32_mono_8k.wav \
+    -f s16le /tmp/zff-validation/f32-ours.s16
+
+/tmp/zff-validation/ffmpeg-install/bin/ffmpeg -v error -nostdin -y \
+    -i zig/testing/fixtures/wav/f32_mono_8k.wav -bitexact \
+    -f s16le /tmp/zff-validation/f32-ffmpeg.s16
+```
+
+Both succeed and produce 16 bytes. For fixture samples `(0, -0, 1, -1, 0.5, +inf, smallest f32 subnormal, NaN)`, the results are:
+
+```text
+Zig:        0, 0, 32767, -32768, 16384,      0, 0,      0
+Local C:    0, 0, 32767, -32768, 16384, -32768, 0, -32768
+```
+
+Zig's result is the rule explicitly documented in `notes.md` and `resample/audioconvert.zig`: a 64-bit `lrint` result narrowed to its low 32 bits before clipping. The local reference object's disassembly was inspected with:
+
+```sh
+objdump -d --disassemble=conv_AV_SAMPLE_FMT_FLT_to_AV_SAMPLE_FMT_S16 \
+    .references/ffmpeg-build/libswresample/audioconvert.o
+```
+
+It contains `cvtss2si %xmm1,%r11d`, a **32-bit** destination, explaining the disagreement with the documented Clang 23 reference. No new media or extreme-value probe was introduced; these values are already in the committed fixture.
+
+For each of `mp3_mpeg25_l3_8k` and `mp3_mpeg2_l3_16k_mono`, direct file conversions were also run with both tools using `-f s16le` and `-f f32le` (the C reference additionally used `-v error -nostdin -bitexact`). Every command returned 0. Raw f32 outputs were byte-identical: **39,168** and **32,256** bytes respectively. Raw s16 outputs differed at **8** and **51** sample positions, respectively, consistent with the downstream conversion behavior. This evidence does not support filing an MPEG decoder arithmetic bug from those sixteen comparison failures.
+
+**MP3 metadata evidence.** Re-running the existing MP3 C vector generator differed only in `mp3_itunsmpb_bare_0x`. Its local duration numerator is `9135360` versus the committed/Zig `9202788`, with corresponding duration/bitrate and final skip-sample changes. The README explicitly records that glibc 2.44 changes a bare `0x` field from the older `sscanf` behavior to a matching failure. This host is 2.41, so the live oracle is outside that prerequisite.
+
+**Successful required groups.** All remaining required groups in the report pass. Selected substantial checks include:
+
+| Group | Passed/total |
+| --- | ---: |
+| Content detection | 309/309 |
+| Probe file/pipe equivalence | 309/309 |
+| Dither | 416/416 |
+| Resampling | 56/56 |
+| FLAC fixtures | 57/57 |
+| FLAC output | 304/304 |
+| Ogg fixtures | 37/37 |
+| Ogg decoding | 372/372 |
+| AAC decoding | 552/552 |
+| ADPCM paths | 661/661 |
+| ALAC decoding | 429/429 |
+| CAF output | 358/358 |
+| G.722/G.726 decoding | 251/251 |
+| AC-3/E-AC-3 decoding | 522/522 |
+| MOV/MP4 probing, files and pipes | 234/234 |
+| G.722/G.726 output | 182/182 |
+| MP2 output | 324/324 |
+| AC-3 output | 691/691 |
+| AAC output | 1,488/1,488 |
+
+Optional skips are **20 Vorbis FATE**, **5 E-AC-3 FATE**, **17 FLAC FATE**, and **24 RFC 8251 Opus cases**. Their samples were unavailable locally; they were not downloaded during this review. Detailed failure text and tables remain in `/tmp/zff-validation/compare.log` and `reference-report.md`.
+
+#### 4.4 Independent refresh of selected existing C vectors
+
+Selected existing generators were compiled against the freshly built static libraries, run into temporary files, and compared byte for byte with the committed vectors. No expected file was regenerated in the repository.
+
+The temporary orchestration command was `python3 /tmp/zff-validation/check-vectors.py`. It used this command structure for the first eight rows below:
+
+```sh
+clang -O1 -I/tmp/zff-validation/ffmpeg-install/include \
+    zig/testing/reference/GENERATOR_vectors.c \
+    /tmp/zff-validation/ffmpeg-install/lib/libavfilter.a \
+    /tmp/zff-validation/ffmpeg-install/lib/libavformat.a \
+    /tmp/zff-validation/ffmpeg-install/lib/libavcodec.a \
+    /tmp/zff-validation/ffmpeg-install/lib/libswscale.a \
+    /tmp/zff-validation/ffmpeg-install/lib/libswresample.a \
+    /tmp/zff-validation/ffmpeg-install/lib/libavutil.a \
+    -lm -pthread -o /tmp/zff-validation/GENERATOR-vectors
+```
+
+`GENERATOR` is `samplefmt`, `pcm`, `layout`, `graph`, `multigraph`, `mp3`, or `mov`. The first five take no arguments. MP3 takes all sorted `zig/testing/fixtures/mp3/*.mp3` paths; MOV takes all sorted `.mp4/.m4a/.mov/.3gp/.3g2` fixture paths. The MOV pipe run adds `-pipe` before those paths. The commands are compiled C oracle generators already supplied by the project, not newly written reproduction programs.
+
+| Vector set | Build/run result | Comparison with committed expectations |
+| --- | --- | --- |
+| `samplefmt.txt` | Exit 0 / 0 | Exact |
+| `pcm.txt` | Exit 0 / 0 | Exact |
+| `layout.txt` | Exit 0 / 0 | Exact |
+| `graph.txt` | Exit 0 / 0 | Exact, including the 93 graph cases |
+| `multigraph.txt` | Exit 0 / 0 | Exact, including the 48 graph cases |
+| `mp3.txt` | Exit 0 / 0 | Only `mp3_itunsmpb_bare_0x` differs; 21 diff lines |
+| `mov.txt` | Exit 0 / 0 | Exact across the 117 fixtures |
+| `mov_pipe.txt` | Exit 0 / 0 | Exact across the same fixtures in pipe mode |
+| `sampleconv.txt` | Exit 0 / 0 | 264/280 lines exact; 16 float/double-to-u8/s16 `edge` lines differ |
+
+The sample conversion generator was run separately to investigate the compiler difference:
+
+```sh
+clang -O1 -I/tmp/zff-validation/ffmpeg-install/include \
+    zig/testing/reference/sampleconv_vectors.c \
+    /tmp/zff-validation/ffmpeg-install/lib/libswresample.a \
+    /tmp/zff-validation/ffmpeg-install/lib/libavutil.a \
+    -lm -pthread -o /tmp/zff-validation/sampleconv-vectors
+/tmp/zff-validation/sampleconv-vectors > /tmp/zff-validation/sampleconv-vectors.txt
+```
+
+Only the established `edge` cases converting packed/planar float or double into packed/planar u8 or s16 differ; all other vector lines match. This corroborates the conversion explanation while preserving the recorded failure. Outputs, stderr, and diffs are retained in `/tmp/zff-validation/*-vectors.*`.
+
+#### 4.5 Source coverage and its limits
+
+This is a whole-codebase, risk-based review, not a claim that every line of the codec/DSP implementations received an independent mathematical audit. Complete affected functions and their relevant callers were traced for the findings. The following distinguishes deeper review from sampling:
+
+| Subsystem | Source work and evidence | Remaining limits |
+| --- | --- | --- |
+| MP3/MPEG demuxing | Header/VBR paths, Xing/LAME/iTunSMPB, setup, duration/skip metadata, seeking integration, MPEG header/parser behavior and ID3 boundaries; 71 fixtures and refreshed packet vectors | Not a new exhaustive proof of every ID3 frame combination or MPEG resynchronization sequence |
+| Shared demux/probe/seek | Parser selection, packet queues, flag propagation, duration/PTS computation, skip injection, reset/seek relationships and format detection | Full timestamp search space and every source-adapter combination not exhaustively exercised |
+| Core ownership and APIs | Dictionary mutation/clone/free, packet/frame ownership, sample storage sizing/copying, send/receive contracts, option metadata and relevant arithmetic helpers | The entire expression evaluator, every rational edge, and every libm routine were not independently re-derived |
+| PCM containers | Shared `pcmdata` read/skip/decode flow; representative WAV/RF64/Wave64, AU, AIFF, CAF and raw header/data/limit paths, metadata and cleanup | Many individual chunk/tag variants were covered by fixtures and source sampling rather than full manual traversal |
+| FLAC/Ogg | Shared parser interaction, selected packet/header/seek logic, Ogg saved-state and metadata replacement ownership, conversion integration | Not every page reconstruction, seek rollback, or FLAC predictor combination independently audited |
+| MOV/MP4 | Input buffering/history, sample selection/finalization, stream setup, metadata/chapter lifetime and end-time handling; refreshed file/pipe vectors | Large box/sample-table/tag parsers were sampled; external real-world MOV corpus and unsupported track types not audited |
+| Lossy decoders | MPEG/AAC/Vorbis/Opus/AC-3 entry points, selected initialization/deinitialization, reconfiguration, output bounds, error paths and decoded-reader integration | Bulk AAC SBR/PS, SILK/CELT, Vorbis and AC-3/E-AC-3 DSP bodies and generated tables received sampling plus existing tests, not a line-by-line algorithm proof |
+| ADPCM/ALAC/G.72x | Container/decoder ownership transfers and selected initialization/data paths, current fixture/oracle comparisons | Entire prediction and trellis implementations not manually re-derived |
+| Encoders and muxers | Public setup, integration/refusal/flush boundaries and selected cleanup; current FLAC, MP2, AAC, AC-3, ADPCM, ALAC, CAF and G.72x comparisons | Rate-control, psychoacoustic and quantizer internals mainly sampled; no independent quality benchmark |
+| Conversion/CLI/I/O | `Conversion` setup and owned-parser cleanup, output preflight, sample counting, option routing, file identity/output acquisition and cleanup, file/pipe behavior | Existing tests establish many late-error paths; no new OS-specific fault-injection campaign or native non-Linux execution |
+| Filters/resampling | Graph send/receive/scheduler/queue paths, `MixRun`, selected split/map/PTS behavior, shared conversion/rematrix/resample structure and lifecycle | No measured steady-backlog memory test; no new combinatorial graph or every resampler coefficient audit |
+| Build/CI/test oracle | Compiler pin, test/example wiring, mode/target checks, fixture generation, selected comparison acceptance/refusal logic and known-difference checks | Sustained fuzzing, full vector regeneration, optional external corpora, and the documented compiler/libc platform were not completed |
+
+**Oracle quality observations.** The comparison harness checks successful output content, statuses and named refusals; it does not treat any two failures as sufficient agreement in the sampled paths. Several known-difference checks constrain the allowed change to timestamps/granules or compare against a precisely adjusted input, and stale exceptions can fail the run. These are useful safeguards. They do not cover the three ordinary API sequences in the findings, and fixture agreement does not establish steady-state memory bounds.
+
+**Checks deliberately not claimed:** No new Zig probe programs, no runtime reproduction of R1, R9, and R10, no sustained fuzz campaign, no native Windows/ARM/macOS execution, no independent regeneration of every codec/libm vector, and no clean full comparison on Clang 23/glibc 2.44. These limits constrain confidence particularly in unexamined DSP combinations and platform behavior. They do not remove the concrete source-level ownership and state defects above.
+
+### 5. Concrete strengths
+
+- **Native implementation with a separate oracle.** The library and tools implement the algorithms in Zig; the pinned C libraries are used for test evidence. Independent C generators and end-to-end programs expose more than self-consistent Zig round trips.
+- **Purposeful existing abstractions.** `format/pcmdata.zig` already centralizes PCM data handling across containers; `format/decoded.zig` shares discard/error/interleave mechanisms. The resampler's `EngineIn(comptime format, comptime counting)` and the PCM/sample-conversion kernels use static specialization for real algorithm variation. Recommending another general PCM framework would duplicate work already done.
+- **Explicit ownership and failure cleanup in many high-risk paths.** Allocators and readers are passed explicitly; owned packet/frame operations are distinguishable from borrowed views. The inspected Ogg metadata replacement stages the new allocation before freeing the old one, and dictionary clone/ordinary replacement have careful cleanup. R1 is a specific gap within that otherwise useful discipline.
+- **Typed option specifications.** `core/options.zig` validates option metadata against fields/defaults at compile time and shares parsing/range behavior. The remaining CLI repetition can build on that foundation.
+- **Meaningful validation breadth.** All 676 tests pass in Debug, ReleaseSafe, and ReleaseFast; fixtures are current; graph and MOV vectors independently refresh exactly on this host. The reference report separates required failures, documented differences, and absent optional corpora.
+- **Scope and arithmetic policies are documented.** Container limits, intentional FFmpeg differences, unsupported subsets, and C floating/integer quirks are described concretely enough to distinguish a defect from an unsupported operation or an unsuitable oracle build. The observed float-conversion discrepancy demonstrates why that documentation matters.
+
+### 6. Pass-3 assessment
+
+**Blocking fixes required.** R1 is the principal blocker: an ordinary public metadata operation can read freed storage. R9 should be fixed before relying on continuously buffered, long-lived filter graphs; its storage demand grows with total processed input rather than live backlog. R10 is a small, focused packet-flag correction.
+
+The source does not call for wholesale redesign. Small ownership/queue fixes and targeted typed abstractions offer a better maintainability return than unifying distinct codec algorithms. The passing unit suites and substantial successful reference groups provide useful evidence, but approval should also include the new regression sequences and a clean differential run on the documented compiler/libc platform. This assessment concerns the selected snapshot on its own merits and makes no claim about merge compatibility or unreviewed platform behavior.
