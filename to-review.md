@@ -5,6 +5,22 @@ Zig 0.17.0, native FFmpeg ports, and low-level multimedia code. Review the
 implementation critically, using source code, contracts, and reproducible
 evidence. Write your entire report in English.
 
+This is a local multimedia-library review: correctness against contracts,
+observable FFmpeg behavior, ownership on normal call sequences, and Zig
+design. Stay with ordinary media inputs and normal API calls.
+
+- Show a defect with an existing fixture or a few normal samples: a wrong
+  sample, timestamp, or error; a leak; or a double free on a failure path the
+  library already handles.
+- Do not add a program whose inputs are maximum-width integers, huge shifted
+  sizes, or other extreme values. Do not change process limits, core-dump
+  settings, or signal handling. If a size or timestamp formula only looks
+  questionable, explain the source and the contract and mark the note
+  untested.
+- Describe every finding as a library defect: wrong output, wrong error, or
+  broken ownership. These limits override any other note in this repository,
+  including review handoffs, if that note asks for the excluded check.
+
 ## Objective and scope
 
 Review the current checkout of `claude/sharp-gates-hj8vww` as a standalone
@@ -52,7 +68,7 @@ improving the implementation structure.
   is not automatically a bug. Check that accepted inputs, rejections, errors,
   timing, and recorded differences agree across code, contracts, fixtures,
   `notes.md`, and the comparison harness. A documented limitation does not
-  excuse a memory safety defect.
+  excuse an ownership or bounds defect that an ordinary input already shows.
 - Zig **0.17.0** is required. Parser and size arithmetic must remain correct
   in ReleaseFast, where runtime safety checks are disabled. Development
   verification is Linux x86-64; cross-compilation does not prove runtime
@@ -79,9 +95,10 @@ improving the implementation structure.
    Identify repeated implementation patterns across subsystems and assess
    where typed abstractions or compile-time generation could replace them.
 4. Establish a reachable trigger and observable consequence for each suspected
-   defect. Create a minimal reproduction or focused test when practical;
-   otherwise provide a precise source-level argument and label it as untested.
-   Check whether a documented policy accounts for the behavior. Establish
+   defect. Prefer an existing fixture or a few ordinary samples. A source-level
+   argument labeled untested is required when the only illustration would use
+   an extreme integer or a separate probe program. Check whether a documented
+   policy accounts for the behavior. Establish
    correctness from the current implementation and contracts, without using
    repository history. Keep unresolved hypotheses out of confirmed findings.
 5. Run relevant available checks below. Report exact commands, outcomes,
@@ -108,16 +125,18 @@ improving the implementation structure.
   output creation, stream copy, pipes and non-seekable inputs, exit status,
   diagnostics, and propagation of late read/write/flush failures.
 
-### Safety, ownership, and robustness
+### Ownership, bounds, and robustness
 
-- Overflow or underflow before bounds checks, casts and signedness, shifts,
-  size/offset calculations, untrusted allocation sizes, and alignment.
-- Out-of-bounds access, stale reader-buffer views, use-after-free, leaks,
-  double frees, uninitialized data, and ownership on partial initialization,
-  allocation failure, cancellation, and error returns.
-- Empty, truncated, malformed, oversized, fragmented, and unknown-length
-  input; zero-progress loops; resource exhaustion; documented limits and
-  error precedence. Trace safety assumptions in ReleaseFast explicitly.
+- On ordinary inputs, check casts, shifts, and size or offset calculations
+  against the contract before a read, write, or allocation. Note alignment
+  when a fixture already depends on it.
+- Stale reader-buffer views, leaks, double frees, uninitialized data, and
+  ownership on partial initialization, allocation failure, cancellation, and
+  error returns. Prefer a normal failure path over an artificial one.
+- Empty, truncated, malformed, fragmented, and unknown-length input already
+  represented by fixtures; zero-progress loops; documented limits and error
+  precedence. Where ReleaseFast disables a runtime check, say which ordinary
+  input would observe the wrong result. Do not manufacture that input.
 
 ### Zig APIs, architecture, and performance
 
@@ -126,10 +145,10 @@ improving the implementation structure.
 - Assess explicit allocator/I/O dependencies, borrowed versus owned data,
   error propagation, public API contracts, module boundaries, registries,
   portability, and whether tests are actually included in the build graph.
-- Investigate hot-path allocation, avoidable copies, repeated scans, and
-  attacker-controlled superlinear work. Support performance findings with a
-  concrete cost argument or measurement. Separate optional improvements from
-  correctness defects and ignore cosmetic style preferences.
+- Investigate hot-path allocation, avoidable copies, and repeated scans of
+  ordinary files. Support performance findings with a concrete cost argument
+  or measurement. Separate optional improvements from correctness defects
+  and ignore cosmetic style preferences.
 
 ### Modern Zig design, types, and `comptime` metaprogramming
 
@@ -153,7 +172,7 @@ Look for concrete ways to express the same behavior more directly in Zig:
   invariants. Use current Zig 0.17.0 reflection only when it reduces repetition.
 - Assess whether enums, tagged unions, explicit state types, and precise error
   sets can replace magic integers, loosely related flags, sentinel values, or
-  ambiguous payloads. Favor APIs that prevent invalid combinations and make
+  ambiguous values. Favor APIs that prevent invalid combinations and make
   ownership and state transitions clear.
 - Identify C-shaped workarounds, unnecessary pointer indirection, manual type
   erasure, and repeated casts that could be simplified with typed Zig APIs.
@@ -204,11 +223,12 @@ of the current codebase, the scope actually reviewed, and the main risks.
 Then provide:
 
 1. **Confirmed findings**, ordered by severity: **Critical**, **High**,
-   **Medium**, and **Low**. Critical means a demonstrated severe safety or
-   security failure; High means a major correctness or safety defect; Medium
-   means a bounded functional defect; Low means a smaller actionable defect.
-   Assign severity from impact and reachability, not speculation. For each
-   finding, include:
+   **Medium**, and **Low**. Critical means a demonstrated severe correctness
+   failure on an ordinary input, such as corrupted output or a double free on
+   a normal error path. High means a major correctness or ownership defect.
+   Medium means a bounded functional defect. Low means a smaller actionable
+   defect. Assign severity from impact and reachability, not speculation.
+   For each finding, include:
    - A short title and the smallest useful `path:line` range in the reviewed
      working tree.
    - The triggering input, option, or state; expected versus actual behavior;
