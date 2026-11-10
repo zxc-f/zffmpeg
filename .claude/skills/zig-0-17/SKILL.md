@@ -76,6 +76,7 @@ checks still apply; these skills supply the detailed procedures.
 
 - No `@as` unless the line stops compiling, or changes type, without it.
 - No `@as(T, @intCast(x))`. The result type is enough: `const y: T = @intCast(x);`.
+- No `@intCast` just to make two operands the same type or to silence a type mismatch. Zig compares signed and unsigned integers directly; cast for a real narrowing, after the range is known.
 - No `std.io`. No `getStdOut`. No reader or writer without a caller-owned buffer and, for files, an `Io`.
 - No `anytype` reader or writer. The type is `*std.Io.Reader` or `*std.Io.Writer`.
 - Borrow `&adapter.interface`. `const w = adapter.interface` compiles and corrupts: `drain` recovers the parent with `@fieldParentPtr`.

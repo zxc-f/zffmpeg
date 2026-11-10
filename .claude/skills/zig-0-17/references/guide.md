@@ -40,6 +40,7 @@ are the lines that come out wrong when a section is skimmed.
 | Do not write | What happens | Write |
 | --- | --- | --- |
 | `const w = adapter.interface` | Compiles. `drain` uses `@fieldParentPtr` on the copy's address, so the parent pointer is garbage. Silent corruption, not a type error. | `const w = &adapter.interface`, and do not move the adapter while that pointer is live. |
+| `const buf_len: i64 = @intCast(buf.len); if (next) \|n\| if (n > buf_len) return null;` | A checked narrowing the code does not need. It only matches operand types; a length beyond `maxInt(i64)` panics in safe builds and is undefined in ReleaseFast. | `if (next) \|n\| if (n > buf.len) return null;` — Zig compares signed and unsigned integers directly. |
 | `file.reader` on a pipe, or `File.stdout().writer` | The first operation can return 0 bytes, then the adapter switches to streaming. Treating that 0 as EOF drops the start of the stream. | `readerStreaming` / `writerStreaming` for a pipe or stdio. Positional `file.reader` only after `stat().kind == .file` (`zig-io`). |
 | `pub fn parse(...) !Header` that `try`s a reader | `EndOfStream` becomes part of the public API. `ReadFailed` hides the OS error and `error.Canceled`, which live on the adapter's `.err`. | A named error set. Map `EndOfStream`. On `ReadFailed`, return `reader.err orelse error.IoFailure`, as `io_patterns.zig` does. |
 | `Writer.end` to mean "finished" | In positional mode `end` calls `setLength` to the logical position (`Io/File/Writer.zig`). A header seek followed by `end` truncates the file. | `flush`. Call `end` only to set the file length on purpose. |
@@ -173,6 +174,23 @@ Widening is a coercion. `const x: u32 = small_u8;` needs no builtin. Since
 is exactly representable (`u24` to `f32` yes, `u25` to `f32` no). Lossy
 comptime int-to-float is a compile error since 0.15; write `123_456_789.0`
 if rounding is intended.
+
+### Do not cast just to match operand types
+
+`@intCast` is a checked narrowing, not a type-match. Zig compares a signed
+integer with an unsigned one directly and mathematically, so this is correct
+when `next` is `?i64` and `buf` is `[]const u8`:
+
+```zig
+if (next) |n| if (n > buf.len) return null;
+```
+
+Converting `buf.len` to `i64` first only adds a narrowing that can panic in
+safe builds and is undefined in ReleaseFast; it does not model C's `int`
+width either. Cast where a narrower type is actually required, after the range
+is known. If C's width is what matters because it truncates or wraps, follow
+"C's numeric conversions: model the reference build"; a comparison is not
+that case.
 
 ### Where `@as` is still the right tool
 
@@ -649,6 +667,10 @@ meaning without a compile error. Do not use it to shuffle sample bytes.
 `i0` is gone. A zero-width unsigned value is `u0`, and almost nothing in this
 port needs one.
 
+Comparison is not a conversion: a signed and an unsigned operand compare by
+their mathematical values. Do not add `@intCast` to make them match; see
+"Do not cast just to match operand types" above.
+
 ### Errors and control flow
 
 `errdefer |err|` was removed in 0.17. `errdefer` no longer names the error.
@@ -917,7 +939,9 @@ elsewhere. Two sources of truth for one format will disagree on damaged input.
 - `@intCast` of a value derived from input is a panic in safe builds and
   undefined behavior in ReleaseFast. Decide what the C does: if it truncates
   (`int x = int64_value`, `put_be24`), write `@truncate` with a comment; if it
-  is a size, check it and return an error.
+  is a size, check it and return an error. If the value is only compared with
+  another integer, compare directly instead of converting it to the other
+  operand's type.
 - Signed arithmetic that C performs on input (timestamps, interpolation,
   counters such as `header_count`) overflows on crafted streams. notes.md
   "Follow the reference build" says it wraps on the reference platform: write
