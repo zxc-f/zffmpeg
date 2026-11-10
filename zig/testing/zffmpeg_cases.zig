@@ -460,6 +460,23 @@ pub fn main(init: std.process.Init) !u8 {
         h.expect(piped, try h.runPiped(&.{ "-i", "-", "-f", "s16le", "-" }, ogg), 3, "zffmpeg: -: UnsupportedFormat");
     }
 
+    // An ALAC cookie rate above the CAF rate limit, under a descriptor rate
+    // within it, is refused before any output, from a file and a pipe
+    // (the packet table precedes the samples, as a pipe needs).
+    {
+        const case = "an ALAC cookie rate above the CAF limit is refused";
+        const caf = try fixture_dir.readFileAlloc(io, "alac" ++ std.fs.path.sep_str ++ "alac_pakt_before_data.caf", h.gpa, .limited(1 << 20));
+        defer h.gpa.free(caf);
+        const body = (std.mem.find(u8, caf, "kuki") orelse return error.TestUnexpectedResult) + 12;
+        // The old cookie style keeps a 24-byte atom prefix before the body.
+        const cookie = body + @as(usize, if (std.mem.eql(u8, caf[body + 4 ..][0..8], "frmaalac")) 24 else 0);
+        std.mem.writeInt(u32, caf[cookie + 20 ..][0..4], 192_001, .big);
+        try h.write("rate.caf", caf);
+        h.expect(case, try h.run(&.{ "-i", "rate.caf", "rate.wav" }, .ignore, null), 5, "rate.caf: LimitExceeded");
+        h.expectAbsent(case, "rate.wav");
+        h.expect("an ALAC cookie rate above the CAF limit through a pipe", try h.runPiped(&.{ "-i", "-", "-f", "wav", "-" }, caf), 5, "zffmpeg: -: LimitExceeded");
+    }
+
     // A decoded input from a pipe into a WAV file: no count ahead, the
     // header rewritten at the end, the same bytes as from the file (a stream
     // without gapless trimming, which a pipe would lose).

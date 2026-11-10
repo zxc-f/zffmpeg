@@ -60,7 +60,7 @@ pub const Container = enum {
     /// Raw ADTS AAC: FFmpeg's `aac` demuxer (T30a), decoded since T30b.
     aac,
     /// FFmpeg's ADTS muxer (T30a): AAC packets, written only (the aac
-    /// demuxer reads them); no encoder here gives it any yet.
+    /// demuxer reads them), from FFmpeg's AAC encoder since T32d.
     adts,
     /// Raw AC-3 (T32a) and E-AC-3 (T32b), read and decoded: FFmpeg's `ac3`
     /// and `eac3` demuxers.

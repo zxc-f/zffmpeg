@@ -40,6 +40,7 @@ are the lines that come out wrong when a section is skimmed.
 | Do not write | What happens | Write |
 | --- | --- | --- |
 | `const w = adapter.interface` | Compiles. `drain` uses `@fieldParentPtr` on the copy's address, so the parent pointer is garbage. Silent corruption, not a type error. | `const w = &adapter.interface`, and do not move the adapter while that pointer is live. |
+| `const step: usize = @intCast(@min(n - done, max_step));`, `const f: f64 = @floatFromInt(rate_u32);` | Placebo. `@min` with a bound already narrows the type, and a `u32` coerces to `f64` exactly. The cast only hides where a real narrowing is. | Delete the builtin and compile ("Delete the cast and compile"). Keep it only if the compiler asks for it. |
 | `const buf_len: i64 = @intCast(buf.len); if (next) \|n\| if (n > buf_len) return null;` | A checked narrowing the code does not need. It only matches operand types; a length beyond `maxInt(i64)` panics in safe builds and is undefined in ReleaseFast. | `if (next) \|n\| if (n > buf.len) return null;` — Zig compares signed and unsigned integers directly. |
 | `file.reader` on a pipe, or `File.stdout().writer` | The first operation can return 0 bytes, then the adapter switches to streaming. Treating that 0 as EOF drops the start of the stream. | `readerStreaming` / `writerStreaming` for a pipe or stdio. Positional `file.reader` only after `stat().kind == .file` (`zig-io`). |
 | `pub fn parse(...) !Header` that `try`s a reader | `EndOfStream` becomes part of the public API. `ReadFailed` hides the OS error and `error.Canceled`, which live on the adapter's `.err`. | A named error set. Map `EndOfStream`. On `ReadFailed`, return `reader.err orelse error.IoFailure`, as `io_patterns.zig` does. |
@@ -192,10 +193,56 @@ is known. If C's width is what matters because it truncates or wraps, follow
 "C's numeric conversions: model the reference build"; a comparison is not
 that case.
 
-A 64-bit build accepting the removal is not proof. `usize` is `u64` there, so
-`u64`/`i64` to `usize` looks harmless while a 32-bit target still needs the
-check; the same applies to `usize` to `u32`. Remove a cast only when the
-source already has the destination type or widens to it on every target.
+### Delete the cast and compile
+
+Whether a conversion builtin is needed is a question the compiler answers,
+not one to answer by reading. Zig coerces implicitly only when every value
+of the source type fits the destination, or when the value is
+comptime-known and fits. So for `@intCast`, `@floatFromInt`, `@floatCast`
+and `@as`:
+
+1. Delete the builtin and keep the destination type (`const n: usize = @min(a, b);`).
+2. Build: `zig build` and `zig build test`. The CI cross targets
+   (x86_64-windows-gnu, aarch64-linux-musl, aarch64-macos) are the target
+   set. All are 64-bit, and 32-bit targets are out of scope for this
+   repository.
+3. If it compiles, the cast could never fire, so it was a placebo. Leave it
+   deleted. If it does not compile, the narrowing is real: keep it, and make
+   sure a check or a stated invariant proves the range before it.
+
+Write new code the same way: start without the builtin, and add one only when
+the compiler asks for it. A cast the compiler did not ask for hides the cases
+where it would have.
+
+The coercions agents do not expect, checked on 0.17.0:
+
+| Expression | Result type | So this needs no cast |
+| --- | --- | --- |
+| `@min(x_u64, 4096)` | `u13`: a comptime bound narrows it | `const step: usize = @min(n - done, max_step);` |
+| `@min(a_u64, b_u32)` | `u32`: the narrower unsigned operand | `const n: u32 = @min(left, frame_frames);` |
+| `@max(v_i32, 0)` | `u31`: a lower bound of 0 makes it unsigned | `const count: u64 = @max(t.channelCount(), 0);` |
+| `@popCount(u16)`, `@clz(u32)`, `@ctz` | `u5`, `u6`: just wide enough for the bit count | `const channels: u8 = @popCount(mask);` |
+| `std.math.log2_int(u64, x)` | `u6` (`Log2Int`) | a shift amount or a `u6` field |
+| An integer to a float that holds every value | `i32`/`u32` to `f64`, `u16` to `f32` | `const rate_f: f64 = rate_u32;` |
+| A float literal or comptime expression | `comptime_float` | `Mdct.init(gpa, 64, true, 1.0 / (64.0 * 32768.0))` |
+| A comptime-known value in a `comptime` table block | checked against the destination at compile time | `t[i] = v;` in a `blk:` table |
+| `@fromBackingInt(x)` | its operand is coerced to the backing type | `@fromBackingInt(mode)`, not `@fromBackingInt(@intCast(mode))` |
+
+`@max(a_u64, b_u32)` stays `u64`: only the minimum, or a bound, narrows.
+
+Limits of the test:
+
+- Delete only the outermost conversion. An inner `@as(u64, a) * b` chooses the
+  width the arithmetic runs at, and a narrower product can overflow. Deleting
+  it can still compile.
+- `@truncate`, `@bitCast` and `core/cconv.zig` conversions change values on
+  purpose (C's truncation, reinterpretation, `lrint`). They are not
+  placebos, even where a value happens to fit.
+- A function whose body compiles only through comptime-known coercion (`return
+  t;` from an `i32` into `i16` in a table builder) can only run at comptime. A
+  later runtime caller gets a compile error, not a wrong value. That is
+  acceptable for table builders. A helper that is meant to run at runtime
+  keeps its checked `@intCast` with the range proof in a comment.
 
 ### Where `@as` is still the right tool
 

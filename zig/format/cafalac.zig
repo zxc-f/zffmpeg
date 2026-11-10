@@ -21,7 +21,8 @@ const seek = @import("seek.zig");
 
 /// What reading the samples can fail with: the CAF parser's errors,
 /// `UnsupportedFormat` for a stream FFmpeg's decoder does not open (no
-/// magic cookie, a sample size or channel count it does not take), and
+/// magic cookie, a sample size or channel count it does not take) or
+/// cannot deliver frames from (a cookie rate of 0 or above INT_MAX), and
 /// the decoding's.
 pub const ReadError = caf.Error || error{
     /// The stream decodes to another sample count than its packet table
@@ -94,10 +95,11 @@ pub const DecodedReader = struct {
     /// padding as remainder frames, which the decoder then drops), else
     /// the table's.
     pub fn readHeader(r: *DecodedReader) ReadError!Header {
+        // Refused before counting ahead, which would decode every packet.
+        if (!r.decoder.config.decodableRate()) return error.UnsupportedFormat;
         const counted: ?u64 = if (!r.count_ahead) null else if (r.parser.seeker) |sk| try r.countAhead(sk) else r.info.frame_count;
         r.expected = counted;
         var format = r.decoder.config.format();
-        if (format.sample_rate == 0) return error.UnsupportedFormat;
         format.sample_format = if (r.wide()) .s32 else .s16;
         return .{ .stream = .alac, .codec = if (r.wide()) .s32le else .s16le, .format = format, .frame_count = counted, .bits = r.decoder.config.sample_size };
     }
@@ -156,11 +158,7 @@ pub const DecodedReader = struct {
         const channels = r.planes.len;
         const width: usize = if (r.wide()) 4 else 2;
         const frame_bytes = width * channels;
-        const frames = @min(output.len / frame_bytes, r.pendingFrames());
-        if (frames == 0) return error.OutputTooSmall;
-        if (r.expected) |expected| {
-            if (r.delivered + frames > expected) return error.FrameCountMismatch;
-        }
+        const frames = try decoded.outputFrames(output.len, frame_bytes, r.pendingFrames(), r.delivered, r.expected);
         for (0..frames) |f| {
             for (r.planes, 0..) |plane, c| {
                 const v = plane[r.pending[0] + f];
@@ -168,7 +166,7 @@ pub const DecodedReader = struct {
                 if (width == 2) std.mem.writeInt(i16, at[0..2], @intCast(v), .little) else std.mem.writeInt(i32, at[0..4], v, .little);
             }
         }
-        r.pending[0] += frames;
+        r.pending[0] += @intCast(frames); // at most the u32 pending count
         r.delivered += frames;
         return output[0 .. frames * frame_bytes];
     }
@@ -482,7 +480,7 @@ test "review: CAF probe and decoding share ALAC fallback channels and cookie rat
         bytes[cookie + 9] = 0;
         try hostile.checkAll(checkCookieFormat, .{ bytes, 48000, false });
         // Zero rates remain visible to probing as in ffprobe, but cannot
-        // configure a decoded output. Negative C-int rates are refused.
+        // configure a decoded output.
         std.mem.writeInt(u32, bytes[cookie + 20 ..][0..4], 0, .big);
         var zero_input: std.Io.Reader = .fixed(bytes);
         const zero = try detect.probeWith(&zero_input, .{}, .{ .gpa = gpa });
@@ -490,8 +488,41 @@ test "review: CAF probe and decoding share ALAC fallback channels and cookie rat
         var output: std.ArrayList(u8) = .empty;
         defer output.deinit(gpa);
         try testing.expectError(error.UnsupportedFormat, decodeBytes(gpa, bytes, false, false, &output));
-        std.mem.writeInt(u32, bytes[cookie + 20 ..][0..4], 0xffffffff, .big);
-        var invalid: std.Io.Reader = .fixed(bytes);
-        try testing.expectError(error.UnsupportedFormat, detect.probeWith(&invalid, .{}, .{ .gpa = gpa }));
+        // The cookie's rate is bounded by the descriptor's limit: taken at
+        // it, refused above it, for probing and decoding alike.
+        std.mem.writeInt(u32, bytes[cookie + 20 ..][0..4], 192_000, .big);
+        try testing.expectEqual(192_000, (try decodedHeader(gpa, bytes, .{})).format.sample_rate);
+        for ([_]u32{ 192_001, 0x8000_0000, 0xffff_ffff }) |rate| {
+            std.mem.writeInt(u32, bytes[cookie + 20 ..][0..4], rate, .big);
+            var over: std.Io.Reader = .fixed(bytes);
+            try testing.expectError(error.LimitExceeded, detect.probeWith(&over, .{}, .{ .gpa = gpa }));
+            try testing.expectError(error.LimitExceeded, decodedHeader(gpa, bytes, .{}));
+        }
+        // With the limit raised past INT_MAX the parser takes such a rate,
+        // but FFmpeg's decoder delivers no frame at a negative C int rate.
+        const raised: caf.Limits = .{ .max_sample_rate = std.math.maxInt(u32) };
+        std.mem.writeInt(u32, bytes[cookie + 20 ..][0..4], std.math.maxInt(i32), .big);
+        try testing.expectEqual(std.math.maxInt(i32), (try decodedHeader(gpa, bytes, raised)).format.sample_rate);
+        for ([_]u32{ 0x8000_0000, 0xffff_ffff }) |rate| {
+            std.mem.writeInt(u32, bytes[cookie + 20 ..][0..4], rate, .big);
+            try testing.expectError(error.UnsupportedFormat, decodedHeader(gpa, bytes, raised));
+        }
     }
+}
+
+/// The decoded header of `bytes` under `limits`, before any sample.
+fn decodedHeader(gpa: std.mem.Allocator, bytes: []const u8, limits: caf.Limits) !DecodedReader.Header {
+    var reader: std.Io.Reader = .fixed(bytes);
+    var parser: caf.Parser = .init(&reader, limits);
+    parser.enableAlac(gpa, null);
+    const info = parser.readHeader() catch |err| {
+        parser.deinit();
+        return err;
+    };
+    var r = DecodedReader.init(gpa, parser, info, null) catch |err| {
+        parser.deinit();
+        return err;
+    };
+    defer r.deinit();
+    return r.readHeader();
 }

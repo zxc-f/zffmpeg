@@ -95,7 +95,7 @@ pub const Config = struct {
         /// channels in the cookie or the container.
         InvalidData,
         /// AVERROR_PATCHWELCOME: a sample size other than 16, 20, 24 or 32,
-        /// more than 8 channels, or a rate outside a positive C int.
+        /// or more than 8 channels.
         Unsupported,
     };
 
@@ -124,10 +124,19 @@ pub const Config = struct {
             c.channels = std.math.cast(u8, container_channels) orelse return error.Unsupported;
         }
         if (c.channels > max_channels) return error.Unsupported;
-        // avctx's sample rate is a signed int; avcodec_open2 refuses a
-        // cookie that would store a negative value there.
-        if (c.sample_rate > std.math.maxInt(i32)) return error.Unsupported;
+        // The rate is kept as read: alac_decode_init stores it in avctx's
+        // signed int without a check, and avcodec_open2 checks the rate only
+        // before init, so a rate above INT_MAX still opens (mov's streamInfo
+        // reports it negative). Decoded readers refuse it (`decodableRate`).
         return c;
+    }
+
+    /// Whether frames at this cookie's rate can be delivered. FFmpeg opens
+    /// the decoder at 0 or at a rate its signed int sees as negative, but
+    /// decode.c's frame_validate then fails every frame (AVERROR_BUG), so
+    /// nothing is decoded; the port refuses before the first frame.
+    pub fn decodableRate(c: Config) bool {
+        return c.sample_rate != 0 and c.sample_rate <= std.math.maxInt(i32);
     }
 };
 

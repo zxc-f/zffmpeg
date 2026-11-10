@@ -204,3 +204,52 @@ test "review: decoded readers preserve pending samples after OutputTooSmall" {
         try checkCapacity(Reader, &actual, &control);
     }
 }
+
+test "review: CAF ALAC and WAV ADPCM readers preserve pending samples after OutputTooSmall" {
+    const fixtures = @import("../testing/fixtures.zig");
+    const caf = @import("caf.zig");
+    const cafalac = @import("cafalac.zig");
+    const wav = @import("wav.zig");
+    const wavadpcm = @import("wavadpcm.zig");
+    const Open = struct {
+        fn alac(input: *std.Io.Reader) !cafalac.DecodedReader {
+            var parser: caf.Parser = .init(input, .{});
+            // A table after the samples needs the seeker, as from a file.
+            parser.enableAlac(testing.allocator, .fixed(input));
+            errdefer parser.deinit();
+            const info = try parser.readHeader();
+            return cafalac.DecodedReader.init(testing.allocator, parser, info, null);
+        }
+        fn adpcm(input: *std.Io.Reader) !wavadpcm.DecodedReader {
+            var parser: wav.Parser = .init(input, .{});
+            const info = try parser.readHeader();
+            return wavadpcm.DecodedReader.init(testing.allocator, parser, info, null);
+        }
+    };
+    inline for (.{ fixtures.alac.bytes("alac_ffmpeg_level0"), fixtures.alac.bytes("alac_ffmpeg_8ch_24"), fixtures.alac.bytes("alac_priming") }) |bytes| {
+        var input: std.Io.Reader = .fixed(bytes);
+        var reference: std.Io.Reader = .fixed(bytes);
+        var actual = try Open.alac(&input);
+        defer actual.deinit();
+        var control = try Open.alac(&reference);
+        defer control.deinit();
+        try checkCapacity(cafalac.DecodedReader, &actual, &control);
+    }
+    inline for (.{ fixtures.adpcm.bytes("adpcm_ffmpeg_ms_short"), fixtures.adpcm.bytes("adpcm_ima_stereo") }) |bytes| {
+        var input: std.Io.Reader = .fixed(bytes);
+        var reference: std.Io.Reader = .fixed(bytes);
+        var actual = try Open.adpcm(&input);
+        defer actual.deinit();
+        var control = try Open.adpcm(&reference);
+        defer control.deinit();
+        try checkCapacity(wavadpcm.DecodedReader, &actual, &control);
+    }
+}
+
+test "outputFrames: the expected count is checked without overflow" {
+    const max = std.math.maxInt(u64);
+    try testing.expectEqual(2, try outputFrames(8, 4, 5, max - 2, max));
+    try testing.expectError(error.FrameCountMismatch, outputFrames(12, 4, 5, max - 2, max));
+    try testing.expectError(error.FrameCountMismatch, outputFrames(4, 4, 1, max, max - 1));
+    try testing.expectError(error.OutputTooSmall, outputFrames(3, 4, 1, 0, null));
+}

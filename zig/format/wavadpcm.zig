@@ -140,17 +140,13 @@ pub const DecodedReader = struct {
         }
         const channels: usize = r.adpcm.params.channels;
         const frame_bytes = 2 * channels;
-        const frames = @min(output.len / frame_bytes, r.pendingFrames());
-        if (frames == 0) return error.OutputTooSmall;
-        if (r.expected) |expected| {
-            if (r.delivered + frames > expected) return error.FrameCountMismatch;
-        }
+        const frames = try decoded.outputFrames(output.len, frame_bytes, r.pendingFrames(), r.delivered, r.expected);
         for (0..frames) |f| {
             for (0..channels) |c| {
                 std.mem.writeInt(i16, output[(f * channels + c) * 2 ..][0..2], r.planes[c][r.pending[0] + f], .little);
             }
         }
-        r.pending[0] += frames;
+        r.pending[0] += @intCast(frames); // at most the u32 pending count
         r.delivered += frames;
         return output[0 .. frames * frame_bytes];
     }

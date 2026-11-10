@@ -349,6 +349,9 @@ pub const Parser = struct {
         p.state = .data;
         const a: Alac = .{ .cookie = p.cookie, .channels = channels, .container_rate = rate, .priming = p.priming, .remainder = p.remainder, .max_packet = p.max_packet };
         const format: audio.Format = if (p.cookie != null) (try a.config()).format() else .{ .sample_rate = rate, .layout = .{ .unspecified = channels }, .sample_format = .s16p };
+        // The cookie's rate replaces the descriptor's checked one as the
+        // stream's rate, so the same limit bounds it.
+        if (format.sample_rate > p.limits.max_sample_rate) return error.LimitExceeded;
         const wide = format.sample_format == .s32p;
         return .{
             .codec = if (wide) .s32le else .s16le,
