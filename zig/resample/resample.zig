@@ -167,8 +167,8 @@ fn EngineIn(comptime format: audio.SampleFormat, comptime counting: bool) type {
         pub fn init(gpa: std.mem.Allocator, channels: u32, in_rate: u32, out_rate: u32, options: Options) Error!Self {
             std.debug.assert(channels >= 1 and channels <= max_channels);
             const cutoff = if (options.cutoff != 0) options.cutoff else 0.97;
-            const out_f: f64 = @floatFromInt(out_rate);
-            const in_f: f64 = @floatFromInt(in_rate);
+            const out_f: f64 = out_rate;
+            const in_f: f64 = in_rate;
             const factor = @min(out_f * cutoff / in_f, 1.0);
             const one: i32 = 1;
             var phase_count: i32 = one << options.phase_shift;

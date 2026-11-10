@@ -1101,7 +1101,7 @@ fn fuzzOne(context: void, smith: *std.testing.Smith) anyerror!void {
         // avformat_open_input's leading ID3v2 tags come first.
         .wav, .flac => {
             const lead = id3v2.leadingLen(bytes);
-            var after: std.Io.Reader = .fixed(bytes[@intCast(@min(lead, bytes.len))..]);
+            var after: std.Io.Reader = .fixed(bytes[@min(lead, bytes.len)..]);
             if (container.family() == .wav)
                 try expectSameResult(wav.probe(&after, .{}), got, container)
             else

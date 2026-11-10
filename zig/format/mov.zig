@@ -282,7 +282,7 @@ const Input = struct {
         if (in.keep_history) {
             var chunk: [4096]u8 = undefined;
             while (got < want) {
-                const step: usize = @intCast(@min(want - got, chunk.len));
+                const step: usize = @min(want - got, chunk.len);
                 const n = try in.read(gpa, chunk[0..step]);
                 got += n;
                 if (n < step) break;
@@ -2066,7 +2066,7 @@ pub const Demuxer = struct {
         var ended = false;
         var chunk: [4096]u8 = undefined;
         while (left > 0) {
-            const step: usize = @intCast(@min(left, chunk.len));
+            const step: usize = @min(left, chunk.len);
             const got = try d.in.read(gpa, chunk[0..step]);
             for (chunk[0..got]) |c| {
                 if (ended or out.items.len >= limit) continue;

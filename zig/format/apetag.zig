@@ -87,7 +87,7 @@ const Cursor = struct {
     /// `avio_read`: the bytes read, or null for AVERROR_EOF (nothing read,
     /// at the end, which a read of 0 bytes reports once the end was met).
     fn read(c: *Cursor, size: u64) ?[]const u8 {
-        const n: usize = @intCast(@min(size, c.bytes.len - c.pos));
+        const n: usize = @min(size, c.bytes.len - c.pos);
         if (n < size) c.eof_reached = true;
         if (n == 0 and c.eof_reached) return null;
         defer c.pos += n;

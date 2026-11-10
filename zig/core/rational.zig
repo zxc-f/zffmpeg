@@ -31,8 +31,8 @@ pub const Rational = struct {
 
     /// `av_q2d`.
     pub fn toFloat(q: Rational) f64 {
-        const num: f64 = @floatFromInt(q.num);
-        const den: f64 = @floatFromInt(q.den);
+        const num: f64 = q.num;
+        const den: f64 = q.den;
         return num / den;
     }
 };

@@ -348,7 +348,7 @@ pub const Decoder = struct {
                     1 => &tab.silk_ltp_filter1_taps[index],
                     else => &tab.silk_ltp_filter2_taps[index],
                 };
-                for (&sf[i].ltptaps, taps[0..5]) |*t, v| t.* = @as(f32, @floatFromInt(v)) / 128.0;
+                for (&sf[i].ltptaps, taps[0..5]) |*t, v| t.* = @as(f32, v) / 128.0;
             }
         }
 

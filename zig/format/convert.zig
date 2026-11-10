@@ -2347,7 +2347,7 @@ test "a long stream converts with fixed memory and exact frame counts" {
     var b: [4096]u8 = undefined;
     var left = input_stat.size;
     while (left > 0) {
-        const n: usize = @intCast(@min(left, a.len));
+        const n: usize = @min(left, a.len);
         try original_reader.interface.readSliceAll(a[0..n]);
         try copy_reader.interface.readSliceAll(b[0..n]);
         try std.testing.expectEqualSlices(u8, a[0..n], b[0..n]);

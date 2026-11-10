@@ -1462,7 +1462,7 @@ fn applyIsBand(e: *Encoder, cpe: *Cpe, w: usize, g: usize, start: usize, len: us
 pub fn decideStereo(e: *Encoder, cpe: *Cpe) void {
     const n = e.nmr.?; // allocated by Encoder.init for this coder
     const ics = &cpe.ch[0].ics;
-    const nw: f32 = @floatFromInt(ics.num_windows);
+    const nw: f32 = ics.num_windows;
     const freq_mult = f(@intCast(e.sample_rate)) / (1024.0 / nw) / 2.0;
     var is_count: i32 = 0;
     const pair_idx = (e.cur_channel >> 1) & 7;

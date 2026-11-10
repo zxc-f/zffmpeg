@@ -372,7 +372,7 @@ pub const Demuxer = struct {
         }
         c.pos += 1 + 1 + 2 + 4 + 2;
         // The CRC of the frame's bytes up to it.
-        const crc_end: usize = @intCast(@min(c.pos, c.bytes.len));
+        const crc_end: usize = @min(c.pos, c.bytes.len);
         const crc = crc16Arc(c.bytes[0..crc_end]);
         if (c.rb16() == crc) {
             if (r_gain != std.math.minInt(i32) or a_gain != std.math.minInt(i32))

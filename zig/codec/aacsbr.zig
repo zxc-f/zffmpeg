@@ -180,7 +180,7 @@ pub const Sbr = struct {
     pub fn create(gpa: std.mem.Allocator, id_aac: u3) Error!*Sbr {
         // The synthesis scales the samples back from +/-32768.0, which the
         // analysis scales them up to, as SBR requires.
-        var mdct = tx.Mdct.init(gpa, 64, true, @floatCast(1.0 / (64.0 * 32768.0))) catch |err| return switch (err) {
+        var mdct = tx.Mdct.init(gpa, 64, true, 1.0 / (64.0 * 32768.0)) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             else => unreachable, // 64 is a supported length
         };

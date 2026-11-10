@@ -151,8 +151,8 @@ pub const Swr = struct {
         std.debug.assert(frame_frames > 0);
         var counter = try resample.Counter.init(std.mem.Allocator.failing, 1, in_rate, out_rate, options.resampler);
         defer counter.deinit();
-        const out_rate_f: f64 = @floatFromInt(out_rate);
-        const in_rate_f: f64 = @floatFromInt(in_rate);
+        const out_rate_f: f64 = out_rate;
+        const in_rate_f: f64 = in_rate;
         const ratio = out_rate_f / in_rate_f;
         const max_room = try Buffers.maxRoom(ratio, frame_frames);
         const view: resample.Counter.View = .{};
@@ -316,7 +316,7 @@ pub const Swr = struct {
     /// + 32, more by the `buffered` delay when there is one, within the
     /// buffers' `max_room`.
     fn callRoom(n_in: u32, ratio: f64, buffered: i64, max_room: u32) u32 {
-        const n_in_f: f64 = @floatFromInt(n_in);
+        const n_in_f: f64 = n_in;
         var room: i64 = @trunc(n_in_f * ratio + 32);
         if (buffered > 0) room += @min(buffered, @max(4096, room));
         return @intCast(@min(room, max_room));

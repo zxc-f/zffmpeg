@@ -27,7 +27,7 @@ pub fn discardShort(r: *Reader, n: u64) Reader.ShortError!u64 {
     var done: u64 = 0;
     while (done < n) {
         // At most max_step, so it fits in usize.
-        const step: usize = @intCast(@min(n - done, max_step));
+        const step: usize = @min(n - done, max_step);
         const skipped = try r.discardShort(step);
         done += skipped;
         if (skipped < step) break;

@@ -421,12 +421,12 @@ pub const Decoder = struct {
     /// transforms (init_dsp's, those the port uses) and `avctx->sample_rate`,
     /// which starts as the container's.
     fn create(gpa: std.mem.Allocator, sample_rate: u32) Error!Decoder {
-        var mdct1024 = tx.Mdct.init(gpa, 1024, true, @floatCast(1.0 / 1024.0 / 32768.0)) catch |err| return switch (err) {
+        var mdct1024 = tx.Mdct.init(gpa, 1024, true, 1.0 / 1024.0 / 32768.0) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             else => unreachable, // 1024 is a supported length
         };
         errdefer mdct1024.deinit();
-        const mdct128 = tx.Mdct.init(gpa, 128, true, @floatCast(1.0 / 128.0 / 32768.0)) catch |err| return switch (err) {
+        const mdct128 = tx.Mdct.init(gpa, 128, true, 1.0 / 128.0 / 32768.0) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             else => unreachable, // 128 is a supported length
         };

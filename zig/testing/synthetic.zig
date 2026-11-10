@@ -40,7 +40,7 @@ pub const ZeroStream = struct {
         const zero_block: [4096]u8 = comptime @splat(0);
         if (s.position < s.head.len) return s.head[@intCast(s.position)..];
         const in_zeros = s.position - s.head.len;
-        if (in_zeros < s.zeros) return zero_block[0..@intCast(@min(s.zeros - in_zeros, zero_block.len))];
+        if (in_zeros < s.zeros) return zero_block[0..@min(s.zeros - in_zeros, zero_block.len)];
         return s.tail[@intCast(in_zeros - s.zeros)..];
     }
 
