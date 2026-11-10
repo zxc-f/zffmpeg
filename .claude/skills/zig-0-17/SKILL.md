@@ -103,6 +103,9 @@ checks still apply; these skills supply the detailed procedures.
   `lockPointers`/`unlockPointers` where tests can reach it (guide "Cleanup
   on every path").
 - A constant copied from C keeps its expression and precedence, derived from the same named values (`(8 + 3) << 4`, not `8 + 2`).
+- A C expression keeps C's operand width: widen an operand where C promotes (`@as(i32, a) - b` for two `u8`; `@as(f64, x) * 2.0` for a `float` times a `double` literal), use `@divTrunc`/`@rem` for signed `/` and `%`, and write C's unsigned conversion out for an `int`/`unsigned` comparison (ffmpeg-c-semantics, "C constructs").
+- A limit is checked on the value that takes effect: a field that can replace a checked one (a cookie's rate, an extension header) meets the same limit.
+- A check added to a shared parser was tested against every caller; a new shared helper replaced every copy of what it shares.
 - No `std.debug.assert` as the only guard of a public contract, no `catch unreachable` / `else => unreachable` on an error input can cause, no `else => unreachable` over `anyerror`.
 - No `discardShort`/`discardAll` with an untrusted length: the std adds `seek + n` unchecked, so a huge skip panics in safe builds and rewinds in ReleaseFast. Use `zig/io/skip.zig`. No `std.math.ldexp` (use `libm.ldexp`). See the guide's "std pitfalls".
 - Work stays proportional to bytes present: no per-unit loop over a header-declared count, no `orderedRemove(0)` drain, no re-copy of a growing value per append.

@@ -59,6 +59,10 @@ Zig and `zig-io` for file adapters, buffers and seeking.
   evidence, not the independent oracle.
 - The harness owns and releases its own allocations and views correctly.
   A harness failure is investigated before it is attributed to the codec.
+- The working tree did not change while a comparison, test or local CI run
+  was in progress. No `git stash`, checkout or edit under a running build:
+  the run would then describe a tree that never existed. Build another
+  commit in a separate `git worktree`, and rerun anything a change raced.
 - A seed run, mutation smoke, and sustained fuzz campaign are reported by
   their real names and budgets. A passing unit suite proves none of the
   unrun campaigns.

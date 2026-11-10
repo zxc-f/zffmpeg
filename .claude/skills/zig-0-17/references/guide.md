@@ -1074,6 +1074,12 @@ source in `lib/std` before using it on input.
 - FFmpeg is the benchmark: when it is linear and the port is not, that is a
   defect even if both finish on the fixtures. Measure with a generated
   adversarial input in ReleaseFast.
+- A limit bounds the value that takes effect, not the field it was first
+  written for. When a second source can replace a checked value (the ALAC
+  cookie's rate replacing `desc`'s, an extension header replacing a base
+  one), check the replacement against the same limit where it becomes the
+  stream's value. A rate of 2e9 that skipped the limit sized a resampler
+  filter of gigabytes from a small file.
 
 ### Cleanup on every path
 
@@ -1164,6 +1170,12 @@ diverged in three observable ways. Before writing a parser, decoder helper or
 timing rule, search for an existing port of the same FFmpeg function. A
 deliberate second copy needs a notes.md row with its retirement condition.
 
+A new shared helper replaces every copy in the change that adds it. Search
+for the expression it replaces (`@min(output.len / frame_bytes`, `delivered +
+frames >`), convert each site, and add each converted caller to the helper's
+test. `decoded.outputFrames` landed with two readers still carrying the old
+check, including the addition that could overflow.
+
 `format/flac.zig` still carries its own copy of libavformat's generic layer
 (timestamps, read-ahead, seeking) beside `format/demux.zig`, which now serves
 Ogg and MP3. New parsed formats go through `demux.Layer`; selecting a parser
@@ -1207,6 +1219,27 @@ precedence and finalization in each format ("Reuse follows working callers").
   call it instead of carrying their own switch.
 - Repetitive build data (process-case reports) can be generated with
   `std.fmt.comptimePrint` while the expected values stay hand-written.
+
+### Loops ported from pointer arithmetic
+
+For each C construct's Zig operation (promotions, division, `memmove`,
+`goto fail`), use the table in
+[ffmpeg-c-semantics](../../ffmpeg-c-semantics/references/behavior.md#c-constructs-and-the-zig-operation-that-keeps-their-result).
+The shape of a sample loop decides its speed as well as its safety:
+
+- Cut each slice to its final length once, before the loop
+  (`const row = plane[start..][0..n];`), and iterate with
+  `for (dst, src) |*d, s|`. The lengths are compared once, at the loop, not
+  at every index.
+- Keep per-packet storage in the codec state and reuse it. FFmpeg's
+  `av_fast_malloc` is a retained `ArrayList` with `ensureTotalCapacity`, not
+  an allocation per frame.
+- A choice FFmpeg makes once through a function pointer (sample format, byte
+  order, channel count) is a `comptime` parameter or a `switch` outside the
+  loop, so the loop body has no indirect call.
+- Run the task's speed check (CLAUDE.md "Speed check") before changing a
+  loop for speed, and keep the scalar version as the oracle for any
+  `@Vector` kernel.
 
 Do not fold switches whose arms genuinely differ (the per-format arms in
 `detect.zig` and `convert.zig`) into a descriptor table: the exhaustive

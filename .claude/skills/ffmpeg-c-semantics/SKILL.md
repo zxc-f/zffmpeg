@@ -38,7 +38,17 @@ FFmpeg sources settle API facts; the contracts settle supported behavior.
 ## Questions before accepting a port
 
 - Does the Zig expression compute in the same width and precision before
-  storing? A wider accumulator or later clip can change output.
+  storing? A wider accumulator or later clip can change output. Zig does not
+  promote: `u8 - u8` overflows where C computes in `int`, `f32 * 2.0` stays
+  `f32` where C computes in `double`, and a signed/unsigned comparison is
+  mathematical where C converts to unsigned. The procedure's "C constructs"
+  table lists each construct with its Zig operation.
+- Is every statement about FFmpeg ("refuses", "ignores", "opens") tied to a
+  function that was read at the pin, at the right point in the call order?
+  A check before `codec->init` does not see what init stores, and opening a
+  decoder is not decoding a frame.
+- Does a check added to a shared parser hold for every caller? Probing and
+  decoding can need different answers from the same parsed value.
 - Is a wrapping operation codec arithmetic or an allocation/offset count?
   The latter needs checked math, not wrapping copied from C.
 - Did an apparently convenient Zig helper change NaN handling, rounding,

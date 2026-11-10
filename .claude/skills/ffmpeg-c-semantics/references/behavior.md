@@ -32,6 +32,39 @@ the FLAC probe's `FLAC_MAX_CHANNELS + FLAC_CHMODE_MID_SIDE << 4` means
 `(8 + 3) << 4`. Derive a constant from the same named values; an unexplained
 recomputed literal loses the relationship that makes it reviewable.
 
+## C constructs and the Zig operation that keeps their result
+
+Each row was run on the pinned 0.17.0. The trap column is what a direct
+transcription does instead. Where a row says a cast is required, it is not a
+placebo: the `zig-0-17` guide's "Delete the cast and compile" test covers
+only the outermost conversion, never an operand widening.
+
+| C | Zig | Trap in the direct transcription |
+| --- | --- | --- |
+| `uint8_t a, b; int d = a - b;` (operands promoted to `int`) | `const d = @as(i32, a) - b;` | `const d: i32 = a - b;` computes in `u8` and overflows: the destination type does not widen the operands. The same holds for `u16 * u16`. |
+| `float x; x * 2.0` (the literal is a `double`, so the product is too) | `@as(f64, x) * 2.0`, then `@floatCast` where C stores to `float` | `x * 2.0` stays `f32` in Zig. `2.0f` in C is the `f32` product. Read the literal's suffix. |
+| `int a; unsigned b; if (a < b)` (`a` is converted to unsigned) | Write C's result out. A negative `a` becomes a huge unsigned value, so C's `a < b` is `a >= 0 and a < b`, and C's `a > b` is `a < 0 or a > b`. The `(unsigned)x < n` range idiom is `x >= 0 and x < n`. | Zig compares mathematically, so `-3 < 5` is true where C says false. Check which operand C converted. |
+| `a / b`, `a % b` on signed values | `@divTrunc(a, b)`, `@rem(a, b)` | `/` on runtime signed integers does not compile. `@divFloor`/`@mod` compile and differ for negatives (`-7 / 2` is -3 in C, `@divFloor` gives -4). |
+| `x >> n` on a signed value (arithmetic on the reference build) | `x >> n` | None for the value. The count must be the shift type (`u5` for 32 bits): prove its range, or use `std.math.shl`, which gives 0 for a count past the width. A C shift by the width or more is undefined, so follow notes.md. |
+| `(uint8_t)x`, `int16_t y = wide;` (keeps the low bits) | `@truncate(x)`; for a signed result `@bitCast(@as(u16, @truncate(x)))` | `@intCast` panics or is undefined where C wraps. |
+| `(int8_t)byte` then used as `int` (sign extension) | `@as(i32, @as(i8, @bitCast(byte)))` | Widening the `u8` zero-extends. |
+| `FFABS(x)`, `abs(x)` | `@abs(x)`, whose type is unsigned (`u32` for `i32`) | The type change spreads into later arithmetic. `@abs(minInt)` is 2147483648 where C's `abs(INT_MIN)` is undefined; follow notes.md for which value the build gives. |
+| `FFMIN`/`FFMAX`/`av_clip` on integers | `@min`/`@max`/`std.math.clamp` | `@min`/`@max` narrow the result type (`@min(i32, u32)` is `i32`); `clamp` keeps the operand type. On floats see the NaN rule below. |
+| `!!x`, `x != 0` used as a number | `@intFromBool(x != 0)`, a `u1` | `u1 + u1` overflows; widen before arithmetic. |
+| Unsigned wraparound (`uint32_t` sums, hashes, CRCs) | `+%`, `-%`, `*%` | `+` panics in safe builds and is undefined in ReleaseFast. |
+| `memcpy` | `@memcpy(dst, src)` with equal lengths | Aliasing arguments panic ("@memcpy arguments alias"). |
+| `memmove` | `std.mem.copyForwards` (destination below source) or `copyBackwards` | `@memcpy` is not a `memmove`. |
+| `memset(p, 0, n)`, `= {0}` | `@memset(slice, 0)`, `@splat(0)`, `std.mem.zeroes` for plain data | A struct with defaults is `.{}`, not zeroed bytes. |
+| `AV_RB32`, `AV_WL16`, `bytestream2_get_*` | `std.mem.readInt(u32, p[0..4], .big)` on a checked slice | `@ptrCast` of bytes to an integer pointer reads native-endian and unaligned. |
+| Pointer walks (`*dst++ = *src++`, `p < end`) | A slice cut once before the loop, then `for (dst, src) \|*d, s\|` | An index checked on every access; pointer arithmetic past a slice. |
+| `goto fail;` with frees at the label | `errdefer` at each acquisition; `defer` for unconditional cleanup | One owner freed by both an `errdefer` and the caller. |
+| `int ret; if ((ret = f()) < 0) return ret;` | An error union and `try`, after reading what the caller does with the error | `try` on an error FFmpeg ignores ("Errors and state commits"). |
+| Out-parameters, `-1` sentinels, `got_frame` flags | A returned struct, an optional, a tagged union | A sentinel that is also a valid value. |
+| Function-like macros, templated `.c` files (`#include "x_template.c"`) | One `fn` with `comptime T: type` or a `comptime` parameter | A copy per type. |
+| `static const` tables, tables filled by `ff_init_*` at first use | `const table = blk: { ... };` at comptime, with `@setEvalBranchQuota` where needed | Runtime init with a once-flag. |
+| Function pointers chosen at init (`dsp->func`) | A comptime-specialized call, or a `switch` at the stream boundary | A pointer call inside the sample loop. |
+| `av_fast_malloc`, a buffer regrown and reused per packet | A retained `ArrayList` with `ensureTotalCapacity` and `clearRetainingCapacity` | An allocation per packet or per frame. |
+
 ## Choose a numeric helper by its contract
 
 | Behavior to model | Existing implementation / decision |
@@ -94,6 +127,31 @@ error and can still open the file. Its counterpart in
 [format/demux.zig](../../../../zig/format/demux.zig) models that behavior with
 explicit allocation/I/O error handling. Applying the same policy to every
 parser read would be wrong: required fields have their own error contract.
+
+### Where FFmpeg refuses, in call order
+
+"FFmpeg refuses this" is a claim about one line. Read the call sequence and
+find it before writing the check or the comment:
+
+- `avcodec_open2` (`libavcodec/avcodec.c`) validates `sample_rate`,
+  `block_align` and the layout **before** `codec->init`. A value the
+  decoder's init stores from extradata afterwards is not checked: the ALAC
+  cookie's rate can be negative in `avctx` and the decoder still opens.
+  After init only the channel layout and `bits_per_coded_sample` are
+  checked.
+- A decoder that opened can still deliver nothing: `decode.c`'s
+  `frame_validate` fails each frame whose rate is not positive
+  (AVERROR_BUG). So "ffprobe reports the stream" and "ffmpeg decodes it"
+  are separate observable results, and a port's check belongs at the level
+  where FFmpeg fails: probing keeps what ffprobe shows, decoding refuses.
+- A comment that says what FFmpeg does names the function, and the author
+  read that function at the pin. A plausible claim that was not read is how
+  a wrong refusal lands in a shared parser.
+
+A check added to a shared parser or helper changes every caller. Search for
+the callers first (`alac.Config.parse` serves CAF decoding and MP4 probing):
+if they need different results, the check belongs to the caller, as a named
+predicate on the parsed value.
 
 Likewise, inspect when the C changes counters, replaces metadata, saves a
 packet or publishes new codec parameters. Use a local successful Zig
