@@ -80,7 +80,7 @@ pub fn drawTestPlan(smith: *std.testing.Smith, seekable: bool) TestPlan {
 /// `drawTestPlan`'s values for a seed (`fuzzSeed`).
 pub fn seedValues(comptime s: ?TestPlan.Seek) [7]u64 {
     const t = s orelse return @splat(0);
-    return .{ 1, @intFromBool(t.file), @intCast(t.stream + 1), @bitCast(t.ts), @intFromBool(t.flags.backward), @intFromBool(t.flags.any), @intFromBool(t.flags.byte) };
+    return .{ 1, @intFromBool(t.file), t.stream + 1, @bitCast(t.ts), @intFromBool(t.flags.backward), @intFromBool(t.flags.any), @intFromBool(t.flags.byte) };
 }
 
 /// The read-ahead, then up to `plan.max_packets` packets, with the seek
@@ -197,7 +197,7 @@ pub fn checkAllocationFailuresWith(
 pub fn fuzzSeed(comptime bytes: []const u8, comptime values: []const u64) []const u8 {
     return comptime seed: {
         @setEvalBranchQuota(10 * bytes.len + 1000);
-        var out: []const u8 = &littleEndian(u32, @intCast(bytes.len));
+        var out: []const u8 = &littleEndian(u32, bytes.len);
         out = out ++ bytes;
         for (values) |v| out = out ++ &littleEndian(u64, v);
         const done = out[0..out.len].*;

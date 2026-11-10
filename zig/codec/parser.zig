@@ -48,8 +48,7 @@ pub const ParseContext = struct {
             pc.overread_index += 1;
         }
         var next = next_in;
-        const buf_len: i64 = @intCast(buf.len);
-        if (next) |n| if (n > buf_len) return null;
+        if (next) |n| if (n > buf.len) return null;
         // At the end, flush what is held.
         if (buf.len == 0 and next == null) next = 0;
         pc.last_index = pc.index;

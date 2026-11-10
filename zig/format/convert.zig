@@ -1194,7 +1194,7 @@ pub const Conversion = struct {
 fn flacStorage(input: audio.SampleFormat) pcm.Codec {
     const score = struct {
         fn of(dst_bytes: i32, input_format: audio.SampleFormat) i32 {
-            const src_bytes: i32 = @intCast(input_format.bytesPerSample());
+            const src_bytes: i32 = input_format.bytesPerSample();
             var total: i32 = @intFromBool(input_format.isPlanar());
             if (dst_bytes < src_bytes) total += 100 * (src_bytes - dst_bytes) else total += 10 * (dst_bytes - src_bytes);
             // An s32 output for float input.
@@ -1261,7 +1261,7 @@ fn sourceBits(summary: Summary, input: *const Conversion.Parser) u8 {
         .mp3, .aac, .ac3 => 32,
         // The decoder's bits_per_raw_sample: the cookie's sample size.
         .alac => |*reader| reader.decoder.config.sample_size,
-        else => @intCast(summary.input_codec.bytesPerSample() * 8),
+        else => summary.input_codec.bytesPerSample() * 8,
     };
 }
 

@@ -877,7 +877,7 @@ pub const Encoder = struct {
     /// encode_scalar.
     fn encodeScalar(e: *Encoder, pb: *bits.BitWriter, x: i32, k_in: u32, write_sample_size: u6) void {
         _ = e;
-        const k: u5 = @intCast(@min(k_in, k_modifier));
+        const k: u5 = @min(k_in, k_modifier);
         const divisor: i32 = (@as(i32, 1) << k) - 1;
         const q = @divTrunc(x, divisor);
         const r = @rem(x, divisor);

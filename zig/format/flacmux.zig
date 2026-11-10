@@ -302,7 +302,7 @@ pub const Writer = struct {
         const e = w.encoder.?;
         const block = e.frame_size;
         while (w.pendingFrames() >= block or (final and w.pendingFrames() > 0)) {
-            const n: u32 = @intCast(@min(block, w.pendingFrames()));
+            const n: u32 = @min(block, w.pendingFrames());
             try w.encodeBlock(e, n);
         }
         // Keep the buffer from growing: move what is left to its start.

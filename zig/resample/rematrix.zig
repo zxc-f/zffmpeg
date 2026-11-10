@@ -854,7 +854,7 @@ pub const Remix = struct {
                         .s16p => {
                             var v: i32 = 0;
                             for (sources.index[0..sources.count]) |i| {
-                                v +%= @as(i32, @intCast(load(in.plane(i), n))) *% cconv.lrintfInt(r.matrix[o][i] * 32768);
+                                v +%= @as(i32, load(in.plane(i), n)) *% cconv.lrintfInt(r.matrix[o][i] * 32768);
                             }
                             store(plane, n, @truncate((v +% 16384) >> 15));
                         },

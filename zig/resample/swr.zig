@@ -161,7 +161,7 @@ pub const Swr = struct {
         // no call without input follows it.
         var left = total;
         while (left > 0) {
-            const n_in: u32 = @intCast(@min(left, frame_frames));
+            const n_in: u32 = @min(left, frame_frames);
             left -= n_in;
             const room = callRoom(n_in, ratio, counter.delay(out_rate), max_room);
             const got = try counter.resample(view, @intCast(room), view, @intCast(n_in));

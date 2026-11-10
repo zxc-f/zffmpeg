@@ -147,11 +147,11 @@ pub const Params = struct {
                 size,
             // The headers, then the nibble bytes the decoder's loops read.
             .ms => if (ch > 2)
-                ch * (7 + @as(u64, @intCast(@max(0, (n - 2) >> 1))))
+                ch * (7 + @as(u64, @max(0, (n - 2) >> 1)))
             else
-                7 * ch + @as(u64, @intCast(@max(0, (n - 2) >> @intCast(2 - ch)))),
+                7 * ch + @as(u64, @max(0, (n - 2) >> @intCast(2 - ch))),
         };
-        return @intCast(@min(read, size));
+        return @min(read, size);
     }
 
     /// The samples a channel FFmpeg's decoder gives for a packet of `len`

@@ -150,7 +150,7 @@ pub const Writer = struct {
             .coding = coding,
             .channels = channels,
             .data_at = 0,
-            .sample_bytes = @intCast(format.sample_format.bytesPerSample()),
+            .sample_bytes = format.sample_format.bytesPerSample(),
         };
         errdefer w.deinit();
         var cookie: ?[alac.cookie_len]u8 = null;
@@ -255,7 +255,7 @@ pub const Writer = struct {
                     w.pending[c * alac.frame_size + w.pending_len + i] = v;
                 }
             }
-            w.pending_len += @intCast(take);
+            w.pending_len += take;
             rest = rest[take * frame_bytes ..];
             if (w.pending_len == alac.frame_size) try w.emit();
         }

@@ -341,7 +341,7 @@ fn canonicalCodes(comptime lens: []const u8) [lens.len]u32 {
     var codes: [lens.len]u32 = undefined;
     var code: u64 = 0;
     for (lens, 0..) |len, i| {
-        codes[i] = @intCast(code >> (32 - len));
+        codes[i] = code >> (32 - len);
         code += @as(u64, 1) << (32 - len);
     }
     // The tables are complete prefix codes: every first-level entry and
@@ -435,7 +435,7 @@ pub const table_4_3: Table43 = blk: {
         const m: u32 = @truncate(@as(u64, @bitCast(cconv.lrint(parts.significand * (1 << 31)))));
         const e = parts.exponent + frac_bits - 31 + 5 - 100;
         t.value[i] = m;
-        t.exp[i] = @intCast(-e);
+        t.exp[i] = -e;
     }
     break :blk t;
 };
@@ -483,7 +483,7 @@ pub const is_table_lsf: [2][2][16]f32 = blk: {
     var t: [2][2][16]f32 = undefined;
     for (0..16) |i| {
         for (0..2) |j| {
-            const e: i32 = -@as(i32, @intCast(j + 1)) * @as(i32, @intCast((i + 1) >> 1));
+            const e: i32 = -@as(i32, j + 1) * @as(i32, (i + 1) >> 1);
             const f = libm.exp2(@as(f64, @floatFromInt(e)) / 4.0);
             const k = i & 1;
             t[j][k ^ 1][i] = @floatCast(f);
@@ -518,7 +518,7 @@ const frac_one: i64 = 1 << frac_bits;
 /// remainder (`& 3`) and quotient (`>> 2`).
 pub const scale_factor_modshift: [64]u16 = blk: {
     var t: [64]u16 = undefined;
-    for (&t, 0..) |*v, i| v.* = @intCast((i % 3) | ((i / 3) << 2));
+    for (&t, 0..) |*v, i| v.* = (i % 3) | ((i / 3) << 2);
     break :blk t;
 };
 
@@ -636,7 +636,7 @@ fn divisionTable(comptime steps: u16, comptime len: usize) [len]i16 {
     for (&t, 0..) |*v, j| {
         const val1 = j % steps;
         const rest = j / steps;
-        v.* = @intCast(val1 + ((rest % steps) << 4) + ((rest / steps) << 8));
+        v.* = val1 + ((rest % steps) << 4) + ((rest / steps) << 8);
     }
     return t;
 }

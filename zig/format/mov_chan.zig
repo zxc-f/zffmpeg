@@ -323,7 +323,7 @@ fn mapRead(err: std.Io.Reader.Error) Error {
 fn maskOf(comptime channels: []const Channel) u64 {
     var mask: u64 = 0;
     const one: u64 = 1;
-    for (channels) |channel| mask |= one << @intCast(channel.id());
+    for (channels) |channel| mask |= one << channel.id();
     return mask;
 }
 

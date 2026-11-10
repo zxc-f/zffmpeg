@@ -182,7 +182,7 @@ fn sampleRate(bytes: *const [10]u8, max_sample_rate: u32) Error!u32 {
 /// the rate shifted up to set bit 63.
 fn encodeRate(rate: u32) [10]u8 {
     std.debug.assert(rate > 0);
-    const top: u6 = @intCast(31 - @clz(rate));
+    const top: u6 = 31 - @clz(rate);
     var bytes: [10]u8 = undefined;
     const exponent: u16 = top;
     std.mem.writeInt(u16, bytes[0..2], 16383 + exponent, .big);

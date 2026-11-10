@@ -482,7 +482,7 @@ fn formatScore(dst_id: i32, src_id: i32) i32 {
 
 fn chBit(c: Channel) u64 {
     const one: u64 = 1;
-    return one << @intCast(c.id());
+    return one << c.id();
 }
 
 const center_pair = chBit(.front_left_of_center) | chBit(.front_right_of_center);

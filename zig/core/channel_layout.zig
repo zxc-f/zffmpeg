@@ -139,7 +139,7 @@ pub const Channel = enum(i32) {
         // Converted to int as C converts a long.
         const value: i32 = @truncate(number.value);
         if (value < 0) return error.InvalidChannel;
-        const channel: Channel = @fromBackingInt(@intCast(value));
+        const channel: Channel = @fromBackingInt(value);
         if (channel.isAmbisonic()) return error.UnsupportedChannel;
         return channel;
     }
@@ -380,7 +380,7 @@ pub const Layout = union(enum) {
     /// demuxer builds from a channel list.
     pub fn fromChannels(channels: []const Channel) error{LimitExceeded}!Layout {
         if (channels.len > max_custom_channels) return error.LimitExceeded;
-        var custom: Custom = .{ .count = @intCast(channels.len) };
+        var custom: Custom = .{ .count = channels.len };
         for (channels, 0..) |c, i| custom.channels[i] = .{ .channel = c };
         return .{ .custom = custom };
     }
@@ -430,7 +430,7 @@ pub const Layout = union(enum) {
                 var left = index;
                 var rest = mask;
                 while (rest != 0) : (rest &= rest - 1) {
-                    if (left == 0) return @fromBackingInt(@intCast(@ctz(rest)));
+                    if (left == 0) return @fromBackingInt(@ctz(rest));
                     left -= 1;
                 }
                 return .none;
@@ -867,7 +867,7 @@ fn checkVector(line: []const u8) !void {
     var w: std.Io.Writer = .fixed(&buffer);
     switch (kind[0]) {
         'C' => {
-            const channel: Channel = @fromBackingInt(@intCast(try std.fmt.parseInt(i32, try vectorField(&fields), 10)));
+            const channel: Channel = @fromBackingInt(try std.fmt.parseInt(i32, try vectorField(&fields), 10));
             try channel.writeName(&w);
             try std.testing.expectEqualStrings(try unhex(try vectorField(&fields), &text_buffer), w.buffered());
             w.end = 0;
@@ -923,7 +923,7 @@ fn checkVector(line: []const u8) !void {
                         const id = try std.fmt.parseInt(i32, item[0 .. at orelse item.len], 10);
                         var name_buffer: [64]u8 = undefined;
                         const name = if (at) |a| try unhex(item[a + 1 ..], &name_buffer) else "";
-                        c.* = .init(@fromBackingInt(@intCast(id)), name);
+                        c.* = .init(@fromBackingInt(id), name);
                     }
                     break :custom .{ .custom = custom };
                 },
@@ -969,7 +969,7 @@ test "ambisonic layouts and channels are out of scope" {
     try std.testing.expectError(error.InvalidLayout, Layout.parse("AMBI0+XX"));
     var buffer: [32]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buffer);
-    const acn: Channel = @fromBackingInt(@intCast(0x405));
+    const acn: Channel = @fromBackingInt(0x405);
     try acn.writeName(&w);
     try std.testing.expectEqualStrings("AMBI5", w.buffered());
 }

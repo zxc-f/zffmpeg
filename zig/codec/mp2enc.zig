@@ -110,9 +110,9 @@ const filter_bank: [512]i16 = blk: {
     for (0..257) |i| {
         var v: i32 = dsp.enwindow[i];
         v = (v + (1 << (16 - wfrac_bits - 1))) >> (16 - wfrac_bits);
-        t[i] = @intCast(v);
+        t[i] = v;
         if ((i & 63) != 0) v = -v;
-        if (i != 0) t[512 - i] = @intCast(v);
+        if (i != 0) t[512 - i] = v;
     }
     break :blk t;
 };
@@ -132,7 +132,7 @@ const scale_diff_table: [128]u8 = blk: {
 /// twelve codes) at each quantizer.
 const total_quant_bits: [17]u16 = blk: {
     var t: [17]u16 = undefined;
-    for (&t, tab.quant_bits) |*out, b| out.* = 12 * @as(u16, if (b < 0) @intCast(-b) else @as(u16, @intCast(b)) * 3);
+    for (&t, tab.quant_bits) |*out, b| out.* = 12 * @as(u16, if (b < 0) -b else @as(u16, b) * 3);
     break :blk t;
 };
 
@@ -557,7 +557,7 @@ pub const Encoder = struct {
         if (q >= steps) q = @intCast(steps - 1);
         // The scale factor bounds the sample, so q is never negative; the
         // C's put_bits would take its low bits.
-        return @intCast(@max(q, 0));
+        return @max(q, 0);
     }
 };
 

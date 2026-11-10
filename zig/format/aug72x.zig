@@ -123,7 +123,7 @@ pub const DecodedReader = struct {
         const n = @min(output.len / 2, r.pendingFrames());
         if (n == 0) return error.OutputTooSmall;
         for (0..n) |i| std.mem.writeInt(i16, output[2 * i ..][0..2], r.samples[r.pending[0] + i], .little);
-        r.pending[0] += @intCast(n);
+        r.pending[0] += n;
         r.delivered += n;
         return output[0 .. 2 * n];
     }
@@ -318,7 +318,7 @@ pub const Writer = struct {
         if (data.len % 2 != 0) return error.IncompleteFrame;
         // Without a first frame's size (a caller that gave none): its
         // samples are the first frame.
-        if (w.pending.len == 0 and data.len != 0) try w.open(g722.effectiveFrameSize(@intCast(@min(data.len / 2, g722.max_frame_size))));
+        if (w.pending.len == 0 and data.len != 0) try w.open(g722.effectiveFrameSize(@min(data.len / 2, g722.max_frame_size)));
         var rest = data;
         while (rest.len != 0) {
             const take = @min(w.pending.len - w.pending_len, rest.len / 2);

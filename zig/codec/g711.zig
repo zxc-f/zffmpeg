@@ -25,27 +25,27 @@ const bias = 0x84;
 fn alawToLinear(code: u8) i16 {
     const a = code ^ 0x55;
     var t: i32 = a & quant_mask;
-    const seg: u5 = @intCast((a & seg_mask) >> seg_shift);
+    const seg: u5 = (a & seg_mask) >> seg_shift;
     if (seg != 0) {
         t = (t + t + 1 + 32) << (seg + 2);
     } else {
         t = (t + t + 1) << 3;
     }
     // The largest magnitude is (15 + 15 + 1 + 32) << 9 = 32256, within i16.
-    return @intCast(if (a & sign_bit != 0) t else -t);
+    return if (a & sign_bit != 0) t else -t;
 }
 
 fn mulawToLinear(code: u8) i16 {
     const u = ~code;
     var t: i32 = ((u & quant_mask) << 3) + bias;
-    const seg: u5 = @intCast((u & seg_mask) >> seg_shift);
+    const seg: u5 = (u & seg_mask) >> seg_shift;
     t <<= seg;
-    return @intCast(if (u & sign_bit != 0) bias - t else t - bias);
+    return if (u & sign_bit != 0) bias - t else t - bias;
 }
 
 fn decodeTable(comptime toLinear: fn (u8) i16) [256]i16 {
     var table: [256]i16 = undefined;
-    for (&table, 0..) |*entry, code| entry.* = toLinear(@intCast(code));
+    for (&table, 0..) |*entry, code| entry.* = toLinear(code);
     return table;
 }
 
@@ -58,7 +58,7 @@ fn encodeTable(comptime toLinear: fn (u8) i16, comptime mask: u8) [16384]u8 {
     table[8192] = mask;
     var j: usize = 1;
     for (0..127) |i| {
-        const code: u8 = @intCast(i);
+        const code: u8 = i;
         const v1: i32 = toLinear(code ^ mask);
         const v2: i32 = toLinear((code + 1) ^ mask);
         const v: i32 = (v1 + v2 + 4) >> 3;

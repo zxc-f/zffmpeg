@@ -51,7 +51,7 @@ const v_max_partitions = 1 << 20;
 fn ilog(i: u32) u6 {
     const x: u64 = 2 * @as(u64, i);
     if (x == 0) return 0;
-    return @intCast(std.math.log2_int(u64, x));
+    return std.math.log2_int(u64, x);
 }
 
 /// ff_inverse: ceil(2^32 / i), 2^32 - 1 for 1.
@@ -59,7 +59,7 @@ const inverse = table: {
     var t: [257]u32 = undefined;
     t[0] = 0;
     t[1] = 0xffff_ffff;
-    for (2..257) |i| t[i] = @intCast(((1 << 32) + i - 1) / i);
+    for (2..257) |i| t[i] = ((1 << 32) + i - 1) / i;
     break :table t;
 };
 
@@ -833,7 +833,7 @@ pub const Decoder = struct {
             }
             @memcpy(saved[0 .. blocksize / 4], buf[blocksize / 4 ..][0 .. blocksize / 4]);
         }
-        d.previous_window = @intCast(blockflag);
+        d.previous_window = blockflag;
         return retlen;
     }
 

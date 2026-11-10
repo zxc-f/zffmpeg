@@ -682,7 +682,7 @@ pub const huff_vlc: [10][]const vlc.Elem = blk: {
         for (0..count) |i| {
             lens[i] = huffman_tab[start + i][1];
             symbols[i] = @as(i16, huffman_tab[start + i][0]) + vlc_offsets[t];
-            codes[i] = @intCast(code >> (32 - lens[i]));
+            codes[i] = code >> (32 - lens[i]);
             code += @as(u64, 1) << (32 - lens[i]);
         }
         if (code != 1 << 32) @compileError("an incomplete SBR Huffman code");

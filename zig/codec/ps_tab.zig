@@ -106,7 +106,7 @@ pub const huff_vlc: [10][]const vlc.Elem = blk: {
         for (0..count) |i| {
             lens[i] = huff_tabs[start + i][1];
             symbols[i] = @as(i16, huff_tabs[start + i][0]) + huff_offset[t];
-            codes[i] = @intCast(code >> (32 - lens[i]));
+            codes[i] = code >> (32 - lens[i]);
             code += @as(u64, 1) << (32 - lens[i]);
         }
         if (code != 1 << 32) @compileError("an incomplete PS Huffman code");

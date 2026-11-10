@@ -192,6 +192,11 @@ is known. If C's width is what matters because it truncates or wraps, follow
 "C's numeric conversions: model the reference build"; a comparison is not
 that case.
 
+A 64-bit build accepting the removal is not proof. `usize` is `u64` there, so
+`u64`/`i64` to `usize` looks harmless while a 32-bit target still needs the
+check; the same applies to `usize` to `u32`. Remove a cast only when the
+source already has the destination type or widens to it on every target.
+
 ### Where `@as` is still the right tool
 
 Use it when there is no result type to forward, or when peer types would

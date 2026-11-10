@@ -887,7 +887,7 @@ fn runResample(gpa: std.mem.Allocator, comptime internal: audio.SampleFormat, in
     const delay = engine.delay(out_rate);
     while (total < capacity) {
         try engine.flush();
-        const got = try engine.resample(out_view.shifted(channels, total), @intCast(@min(4096, capacity - @as(u32, @intCast(total)))), in_view, 0);
+        const got = try engine.resample(out_view.shifted(channels, total), @min(4096, capacity - @as(u32, @intCast(total))), in_view, 0);
         if (got <= 0) break;
         total += got;
     }

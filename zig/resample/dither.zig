@@ -450,7 +450,7 @@ pub const Dither = struct {
         var done: u32 = 0;
         while (done < count) {
             if (d.call_left == 0) d.beginCall(if (d.call_frames == 0) count else d.nextCall());
-            const n: u32 = @intCast(@min(d.call_left, count - done));
+            const n: u32 = @min(d.call_left, count - done);
             // Every channel shapes from the same filter position.
             var ns_end = d.ns_pos;
             for (0..d.channels) |c| {

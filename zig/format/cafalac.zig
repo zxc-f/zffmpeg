@@ -168,7 +168,7 @@ pub const DecodedReader = struct {
                 if (width == 2) std.mem.writeInt(i16, at[0..2], @intCast(v), .little) else std.mem.writeInt(i32, at[0..4], v, .little);
             }
         }
-        r.pending[0] += @intCast(frames);
+        r.pending[0] += frames;
         r.delivered += frames;
         return output[0 .. frames * frame_bytes];
     }

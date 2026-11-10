@@ -210,7 +210,7 @@ pub fn rescaleRnd(a: i64, b: i64, c: i64, rnd: Rounding) i64 {
         // The magnitude, rounded the mirrored way (zero and inf stay, down
         // and up swap).
         mode ^= (mode >> 1) & 1;
-        const mirrored: Rounding.Mode = @fromBackingInt(@intCast(mode));
+        const mirrored: Rounding.Mode = @fromBackingInt(mode);
         return signed(0 -% unsigned(rescaleRnd(-@max(a, -max), b, c, .{ .mode = mirrored })));
     }
     const r: i64 = if (rnd.mode == .near_inf) @divTrunc(c, 2) else if (mode & 1 != 0) c - 1 else 0;

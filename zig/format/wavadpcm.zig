@@ -150,7 +150,7 @@ pub const DecodedReader = struct {
                 std.mem.writeInt(i16, output[(f * channels + c) * 2 ..][0..2], r.planes[c][r.pending[0] + f], .little);
             }
         }
-        r.pending[0] += @intCast(frames);
+        r.pending[0] += frames;
         r.delivered += frames;
         return output[0 .. frames * frame_bytes];
     }
@@ -301,7 +301,7 @@ pub const Writer = struct {
                     w.pending[c * frame_size + w.pending_len + i] = std.mem.readInt(i16, rest[(i * channels + c) * 2 ..][0..2], .little);
                 }
             }
-            w.pending_len += @intCast(take);
+            w.pending_len += take;
             rest = rest[take * frame_bytes ..];
             if (w.pending_len == frame_size) try w.emit();
         }

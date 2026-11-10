@@ -801,7 +801,7 @@ pub const Decoder = struct {
             d.oc[1].m4ac.chan_config = hdr.chan_config;
             var map: [max_elem_id * 4]Tag = undefined;
             const tags = try defaultChannelConfig(&map, hdr.chan_config);
-            const status: OcStatus = @fromBackingInt(@intCast(@max(@backingInt(d.oc[1].status), @backingInt(OcStatus.trial_frame))));
+            const status: OcStatus = @fromBackingInt(@max(@backingInt(d.oc[1].status), @backingInt(OcStatus.trial_frame)));
             try d.outputConfigure(map[0..tags], status, false);
         } else {
             d.oc[1].m4ac.chan_config = 0;
@@ -1000,7 +1000,7 @@ pub const Decoder = struct {
                 }
                 const sbr = try d.sbrOf(che);
                 sbr.ps_read = false;
-                _ = try sbr.decodeExtension(r, ext_type == 0xe, cnt, @intCast(@backingInt(elem_type)), &d.oc[1].m4ac);
+                _ = try sbr.decodeExtension(r, ext_type == 0xe, cnt, @backingInt(elem_type), &d.oc[1].m4ac);
                 if (sbr.ps_read) d.profile = profile_aac_he_v2;
                 return cnt;
             },

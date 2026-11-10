@@ -99,7 +99,7 @@ fn hashMp3(gpa: std.mem.Allocator, kind: av.framehash.Kind, bytes: []const u8, o
     const params = try layer.codecParams(0);
     const tb = av.mp3.time_base;
     var w: av.framehash.Writer = .init(kind, out, .{
-        .time_base = .{ .num = @intCast(tb.num), .den = @intCast(tb.den) },
+        .time_base = .{ .num = tb.num, .den = tb.den },
         .codec = if (params.mpa_codec) |c| @tagName(c) else "mp3",
         .sample_rate = params.sample_rate,
         .layout = .default(params.channels),
@@ -118,7 +118,7 @@ fn hashMp3(gpa: std.mem.Allocator, kind: av.framehash.Kind, bytes: []const u8, o
         }
         try w.writePacketSide(.{
             .data = p.data,
-            .time_base = .{ .num = @intCast(tb.num), .den = @intCast(tb.den) },
+            .time_base = .{ .num = tb.num, .den = tb.den },
             .pts = p.pts,
             .dts = p.dts,
             .duration = p.duration,
@@ -144,7 +144,7 @@ fn hashAac(gpa: std.mem.Allocator, kind: av.framehash.Kind, bytes: []const u8, o
     if (params.sample_rate == 0 or params.channels == 0) return error.UnsupportedFormat;
     const tb = av.aac.time_base;
     var w: av.framehash.Writer = .init(kind, out, .{
-        .time_base = .{ .num = @intCast(tb.num), .den = @intCast(tb.den) },
+        .time_base = .{ .num = tb.num, .den = tb.den },
         .codec = "aac",
         .sample_rate = params.sample_rate,
         .layout = if (params.mask != 0) .{ .native = params.mask } else .{ .unspecified = std.math.cast(u8, params.channels) orelse return error.UnsupportedFormat },
@@ -154,7 +154,7 @@ fn hashAac(gpa: std.mem.Allocator, kind: av.framehash.Kind, bytes: []const u8, o
     while (layer.next() catch null) |p| {
         try w.writePacketSide(.{
             .data = p.data,
-            .time_base = .{ .num = @intCast(tb.num), .den = @intCast(tb.den) },
+            .time_base = .{ .num = tb.num, .den = tb.den },
             .pts = p.pts,
             .dts = p.dts,
             .duration = p.duration,

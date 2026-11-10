@@ -600,7 +600,7 @@ pub fn Layer(comptime Source: type) type {
                     .aac => |a| a.profile,
                     else => null,
                 } else null;
-                return .{ .mpa_codec = null, .profile = profile, .sample_rate = p.sample_rate, .channels = @intCast(@min(p.channels, 255)), .mask = p.mask, .bit_rate = bit_rate };
+                return .{ .mpa_codec = null, .profile = profile, .sample_rate = p.sample_rate, .channels = @min(p.channels, 255), .mask = p.mask, .bit_rate = bit_rate };
             }
             if (s.codec) |codec| switch (codec) {
                 .mpa => |c| return .{ .mpa_codec = c.codec, .sample_rate = c.sample_rate, .channels = c.channels, .bit_rate = c.bit_rate },

@@ -348,7 +348,7 @@ pub const Parser = struct {
         p.data = .init(p.reader, 1, if (data_size < 0) null else @as(u64, @intCast(data_size)));
         p.state = .data;
         const a: Alac = .{ .cookie = p.cookie, .channels = channels, .container_rate = rate, .priming = p.priming, .remainder = p.remainder, .max_packet = p.max_packet };
-        const format: audio.Format = if (p.cookie != null) (try a.config()).format() else .{ .sample_rate = rate, .layout = .{ .unspecified = @intCast(channels) }, .sample_format = .s16p };
+        const format: audio.Format = if (p.cookie != null) (try a.config()).format() else .{ .sample_rate = rate, .layout = .{ .unspecified = channels }, .sample_format = .s16p };
         const wide = format.sample_format == .s32p;
         return .{
             .codec = if (wide) .s32le else .s16le,

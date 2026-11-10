@@ -209,7 +209,7 @@ pub const Parser = struct {
             if (p.frame_size != 0) {
                 const inc = @min(buf.len - i, p.frame_size);
                 i += inc;
-                p.frame_size -= @intCast(inc);
+                p.frame_size -= inc;
                 state = 0;
                 if (p.frame_size == 0) {
                     next = i;

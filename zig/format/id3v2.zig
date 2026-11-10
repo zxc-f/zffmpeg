@@ -215,7 +215,7 @@ fn decodeStr(gpa: std.mem.Allocator, c: *Cursor, encoding: u8, maxread: *i32) Er
     errdefer out.deinit(gpa);
     var left = maxread.*;
     var ch: u32 = 1;
-    if (left != 0) switch (@as(Encoding, @fromBackingInt(@intCast(encoding)))) {
+    if (left != 0) switch (@as(Encoding, @fromBackingInt(encoding))) {
         .iso8859 => while (left != 0 and ch != 0) {
             ch = c.r8();
             try putUtf8(&out, gpa, ch);

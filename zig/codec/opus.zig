@@ -208,7 +208,7 @@ pub fn parsePacket(buf_in: []const u8, self_delimiting: bool) ?Packet {
         var bw: u3 = @intCast((pkt.config - 16) >> 2);
         // No medium band.
         if (bw != 0) bw += 1;
-        pkt.bandwidth = @fromBackingInt(@intCast(bw));
+        pkt.bandwidth = @fromBackingInt(bw);
     }
     return pkt;
 }

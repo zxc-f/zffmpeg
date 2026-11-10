@@ -73,7 +73,7 @@ const dba_reserved = 3;
 
 /// 2^v, exactly, for the dynamic range tables' `powf(2.0f, v)`.
 fn exp2i(v: i32) f32 {
-    return if (v >= 0) @floatFromInt(@as(u32, 1) << @intCast(v)) else 1.0 / @as(f32, @floatFromInt(@as(u32, 1) << @intCast(-v)));
+    return if (v >= 0) @floatFromInt(@as(u32, 1) << v) else 1.0 / @as(f32, @floatFromInt(@as(u32, 1) << -v));
 }
 
 /// `dynamic_range_tab`: code to scale factor (7.7.1).
@@ -1509,7 +1509,7 @@ pub const Decoder = struct {
             }
         }
         const samples: u32 = s.num_blocks * block_size;
-        const channels: u8 = @intCast(@popCount(mask));
+        const channels: u8 = @popCount(mask);
         var frame: Frame = .{
             .planes = undefined,
             .channels = channels,

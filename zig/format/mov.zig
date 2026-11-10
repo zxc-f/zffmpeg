@@ -1838,7 +1838,7 @@ pub const Demuxer = struct {
         // channel count); none for the other tags.
         var used: u64 = 0;
         if (tag_value == mov_chan.tags.use_descriptions) {
-            const count: u64 = @intCast(@max(t.channelCount(), 0));
+            const count: u64 = @max(t.channelCount(), 0);
             used = @min(described, count);
         }
         std.mem.writeInt(u32, head[8..12], @intCast(used), .big);
@@ -3284,7 +3284,7 @@ pub const Demuxer = struct {
             }
         }
         return .{
-            .stream = @intCast(d.trackIndex(t)),
+            .stream = d.trackIndex(t),
             .data = d.current.items,
             .pts = pts,
             .dts = dts,
